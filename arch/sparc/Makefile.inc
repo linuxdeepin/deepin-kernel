@@ -1,4 +1,5 @@
 #
 # Variables 
 #
-karch_deps = sparc-utils
+include_common_config = 'no'
+header_dirs = 'sparc | sparc64'

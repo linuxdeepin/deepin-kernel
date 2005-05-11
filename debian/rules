@@ -25,30 +25,92 @@ ifneq ($(DEB_BUILD_ARCH),$(DEB_HOST_ARCH))
 endif
 karch = $(DEB_HOST_ARCH)
 
+controls = $(wildcard arch/*/control.in)
 configs = $(notdir $(wildcard arch/$(karch)/config.*))
 ifndef flavours
   flavours = $(filter-out common, $(patsubst config.%,%,$(configs)))
 endif
+
 -include arch/$(karch)/Makefile.inc
 
-unpack: unpack-stamp
-unpack-stamp: debian/control $(kdir)
+ifndef header_dirs
+  header_dirs = $(karch)
+endif
 
+
+unpack: unpack-stamp
+unpack-stamp: $(kdir) $(configs) header-install.out
+	for i in $(flavours); do                     \
+	  cp -al $(kdir) build-$$i;                  \
+	  cp config.$$i build-$$i/.config;           \
+	  make -C build-$$i ARCH=$(karch) oldconfig; \
+	done
+#       Have to figure out what to do with that one
+#	cp default $(kdir)/.config
+	ln -s $$(command -v touch) bin/touch.orig
+	touch $@
+
+clean:
+	rm -f *-stamp header-install.out config.*
+	rm -rf $(kdir) build-* install-* bin/touch.orig
+	dh_clean
+ 
+header-install.out: header-install
+	sed -e 's/@kbpkg@/$(kbpkg)/g'             \
+	    -e 's/@karch@/$(karch)/g'             \
+	    -e 's/@header_dirs@/$(header_dirs)/g' \
+        header-install > header-install.out
+	chmod u+x header-install.out
+#
+# Generates the kernel config file for a subarch by merging
+# the arch-independent config file (arch/config.common),
+# arch-specific config file (arch/$(karch)/config.common),
+# and subarch specific one (arch/$(karch)/config.subarch).
+# It is possible to avoid the inclusion of the arch-indep
+# config file by setting include_common_config = no in the
+# arch/$(karch)/Makefile.inc. Absense of any of the above
+# files is ignored.
+#
+config.%:
+	@echo -n "Generating configuration file $@ ..."
+	@arch='arch/$(karch)/config.common';            \
+	subarch='arch/$(karch)/$@';                     \
+	include='';                                     \
+	if [ '$(include_common_config)' != 'no' ]; then \
+	  include='arch/config.common';                 \
+	fi;                                             \
+	if [ -f "$${arch}" ]; then                      \
+	  include="$${include} $${arch}";               \
+	fi;                                             \
+	if [ -f "$${subarch}" ]; then                   \
+	  include="$${include} $${subarch}";            \
+	fi;                                             \
+	cat $${include} > $@ 
+	@echo " done."
+#
+# Prepare debian/control by cat'ing together all the
+# control files, substituting variables, removing all
+# empty lines and inserting a newline before every
+# line starting with 'Package:'
+#
 debian/control:
-	cat debian/control.in arch/$(karch)/control.in | \
-	sed -e 's/@karch@/$(karch)/g'                    \
-	    -e 's/@version@/$(version)/g'                \
-	    -e 's/@karch_deps@/$(karch_deps)/g'          \
-	    -e 's/@ktver@/$(ktver)/g'                    \
-	    -e 's/@abiname@/$(abiname)/g'                \
-	    -e 's/@kbuild_deps@/$(kbuild_deps)/g' > debian/control
+	cat debian/control.in $(controls) |     \
+	sed -e 's/@karch@/$(karch)/g'           \
+	    -e 's/@version@/$(version)/g'       \
+	    -e 's/@ktver@/$(ktver)/g'           \
+	    -e 's/@abiname@/$(abiname)/g'       \
+	    -e 's/@kbpkg@/$(kbpkg)/g' |         \
+	sed '/^[[:space:]]*$$/d' |              \
+        sed 's/^Package:/\n&/g' > debian/control
 
 $(kdir):
-	tar jxf /usr/src/kernel-source-$(version).tar.bz2
-	cd $(kdir) && $(kpatch) $(version)-$(ktver)
-	mkdir -p $(kdir)/debian
-	cp debian/changelog $(kdir)/debian
-	cp debian/control   $(kdir)/debian
-	cp debian/copyright $(kdir)/debian
-	touch $(kdir)/debian/official
-	install post-install $(kdir)/debian 
+	@echo -n "Unpacking kernel source $(version) ..."
+	@tar jxf /usr/src/kernel-source-$(version).tar.bz2
+	@cd $(kdir) && $(kpatch) $(version)-$(ktver)
+	@mkdir -p $(kdir)/debian
+	@cp debian/changelog $(kdir)/debian
+	@cp debian/control   $(kdir)/debian
+	@cp debian/copyright $(kdir)/debian
+	@touch $(kdir)/debian/official
+	@install post-install $(kdir)/debian
+	@echo " done."
