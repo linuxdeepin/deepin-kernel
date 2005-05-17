@@ -1,0 +1,111 @@
+#!/bin/sh
+#
+# This is the hook file executed by make-kpkg in the end of creation
+# of the kernel-image for a particular flavour. The major task it performs
+# is the creation of the flavour-specific kernel-headers package.
+#
+set -e
+
+debhelper_pre() {
+	dh_clean -k --package="$1"
+	dh_installdirs --package="$1"
+}
+
+debhelper_post() {
+	dh_installdocs --package="$1"
+	dh_installchangelogs --package="$1"
+	dh_compress --package="$1"
+	dh_fixperms --package="$1"
+	dh_installdeb --package="$1"
+	dh_gencontrol --package="$1"
+	dh_md5sums --package="$1"
+	dh_builddeb --package="$1"
+}
+suffix=${version#*$debnum-}
+prefix=${version%%-*}$debnum
+pkg=kernel-headers-$version
+top=$PWD/debian/$pkg
+dir=$top/usr/src/kernel-headers-$version
+#
+# Here we need to find the kernel architecture which
+# is appropriate for the current flavour. It is available
+# in kernel-package as KERNEL_ARCH. Cleanest way is to get
+# make-kpkg export it to this script. 
+# 
+# Currently we'll have to do some fiddling here For
+# example for sparc we need to map sparc32* to 'sparc'
+# and sparc64* to 'sparc64'. The default for other
+# arches is the name of the architecture.
+#
+case ${DEB_HOST_ARCH} in
+  sparc*)
+    KERNEL_ARCH=${suffix%-smp}
+    KERNEL_ARCH=${KERNEL_ARCH%32}
+    ;;
+  *)
+    KERNEL_ARCH=${DEB_HOST_ARCH}
+    ;;
+esac
+
+debhelper_pre $pkg
+
+#
+# Stuff below is ugly as hell, but does the trick so I'm not
+# touching it until we can invent something better.
+#
+mkdir -p $dir/include/linux
+cp -a .config $dir
+echo $debnum-$suffix > $dir/.extraversion
+cp -a Module.symvers $dir
+
+find . -mindepth 1 -maxdepth 1 \
+	! -name debian -a ! -name Documentation -a ! -name include -a \
+	! -name '.*' -a \( \
+	-name Makefile -o -type d \) \
+	-printf "../kernel-headers-$prefix/%f\n" |
+	xargs ln -s --target-directory="$dir"
+
+cd include
+find . -mindepth 1 -maxdepth 1 \
+	! -name config -a ! -name linux -a \( \
+	! -name 'asm-*' -o -name asm-generic -o -name asm-${KERNEL_ARCH} \) \
+	-printf "../../kernel-headers-$prefix/include/%f\n" |
+	xargs ln -s --target-directory=$dir/include
+cp -a config $dir/include
+ln -sf asm-${KERNEL_ARCH} $dir/include/asm
+find linux -mindepth 1 -maxdepth 1 \
+	! -name autoconf.h -a ! -name compile.h -a ! -name version.h \
+	-printf "../../../kernel-headers-$prefix/include/linux/%f\n" |
+	xargs ln -s --target-directory=$dir/include/linux
+cp -a linux/autoconf.h linux/compile.h \
+	linux/version.h $dir/include/linux
+cd ..
+
+mkdir -p $top/lib/modules/$version
+ln -s /usr/src/kernel-headers-$version $top/lib/modules/$version/build
+
+debhelper_post $pkg
+
+#
+# This is kernel-build cruft which we will probably phase out
+# 
+# bpkg=kernel-build-$prefix
+# top=$PWD/../debian/$bpkg
+#
+# [ -d $top/usr/src/$bpkg ] || mkdir -p $top/usr/src/$bpkg
+# ln -s ../kernel-headers-$version $top/usr/src/$bpkg/$suffix
+
+#
+# Check whether we should force any modules to be available
+# on the initrd.
+#
+cd ${IMAGE_TOP}/lib/modules/${version}
+modules='@initrd_modules@'
+if [ -n "${modules}" ]; then
+  mkdir initrd
+  for i in ${modules}; do
+    if [ -f "${i}" ]; then
+      ln "${i}" initrd
+    fi
+  done
+fi
