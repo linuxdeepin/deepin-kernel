@@ -32,16 +32,36 @@ export version debnum DEBIAN_SRCTOP DEBIAN_UPSTREAM_VERSION
 ifneq ($(DEB_BUILD_ARCH),$(DEB_HOST_ARCH))
   CROSS := $(DEB_HOST_ARCH)-linux-
 endif
-karch := $(DEB_HOST_ARCH)
-
-controls := $(wildcard arch/*/control.in)
+karch    := $(DEB_HOST_ARCH)
+controls := $(wildcard arch/*/control.in arch/*/*/control.in)
 default  := arch/$(karch)/config.default
 configs  := $(notdir $(wildcard arch/$(karch)/config.*))
 configs  := $(filter-out config.common config.default, $(configs))
+#
+# We can have different subarchs within the arch and different flavours
+# within each subarch. We allow to override the choice of what to build
+# via subarchs and flavours variables, so if they are defined, we leave
+# them alone. Otherwise we get a list of subarchs as a list of subdirs
+# in the arch/$(karch) directory.
+#
+ifndef subarchs
+  subarchs := $(shell find arch/$(karch) \
+                           -type d -mindepth 1 -maxdepth 1 \
+                           ! -name '.svn' -printf '%f\n')
+endif
+ifeq ($(subarchs),)
+  subarchs := none
+endif
 ifndef flavours
   flavours := $(patsubst config.%,%,$(configs))
 endif
-
+#
+# Build the lists of the kernel and build dirs which need to be
+# created based on the selected subarch and flavour values.
+#
+kdirs    := $(addprefix $(kdir)-, $(subarchs))
+bdirs    := foreach(sub, $(subarchs), $(addprefix build-$(sub)-, $(flavours)))
+ 
 -include arch/$(karch)/Makefile.inc
 #
 # Here we construct the command lines for different make-kpkg
@@ -75,6 +95,8 @@ ifndef headers_dirs
   headers_dirs = $(karch)
 endif
 
+all:
+	echo "$(kdirs)"
 #
 # TODO:
 #  * Check that make oldconfig does not actually
@@ -82,7 +104,7 @@ endif
 #    is wrong (missing/extra options, etc).
 #
 unpack: unpack-stamp
-unpack-stamp: $(kdir) $(configs) header-install
+unpack-stamp: $(kdirs) $(configs) header-install
 	for i in $(flavours); do			\
 	  cp -al $(kdir) build-$$i;			\
 	  cp config.$$i build-$$i/.config;		\
@@ -204,17 +226,36 @@ debian/control:
 	    -e 's,@kbpkg@,$(kbpkg),g' |         \
 	sed '/^[[:space:]]*$$/d' |              \
         sed 's/^Package:/\n&/g' > debian/control
-
-$(kdir): post-install
+#
+# This is a general target to create the ready-to-build directory
+# for the correct subarch and flavour. For the arches with subarchs
+# the directory will have the name build-$(subarch)-$(flavour). For
+# the ones with subarch, it will be just build-$(flavour).
+#
+build-%:
+	set $(subst -, ,$@); shift;					\
+	subarch="$${1}";						\
+	flavour="$${2}";						\
+	if [ -z "$${flavour}" ]; then					\
+	  cp -al $(kdir) build-$${subarch};				\
+	else								\
+	  cp -al $(kdir)-$${subarch} build-$${subarch}-$${flavour};	\
+	fi
+#
+#
+#
+$(kdir)-%: post-install
 	dh_testdir
-	tar jxf /usr/src/kernel-source-$(version).tar.bz2
-	cd $(kdir) && $(kpatch) $(version)-$(ktver)
+	tar jxf /usr/src/$(kdir).tar.bz2
 	mkdir -p $(kdir)/debian
 	cp debian/changelog $(kdir)/debian
 	cp debian/control   $(kdir)/debian
 	cp debian/copyright $(kdir)/debian
+#	File below must be the proper subarch file
 	cp $(default) $(kdir)/.config
 	touch $(kdir)/debian/official
 	install post-install $(kdir)/debian
+#	Here we need to do the subarch-specific patching
+	mv $(kdir) $@
 
 .PHONY: clean build unpack binary-indep binary-arch binary
