@@ -4,213 +4,64 @@
 #
 version   := 2.6.11
 abiname   := 1
-ktver     := 5
-kbuildver := 2.6-3
+ktver     := 4
 #
 # Generally nothing needs to be modified below this line
 #
-SHELL  := sh -e
-debver := $(version)-$(abiname)
-uver   := $(subst .,_,$(version))
-debnum := -$(abiname)
-bpkg   := kernel-build-$(debver)
-kdir   := kernel-source-$(version)
-kbpkg  := kernel-kbuild-$(kbuildver)
-kpatch := /usr/src/kernel-patches/all/$(version)/apply/debian
-DEBIAN_SRCTOP := $(CURDIR)/$(kdir)
-DEBIAN_UPSTREAM_VERSION := $(version)
-ifeq (,$(DEB_HOST_ARCH))
-  DEB_HOST_ARCH  := $(shell dpkg-architecture -qDEB_HOST_ARCH)
-  DEB_BUILD_ARCH := $(shell dpkg-architecture -qDEB_BUILD_ARCH)
-endif
-export version debnum DEBIAN_SRCTOP DEBIAN_UPSTREAM_VERSION
+SHELL     := sh -e
+kbpkg     := kernel-kbuild-$(version)-$(abiname)
+controls  := $(wildcard arch/*/control.in arch/*/*/control.in)
+karch     := $(shell dpkg-architecture -qDEB_HOST_ARCH)
 #
-# The CROSS variable is only used on sparc to call
-# the correct 'strip' binary on the kernel-image.
-# Not sure whether we really need it.
-#
-ifneq ($(DEB_BUILD_ARCH),$(DEB_HOST_ARCH))
-  CROSS := $(DEB_HOST_ARCH)-linux-
-endif
-karch    := $(DEB_HOST_ARCH)
-controls := $(wildcard arch/*/control.in arch/*/*/control.in)
-default  := arch/$(karch)/config.default
-configs  := $(notdir $(wildcard arch/$(karch)/config.*))
-configs  := $(filter-out config.common config.default, $(configs))
-#
-# We can have different subarchs within the arch and different flavours
-# within each subarch. We allow to override the choice of what to build
-# via subarchs and flavours variables, so if they are defined, we leave
-# them alone. Otherwise we get a list of subarchs as a list of subdirs
-# in the arch/$(karch) directory.
+# If we are not passed a subarchs variable, we obtain the complete
+# subarch list as a list of subdirectories in arch/$(karch). We
+# also export the flavours variables, which allows to control which
+# flavours are built.
 #
 ifndef subarchs
   subarchs := $(shell find arch/$(karch) \
                            -type d -mindepth 1 -maxdepth 1 \
                            ! -name '.svn' -printf '%f\n')
 endif
-ifeq ($(subarchs),)
+ifeq (,$(subarchs))
   subarchs := none
 endif
-ifndef flavours
-  flavours := $(patsubst config.%,%,$(configs))
-endif
-#
-# Build the lists of the kernel and build dirs which need to be
-# created based on the selected subarch and flavour values.
-#
-kdirs    := $(addprefix $(kdir)-, $(subarchs))
-bdirs    := foreach(sub, $(subarchs), $(addprefix build-$(sub)-, $(flavours)))
- 
--include arch/$(karch)/Makefile.inc
-#
-# Here we construct the command lines for different make-kpkg
-# calls (build, kernel-image, kernel-headers) based on the values
-# of variables defined so far and provided by the architecture
-# in Makefile.inc. Note that $$i in these expressions is going to
-# become a reference to the shell variable $i, which is expected
-# to have the current flavour. This is slightly evil, but saves
-# a lot of grief.
-#
-kpkg_headers_cmd := HEADER_CLEAN_HOOK='$(CURDIR)/header-install' make-kpkg
-kpkg_headers_cmd += --append-to-version $(debnum)
-kpkg_build_cmd  := make-kpkg --append-to-version $(debnum)-$$i
-ifdef added_patches
-  kpkg_headers_cmd += --added_patches $(subst @uver@,$(uver),$(added_patches))
-  kpkg_build_cmd   += --added_patches $(subst @uver@,$(uver),$(added_patches))
-endif
-ifdef build_subarch
-  kpkg_build_cmd += --subarch $$i
-endif
-ifdef headers_subarch
-  kpkg_headers_cmd += --subarch $(headers_subarch)
-endif
-ifdef build_makeflags
-  kpkg_build_cmd := MAKEFLAGS=$(build_makeflags) $(kpkg_build_cmd)
-endif
-kpkg_image_cmd  := $(kpkg_build_cmd) --initrd kernel_image
-kpkg_build_cmd  += build
-kpkg_headers_cmd += kernel-headers
-ifndef headers_dirs
-  headers_dirs = $(karch)
-endif
 
-all:
-	echo "$(kdirs)"
-#
-# TODO:
-#  * Check that make oldconfig does not actually
-#    change the config file. If it does, something
-#    is wrong (missing/extra options, etc).
-#
+export version abiname ktver kbuildver flavours
+
 unpack: unpack-stamp
-unpack-stamp: $(kdirs) $(configs) header-install
-	for i in $(flavours); do			\
-	  cp -al $(kdir) build-$$i;			\
-	  cp config.$$i build-$$i/.config;		\
-	  make -C build-$$i ARCH=$(karch) oldconfig;	\
+unpack-stamp:
+	dh_testdir
+	for i in $(subarchs); do				\
+	  $(MAKE) -f debian/rules.subarch subarch=$${i} unpack;	\
 	done
 	ln -s $$(command -v touch) bin/touch.orig
 	touch unpack-stamp
-#
-# Problems:
-#   * m68k,mips have no-op build targets
-#   * sparc strips parts of the kernel after building
-#     otherwise it is too big for silo to boot.
-# TODO:
-#   * Implement optional stripping of the kernel
-#     (for sparc). 
-#   * Check that it is really ok to call --subarch
-#     with the name of the flavour. For mips which
-#     is another --subarch user it should be fine.
-#
+
 build: build-stamp
 build-stamp: unpack-stamp
 	dh_testdir
-	PATH=$$PWD/bin:$$PATH;		\
-	for i in $(flavours); do	\
-	  cd build-$$i;			\
-	  $(kpkg_build_cmd);		\
-	  cd ..;			\
+	for i in $(subarchs); do				\
+	  $(MAKE) -f debian/rules.subarch subarch=$${i} build;	\
 	done
 	touch build-stamp
 
 clean:
 	dh_testdir
-	rm -f *-stamp header-install post-install config.*
-	rm -rf $(kdir) build-* install-* bin/touch.orig
+	rm -f *-stamp-* *-stamp config.*
+	rm -f header-install-* post-install bin/touch.orig
+	rm -rf kernel-source-* build-* install-* 
 	dh_clean
-#
-# Problems:
-#   * Due to some reason i386 build runs some debhelper
-#     commands on the kernel-headers package, as if
-#     building it manually. I thought make-kpkg was supposed
-#     to take care of it.
-#
+
 binary-indep: build
-#
-# Problems:
-#   * sparc prepends the 'kernel-image' make-kpkg call
-#     by 'sparc32' and 'sparc64', depending on the flavour.
-#     Need to figure out the role of these binaries.
-#
 binary-arch: build
 	dh_testdir
-	dh_clean -k
-	dh_installdirs
-
-	cd $(kdir); $(kpkg_headers_cmd)
-
-	mv $(kdir)/debian/files debian
-
-	for i in $(flavours); do			\
-	  cp -al build-$$i install-$$i;			\
-	  cd install-$$i;				\
-	  $(kpkg_image_cmd);				\
-	  cd ..;					\
-	  cat install-$$i/debian/files >> debian/files;	\
-	  rm -rf install-$$i ;				\
+	for i in $(subarchs); do                                \
+	  $(MAKE) -f debian/rules.subarch subarch=$${i} binary;	\
 	done
-	mv *.deb ..
 
 binary:	binary-indep binary-arch
 
-header-install: header-install.in
-	sed -e 's,@kbpkg@,$(kbpkg),g'			\
-	    -e 's,@headers_dirs@,$(headers_dirs),g'	\
-	    -e 's,@headers_extra@,$(headers_extra),g'	\
-            header-install.in > header-install
-	chmod u+x header-install
-
-post-install: post-install.in
-	sed -e 's,@initrd_modules@,$(initrd_modules),'	\
-	    post-install.in > post-install
-#
-# Generates the kernel config file for a subarch by merging
-# the arch-independent config file (arch/config.common),
-# arch-specific config file (arch/$(karch)/config.common),
-# and subarch specific one (arch/$(karch)/config.subarch).
-# It is possible to avoid the inclusion of the arch-indep
-# config file by setting include_common_config = no in the
-# arch/$(karch)/Makefile.inc. Absense of any of the above
-# files is ignored.
-#
-config.%:
-	@echo -n "Generating configuration file $@ ..."
-	@arch='arch/$(karch)/config.common';            \
-	subarch='arch/$(karch)/$@';                     \
-	include='';                                     \
-	if [ '$(include_common_config)' != 'no' ]; then \
-	  include='arch/config.common';                 \
-	fi;                                             \
-	if [ -f "$${arch}" ]; then                      \
-	  include="$${include} $${arch}";               \
-	fi;                                             \
-	if [ -f "$${subarch}" ]; then                   \
-	  include="$${include} $${subarch}";            \
-	fi;                                             \
-	cat $${include} > $@ 
-	@echo " done."
 #
 # Prepares debian/control by cat'ing together all the
 # control files, substituting variables, removing all
@@ -226,36 +77,5 @@ debian/control:
 	    -e 's,@kbpkg@,$(kbpkg),g' |         \
 	sed '/^[[:space:]]*$$/d' |              \
         sed 's/^Package:/\n&/g' > debian/control
-#
-# This is a general target to create the ready-to-build directory
-# for the correct subarch and flavour. For the arches with subarchs
-# the directory will have the name build-$(subarch)-$(flavour). For
-# the ones with subarch, it will be just build-$(flavour).
-#
-build-%:
-	set $(subst -, ,$@); shift;					\
-	subarch="$${1}";						\
-	flavour="$${2}";						\
-	if [ -z "$${flavour}" ]; then					\
-	  cp -al $(kdir) build-$${subarch};				\
-	else								\
-	  cp -al $(kdir)-$${subarch} build-$${subarch}-$${flavour};	\
-	fi
-#
-#
-#
-$(kdir)-%: post-install
-	dh_testdir
-	tar jxf /usr/src/$(kdir).tar.bz2
-	mkdir -p $(kdir)/debian
-	cp debian/changelog $(kdir)/debian
-	cp debian/control   $(kdir)/debian
-	cp debian/copyright $(kdir)/debian
-#	File below must be the proper subarch file
-	cp $(default) $(kdir)/.config
-	touch $(kdir)/debian/official
-	install post-install $(kdir)/debian
-#	Here we need to do the subarch-specific patching
-	mv $(kdir) $@
 
 .PHONY: clean build unpack binary-indep binary-arch binary
