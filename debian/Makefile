@@ -5,7 +5,7 @@
 # Additionally, variables version, abiname and ktver are
 # expected to be available (need to be exported from the parent process).
 # It is possible to override the flavours by setting the flavours
-# variable.
+# variable. 
 #
 SHELL  := sh -e
 debver := $(version)-$(abiname)
@@ -49,20 +49,18 @@ build_prefix := build-$(subarch)-
 # Here we construct the command lines for different make-kpkg
 # calls (build, kernel-image, kernel-headers) based on the values
 # of variables defined so far and provided by the arch/subarch
-# in Makefile.inc. Note that $$i in these expressions is going to
-# become a reference to the shell variable $i, which is expected
-# to have the current flavour. This is slightly evil, but saves
-# a lot of grief.
+# in Makefile.inc. @flavour@ in the expressions is going to be
+# replaced by the flavour for which the command is run. 
 #
 kpkg_headers_cmd := HEADER_CLEAN_HOOK='$(CURDIR)/header-install-$(subarch)'
 kpkg_headers_cmd += make-kpkg --append-to-version $(debnum)$(append)
-kpkg_build_cmd  := make-kpkg --append-to-version $(debnum)-$$i
+kpkg_build_cmd  := make-kpkg --append-to-version $(debnum)-@flavour@
 ifdef added_patches
   kpkg_headers_cmd += --added_patches $(subst @uver@,$(uver),$(added_patches))
   kpkg_build_cmd   += --added_patches $(subst @uver@,$(uver),$(added_patches))
 endif
 ifdef build_subarch
-  kpkg_build_cmd += --subarch $$i
+  kpkg_build_cmd += --subarch @flavour@
 endif
 ifdef headers_subarch
   kpkg_headers_cmd += --subarch $(headers_subarch)
@@ -81,55 +79,43 @@ ifneq (no,$(include_common_config))
   ccommon := arch/config.common
 endif
 ccommon += arch/$(karch)/config.common arch/$(karch)/$(subarch)/config.common
-bdirs := $(addprefix build-$(subarch)-, $(flavours))
 #
-# TODO:
-#  * Check that make oldconfig does not actually
-#    change the config file. If it does, something
-#    is wrong (missing/extra options, etc).
+# Here we build lists of directories and stamps which we will depend on.
+# For each class of such targets there is a pattern rule which will catch
+# it and do the right thing.
+#
+bdirs   := $(addprefix build-$(subarch)-, $(flavours))
+bstamps := $(addprefix build-stamp-$(subarch)-, $(flavours))
+istamps := $(addprefix install-stamp-$(subarch)-, $(flavours))
+#
+# Targets
 #
 unpack: unpack-stamp-$(subarch)
 unpack-stamp-$(subarch): $(configs) header-install-$(subarch) $(bdirs)
-#	We remove the configs just in case
-	rm -f $(configs)
 	touch unpack-stamp-$(subarch)
-#
-#
-#
+
 build: build-stamp-$(subarch)
-build-stamp-$(subarch): unpack-stamp-$(subarch)
-	dh_testdir
-	PATH=$$PWD/bin:$$PATH;					\
-	for i in $(flavours); do				\
-	  cd build-$(subarch)-$$i;				\
-	  $(kpkg_build_cmd);					\
-	  $(if $(image_postproc),$(image_postproc),true);	\
-	  cd ..;						\
-	done
+build-stamp-$(subarch): unpack-stamp-$(subarch) $(bstamps)
 	touch build-stamp-$(subarch)
 
 binary-indep: build
-binary-arch: build
+binary-arch: build headers-stamp $(istamps)
+	mv *.deb ..
+
+install-stamp-$(subarch)-%: build-$(subarch)-% build-stamp-$(subarch)-%
+	cp -al $< install-$*;
+	cd install-$*; $(kpkg_image_cmd)
+	cat install-$*/debian/files >> debian/files;
+	rm -rf install-$*;
+	touch install-stamp-$(subarch)-$*
+
+headers-stamp: $(kdir)
 	dh_testdir
 	dh_clean -k
 	dh_installdirs
-
 	cd $(kdir); $(kpkg_headers_cmd)
-#
-#	Hmm, is it right to just cat all the debian/files
-#	together? Need to check it out...
-#
 	cat $(kdir)/debian/files >> debian/files
-
-	for i in $(flavours); do			\
-	  cp -al build-$(subarch)-$$i install-$$i;	\
-	  cd install-$$i;				\
-	  $(kpkg_image_cmd);				\
-	  cd ..;					\
-	  cat install-$$i/debian/files >> debian/files;	\
-	  rm -rf install-$$i ;				\
-	done
-	mv *.deb ..
+	touch headers-stamp
 
 binary:	binary-indep binary-arch
 
@@ -158,6 +144,7 @@ post-install-$(subarch): post-install.in
 # arch/$(karch)/Makefile.inc.
 #
 config.%:
+	@echo "configs=$(configs)"
 	@echo "Generating configuration file $@:"
 	rm -f $@
 	for i in $(ccommon); do	\
@@ -167,9 +154,7 @@ config.%:
 	done
 #	Flavour config file must be present
 	cat $(basedir)/$@ >> $@			 
-#
-# TODO: subarch specific patches
-#
+
 $(kdir): post-install-$(subarch)
 	dh_testdir
 	tar jxf /usr/src/$(tkdir).tar.bz2
@@ -190,11 +175,26 @@ $(kdir): post-install-$(subarch)
 	  done;							\
 	fi
 	mv $(tkdir) $@
-
-build-%: $(kdir)
+#
+# This target performs a build for a particular flavour. Note
+# that in this file it should be always placed *before* the
+# build-$(subarch)-% target, which creates the build directory.
+#
+build-stamp-$(subarch)-%: build-$(subarch)-%
+	dh_testdir
+	PATH=$$PWD/bin:$$PATH;					\
+	cd $<;							\
+	$(subst @flavour@,$*,$(kpkg_build_cmd));		\
+	$(if $(image_postproc),$(image_postproc),true);
+	touch build-stamp-$(subarch)-$*
+#
+# Creates a build directory for a particular flavour
+#
+build-$(subarch)-%: $(kdir) config.%
+	dh_testdir
 	if [ ! -d $@ ]; then					\
 	  cp -al $(kdir) $@;					\
-	  cp config.$(subst build-$(subarch)-,,$@) $@/.config;	\
+	  cp config.$* $@/.config;				\
 	fi
 
 .PHONY: build unpack binary-indep binary-arch binary
