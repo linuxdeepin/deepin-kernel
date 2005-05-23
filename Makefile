@@ -120,6 +120,7 @@ headers-stamp: $(kdir)
 	dh_testdir
 	dh_clean -k
 	dh_installdirs
+	cp $(default) $(kdir)/.config
 	cd $(kdir); $(kpkg_headers_cmd)
 	cat $(kdir)/debian/files >> debian/files
 	touch headers-stamp
@@ -169,7 +170,6 @@ $(kdir): post-install-$(subarch)
 	cp debian/changelog $(tkdir)/debian
 	cp debian/control   $(tkdir)/debian
 	cp debian/copyright $(tkdir)/debian
-	cp $(default) $(tkdir)/.config
 	touch $(tkdir)/debian/official
 	install post-install-$(subarch) $(tkdir)/debian/post-install
 	cd $(tkdir) && $(kpatch)
