@@ -203,7 +203,7 @@ build-stamp-$(subarch)-%: build-$(subarch)-%
 	$(subst @flavour@,$*,$(kpkg_build_cmd));		\
 	$(if $(image_postproc),$(image_postproc),true);		\
 	arch=$$(basename $$(readlink include/asm));		\
-	arch="${arch#asm-}";					\
+	arch="$${arch#asm-}";					\
 	src="arch/$${arch}/kernel/asm-offsets.s";		\
 	dst="../$(kdir)/$${src}";				\
 	if [ -f "$${src}" ] && [ ! -L "$${dst}" ]; then		\
