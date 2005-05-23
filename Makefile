@@ -41,7 +41,6 @@ kdir    := kernel-source-$(version)-$(subarch)
 ifndef flavours
   flavours := $(patsubst config.%,%,$(configs))
 endif
-build_prefix := build-$(subarch)-
 
 -include $(basedir)/Makefile.inc
 
@@ -68,9 +67,16 @@ endif
 ifdef build_makeflags
   kpkg_build_cmd := MAKEFLAGS=$(build_makeflags) $(kpkg_build_cmd)
 endif
-kpkg_image_cmd  := $(image_prefix) $(kpkg_build_cmd) --initrd kernel_image
-kpkg_image_cmd  := $(strip $(kpkg_image_cmd))
-kpkg_build_cmd  += build
+#
+# Note that next variable (kpkg_image_pre) is not going to be evaluated
+# immediately. When referenced, the variable $* will have the current
+# flavour for which the command is executed. So if this flavour will
+# happen to be in the image_prefix_flavours list, the call to make-kpkg
+# will be prepended with contents if image_prefix.
+#
+kpkg_image_pre = $(if $(filter $*,$(image_prefix_flavours)),$(image_prefix))
+kpkg_image_cmd := $(kpkg_build_cmd) --initrd kernel_image
+kpkg_build_cmd += build
 kpkg_headers_cmd += kernel-headers
 ifndef headers_dirs
   headers_dirs = $(karch)
@@ -104,7 +110,8 @@ binary-arch: build headers-stamp $(istamps)
 
 install-stamp-$(subarch)-%: build-$(subarch)-% build-stamp-$(subarch)-%
 	cp -al $< install-$*;
-	cd install-$*; $(subst @flavour@,$*,$(kpkg_image_cmd))
+	cd install-$*; \
+	$(strip $(kpkg_image_pre) $(subst @flavour@,$*,$(kpkg_image_cmd)))
 	cat install-$*/debian/files >> debian/files;
 	rm -rf install-$*;
 	touch install-stamp-$(subarch)-$*
