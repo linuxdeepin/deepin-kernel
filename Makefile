@@ -206,7 +206,7 @@ build-stamp-$(subarch)-%: build-$(subarch)-%
 	arch="$${arch#asm-}";					\
 	src="arch/$${arch}/kernel/asm-offsets.s";		\
 	dst="../$(kdir)/$${src}";				\
-	if [ -f "$${src}" ] && [ ! -L "$${dst}" ]; then		\
+	if [ -f "$${src}" ] && [ ! -e "$${dst}" ]; then		\
 	  ln -s "$${src}" "$${dst}";				\
 	fi	
 	touch build-stamp-$(subarch)-$*
