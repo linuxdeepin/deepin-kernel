@@ -187,12 +187,28 @@ $(kdir): post-install-$(subarch)
 # that in this file it should be always placed *before* the
 # build-$(subarch)-% target, which creates the build directory.
 #
+# Some arches have extra arch/${ARCH}/kernel/asm-offsets.s files
+# which have to be included in kernel-headers. The problem is that
+# they are only generated during build and we never performed a
+# full build in the directory $(kdir) where kernel-headers are
+# built. So, after build we check whether current build arch has
+# such a file and symlink it into the $(kdir) if necessary.
+# Note that to get into the kernel-headers package the arch/subarch
+# still needs variables headers_dirs and headers_extra set.
+#
 build-stamp-$(subarch)-%: build-$(subarch)-%
 	dh_testdir
 	PATH=$$PWD/bin:$$PATH;					\
 	cd $<;							\
 	$(subst @flavour@,$*,$(kpkg_build_cmd));		\
-	$(if $(image_postproc),$(image_postproc),true);
+	$(if $(image_postproc),$(image_postproc),true);		\
+	arch=$$(basename $$(readlink include/asm));		\
+	arch="${arch#asm-}";					\
+	src="arch/$${arch}/kernel/asm-offsets.s";		\
+	dst="../$(kdir)/$${src}";				\
+	if [ -f "$${src}" ] && [ ! -L "$${dst}" ]; then		\
+	  ln -s "$${src}" "$${dst}";				\
+	fi	
 	touch build-stamp-$(subarch)-$*
 #
 # Creates a build directory for a particular flavour
