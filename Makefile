@@ -59,7 +59,7 @@ ifdef added_patches
   kpkg_build_cmd   += --added_patches $(subst @uver@,$(uver),$(added_patches))
 endif
 ifdef build_subarch
-  kpkg_build_cmd += --subarch @flavour@
+  kpkg_build_cmd += --subarch $(build_subarch)
 endif
 ifdef headers_subarch
   kpkg_headers_cmd += --subarch $(headers_subarch)
