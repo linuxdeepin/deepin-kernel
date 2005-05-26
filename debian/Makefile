@@ -7,6 +7,8 @@
 # It is possible to override the flavours by setting the flavours
 # variable. 
 #
+# This Makefile is run from the debian subdir
+#
 SHELL  := sh -e
 debver := $(version)-$(abiname)
 uver   := $(subst .,_,$(version))
@@ -106,13 +108,13 @@ build-stamp-$(subarch): unpack-stamp-$(subarch) $(bstamps)
 
 binary-indep: build
 binary-arch: build headers-stamp $(istamps)
-	mv *.deb ..
+	mv *.deb ../..
 
 install-stamp-$(subarch)-%: build-$(subarch)-% build-stamp-$(subarch)-%
 	cp -al $< install-$*;
 	cd install-$*; \
 	$(strip $(kpkg_image_pre) $(subst @flavour@,$*,$(kpkg_image_cmd)))
-	cat install-$*/debian/files >> debian/files;
+	cat install-$*/debian/files >> files;
 	rm -rf install-$*;
 	touch install-stamp-$(subarch)-$*
 
@@ -122,7 +124,7 @@ headers-stamp: $(kdir)
 	dh_installdirs
 	cp $(default) $(kdir)/.config
 	cd $(kdir); $(kpkg_headers_cmd)
-	cat $(kdir)/debian/files >> debian/files
+	cat $(kdir)/debian/files >> files
 	touch headers-stamp
 
 binary:	binary-indep binary-arch
