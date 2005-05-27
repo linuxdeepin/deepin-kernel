@@ -129,21 +129,21 @@ headers-stamp: $(kdir)
 
 binary:	binary-indep binary-arch
 
-header-install-$(subarch): header-install.in
+header-install-$(subarch): templates/header-install.in
 	sed -e 's,@kbpkg@,$(kbpkg),g'				\
 	    -e 's,@ksource_dir@,$(CURDIR)/$(kdir),g'		\
 	    -e 's,@headers_dirs@,$(headers_dirs),g'		\
 	    -e 's,@headers_extra@,$(headers_extra),g'		\
-            header-install.in > header-install-$(subarch)
+            templates/header-install.in > header-install-$(subarch)
 	chmod u+x header-install-$(subarch)
 #
 # The way to make the correct package names is to make a
 # subarch-specific post-install script...
 #
-post-install-$(subarch): post-install.in
+post-install-$(subarch): templates/post-install.in
 	sed -e 's,@initrd_modules@,$(initrd_modules),'	\
 	    -e 's,@append_subarch@,$(append),'		\
-	    post-install.in > post-install-$(subarch)
+	    templates/post-install.in > post-install-$(subarch)
 #
 # Generates the kernel config file for a subarch by merging
 # the arch-independent config file (arch/config.common),
