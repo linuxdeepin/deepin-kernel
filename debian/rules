@@ -2,16 +2,23 @@
 #
 # Required variables
 # 
-version   := 2.6.11
-abiname   := 1
-ktver     := 5
+version  := 2.6.11
+abiname  := 1
+ktver    := 5
 #
 # Generally nothing needs to be modified below this line
 #
-SHELL     := sh -e
-kbpkg     := kernel-kbuild-$(version)-$(abiname)
-controls  := $(wildcard debian/arch/*/control.in debian/arch/*/*/control.in)
-karch     := $(shell dpkg-architecture -qDEB_HOST_ARCH)
+SHELL    := sh -e
+controls := $(wildcard debian/arch/*/control.in debian/arch/*/*/control.in)
+karch    := $(shell dpkg-architecture -qDEB_HOST_ARCH)
+major    := $(basename $(version))
+srcver   := $(shell dpkg-parsechangelog | awk '/^Version:/ {print $$2}')
+#
+# Construct depends and provides for the linux-tree
+#
+lt_depends  += $(shell seq -f 'linux-source-$(version) (= $(version)-%g)' \
+                           -s ' | ' 1 $(ktver))
+lt_provides := $(shell seq -f 'linux-tree-$(version)-%g' -s ', ' 1 $(ktver)) 
 #
 # If we are not passed a subarchs variable, we obtain the complete
 # subarch list as a list of subdirectories in arch/$(karch). We
@@ -30,11 +37,13 @@ endif
 
 export version abiname ktver kbuildver flavours
 
-unpack: unpack-stamp
+
+unpack: debian/linux-source-$(version).tar.bz2 unpack-stamp
 unpack-stamp:
 	dh_testdir
 	for i in $(subarchs); do				\
-	  cd debian && $(MAKE) subarch=$${i} unpack;		\
+	  cd debian; 						\
+	  $(MAKE) -f Makefile.subarch subarch=$${i} unpack;	\
 	done
 	ln -s $$(command -v touch) debian/bin/touch.orig
 	touch unpack-stamp
@@ -43,7 +52,8 @@ build: build-stamp
 build-stamp: unpack-stamp
 	dh_testdir
 	for i in $(subarchs); do				\
-	  cd debian && $(MAKE) subarch=$${i} build;		\
+	  cd debian;	 					\ 
+	  $(MAKE) -f Makefile.subarch subarch=$${i} build;	\
 	done
 	touch build-stamp
 
@@ -59,25 +69,39 @@ binary-indep: build
 binary-arch: build
 	dh_testdir
 	for i in $(subarchs); do                                \
-	  cd debian && $(MAKE) subarch=$${i} binary;		\
+	  cd debian;						\
+	  $(MAKE) -f Makefile.subarch subarch=$${i} binary;	\	
 	done
 
 binary:	binary-indep binary-arch
 
 #
-# Prepares debian/control by cat'ing together all the
-# control files, substituting variables, removing all
-# empty lines and inserting a newline before every
-# line starting with 'Package:'
+# Makes the master debian/control file by substituting
+# variable values into the template.
 #
-debian/control:
-	cat debian/control.in $(controls) |     \
-	sed -e 's,@karch@,$(karch),g'           \
-	    -e 's,@version@,$(version),g'       \
-	    -e 's,@ktver@,$(ktver),g'           \
-	    -e 's,@abiname@,$(abiname),g'       \
-	    -e 's,@kbpkg@,$(kbpkg),g' |         \
-	sed '/^[[:space:]]*$$/d' |              \
+debian/control: debian/templates/control.main.in
+	cat debian/templates/control.main.in |		\
+	sed -e 's/@version@/$(version)/g'       	\
+	    -e 's/@major@/$(major)/g'			\
+	    -e 's/@ktver@/$(ktver)/g'           	\
+	    -e 's/@srcver@/$(srcver)/g'			\
+	    -e 's/@lt_depends@/$(lt_depends)/g'		\
+	    -e 's/@lt_provides@/$(lt_provides)/g'	\
+	    -e 's/@abiname@/$(abiname)/g' |       	\
+	sed '/^[[:space:]]*$$/d' |              	\
         sed 's/^Package:/\n&/g' > debian/control
-
+#
+# If we ended up here, either we need to perform the linux-source
+# build, or use the existing linux-source to unpack the kernels.
+# This can be controlled by the use_existing_source variable.
+#
+debian/linux-source-$(version).tar.bz2: debian/Makefile.source
+	dh_testdir
+	if [ '$(use_existing_source)' = 'yes' ]; then		\
+	  ln -s /usr/src/linux-source-$(version).tar.bz2	\
+	        debian/linux-source-$(version).tar.bz2;		\
+	else							\
+	  $(MAKE) -f debian/Makefile.source binary;		\
+	fi
+	
 .PHONY: clean build unpack binary-indep binary-arch binary
