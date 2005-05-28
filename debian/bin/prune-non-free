@@ -1,0 +1,312 @@
+#!/usr/bin/ruby -w
+# prune-non-free - split out non-free drivers, and generate kernel-source tarball.
+#
+#    Copyright (C) 2005  Andres Salomon <dilinger@debian.org>
+#
+#    This program is free software; you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation; either version 2 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program; if not, write to the Free Software
+#    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+#
+
+FILES = %w{
+	drivers/net/tg3.c
+	drivers/net/tg3.h
+
+	drivers/net/acenic.c
+	drivers/net/acenic.h
+	drivers/net/acenic_firmware.h
+
+	drivers/net/dgrs.c
+	drivers/net/dgrs.h
+	drivers/net/dgrs_es4h.h
+	drivers/net/dgrs_plx9060.h
+	drivers/net/dgrs_i82596.h
+	drivers/net/dgrs_ether.h
+	drivers/net/dgrs_asstruct.h
+	drivers/net/dgrs_bcomm.h
+	drivers/net/dgrs_firmware.c
+
+	drivers/net/tokenring/smctr.c
+	drivers/net/tokenring/smctr.h
+	drivers/net/tokenring/smctr_firmware.h
+
+	drivers/scsi/qla2xxx/qla_def.h
+	drivers/scsi/qla2xxx/qla_settings.h
+	drivers/scsi/qla2xxx/qla_version.h
+	drivers/scsi/qla2xxx/qla_gbl.h
+	drivers/scsi/qla2xxx/qla_dbg.h
+	drivers/scsi/qla2xxx/qla_inline.h
+	drivers/scsi/qla2xxx/qla_listops.h
+	drivers/scsi/qla2xxx/qla_devtbl.h
+	drivers/scsi/qla2xxx/qla_os.c
+	drivers/scsi/qla2xxx/qla_init.c
+	drivers/scsi/qla2xxx/qla_mbx.c
+	drivers/scsi/qla2xxx/qla_iocb.c
+	drivers/scsi/qla2xxx/qla_isr.c
+	drivers/scsi/qla2xxx/qla_gs.c
+	drivers/scsi/qla2xxx/qla_dbg.c
+	drivers/scsi/qla2xxx/qla_sup.c
+	drivers/scsi/qla2xxx/qla_rscn.c
+	drivers/scsi/qla2xxx/ql2100.c
+	drivers/scsi/qla2xxx/ql2100_fw.c
+	drivers/scsi/qla2xxx/ql2200.c
+	drivers/scsi/qla2xxx/ql2200_fw.c
+	drivers/scsi/qla2xxx/ql2300.c
+	drivers/scsi/qla2xxx/ql2300_fw.c
+	drivers/scsi/qla2xxx/ql2322.c
+	drivers/scsi/qla2xxx/ql2322_fw.c
+	drivers/scsi/qla2xxx/ql6312.c
+	drivers/scsi/qla2xxx/ql6312_fw.c
+
+	drivers/usb/media/dabusb.c
+	drivers/usb/media/dabusb.h
+	drivers/usb/media/dabfirmware.h
+
+	drivers/usb/misc/emi62.c
+	drivers/usb/misc/emi62_fw_m.h
+	drivers/usb/misc/emi62_fw_s.h
+
+	drivers/usb/serial/keyspan.c
+	drivers/usb/serial/keyspan.h
+	-drivers/usb/serial/usb-serial.h
+	drivers/usb/serial/keyspan_mpr_fw.h
+	drivers/usb/serial/keyspan_usa18x_fw.h
+	drivers/usb/serial/keyspan_usa19_fw.h
+	drivers/usb/serial/keyspan_usa19qi_fw.h
+	drivers/usb/serial/keyspan_usa19qw_fw.h
+	drivers/usb/serial/keyspan_usa19w_fw.h
+	drivers/usb/serial/keyspan_usa28_fw.h
+	drivers/usb/serial/keyspan_usa28x_fw.h
+	drivers/usb/serial/keyspan_usa28xa_fw.h
+	drivers/usb/serial/keyspan_usa28xb_fw.h
+	drivers/usb/serial/keyspan_usa49w_fw.h
+	drivers/usb/serial/keyspan_usa49wlc_fw.h
+	drivers/usb/serial/keyspan_usa26msg.h
+	drivers/usb/serial/keyspan_usa28msg.h
+	drivers/usb/serial/keyspan_usa49msg.h
+	drivers/usb/serial/keyspan_usa90msg.h
+}
+
+require 'tempfile'
+require 'fileutils'
+require 'open3'
+
+class Shell
+	def Shell.quote(s)
+		"'" + s.gsub("'") { |i| "'\\''" } + "'"
+	end
+
+	def Shell.quote!(s)
+		s.replace(quote(s))
+	end
+
+	def Shell.command(cmd)
+		if cmd.class == Array
+			s = cmd.shift
+			cmd.each { |arg|
+				s += ' ' + Shell.quote(arg)
+			}
+			cmd = s
+		end
+
+		ret = Open3.popen3(cmd + ';echo $?') { |si,so,se|
+			[ so.readlines, se.readlines ]
+		}
+		errno = ret[0].pop.to_i
+		raise "Error: cannot execute command #{cmd}: #{ret[1].join('')}" if errno != 0
+		ret
+	end
+end
+
+def tmpdir
+	tf = Tempfile.new('prune','.')
+	FileUtils.rm_f(tf.path)
+	FileUtils.mkdir_p(tf.path)
+	tf.path
+end
+
+def kversion(file)
+	tarball = File.basename(file)
+	unless tarball =~ /^linux-([0-9\.]+)\.tar.*$/
+		raise "cannot determine kernel version from '#{tarball}'!"
+	end
+	$1
+end
+
+def zip_type(tarball)
+	if tarball =~ /\.gz$/
+		'z'
+	elsif tarball =~ /\.bz2/
+		'j'
+	else
+		''
+	end
+end
+
+def unpack(tarball, targetdir)
+	unless File.exists?(tarball)
+		raise "file '#{tarball}' doesn't exist!"
+	end
+	FileUtils.rm_rf(targetdir)
+
+	zipped = zip_type(tarball)
+	dir = Shell.command("tar #{zipped}tf " + Shell.quote(tarball) + " | head -n1")
+	dir = dir[0][0].chomp
+
+	tmp = tmpdir()
+	Shell.command("tar #{zipped}xCf #{tmp} " + Shell.quote(tarball))
+	FileUtils.mv("#{tmp}/#{dir}", targetdir)
+	FileUtils.rm_rf(tmp)
+end
+
+def pack(tarball, srcdir)
+	unless File.directory?(srcdir)
+		raise "directory '#{srcdir}' doesn't exist!"
+	end
+	FileUtils.rm_f(tarball)
+
+	zipped = zip_type(tarball)
+	Shell.command("tar #{zipped}cf " + Shell.quote(tarball) + ' ' + Shell.quote(srcdir))
+end
+
+def rm_config_from_kconfig(mf, option)
+	option = option.sub(/^CONFIG_/, '')
+	kconfig = File.dirname(mf) + '/Kconfig'
+	new_kconfig = File.open(kconfig + '.new', 'w')
+	deleting = false
+	File.open(kconfig).each { |line|
+		if line.include?(option) && line =~ /^config\s+/
+			deleting = true
+		elsif line =~ /^(config|endmenu|comment)/
+			deleting = false
+		end
+		new_kconfig << line unless deleting
+	}
+	new_kconfig.close
+	FileUtils.mv(kconfig + '.new', kconfig)
+end
+
+def rm_config_from_makefile(mf, objects)
+	new_mf = File.open(mf + '.new', 'w')
+	File.open(mf).each { |line|
+		objects.each { |o|
+			line.gsub!(o, '')
+		}
+
+		if line !~ /=[\s\\]*$/
+			new_mf << line
+		end
+	}
+	new_mf.close
+	FileUtils.mv(mf + '.new', mf)
+end
+
+def scan_frag(src_mf, dst_mf, objects)
+	deferred = []
+	File.open(src_mf).each { |line|
+		if objects.find { |o| line.include?(o) } || line.include?('EXTRA_CFLAGS')
+			if line =~ /\$\((CONFIG_[A-Z0-9_]+)\)/
+				rm_config_from_kconfig(src_mf, $1)
+				dst_mf << "EXTRA_CFLAGS += -D#{$1}=1\n"
+				line.gsub!(/\$\(CONFIG_[A-Z0-9_]+\)/, 'm')
+			end
+			dst_mf << line
+
+			# Work around more complex Makefile builds
+			if line !~ /^\s*obj-/ && line =~ /^\s*([\w\d]+)-/
+				deferred << "#{$1}.o"
+			end
+
+			# Finally, delete object
+			rm_config_from_makefile(src_mf, objects)
+		end
+	}
+	deferred
+end
+
+def mk_makefile(name, dst_dir, fragments)
+	mf = File.open(name, 'w')
+	mf << "DIR ?= /usr/src/linux\n\n"
+	fragments.each { |key, val|
+		objects = val
+#		objects << 'EXTRA_CFLAGS' # make sure these don't get missed
+		while objects.length > 0
+			objects = scan_frag("#{dst_dir}/#{key}/Makefile", mf, objects)
+		end
+	}
+	mf << "\nall:\n\t$(MAKE) -C $(DIR) M=$(CURDIR) modules\n\n"
+	mf << "install:\n\t$(MAKE) -C $(DIR) M=$(CURDIR) modules_install\n\n"
+	mf << "clean:\n\t$(MAKE) -C $(DIR) M=$(CURDIR) clean\n\n"
+	mf.close
+end
+
+def dont_nuke_debian_dir(free_dir)
+	name = free_dir + '/scripts/package/Makefile'
+	mf = File.open(name + '.new', 'w')
+	File.open(name).each { |line|
+		if line !~ /\/debian\//
+			mf << line
+		end
+	}
+	mf.close
+	FileUtils.mv(name + '.new', name)
+end
+
+raise "Usage: #{$0} <kernel tarball>" unless ARGV.length == 1
+
+# Create source directories
+version = kversion(ARGV[0])
+free_dir = "kernel-source-#{version}-#{version}"
+nonfree_dir = "kernel-source-nonfree-#{version}-#{version}"
+unpack(ARGV[0], free_dir)
+FileUtils.mkdir_p(nonfree_dir)
+
+# Move or copy non-free and support files into non-free directory
+makefiles = {}
+FILES.each { |f|
+	copy = false
+	if f =~ /^-/
+		f.sub!(/^-/, '')
+		copy = true
+	end
+
+	file = File.basename(f)
+	dir = File.dirname(f)
+
+	# Move or copy file into non-free
+	if copy
+		FileUtils.cp("#{free_dir}/#{f}", nonfree_dir)
+	else
+		FileUtils.mv("#{free_dir}/#{f}", nonfree_dir)
+	end
+
+	# Add makefile fragment
+	if file =~ /\.c$/
+		obj = file.sub(/\.c$/, '.o')
+		makefiles[dir] ||= []
+		makefiles[dir] << obj unless makefiles[dir].index(obj)
+	end
+}
+# Generate non-free driver's makefile
+mk_makefile("#{nonfree_dir}/Makefile", free_dir, makefiles)
+
+dont_nuke_debian_dir(free_dir)
+
+# Tar up the kernel source trees
+pack("kernel-source-#{version}_#{version}.orig.tar.gz", free_dir)
+FileUtils.rm_rf(free_dir) 
+pack("kernel-source-nonfree-#{version}_#{version}.orig.tar.gz", nonfree_dir)
+FileUtils.rm_rf(nonfree_dir)
+
+
+exit(0)
