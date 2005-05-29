@@ -5,24 +5,23 @@
 # Additionally, variables version, abiname and ktver are
 # expected to be available (need to be exported from the parent process).
 # It is possible to override the flavours by setting the flavours
-# variable. 
+# variable. It will also be passed a list of source files
 #
-# This Makefile is run from the debian subdir
+# This Makefile is run from the debian subdir. 
 #
 SHELL  := sh -e
 debver := $(version)-$(abiname)
 uver   := $(subst .,_,$(version))
 debnum := -$(abiname)
-kbpkg  := kernel-kbuild-$(version)-$(abiname)
-# This will eventually have to be changed to a command, applying
-# the debian's patches from the local tree (arch/patches?)
-kpatch := /usr/src/kernel-patches/all/$(version)/apply/debian $(version)-$(ktver)
+#
+# These variables control the behaviour of make-kpkg
+#
 DEBIAN_UPSTREAM_VERSION := $(version)
 ifeq (,$(DEB_HOST_ARCH))
   DEB_HOST_ARCH  := $(shell dpkg-architecture -qDEB_HOST_ARCH)
   DEB_BUILD_ARCH := $(shell dpkg-architecture -qDEB_BUILD_ARCH)
 endif
-export version debnum DEBIAN_UPSTREAM_VERSION
+export version debnum DEBIAN_UPSTREAM_VERSION DEBIAN_STEM
 
 karch := $(DEB_HOST_ARCH)
 #
@@ -33,8 +32,9 @@ ifeq ($(subarch),none)
   append  := 
 else
   basedir := arch/$(karch)/$(subarch)
-  append  := -$(subarch)
+  append  := $(subarch)-
 endif
+
 default := $(basedir)/config.default
 configs := $(notdir $(wildcard $(basedir)/config.*))
 configs := $(filter-out config.common config.default, $(configs))
@@ -43,6 +43,8 @@ kdir    := kernel-source-$(version)-$(subarch)
 ifndef flavours
   flavours := $(patsubst config.%,%,$(configs))
 endif
+controls := templates/control.source.in templates/control.headers.in
+controls += $(basedir)/control.in
 
 -include $(basedir)/Makefile.inc
 
@@ -54,8 +56,10 @@ endif
 # replaced by the flavour for which the command is run. 
 #
 kpkg_headers_cmd := HEADER_CLEAN_HOOK='$(CURDIR)/header-install-$(subarch)'
-kpkg_headers_cmd += make-kpkg --append-to-version $(debnum)$(append)
-kpkg_build_cmd  := make-kpkg --append-to-version $(debnum)-@flavour@
+kpkg_headers_cmd += make-kpkg --append-to-version $(append)$(debnum)
+kpkg_headers_cmd += --stem linux
+kpkg_build_cmd := make-kpkg --append-to-version $(debnum)-@flavour@
+kpkg_build_cmd += --stem linux
 ifdef added_patches
   kpkg_headers_cmd += --added_patches $(subst @uver@,$(uver),$(added_patches))
   kpkg_build_cmd   += --added_patches $(subst @uver@,$(uver),$(added_patches))
@@ -119,9 +123,6 @@ install-stamp-$(subarch)-%: build-$(subarch)-% build-stamp-$(subarch)-%
 	touch install-stamp-$(subarch)-$*
 
 headers-stamp: $(kdir)
-	dh_testdir
-	dh_clean -k
-	dh_installdirs
 	cp $(default) $(kdir)/.config
 	cd $(kdir); $(kpkg_headers_cmd)
 	cat $(kdir)/debian/files >> files
@@ -165,24 +166,23 @@ config.%:
 #	Flavour config file must be present
 	cat $(basedir)/$@ >> $@			 
 
-$(kdir): post-install-$(subarch)
-	dh_testdir
-	tar jxf /usr/src/$(tkdir).tar.bz2
+srcfiles := $(filter-out ../debian ../linux-source-$(version), $(shell echo ../*))
+$(kdir): post-install-$(subarch) $(controls)
+	mkdir -p $(tkdir)
+	cp -al $(srcfiles) $(tkdir)
 	mkdir -p $(tkdir)/debian
-	cp debian/changelog $(tkdir)/debian
-	cp debian/control   $(tkdir)/debian
-	cp debian/copyright $(tkdir)/debian
+	cp changelog $(tkdir)/debian
+	cp copyright $(tkdir)/debian
+	cat $(controls) |			\
+	sed -e 's/@version@/$(version)/g'	\
+	    -e 's/@ltver@/$(ltver)/g'		\
+	    -e 's/@subarch@/$(append)/g'	\
+	    -e 's/@major@/$(major)/g'		\
+            -e 's/@abiname@/$(abiname)/g' |	\
+        sed '/^[[:space:]]*$$/d' |		\
+        sed 's/^Package:/\n&/g' > $(tkdir)/debian/control
 	touch $(tkdir)/debian/official
 	install post-install-$(subarch) $(tkdir)/debian/post-install
-	cd $(tkdir) && $(kpatch)
-#	Arch/subarch-specific patches
-	if [ -d $(basedir)/patches ] &&				\
-	   [ -s $(basedir)/patches/list ]; then			\
-	  cd $(tkdir);						\
-	  for i in $$(cat ../$(basedir)/patches/list); do	\
-	    patch -p1 < ../$(basedir)/patches/$${i};		\
-	  done;							\
-	fi
 	mv $(tkdir) $@
 #
 # This target performs a build for a particular flavour. Note
@@ -199,7 +199,6 @@ $(kdir): post-install-$(subarch)
 # still needs variables headers_dirs and headers_extra set.
 #
 build-stamp-$(subarch)-%: build-$(subarch)-%
-	dh_testdir
 	PATH=$$PWD/bin:$$PATH;					\
 	cd $<;							\
 	$(subst @flavour@,$*,$(kpkg_build_cmd));		\
@@ -216,7 +215,6 @@ build-stamp-$(subarch)-%: build-$(subarch)-%
 # Creates a build directory for a particular flavour
 #
 build-$(subarch)-%: $(kdir) config.%
-	dh_testdir
 	if [ ! -d $@ ]; then					\
 	  cp -al $(kdir) $@;					\
 	  cp config.$* $@/.config;				\
