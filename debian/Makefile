@@ -37,8 +37,8 @@ endif
 default := $(basedir)/config.default
 configs := $(notdir $(wildcard $(basedir)/config.*))
 configs := $(filter-out config.common config.default, $(configs))
-tkdir   := kernel-source-$(version)
-kdir    := kernel-source-$(version)-$(subarch)
+tkdir   := linux-source-$(version)
+kdir    := linux-source-$(version)-$(subarch)
 ifndef flavours
   flavours := $(patsubst config.%,%,$(configs))
 endif
@@ -49,7 +49,7 @@ controls += $(basedir)/control.in
 
 #
 # Here we construct the command lines for different make-kpkg
-# calls (build, kernel-image, kernel-headers) based on the values
+# calls (build, linux-image, linux-headers) based on the values
 # of variables defined so far and provided by the arch/subarch
 # in Makefile.inc. @flavour@ in the expressions is going to be
 # replaced by the flavour for which the command is run. 
@@ -192,11 +192,13 @@ $(kdir): post-install-$(subarch) $(controls)
 # build-$(subarch)-% target, which creates the build directory.
 #
 # Some arches have extra arch/${ARCH}/kernel/asm-offsets.s files
-# which have to be included in kernel-headers. The problem is that
+# which have to be included in linux-headers. The problem is that
 # they are only generated during build and we never performed a
-# full build in the directory $(kdir) where kernel-headers are
+# full build in the directory $(kdir) where linux-headers are
 # built. So, after build we check whether current build arch has
-# such a file and symlink it into the $(kdir) if necessary.
+# such a file and symlink it into the $(kdir) if necessary. It will
+# then be picked up and included into the linux-headers package
+# by the headers-install script.
 #
 build-stamp-$(subarch)-%: build-$(subarch)-%
 	PATH=$$PWD/bin:$$PATH;					\
