@@ -197,8 +197,6 @@ $(kdir): post-install-$(subarch) $(controls)
 # full build in the directory $(kdir) where kernel-headers are
 # built. So, after build we check whether current build arch has
 # such a file and symlink it into the $(kdir) if necessary.
-# Note that to get into the kernel-headers package the arch/subarch
-# still needs variables headers_dirs and headers_extra set.
 #
 build-stamp-$(subarch)-%: build-$(subarch)-%
 	PATH=$$PWD/bin:$$PATH;					\
