@@ -59,10 +59,6 @@ kpkg_headers_cmd += make-kpkg --append-to-version $(append)$(debnum)
 kpkg_headers_cmd += --stem linux
 kpkg_build_cmd := make-kpkg --append-to-version $(debnum)-@flavour@
 kpkg_build_cmd += --stem linux
-ifdef added_patches
-  kpkg_headers_cmd += --added_patches $(subst @uver@,$(uver),$(added_patches))
-  kpkg_build_cmd   += --added_patches $(subst @uver@,$(uver),$(added_patches))
-endif
 ifdef build_subarch
   kpkg_build_cmd += --subarch $(build_subarch)
 endif
@@ -166,6 +162,9 @@ config.%:
 	cat $(basedir)/$@ >> $@			 
 
 srcfiles := $(filter-out ../debian ../linux-source-$(version), $(shell echo ../*))
+patches  := $(wildcard patches-debian/$(subarch).*)
+patches  += $(wildcarc patches-debian/$(karch).*)
+patches  := $(strip $(patches))
 $(kdir): post-install-$(subarch) $(controls)
 	mkdir -p $(tkdir)
 	cp -al $(srcfiles) $(tkdir)
@@ -180,7 +179,11 @@ $(kdir): post-install-$(subarch) $(controls)
             -e 's/@abiname@/$(abiname)/g' |	\
         sed '/^[[:space:]]*$$/d' |		\
         sed 's/^Package:/\n&/g' > $(tkdir)/debian/control
-	touch $(tkdir)/debian/official
+	touch $(tkdir)/debian/official	
+	if [ -n '$(patches)' ]; then			\
+	  cd $(tkdir);					\
+	  cat $(addprefix ../,$(patches)) | patch -p1;	\
+	fi
 	install post-install-$(subarch) $(tkdir)/debian/post-install
 	mv $(tkdir) $@
 #
