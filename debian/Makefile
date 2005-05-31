@@ -212,7 +212,6 @@ build-stamp-$(subarch)-%: build-$(subarch)-%
 	if [ -f "$${src}" ] && [ ! -e "$${dst}" ]; then		\
 	  ln -s "$$(pwd)/$${src}" "$${dst}";			\
 	fi
-	cat $</debian/files >> files
 	touch build-stamp-$(subarch)-$*
 #
 # Creates a build directory for a particular flavour
