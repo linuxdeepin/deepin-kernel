@@ -210,8 +210,9 @@ build-stamp-$(subarch)-%: build-$(subarch)-%
 	src="arch/$${arch}/kernel/asm-offsets.s";		\
 	dst="../$(kdir)/$${src}";				\
 	if [ -f "$${src}" ] && [ ! -e "$${dst}" ]; then		\
-	  ln -s "$$(pwd)/$${src}" "$${dst}";				\
-	fi	
+	  ln -s "$$(pwd)/$${src}" "$${dst}";			\
+	fi
+	cat $</debian/files >> files
 	touch build-stamp-$(subarch)-$*
 #
 # Creates a build directory for a particular flavour
