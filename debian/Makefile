@@ -11,7 +11,6 @@
 #
 SHELL  := sh -e
 debver := $(version)-$(abiname)
-uver   := $(subst .,_,$(version))
 debnum := -$(abiname)
 #
 # These variables control the behaviour of make-kpkg
