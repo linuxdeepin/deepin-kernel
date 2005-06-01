@@ -174,8 +174,8 @@ $(kdir): post-install-$(subarch) $(controls)
 	cat $(controls) |			\
 	sed -e 's/@version@/$(version)/g'	\
 	    -e 's/@ltver@/$(ltver)/g'		\
-	    -e 's/@subarch@/$(append)/g'	\
 	    -e 's/@major@/$(major)/g'		\
+	    -e 's/@subarch@/$(append)/g'	\
             -e 's/@abiname@/$(abiname)/g' |	\
         sed '/^[[:space:]]*$$/d' |		\
         sed 's/^Package:/\n&/g' > $(tkdir)/debian/control
