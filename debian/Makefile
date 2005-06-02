@@ -180,10 +180,6 @@ $(kdir): post-install-$(subarch) $(controls)
         sed '/^[[:space:]]*$$/d' |		\
         sed 's/^Package:/\n&/g' > $(tkdir)/debian/control
 	touch $(tkdir)/debian/official
-#
-#	This is required to disable some buggy checks.
-#
-	touch $(tkdir)/stamp-debian	
 	if [ -n '$(patches)' ]; then			\
 	  cd $(tkdir);					\
 	  cat $(addprefix ../,$(patches)) | patch -p1;	\
