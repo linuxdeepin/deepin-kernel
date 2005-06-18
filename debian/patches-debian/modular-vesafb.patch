@@ -1,0 +1,197 @@
+## All lines beginning with `## DP:' are a description of the patch.
+## DP: Description: modularised VESA FB
+## DP: Patch author: initial author unknown, fixed up by Andres Salomon
+## DP: Upstream status: not submitted
+#
+diff -aurN a/drivers/video/Kconfig b/drivers/video/Kconfig
+--- a/drivers/video/Kconfig	2005-06-06 11:22:29.000000000 -0400
++++ b/drivers/video/Kconfig	2005-06-15 22:32:51.000000000 -0400
+@@ -477,7 +477,7 @@
+ 	  cards. Say Y if you have one of those.
+ 
+ config FB_VESA
+-	bool "VESA VGA graphics support"
++	tristate "VESA VGA graphics support"
+ 	depends on (FB = y) && (X86 || X86_64)
+ 	select FB_CFB_FILLRECT
+ 	select FB_CFB_COPYAREA
+diff -aurN a/drivers/video/vesafb.c b/drivers/video/vesafb.c
+--- a/drivers/video/vesafb.c	2005-06-06 11:22:29.000000000 -0400
++++ b/drivers/video/vesafb.c	2005-06-15 22:33:47.000000000 -0400
+@@ -25,6 +25,12 @@
+ #define dac_reg	(0x3c8)
+ #define dac_val	(0x3c9)
+ 
++struct vesafb_info
++{
++	u32 pseudo_palette[256];
++	int mtrr_hdl;
++};
++
+ /* --------------------------------------------------------------------- */
+ 
+ static struct fb_var_screeninfo vesafb_defined __initdata = {
+@@ -44,17 +50,34 @@
+ 	.accel	= FB_ACCEL_NONE,
+ };
+ 
+-static int             inverse   = 0;
+-static int             mtrr      = 1;
++static int             mtrr __initdata = 1;
+ static int	       vram_remap __initdata = 0; /* Set amount of memory to be used */
+ static int	       vram_total __initdata = 0; /* Set total amount of memory */
+ static int             pmi_setpal = 0;	/* pmi for palette changes ??? */
++static int             redraw __initdata = 0;
+ static int             ypan       = 0;  /* 0..nothing, 1..ypan, 2..ywrap */
++static int             ywrap __initdata = 0;
+ static unsigned short  *pmi_base  = NULL;
+ static void            (*pmi_start)(void);
+ static void            (*pmi_pal)(void);
+ static int             depth;
+ 
++module_param(redraw, bool, 0);
++module_param(ypan, bool, 0);
++module_param(ywrap, bool, 0);
++module_param_named(vgapal, pmi_setpal, invbool, 0);
++MODULE_PARM_DESC(vgapal, "Use VGA for setting palette (default)");
++module_param_named(pmipal, pmi_setpal, bool, 0);
++MODULE_PARM_DESC(pmipal, "Use PMI for setting palette");
++module_param(mtrr, bool, 0);
++MODULE_PARM_DESC(mtrr, "Enable MTRR support (default)");
++module_param_named(nomtrr, mtrr, invbool, 0);
++MODULE_PARM_DESC(nomtrr, "Disable MTRR support");
++module_param(vram_remap, int, 0);
++MODULE_PARM_DESC(vram_remap, "Set total amount of memory to be used");
++module_param(vram_total, int, 0);
++MODULE_PARM_DESC(vram_total, "Total amount of memory");
++
+ /* --------------------------------------------------------------------- */
+ 
+ static int vesafb_pan_display(struct fb_var_screeninfo *var,
+@@ -182,6 +205,7 @@
+ 	.fb_cursor	= soft_cursor,
+ };
+ 
++#ifndef MODULE
+ static int __init vesafb_setup(char *options)
+ {
+ 	char *this_opt;
+@@ -192,9 +216,7 @@
+ 	while ((this_opt = strsep(&options, ",")) != NULL) {
+ 		if (!*this_opt) continue;
+ 		
+-		if (! strcmp(this_opt, "inverse"))
+-			inverse=1;
+-		else if (! strcmp(this_opt, "redraw"))
++		if (! strcmp(this_opt, "redraw"))
+ 			ypan=0;
+ 		else if (! strcmp(this_opt, "ypan"))
+ 			ypan=1;
+@@ -215,11 +237,13 @@
+ 	}
+ 	return 0;
+ }
++#endif
+ 
+ static int __init vesafb_probe(struct device *device)
+ {
+ 	struct platform_device *dev = to_platform_device(device);
+ 	struct fb_info *info;
++	struct vesafb_info *vfb_info;
+ 	int i, err;
+ 	unsigned int size_vmode;
+ 	unsigned int size_remap;
+@@ -277,13 +301,14 @@
+ 		   spaces our resource handlers simply don't know about */
+ 	}
+ 
+-	info = framebuffer_alloc(sizeof(u32) * 256, &dev->dev);
++	info = framebuffer_alloc(sizeof(struct vesafb_info), &dev->dev);
+ 	if (!info) {
+ 		release_mem_region(vesafb_fix.smem_start, vesafb_fix.smem_len);
+ 		return -ENOMEM;
+ 	}
+-	info->pseudo_palette = info->par;
+-	info->par = NULL;
++	vfb_info = (struct vesafb_info *) info->par;
++	vfb_info->mtrr_hdl = -1;
++	info->pseudo_palette = vfb_info->pseudo_palette;
+ 
+         info->screen_base = ioremap(vesafb_fix.smem_start, vesafb_fix.smem_len);
+ 	if (!info->screen_base) {
+@@ -392,7 +417,7 @@
+                 	temp_size &= (temp_size - 1);
+                         
+                 /* Try and find a power of two to add */
+-		while (temp_size && mtrr_add(vesafb_fix.smem_start, temp_size, MTRR_TYPE_WRCOMB, 1)==-EINVAL) {
++		while (temp_size && (vfb_info->mtrr_hdl = mtrr_add(vesafb_fix.smem_start, temp_size, MTRR_TYPE_WRCOMB, 1)) == -EINVAL) {
+ 			temp_size >>= 1;
+ 		}
+ 	}
+@@ -414,6 +439,7 @@
+ 	}
+ 	printk(KERN_INFO "fb%d: %s frame buffer device\n",
+ 	       info->node, info->fix.id);
++	dev_set_drvdata(device, info);
+ 	return 0;
+ err:
+ 	framebuffer_release(info);
+@@ -421,10 +447,24 @@
+ 	return err;
+ }
+ 
++static void __exit vesafb_remove(struct device *device)
++{
++	struct fb_info *info = dev_get_drvdata(device);
++	struct vesafb_info *vfb_info = (struct vesafb_info *) info->par;
++
++	unregister_framebuffer(info);
++	if (vfb_info->mtrr_hdl >= 0)
++		mtrr_del(vfb_info->mtrr_hdl, 0, 0);
++	iounmap(info->screen_base);
++	framebuffer_release(info);
++	release_mem_region(vesafb_fix.smem_start, vesafb_fix.smem_len);
++}
++
+ static struct device_driver vesafb_driver = {
+ 	.name	= "vesafb",
+ 	.bus	= &platform_bus_type,
+ 	.probe	= vesafb_probe,
++	.remove = vesafb_remove,
+ };
+ 
+ static struct platform_device vesafb_device = {
+@@ -434,11 +474,18 @@
+ static int __init vesafb_init(void)
+ {
+ 	int ret;
++#ifndef MODULE
+ 	char *option = NULL;
+ 
+ 	/* ignore error return of fb_get_options */
+ 	fb_get_options("vesafb", &option);
+ 	vesafb_setup(option);
++#else
++	if (redraw)
++		ypan = 0;
++	if (ywrap)
++		ypan = 2;
++#endif
+ 	ret = driver_register(&vesafb_driver);
+ 
+ 	if (!ret) {
+@@ -448,6 +495,14 @@
+ 	}
+ 	return ret;
+ }
++
++static void __exit vesafb_exit(void)
++{
++	platform_device_unregister(&vesafb_device);
++	driver_unregister(&vesafb_driver);
++}
++
+ module_init(vesafb_init);
++module_exit(vesafb_exit);
+ 
+ MODULE_LICENSE("GPL");
