@@ -2,7 +2,7 @@
 # This Makefile executes the unpack/build/binary targets for a single
 # subarch, which is passed in the subarch variable. Empty subarch
 # variable means that we are building for an arch without the subarch.
-# Additionally, variables version, abiname and ktver are
+# Additionally, variables version, abiname and ltver are
 # expected to be available (need to be exported from the parent process).
 # It is possible to override the flavours by setting the flavours
 # variable. It will also be passed a list of source files
@@ -34,7 +34,6 @@ else
   append  := $(subarch)-
 endif
 
-default := $(basedir)/config.default
 configs := $(notdir $(wildcard $(basedir)/config.*))
 configs := $(filter-out config.common config.default, $(configs))
 tkdir   := linux-source-$(version)
@@ -95,6 +94,22 @@ bdirs   := $(addprefix build-$(subarch)-, $(flavours))
 bstamps := $(addprefix build-stamp-$(subarch)-, $(flavours))
 istamps := $(addprefix install-stamp-$(subarch)-, $(flavours))
 #
+# We need to determine the default config, the one which we will
+# use to build the headers with. It does not matter very much which
+# one is used, but for historical reasons we will look for it like
+# this:
+# * If variable default_config is set (may be set in Makefile.inc)
+#   then config file config.$(default_config) will be used as default.
+# * If the file config.default exists, it will be used as a default.
+# * Otherwise, the config for the first flavour mentioned in $(flavours)
+#   will be used.
+#
+default_list := $(basedir)/config.$(default_config)
+default_list += $(basedir)/config.default
+default_list += $(basedir)/config.$(firstword $(flavours))
+default := $(firstword $(wildcard $(default_list)))
+
+#
 # Targets
 #
 unpack: unpack-stamp-$(subarch)
@@ -118,6 +133,7 @@ install-stamp-$(subarch)-%: build-$(subarch)-% build-stamp-$(subarch)-%
 	touch install-stamp-$(subarch)-$*
 
 headers-stamp: $(kdir)
+	@echo "I: Using $(default) as the header configuration file."
 	cp $(default) $(kdir)/.config
 	cd $(kdir); $(kpkg_headers_cmd)
 	cat $(kdir)/debian/files >> files
