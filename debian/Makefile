@@ -178,8 +178,10 @@ config.%:
 	cat $(basedir)/$@ >> $@			 
 
 srcfiles := $(filter-out ../debian ../linux-source-$(version), $(shell echo ../*))
-patches  := $(wildcard patches-debian/$(subarch).*)
-patches  += $(wildcarc patches-debian/$(karch).*)
+patches  := $(wildcard patches-arch/$(subarch).*)
+patches  += $(wildcard patches-arch/$(subarch)_*)
+patches  += $(wildcard patches-arch/$(karch).*)
+patches  += $(wildcard patches-arch/$(karch)_*)
 patches  := $(strip $(patches))
 $(kdir): post-install-$(subarch) $(controls)
 	mkdir -p $(tkdir)
