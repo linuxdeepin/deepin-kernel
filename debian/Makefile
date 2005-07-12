@@ -65,7 +65,9 @@ ifdef headers_subarch
   kpkg_headers_cmd += --subarch $(headers_subarch)
 endif
 ifdef build_makeflags
-  kpkg_build_cmd := MAKEFLAGS=$(build_makeflags) $(kpkg_build_cmd)
+  export_makeflags := export MAKEFLAGS=$(build_makeflags)
+else
+  export_makeflags := true
 endif
 #
 # Note that next variable (kpkg_image_pre) is not going to be evaluated
@@ -126,7 +128,8 @@ binary-arch: build headers-stamp $(istamps)
 
 install-stamp-$(subarch)-%: build-$(subarch)-% build-stamp-$(subarch)-%
 	cp -al $< install-$*;
-	cd install-$*; \
+	cd install-$*; 		\
+	$(export_makeflags); 	\
 	$(strip $(kpkg_image_pre) $(subst @flavour@,$*,$(kpkg_image_cmd)))
 	cat install-$*/debian/files >> files;
 	rm -rf install-$*;
@@ -221,6 +224,7 @@ $(kdir): post-install-$(subarch) $(controls)
 build-stamp-$(subarch)-%: build-$(subarch)-%
 	PATH=$$PWD/bin:$$PATH;					\
 	cd $<;							\
+	$(export_makeflags);					\
 	$(subst @flavour@,$*,$(kpkg_build_cmd));		\
 	$(if $(image_postproc),$(image_postproc),true);		\
 	arch=$$(basename $$(readlink include/asm));		\
