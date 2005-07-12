@@ -200,7 +200,7 @@ $(kdir): post-install-$(subarch) $(wildcard templates/control.*.in)
 		cat templates/control.$$1 |      \
 			sed -e 's/@version@/$(version)/g'       \
 				-e 's/@major@/$(major)/g'           \
-				-e "s/@arch@/$(arch)/g"                 \
+				-e "s/@arch@/$(karch)/g"                 \
 				-e "s/@subarch@/$(append)/g"             \
 				-e "s/@flavour@/$$2/g"              \
 				-e 's/@ltver@/$(ltver)/g'           \
