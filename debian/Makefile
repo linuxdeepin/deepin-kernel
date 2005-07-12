@@ -186,20 +186,38 @@ patches  += $(wildcard patches-arch/$(subarch)_*)
 patches  += $(wildcard patches-arch/$(karch).*)
 patches  += $(wildcard patches-arch/$(karch)_*)
 patches  := $(strip $(patches))
+# substitute() and friends is duplicated in debian/rules; this should
+# be cleaned up in the long term.  watch out for relative paths, as
+# debian/rules runs in the top level directory, while debian/Makefile
+# runs from the debian directory!
 $(kdir): post-install-$(subarch) $(wildcard templates/control.*.in)
 	mkdir -p $(tkdir)
 	cp -al $(srcfiles) $(tkdir)
 	mkdir -p $(tkdir)/debian
 	cp changelog $(tkdir)/debian
 	cp copyright $(tkdir)/debian
-	cat $(controls) |			\
-	sed -e 's/@version@/$(version)/g'	\
-	    -e 's/@ltver@/$(ltver)/g'		\
-	    -e 's/@major@/$(major)/g'		\
-	    -e 's/@subarch@/$(append)/g'	\
-            -e 's/@abiname@/$(abiname)/g' |	\
-        sed '/^[[:space:]]*$$/d' |		\
-        sed 's/^Package:/\n&/g' > $(tkdir)/debian/control
+	substitute() {                                  \
+		cat templates/control.$$1 |      \
+			sed -e 's/@version@/$(version)/g'       \
+				-e 's/@major@/$(major)/g'           \
+				-e "s/@arch@/$(arch)/g"                 \
+				-e "s/@subarch@/$(subarch)/g"             \
+				-e "s/@flavour@/$$2/g"              \
+				-e 's/@ltver@/$(ltver)/g'           \
+				-e 's/@srcver@/$(srcver)/g'         \
+				-e 's/@lt_depends@/$(lt_depends)/g' \
+				-e 's/@lt_provides@/$(lt_provides)/g' \
+				-e 's/@abiname@/$(abiname)/g' |     \
+			sed '/^[[:space:]]*$$/d' |              \
+			sed 's/^Package:/\n&/g';                \
+	};                                              \
+	substitute source.in "" >> $(tkdir)/debian/control;      \
+	substitute headers.in "" >> $(tkdir)/debian/control;     \
+	substitute headers.arch.in "" >> $(tkdir)/debian/control; \
+	for f in $(flavours); do      \
+		substitute headers.flavour.in $$f >> $(tkdir)/debian/control; \
+		substitute image.in $$f >> $(tkdir)/debian/control; \
+	done
 	touch $(tkdir)/debian/official
 	if [ -n '$(patches)' ]; then			\
 	  cd $(tkdir);					\
