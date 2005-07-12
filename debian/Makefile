@@ -201,7 +201,7 @@ $(kdir): post-install-$(subarch) $(wildcard templates/control.*.in)
 			sed -e 's/@version@/$(version)/g'       \
 				-e 's/@major@/$(major)/g'           \
 				-e "s/@arch@/$(arch)/g"                 \
-				-e "s/@subarch@/$(subarch)/g"             \
+				-e "s/@subarch@/$(append)/g"             \
 				-e "s/@flavour@/$$2/g"              \
 				-e 's/@ltver@/$(ltver)/g'           \
 				-e 's/@srcver@/$(srcver)/g'         \
