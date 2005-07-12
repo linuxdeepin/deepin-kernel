@@ -186,7 +186,7 @@ patches  += $(wildcard patches-arch/$(subarch)_*)
 patches  += $(wildcard patches-arch/$(karch).*)
 patches  += $(wildcard patches-arch/$(karch)_*)
 patches  := $(strip $(patches))
-$(kdir): post-install-$(subarch) $(controls)
+$(kdir): post-install-$(subarch) $(wildcard templates/control.*.in)
 	mkdir -p $(tkdir)
 	cp -al $(srcfiles) $(tkdir)
 	mkdir -p $(tkdir)/debian
