@@ -1,7 +1,6 @@
 #
 # Variables 
 #
-include_common_config := no
 headers_dirs := sparc | sparc64
 headers_subarch := sparc64
 build_subarch := @flavour@
