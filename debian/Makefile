@@ -158,6 +158,7 @@ header-install-$(subarch): templates/header-install.in
 post-install-$(subarch): templates/post-install.in
 	sed -e 's,@initrd_modules@,$(initrd_modules),'	\
 	    -e 's,@append_subarch@,$(append),'		\
+	    -e 's,@extra_postinstall_command@,$(extra_postinstall_command),'	\
 	    templates/post-install.in > post-install-$(subarch)
 #
 # Generates the kernel config file for a subarch by merging
