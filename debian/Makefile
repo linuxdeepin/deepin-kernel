@@ -35,7 +35,7 @@ else
 endif
 
 configs := $(notdir $(wildcard $(basedir)/config.*))
-configs := $(filter-out config.common config.default, $(configs))
+configs := $(filter-out config config.default, $(configs))
 tkdir   := linux-source-$(version)
 kdir    := linux-source-$(version)-$(subarch)
 ifndef flavours
@@ -83,10 +83,11 @@ kpkg_headers_cmd += kernel-headers
 ifndef headers_dirs
   headers_dirs = $(karch)
 endif
-ifneq (no,$(include_common_config))
-  ccommon := arch/config.common
-endif
-ccommon += arch/$(karch)/config.common arch/$(karch)/$(subarch)/config.common
+# XXX: include_common_config disabled.
+#ifneq (no,$(include_common_config))
+  ccommon := arch/config
+#endif
+ccommon += arch/config arch/$(karch)/config arch/$(karch)/$(subarch)/config
 #
 # Here we build lists of directories and stamps which we will depend on.
 # For each class of such targets there is a pattern rule which will catch
@@ -162,9 +163,9 @@ post-install-$(subarch): templates/post-install.in
 	    templates/post-install.in > post-install-$(subarch)
 #
 # Generates the kernel config file for a subarch by merging
-# the arch-independent config file (arch/config.common),
-# arch-specific config file (arch/$(karch)/config.common),
-# and subarch specific one (arch/$(karch)/config.subarch).
+# the arch-independent config file (arch/config),
+# arch-specific config file (arch/$(karch)/config),
+# and subarch specific one (arch/$(karch)/$(subarch)/config).
 # It is possible to avoid the inclusion of the arch-indep
 # config file by setting include_common_config = no in the
 # arch/$(karch)/Makefile.inc.
