@@ -106,8 +106,8 @@ istamps := $(addprefix install-stamp-$(subarch)-, $(flavours))
 # * Otherwise, the config for the first flavour mentioned in $(flavours)
 #   will be used.
 #
-default_list := debian/config.$(default_config)
-default_list += debian/config.$(firstword $(flavours))
+default_list := config.$(default_config)
+default_list += config.$(firstword $(flavours))
 
 #
 # Targets
