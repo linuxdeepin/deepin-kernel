@@ -135,7 +135,7 @@ install-stamp-$(subarch)-%: build-$(subarch)-% build-stamp-$(subarch)-%
 
 headers-stamp: $(kdir)
 	default='$(firstword $(wildcard $(default_list)))';		\
-	@echo "I: Using $${default} as the header configuration file.";	\
+	echo "I: Using $${default} as the header configuration file.";	\
 	cp "$${default}" $(kdir)/.config
 	cd $(kdir); $(kpkg_headers_cmd)
 	cat $(kdir)/debian/files >> files
