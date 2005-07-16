@@ -1,11 +1,11 @@
 #!/usr/bin/python
 #
-# Scans underlying directory structure for files with names config.ext
-# where .ext is not .stub, .common or .default, and extracts a common
+# Scans underlying directory structure for files with names config.*
+# where .* is not .stub or .default, and extracts a common
 # set of config options from them. The resulting set of options is
-# written into the config.common file. On the second pass each config.ext
+# written into the 'config' file. On the second pass each config.*
 # file is parsed to remove the common config options found in
-# config.common, with the results written to config.ext.stub.
+# config, with the results written to config.*.stub.
 #
 import os, string, sys
 
@@ -44,7 +44,7 @@ def walk_callback(arg, dir, names):
   	if names.count('.svn'): names.remove('.svn')
 	for name in names:
 		base, ext = os.path.splitext(name)
-		if(base == 'config' and ext not in ('.default', '.stub', '.common')):
+		if(base == 'config' and ext not in ('.default', '.stub', '')):
 			fname = os.path.join(dir,name)
 			conffiles.append(fname)
 			print 'Processing ' + fname + ' ... ',
@@ -55,8 +55,8 @@ def walk_callback(arg, dir, names):
 # Main routine
 #
 os.path.walk('.', walk_callback, None)
-print 'Writing the config.common output file ... ',
-write_out(common, 'config.common')
+print 'Writing the config output file ... ',
+write_out(common, 'config')
 print 'done.'
 for fname in conffiles:
 	print 'Writing the ' + fname + '.stub output file ... ',
