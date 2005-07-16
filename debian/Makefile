@@ -103,14 +103,11 @@ istamps := $(addprefix install-stamp-$(subarch)-, $(flavours))
 # this:
 # * If variable default_config is set (may be set in Makefile.inc)
 #   then config file config.$(default_config) will be used as default.
-# * If the file config.default exists, it will be used as a default.
 # * Otherwise, the config for the first flavour mentioned in $(flavours)
 #   will be used.
 #
-default_list := $(basedir)/config.$(default_config)
-default_list += $(basedir)/config.default
-default_list += $(basedir)/config.$(firstword $(flavours))
-default := $(firstword $(wildcard $(default_list)))
+default_list := debian/config.$(default_config)
+default_list += debian/config.$(firstword $(flavours))
 
 #
 # Targets
@@ -137,8 +134,9 @@ install-stamp-$(subarch)-%: build-$(subarch)-% build-stamp-$(subarch)-%
 	touch install-stamp-$(subarch)-$*
 
 headers-stamp: $(kdir)
-	@echo "I: Using $(default) as the header configuration file."
-	cp $(default) $(kdir)/.config
+	default='$(firstword $(wildcard $(default_list)))';		\
+	@echo "I: Using $${default} as the header configuration file.";	\
+	cp "$${default}" $(kdir)/.config
 	cd $(kdir); $(kpkg_headers_cmd)
 	cat $(kdir)/debian/files >> files
 	touch headers-stamp
