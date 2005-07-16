@@ -7,15 +7,14 @@
 # file is parsed to remove the common config options found in
 # config, with the results written to config.*.stub.
 #
-import os, string, sys
+import os, string, sys, re
 
 common = []
 conffiles = []
 
 def is_option(line):
-	result = (string.count(line, '#') > 0)
-	result = result or (len(string.strip(line)) == 0)
-	return not result
+	result = (len(string.strip(line)) != 0) and (re.match('^#*\s*CONFIG_\w+[\s=]', line))
+	return result
 
 def is_not_common(line):
 	return (line not in common)
