@@ -83,7 +83,7 @@ kpkg_headers_cmd += kernel-headers
 ifndef headers_dirs
   headers_dirs = $(karch)
 endif
-ccommon += arch/config arch/$(karch)/config arch/$(karch)/$(subarch)/config
+ccommon = arch/config arch/$(karch)/config arch/$(karch)/$(subarch)/config
 #
 # Here we build lists of directories and stamps which we will depend on.
 # For each class of such targets there is a pattern rule which will catch
@@ -129,8 +129,11 @@ install-stamp-$(subarch)-%: build-$(subarch)-% build-stamp-$(subarch)-%
 	rm -rf install-$*;
 	touch install-stamp-$(subarch)-$*
 
-headers-stamp: $(kdir)
-	default='$(firstword $(wildcard $(default_list)))';		\
+headers-stamp: $(kdir) config.$(firstword $(flavours))
+	# In the long term, we can just use 'make-kpkg --config def' instead
+	# of providing a default config; however, we're going to have to
+	# wait for kernel-package to fix that first.  #XXX
+	default='$(firstword $(wildcard $(default_list)))';             \
 	echo "I: Using $${default} as the header configuration file.";	\
 	cp "$${default}" $(kdir)/.config
 	cd $(kdir); $(kpkg_headers_cmd)
