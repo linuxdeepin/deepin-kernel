@@ -92,18 +92,6 @@ ccommon = arch/config arch/$(karch)/config arch/$(karch)/$(subarch)/config
 bdirs   := $(addprefix build-$(subarch)-, $(flavours))
 bstamps := $(addprefix build-stamp-$(subarch)-, $(flavours))
 istamps := $(addprefix install-stamp-$(subarch)-, $(flavours))
-#
-# We need to determine the default config, the one which we will
-# use to build the headers with. It does not matter very much which
-# one is used, but for historical reasons we will look for it like
-# this:
-# * If variable default_config is set (may be set in Makefile.inc)
-#   then config file config.$(default_config) will be used as default.
-# * Otherwise, the config for the first flavour mentioned in $(flavours)
-#   will be used.
-#
-default_list := config.$(default_config)
-default_list += config.$(firstword $(flavours))
 
 #
 # Targets
@@ -129,14 +117,12 @@ install-stamp-$(subarch)-%: build-$(subarch)-% build-stamp-$(subarch)-%
 	rm -rf install-$*;
 	touch install-stamp-$(subarch)-$*
 
-headers-stamp: $(kdir) config.$(firstword $(flavours))
+headers-stamp: $(kdir)
 	# In the long term, we can just use 'make-kpkg --config def' instead
-	# of providing a default config; however, we're going to have to
+	# of calling this manually; however, we're going to have to
 	# wait for kernel-package to fix that first.  #XXX
-	default='$(firstword $(wildcard $(default_list)))';             \
-	echo "I: Using $${default} as the header configuration file.";	\
-	cp "$${default}" $(kdir)/.config
-	cd $(kdir); $(kpkg_headers_cmd)
+	echo "I: generating header configuration file using 'make defconfig.'";\
+	cd $(kdir); $(MAKE) defconfig; $(kpkg_headers_cmd)
 	cat $(kdir)/debian/files >> files
 	touch headers-stamp
 
