@@ -83,10 +83,6 @@ kpkg_headers_cmd += kernel-headers
 ifndef headers_dirs
   headers_dirs = $(karch)
 endif
-# XXX: include_common_config disabled.
-#ifneq (no,$(include_common_config))
-  ccommon := arch/config
-#endif
 ccommon += arch/config arch/$(karch)/config arch/$(karch)/$(subarch)/config
 #
 # Here we build lists of directories and stamps which we will depend on.
