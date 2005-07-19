@@ -130,7 +130,6 @@ header-install-$(subarch): templates/header-install.in
 	sed -e 's,@kbpkg@,$(kbpkg),g'				\
 	    -e 's,@ksource_dir@,$(CURDIR)/$(kdir),g'		\
 	    -e 's,@headers_dirs@,$(headers_dirs),g'		\
-	    -e 's,@headers_extra@,$(headers_extra),g'		\
             templates/header-install.in > header-install-$(subarch)
 	chmod u+x header-install-$(subarch)
 #
