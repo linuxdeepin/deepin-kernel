@@ -201,7 +201,6 @@ $(kdir): post-install-$(subarch) $(wildcard templates/control.*.in)
 	};                                              \
 	substitute source.in "" >> $(tkdir)/debian/control;      \
 	substitute headers.in "" >> $(tkdir)/debian/control;     \
-	substitute headers.arch.in "" >> $(tkdir)/debian/control; \
 	for f in $(flavours); do      \
 		substitute headers.flavour.in $$f >> $(tkdir)/debian/control; \
 		substitute image.in $$f >> $(tkdir)/debian/control; \
