@@ -55,7 +55,7 @@ controls += $(basedir)/control.in
 #
 kpkg_headers_cmd := HEADER_CLEAN_HOOK='$(CURDIR)/header-install-$(subarch)'
 kpkg_headers_cmd += make-kpkg --append-to-version $(append)$(debnum)
-kpkg_headers_cmd += --stem linux --config def
+kpkg_headers_cmd += --stem linux --config defconfig
 kpkg_build_cmd := make-kpkg --append-to-version $(debnum)-@flavour@
 kpkg_build_cmd += --stem linux
 ifdef build_subarch
