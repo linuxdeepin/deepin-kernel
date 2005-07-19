@@ -35,7 +35,7 @@ else
 endif
 
 configs := $(notdir $(wildcard $(basedir)/config.*))
-configs := $(filter-out config config.default, $(configs))
+configs := $(filter-out config, $(configs))
 tkdir   := linux-source-$(version)
 kdir    := linux-source-$(version)-$(subarch)
 ifndef flavours
@@ -55,7 +55,7 @@ controls += $(basedir)/control.in
 #
 kpkg_headers_cmd := HEADER_CLEAN_HOOK='$(CURDIR)/header-install-$(subarch)'
 kpkg_headers_cmd += make-kpkg --append-to-version $(append)$(debnum)
-kpkg_headers_cmd += --stem linux
+kpkg_headers_cmd += --stem linux --config def
 kpkg_build_cmd := make-kpkg --append-to-version $(debnum)-@flavour@
 kpkg_build_cmd += --stem linux
 ifdef build_subarch
@@ -118,11 +118,9 @@ install-stamp-$(subarch)-%: build-$(subarch)-% build-stamp-$(subarch)-%
 	touch install-stamp-$(subarch)-$*
 
 headers-stamp: $(kdir)
-	# In the long term, we can just use 'make-kpkg --config def' instead
-	# of calling this manually; however, we're going to have to
-	# wait for kernel-package to fix that first.  #XXX
-	echo "I: generating header configuration file using 'make defconfig.'";\
-	cd $(kdir); $(MAKE) defconfig; $(kpkg_headers_cmd)
+	# The headers config is now automatically generated via the kernel's
+	# defconfig target.  Woo!
+	cd $(kdir); $(kpkg_headers_cmd)
 	cat $(kdir)/debian/files >> files
 	touch headers-stamp
 
