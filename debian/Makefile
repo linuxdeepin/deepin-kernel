@@ -184,7 +184,7 @@ $(kdir): post-install-$(subarch) $(wildcard templates/control.*.in)
 	cp changelog $(tkdir)/debian
 	cp copyright $(tkdir)/debian
 	substitute() {                                  \
-		class="$$2";                            \
+		class="$$2-class";                            \
 		desc="";                                \
 		[ -f "debian/arch/$(karch)/$(append)/desc.$$2" ] && . "debian/arch/$(karch)/$(append)/desc.$$2"; \
 		cat templates/control.$$1 |      \
