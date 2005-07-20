@@ -193,8 +193,8 @@ $(kdir): post-install-$(subarch) $(wildcard templates/control.*.in)
 				-e "s/@arch@/$(karch)/g"                 \
 				-e "s/@subarch@/$(append)/g"             \
 				-e "s/@flavour@/$$2/g"              \
-				-e "s/@class@/$$class/g"            \
-				-e "s/@desc@/$$desc/g"              \
+				-e "s#@class@#$$class#g"            \
+				-e "s#@desc@#$$desc#g"              \
 				-e 's/@ltver@/$(ltver)/g'           \
 				-e 's/@srcver@/$(srcver)/g'         \
 				-e 's/@lt_depends@/$(lt_depends)/g' \
