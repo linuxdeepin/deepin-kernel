@@ -185,8 +185,10 @@ $(kdir): post-install-$(subarch) $(wildcard templates/control.*.in)
 	cp copyright $(tkdir)/debian
 	substitute() {                                  \
 		class="$$2-class";                            \
+		longclass="";				\
 		desc="";                                \
 		[ -f "debian/arch/$(karch)/$(append)/desc.$$2" ] && . "debian/arch/$(karch)/$(append)/desc.$$2"; \
+		[ -z "$$longclass" ] && longclass="$$class"; \
 		cat templates/control.$$1 |      \
 			sed -e 's/@version@/$(version)/g'       \
 				-e 's/@major@/$(major)/g'           \
@@ -194,6 +196,7 @@ $(kdir): post-install-$(subarch) $(wildcard templates/control.*.in)
 				-e "s/@subarch@/$(append)/g"             \
 				-e "s/@flavour@/$$2/g"              \
 				-e "s#@class@#$$class#g"            \
+				-e "s#@longclass@#$$longclass#g"    \
 				-e 's/@ltver@/$(ltver)/g'           \
 				-e 's/@srcver@/$(srcver)/g'         \
 				-e 's/@lt_depends@/$(lt_depends)/g' \
