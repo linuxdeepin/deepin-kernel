@@ -183,35 +183,7 @@ $(kdir): post-install-$(subarch) $(wildcard templates/control.*.in)
 	mkdir -p $(tkdir)/debian
 	cp changelog $(tkdir)/debian
 	cp copyright $(tkdir)/debian
-	substitute() {                                  \
-		class="$$2-class";                            \
-		longclass="";				\
-		desc="";                                \
-		[ -f "debian/arch/$(karch)/$(append)/desc.$$2" ] && . "debian/arch/$(karch)/$(append)/desc.$$2"; \
-		[ -z "$$longclass" ] && longclass="$$class"; \
-		cat templates/control.$$1 |      \
-			sed -e 's/@version@/$(version)/g'       \
-				-e 's/@major@/$(major)/g'           \
-				-e "s/@arch@/$(karch)/g"                 \
-				-e "s/@subarch@/$(append)/g"             \
-				-e "s/@flavour@/$$2/g"              \
-				-e "s#@class@#$$class#g"            \
-				-e "s#@longclass@#$$longclass#g"    \
-				-e 's/@ltver@/$(ltver)/g'           \
-				-e 's/@srcver@/$(srcver)/g'         \
-				-e 's/@lt_depends@/$(lt_depends)/g' \
-				-e 's/@lt_provides@/$(lt_provides)/g' \
-				-e 's/@abiname@/$(abiname)/g' |     \
-			sed '/^[[:space:]]*$$/d' |              \
-			sed 's/^Package:/\n&/g';                \
-		[ -z "$$3" ] || printf "$$desc\n";		\
-	};                                              \
-	substitute source.in "" >> $(tkdir)/debian/control;      \
-	substitute headers.in "" >> $(tkdir)/debian/control;     \
-	for f in $(flavours); do      \
-		substitute headers.flavour.in $$f >> $(tkdir)/debian/control; \
-		substitute image.in $$f "1" >> $(tkdir)/debian/control; \
-	done
+	arch=$(karch) subarch=$(subarch) bin/gencontrol > $(tkdir)/debian/control
 	touch $(tkdir)/debian/official
 	if [ -n '$(patches)' ]; then			\
 	  cd $(tkdir);					\
