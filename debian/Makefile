@@ -15,10 +15,16 @@ debnum := -$(abiname)
 #
 # These variables control the behaviour of make-kpkg
 #
+# enable cross-compiling for m68k
+#DEB_HOST_ARCH := m68k
+#
 DEBIAN_UPSTREAM_VERSION := $(version)
 ifeq (,$(DEB_HOST_ARCH))
   DEB_HOST_ARCH  := $(shell dpkg-architecture -qDEB_HOST_ARCH)
   DEB_BUILD_ARCH := $(shell dpkg-architecture -qDEB_BUILD_ARCH)
+endif
+ifneq ($(DEB_BUILD_ARCH),$(DEB_HOST_ARCH))
+  cross_compile := $(DEB_HOST_ARCH)
 endif
 export version debnum DEBIAN_UPSTREAM_VERSION DEBIAN_STEM
 
@@ -60,6 +66,10 @@ kpkg_build_cmd := make-kpkg --append-to-version $(debnum)-@flavour@
 kpkg_build_cmd += --stem linux
 ifdef build_subarch
   kpkg_build_cmd += --subarch $(build_subarch)
+endif
+ifeq ($(cross_compile),m68k)
+  kpkg_headers_cmd +=  --arch m68k --cross_compile m68k-linux
+  kpkg_build_cmd +=  --arch m68k --cross_compile m68k-linux
 endif
 ifdef headers_subarch
   kpkg_headers_cmd += --subarch $(headers_subarch)
