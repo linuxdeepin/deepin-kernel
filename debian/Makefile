@@ -67,6 +67,9 @@ kpkg_build_cmd += --stem linux
 ifdef build_subarch
   kpkg_build_cmd += --subarch $(build_subarch)
 endif
+# XXX: Instead of special-casing m68k here, we could make --arch and
+# --cross_compile options supported in Makefile.inc, and use them if
+#  DEB_HOST_ARCH != DEB_BUILD_ARCH..  -dil
 ifeq ($(cross_compile),m68k)
   kpkg_headers_cmd +=  --arch m68k --cross_compile m68k-linux
   kpkg_build_cmd +=  --arch m68k --cross_compile m68k-linux
