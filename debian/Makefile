@@ -193,7 +193,7 @@ $(kdir): post-install-$(subarch) $(wildcard templates/control.*.in)
 	mkdir -p $(tkdir)/debian
 	cp changelog $(tkdir)/debian
 	cp copyright $(tkdir)/debian
-	arch=$(karch) subarch=$(subarch) bin/gencontrol > $(tkdir)/debian/control
+	cp control $(tkdir)/debian/control
 	touch $(tkdir)/debian/official
 	if [ -n '$(patches)' ]; then			\
 	  cd $(tkdir);					\
