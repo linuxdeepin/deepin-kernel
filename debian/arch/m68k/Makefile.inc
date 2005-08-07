@@ -1,4 +1,4 @@
 #
 # Variables 
 #
-build_makeflags := 'CC=gcc-3.3'
+build_makeflags := 'CC=m68k-linux-gcc-3.3'
