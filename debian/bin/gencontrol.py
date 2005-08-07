@@ -300,14 +300,14 @@ if __name__ == '__main__':
     tree = read_template("tree")
     packages.append(process_real_tree(tree[0], changelog, vars))
 
-    headers = read_template("headers")
+    headers_main = read_template("headers.main")
     a = subarches_architecture[None].keys()
     a.sort()
     b = vars.copy()
     b['arch'] = ' '.join(a)
-    packages.append(process_real_package(headers[0], b))
+    packages.append(process_real_package(headers_main[0], b))
 
-    headers_flavour = read_template("headers.flavour")
+    headers = read_template("headers")
     headers_latest = read_template("headers.latest")
     image = read_template("image")
     image_latest = read_template("image.latest")
@@ -341,10 +341,10 @@ if __name__ == '__main__':
                 if not flavour_vars.has_key('longclass'):
                     flavour_vars['longclass'] = flavour_vars['class']
 
-                packages.append(process_real_package(headers_flavour[0], flavour_vars))
-                packages.append(process_real_package(headers_latest[0], flavour_vars))
+                packages.extend(process_real_packages(image_latest, flavour_vars))
                 packages.append(process_real_image(image[0], flavour_vars))
-                packages.append(process_real_package(image_latest[0], flavour_vars))
+                packages.append(process_real_package(headers_latest[0], flavour_vars))
+                packages.append(process_real_package(headers[0], flavour_vars))
 
     write_control(packages)
 
