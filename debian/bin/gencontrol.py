@@ -30,6 +30,11 @@ class entry(dict):
         for i in self._list:
             yield (i, self[i])
 
+class wrap(textwrap.TextWrapper):
+    wordsep_re = re.compile(
+        r'(\s+|'                                  # any whitespace
+        r'(?<=[\w\!\"\'\&\.\,\?])-{2,}(?=\w))')   # em-dash
+
 def config():
     c = ConfigParser.ConfigParser()
     c.read("debian/arch/defines")
@@ -120,7 +125,7 @@ def read_rfc822(f):
             if line[0] in ' \t':
                 if not last:
                     raise ValueError('Continuation line seen before first header')
-                e[last] += '\n' + line
+                e[last] += '\n' + line.lstrip()
                 continue
             i = line.find(':')
             if i < 0:
@@ -191,8 +196,26 @@ def process_real_image(in_entry, vars):
                 value.append(t)
         entry[i] = ', '.join(value)
     if vars.has_key('desc'):
-        entry['Description'] += '\n .\n ' + '\n '.join(textwrap.wrap(vars['desc']))
+        entry['Description'] += "\n.\n" + vars['desc']
+    return process_real_package(entry, vars)
+
+def process_real_package(in_entry, vars):
+    entry = process_entry(in_entry, vars)
+    desc = entry['Description']
+    desc_short, desc_long = desc.split ("\n", 1)
+    desc_pars = desc_long.split ("\n.\n")
+    desc_pars_wrapped = []
+    w = wrap(width = 74, fix_sentence_endings = True)
+    for i in desc_pars:
+        desc_pars_wrapped.append(w.fill(i))
+    entry['Description'] = "%s\n%s" % (desc_short, '\n.\n'.join(desc_pars_wrapped))
     return entry
+
+def process_real_packages(in_entries, vars):
+    entries = []
+    for i in in_entries:
+        entries.append(process_real_package(i, vars))
+    return entries
 
 def process_real_tree(in_entry, changelog, vars):
     entry = process_entry(in_entry, vars)
@@ -240,7 +263,9 @@ def write_control(list):
 def write_rfc822(f, list):
     for i in list:
         for j in i.iteritems():
-            f.write("%s: %s\n" % j)
+            f.write("%s:" % j[0])
+            for k in j[1].split('\n'):
+              f.write(" %s\n" % k)
         f.write('\n')
 
 if __name__ == '__main__':
@@ -270,7 +295,7 @@ if __name__ == '__main__':
     packages.append(process_entry(source[0], vars))
 
     main = read_template("main")
-    packages.extend(process_entries(main, vars))
+    packages.extend(process_real_packages(main, vars))
 
     tree = read_template("tree")
     packages.append(process_real_tree(tree[0], changelog, vars))
@@ -280,10 +305,12 @@ if __name__ == '__main__':
     a.sort()
     b = vars.copy()
     b['arch'] = ' '.join(a)
-    packages.extend(process_entries(headers, b))
+    packages.append(process_real_package(headers[0], b))
 
     headers_flavour = read_template("headers.flavour")
+    headers_latest = read_template("headers.latest")
     image = read_template("image")
+    image_latest = read_template("image.latest")
 
     i1 = arches.keys()
     i1.sort()
@@ -314,8 +341,10 @@ if __name__ == '__main__':
                 if not flavour_vars.has_key('longclass'):
                     flavour_vars['longclass'] = flavour_vars['class']
 
-                packages.extend(process_entries(headers_flavour, flavour_vars))
+                packages.append(process_real_package(headers_flavour[0], flavour_vars))
+                packages.append(process_real_package(headers_latest[0], flavour_vars))
                 packages.append(process_real_image(image[0], flavour_vars))
+                packages.append(process_real_package(image_latest[0], flavour_vars))
 
     write_control(packages)
 
