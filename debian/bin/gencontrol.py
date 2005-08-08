@@ -260,6 +260,17 @@ def vars_changelog(vars, changelog):
 def write_control(list):
     write_rfc822(file("debian/control", 'w'), list)
 
+def write_makefile(list):
+    f = file("debian/Makefile.inc", 'w')
+    for i in list:
+        f.write("%s\n" % i[0])
+        if i[1] is not None:
+            list = i[1]
+            if isinstance(list, basestring):
+                list = list.split('\n')
+            for j in list:
+                f.write("\t%s\n" % j)
+
 def write_rfc822(f, list):
     for i in list:
         for j in i.iteritems():
@@ -290,6 +301,7 @@ if __name__ == '__main__':
         arches[arch] = t1
 
     packages = []
+    makefile = []
 
     source = read_template("source")
     packages.append(process_entry(source[0], vars))
@@ -318,16 +330,24 @@ if __name__ == '__main__':
         arch_vars = vars.copy()
         arch_vars['arch'] = arch
         arch_vars.update(config_arch(arch).defaults())
+
         i2 = arches[arch].keys()
         i2.sort()
         for subarch in i2:
             subarch_config = config_subarch(arch, subarch)
             subarch_vars = arch_vars.copy()
             subarch_vars.update(subarch_config.defaults())
+
             if subarch is not None:
+                subarch_text = subarch
                 subarch_vars['subarch'] = '%s-' % subarch
             else:
+                subarch_text = 'none'
                 subarch_vars['subarch'] = ''
+
+            for i in ('binary', 'build', 'unpack'):
+                makefile.append(("%s-%s:: %s-%s-%s" % (i, arch, i, arch, subarch_text), None))
+
             i3 = arches[arch][subarch].keys()
             i3.sort()
             for flavour in i3:
@@ -341,10 +361,21 @@ if __name__ == '__main__':
                 if not flavour_vars.has_key('longclass'):
                     flavour_vars['longclass'] = flavour_vars['class']
 
-                packages.extend(process_real_packages(image_latest, flavour_vars))
+                dummy_packages = []
+                dummy_packages.extend(process_real_packages(image_latest, flavour_vars))
                 packages.append(process_real_image(image[0], flavour_vars))
-                packages.append(process_real_package(headers_latest[0], flavour_vars))
+                dummy_packages.append(process_real_package(headers_latest[0], flavour_vars))
                 packages.append(process_real_package(headers[0], flavour_vars))
+                packages.extend(dummy_packages)
+
+                for i in ('binary', 'build', 'unpack'):
+                    makefile.append(("%s-%s-%s:: %s-%s-%s-%s" % (i, arch, subarch_text, i, arch, subarch_text, flavour), None))
+                rule = []
+                for i in dummy_packages:
+                    rule.append("$(MAKE) -f debian/Makefile binary-dummy PACKAGE=%s" % i['Package'])
+                makefile.append(("binary-%s-%s-%s:" % (arch, subarch_text, flavour), rule))
 
     write_control(packages)
+    write_makefile(makefile)
+
 

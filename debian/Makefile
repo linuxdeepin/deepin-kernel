@@ -242,4 +242,16 @@ build-$(subarch)-%: $(kdir) config.%
 	  cp config.$* $@/.config;				\
 	fi
 
+binary-dummy:
+	dh_testdir
+	dh_testroot
+	dh_installchangelogs -p$(PACKAGE)
+	dh_installdocs -p$(PACKAGE)
+	dh_compress  -p$(PACKAGE)
+	dh_fixperms -p$(PACKAGE)
+	dh_installdeb -p$(PACKAGE)
+	dh_gencontrol -p$(PACKAGE)
+	dh_md5sums -p$(PACKAGE)
+	dh_builddeb -p$(PACKAGE)
+
 .PHONY: build unpack binary-indep binary-arch binary
