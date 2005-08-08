@@ -372,6 +372,20 @@ if __name__ == '__main__':
                     makefile.append(("%s-%s-%s:: %s-%s-%s-%s" % (i, arch, subarch_text, i, arch, subarch_text, flavour), None))
                 makefile.append(("binary-%s-%s-%s:" % (arch, subarch_text, flavour), ("$(MAKE) -f debian/Makefile binary-dummy PACKAGES_ARG='%s'" % ' '.join(["-p%s" % i['Package'] for i in dummy_packages]),)))
 
+    extra = read_template("extra")
+    packages.extend(extra)
+    extra_pn = {}
+    for i in extra:
+        a = i['Architecture']
+        pn = extra_pn.get(a, [])
+        pn.append(i['Package'])
+        extra_pn[a] = pn
+    archs = extra_pn.keys()
+    archs.sort()
+    for arch in archs:
+        makefile.append(("binary-%s:: binary-%s-extra" % (arch, arch), None))
+        makefile.append(("binary-%s-extra:" % arch, ("$(MAKE) -f debian/Makefile binary-dummy PACKAGES_ARG='%s'" % ' '.join(["-p%s" % i for i in extra_pn[arch]]),)))
+
     write_control(packages)
     write_makefile(makefile)
 
