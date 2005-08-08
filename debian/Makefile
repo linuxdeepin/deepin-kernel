@@ -142,6 +142,7 @@ binary:	binary-indep binary-arch
 header-install-$(subarch): templates/header-install.in
 	sed -e 's,@kbpkg@,$(kbpkg),g'				\
 	    -e 's,@ksource_dir@,$(CURDIR)/$(kdir),g'		\
+	    -e 's,@flavours@,$(flavours),g'			\
 	    -e 's,@headers_dirs@,$(headers_dirs),g'		\
             templates/header-install.in > header-install-$(subarch)
 	chmod u+x header-install-$(subarch)
