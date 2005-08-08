@@ -245,13 +245,13 @@ build-$(subarch)-%: $(kdir) config.%
 binary-dummy:
 	dh_testdir
 	dh_testroot
-	dh_installchangelogs -p$(PACKAGE)
-	dh_installdocs -p$(PACKAGE)
-	dh_compress  -p$(PACKAGE)
-	dh_fixperms -p$(PACKAGE)
-	dh_installdeb -p$(PACKAGE)
-	dh_gencontrol -p$(PACKAGE)
-	dh_md5sums -p$(PACKAGE)
-	dh_builddeb -p$(PACKAGE)
+	dh_installchangelogs $(PACKAGES_ARG)
+	dh_installdocs $(PACKAGES_ARG)
+	dh_compress $(PACKAGES_ARG)
+	dh_fixperms $(PACKAGES_ARG)
+	dh_installdeb $(PACKAGES_ARG)
+	dh_gencontrol $(PACKAGES_ARG)
+	dh_md5sums $(PACKAGES_ARG)
+	dh_builddeb $(PACKAGES_ARG)
 
 .PHONY: build unpack binary-indep binary-arch binary

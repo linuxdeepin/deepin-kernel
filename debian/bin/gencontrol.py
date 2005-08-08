@@ -370,10 +370,7 @@ if __name__ == '__main__':
 
                 for i in ('binary', 'build', 'unpack'):
                     makefile.append(("%s-%s-%s:: %s-%s-%s-%s" % (i, arch, subarch_text, i, arch, subarch_text, flavour), None))
-                rule = []
-                for i in dummy_packages:
-                    rule.append("$(MAKE) -f debian/Makefile binary-dummy PACKAGE=%s" % i['Package'])
-                makefile.append(("binary-%s-%s-%s:" % (arch, subarch_text, flavour), rule))
+                makefile.append(("binary-%s-%s-%s:" % (arch, subarch_text, flavour), ("$(MAKE) -f debian/Makefile binary-dummy PACKAGES_ARG='%s'" % ' '.join(["-p%s" % i['Package'] for i in dummy_packages]),)))
 
     write_control(packages)
     write_makefile(makefile)
