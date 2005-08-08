@@ -250,7 +250,7 @@ binary-dummy:
 	dh_compress $(PACKAGES_ARG)
 	dh_fixperms $(PACKAGES_ARG)
 	dh_installdeb $(PACKAGES_ARG)
-	dh_gencontrol $(PACKAGES_ARG)
+	dh_gencontrol $(PACKAGES_ARG) -- $(GENCONTROL_ARGS)
 	dh_md5sums $(PACKAGES_ARG)
 	dh_builddeb $(PACKAGES_ARG)
 

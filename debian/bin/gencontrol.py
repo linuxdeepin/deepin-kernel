@@ -158,23 +158,37 @@ def process_depends(key, e, in_e, vars):
         t = ', '.join(dep)
         e[key] = t
 
-def process_entry(in_entry, vars):
+def process_description(e, in_e, vars):
+    desc = in_e['Description']
+    desc_short, desc_long = desc.split ("\n", 1)
+    desc_pars = [substitute(i, vars) for i in desc_long.split ("\n.\n")]
+    desc_pars_wrapped = []
+    w = wrap(width = 74, fix_sentence_endings = True)
+    for i in desc_pars:
+        desc_pars_wrapped.append(w.fill(i))
+    e['Description'] = "%s\n%s" % (substitute(desc_short, vars), '\n.\n'.join(desc_pars_wrapped))
+
+def process_package(in_entry, vars):
     e = entry()
     for i in in_entry.iterkeys():
         if i in (('Depends', 'Provides', 'Suggests')):
             process_depends(i, e, in_entry, vars)
+        elif i == 'Description':
+            process_description(e, in_entry, vars)
+        elif i[:2] == 'X-':
+            pass
         else:
             e[i] = substitute(in_entry[i], vars)
     return e
 
-def process_entries(in_entries, vars):
+def process_packages(in_entries, vars):
     entries = []
     for i in in_entries:
-        entries.append(process_entry(i, vars))
+        entries.append(process_package(i, vars))
     return entries
 
 def process_real_image(in_entry, vars):
-    entry = process_entry(in_entry, vars)
+    entry = process_package(in_entry, vars)
     for i in (('Depends', 'Provides', 'Suggests')):
         value = []
         tmp = entry.get(i, None)
@@ -197,28 +211,10 @@ def process_real_image(in_entry, vars):
         entry[i] = ', '.join(value)
     if vars.has_key('desc'):
         entry['Description'] += "\n.\n" + vars['desc']
-    return process_real_package(entry, vars)
-
-def process_real_package(in_entry, vars):
-    entry = process_entry(in_entry, vars)
-    desc = entry['Description']
-    desc_short, desc_long = desc.split ("\n", 1)
-    desc_pars = desc_long.split ("\n.\n")
-    desc_pars_wrapped = []
-    w = wrap(width = 74, fix_sentence_endings = True)
-    for i in desc_pars:
-        desc_pars_wrapped.append(w.fill(i))
-    entry['Description'] = "%s\n%s" % (desc_short, '\n.\n'.join(desc_pars_wrapped))
     return entry
 
-def process_real_packages(in_entries, vars):
-    entries = []
-    for i in in_entries:
-        entries.append(process_real_package(i, vars))
-    return entries
-
 def process_real_tree(in_entry, changelog, vars):
-    entry = process_entry(in_entry, vars)
+    entry = process_package(in_entry, vars)
     tmp = changelog[0]['Source']
     versions = []
     for i in changelog:
@@ -284,6 +280,9 @@ if __name__ == '__main__':
 
     vars = {}
     vars = vars_changelog(vars, changelog)
+
+    source_version = vars['srcver']
+
     vars.update(config().defaults())
 
     arches = {}
@@ -304,10 +303,10 @@ if __name__ == '__main__':
     makefile = []
 
     source = read_template("source")
-    packages.append(process_entry(source[0], vars))
+    packages.append(process_package(source[0], vars))
 
     main = read_template("main")
-    packages.extend(process_real_packages(main, vars))
+    packages.extend(process_packages(main, vars))
 
     tree = read_template("tree")
     packages.append(process_real_tree(tree[0], changelog, vars))
@@ -317,7 +316,7 @@ if __name__ == '__main__':
     a.sort()
     b = vars.copy()
     b['arch'] = ' '.join(a)
-    packages.append(process_real_package(headers_main[0], b))
+    packages.append(process_package(headers_main[0], b))
 
     headers = read_template("headers")
     headers_latest = read_template("headers.latest")
@@ -362,10 +361,10 @@ if __name__ == '__main__':
                     flavour_vars['longclass'] = flavour_vars['class']
 
                 dummy_packages = []
-                dummy_packages.extend(process_real_packages(image_latest, flavour_vars))
+                dummy_packages.extend(process_packages(image_latest, flavour_vars))
                 packages.append(process_real_image(image[0], flavour_vars))
-                dummy_packages.append(process_real_package(headers_latest[0], flavour_vars))
-                packages.append(process_real_package(headers[0], flavour_vars))
+                dummy_packages.append(process_package(headers_latest[0], flavour_vars))
+                packages.append(process_package(headers[0], flavour_vars))
                 packages.extend(dummy_packages)
 
                 for i in ('binary', 'build', 'unpack'):
@@ -373,18 +372,27 @@ if __name__ == '__main__':
                 makefile.append(("binary-%s-%s-%s:" % (arch, subarch_text, flavour), ("$(MAKE) -f debian/Makefile binary-dummy PACKAGES_ARG='%s'" % ' '.join(["-p%s" % i['Package'] for i in dummy_packages]),)))
 
     extra = read_template("extra")
-    packages.extend(extra)
+    packages.extend(process_packages(extra, vars))
     extra_pn = {}
     for i in extra:
         a = i['Architecture']
         pn = extra_pn.get(a, [])
-        pn.append(i['Package'])
+        pn.append(i)
         extra_pn[a] = pn
     archs = extra_pn.keys()
     archs.sort()
     for arch in archs:
+        arch_vars = vars.copy()
+        arch_vars.update(config_arch(arch).defaults())
+
+        cmds = []
+        for i in extra_pn[arch]:
+            makeflags = ""
+            if i.has_key('X-Version-Overwrite-Epoch'):
+                    makeflags = "GENCONTROL_ARGS='-v1:%s'" % source_version
+            cmds.append("$(MAKE) -f debian/Makefile binary-dummy PACKAGES_ARG='-p%s' %s" % (i['Package'], makeflags))
         makefile.append(("binary-%s:: binary-%s-extra" % (arch, arch), None))
-        makefile.append(("binary-%s-extra:" % arch, ("$(MAKE) -f debian/Makefile binary-dummy PACKAGES_ARG='%s'" % ' '.join(["-p%s" % i for i in extra_pn[arch]]),)))
+        makefile.append(("binary-%s-extra:" % arch, cmds))
 
     write_control(packages)
     write_makefile(makefile)
