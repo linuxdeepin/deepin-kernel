@@ -244,7 +244,7 @@ def process_real_tree(in_entry, changelog, vars):
 def substitute(s, vars):
     def subst(match):
         return vars[match.group(1)]
-    return re.sub(r'@([^@]+)@', subst, s)
+    return re.sub(r'@([a-z_]+)@', subst, s)
 
 def vars_changelog(vars, changelog):
     version = parse_version(changelog[0]['Version'])
