@@ -1,0 +1,302 @@
+#
+# This Makefile executes the unpack/build/binary targets for a single
+# subarch, which is passed in the subarch variable. Empty subarch
+# variable means that we are building for an arch without the subarch.
+# Additionally, variables version, abiname and ltver are
+# expected to be available (need to be exported from the parent process).
+# It is possible to override the flavours by setting the flavours
+# variable. It will also be passed a list of source files
+#
+SHELL  := sh -e
+DEB_HOST_ARCH     := $(shell dpkg-architecture -a$(ARCH) -qDEB_HOST_ARCH)
+DEB_HOST_GNU_TYPE := $(shell dpkg-architecture -a$(ARCH) -qDEB_HOST_GNU_TYPE)
+DEB_BUILD_ARCH    := $(shell dpkg-architecture -a$(ARCH) -qDEB_BUILD_ARCH)
+#
+# Build the list of common config files to be included
+#
+ifeq ($(SUBARCH),none)
+  basedir := debian/arch/$(ARCH)
+  append  := 
+else
+  basedir := debian/arch/$(ARCH)/$(SUBARCH)
+  append  := $(SUBARCH)-
+endif
+
+configs := $(notdir $(wildcard $(basedir)/config.*))
+configs := $(filter-out config, $(configs))
+ifndef flavours
+  flavours := $(patsubst config.%,%,$(configs))
+endif
+
+-include $(basedir)/Makefile.inc
+
+include debian/rules.defs
+
+#
+# Here we construct the command lines for different make-kpkg
+# calls (build, linux-image, linux-headers) based on the values
+# of variables defined so far and provided by the arch/subarch
+# in Makefile.inc. @flavour@ in the expressions is going to be
+# replaced by the flavour for which the command is run. 
+#
+kpkg_header := HEADER_CLEAN_HOOK='$(CURDIR)/$(BUILD_DIR)/header-install-$(ARCH)-$(SUBARCH)'
+kpkg_header += make-kpkg --append-to-version $(append)-$(ABINAME)
+kpkg_header += --arch $(ARCH)
+kpkg_header += --stem linux
+kpkg_header += --config defconfig
+kpkg_image := make-kpkg --append-to-version -$(ABINAME)-$(FLAVOUR)
+kpkg_image += --arch $(ARCH)
+kpkg_image += --stem linux
+kpkg_image += --initrd
+ifdef KPKG_SUBARCH
+  kpkg_image += --subarch $(KPKG_SUBARCH)
+endif
+ifdef headers_subarch
+  kpkg_header += --subarch $(headers_subarch)
+endif
+ifneq ($(DEB_BUILD_ARCH),$(DEB_HOST_ARCH))
+  kpkg_image += --cross-compile=$(DEB_HOST_GNU_TYPE)
+endif
+setup_env := env -i
+setup_env += HOME=$(HOME) LOGNAME=$(LOGNAME) PATH=$(PATH)
+setup_env += DEBIAN_ABINAME=$(ABINAME) DEBIAN_FLAVOUR=$(FLAVOUR) DEBIAN_VERSION=$(VERSION)
+ifdef build_makeflags
+  setup_env += MAKEFLAGS=$(build_makeflags)
+endif
+ifndef headers_dirs
+  headers_dirs = $(DEB_HOST_ARCH)
+endif
+ccommon = debian/arch/config debian/arch/$(ARCH)/config debian/arch/$(ARCH)/$(SUBARCH)/config
+
+#
+# Targets
+#
+binary-arch-subarch: install-header-$(ARCH)-$(SUBARCH)
+binary-arch-flavour: install-image-$(ARCH)-$(SUBARCH)-$(FLAVOUR)
+
+binary-indep: install-doc install-patch install-source install-tree
+
+build: $(STAMPS_DIR)/build-$(ARCH)-$(SUBARCH)-$(FLAVOUR)
+
+setup-arch: $(STAMPS_DIR)/source
+setup-subarch: $(STAMPS_DIR)/setup-$(ARCH)-$(SUBARCH)
+setup-flavour: $(STAMPS_DIR)/setup-$(ARCH)-$(SUBARCH)-$(FLAVOUR)
+
+$(BUILD_DIR)/header-install-$(ARCH)-$(SUBARCH): $(TEMPLATES_DIR)/header-install.in
+	sed -e 's,@kbpkg@,$(kbpkg),g'				\
+	    -e 's,@ksource_dir@,$(CURDIR)/$(kdir),g'		\
+	    -e 's,@flavours@,$(flavours),g'			\
+	    -e 's,@headers_dirs@,$(headers_dirs),g'		\
+            $< > $@
+	chmod u+x $@
+#
+# The way to make the correct package names is to make a
+# subarch-specific post-install script...
+#
+ifdef extra_postinstall_command
+  extra_command := $(extra_postinstall_command)
+else
+  extra_command := true
+endif
+$(BUILD_DIR)/post-install-$(ARCH)-$(SUBARCH): $(TEMPLATES_DIR)/post-install.in
+	sed -e 's,@initrd_modules@,$(initrd_modules),'			\
+	    -e 's,@append_subarch@,$(append),'				\
+	    -e 's,@extra_postinstall_command@,$(extra_command),'	\
+	    -e 's,@headers_dirs@,$(headers_dirs),g'			\
+	    $< > $@
+#
+# Generates the kernel config file for a subarch by merging
+# the arch-independent config file (arch/config),
+# arch-specific config file (arch/$(karch)/config),
+# and subarch specific one (arch/$(karch)/$(subarch)/config).
+# It is possible to avoid the inclusion of the arch-indep
+# config file by setting include_common_config = no in the
+# arch/$(karch)/Makefile.inc.
+#
+$(BUILD_DIR)/config.$(ARCH)-$(SUBARCH)-$(FLAVOUR): $(basedir)/config.$(FLAVOUR)
+	@echo "configs=$(configs)"
+	@echo "Generating configuration file $@:"
+	rm -f $@
+	for i in $(ccommon); do	\
+	  if [ -f $${i} ]; then	\
+	    cat $${i} >> $@;	\
+	  fi;			\
+	done
+#	Flavour config file must be present
+	cat $(basedir)/config.$(FLAVOUR) >> $@			 
+
+$(BUILD_DIR)/linux-source-$(VERSION).tar.bz2: SOURCE_DIR=$(BUILD_DIR)/source
+$(BUILD_DIR)/linux-source-$(VERSION).tar.bz2: DIR = $(BUILD_DIR)/linux-source-$(VERSION)
+$(BUILD_DIR)/linux-source-$(VERSION).tar.bz2: $(STAMPS_DIR)/source
+	rm -rf $@ $(DIR)
+	cp -al $(SOURCE_DIR) $(DIR)
+	chmod -R u+rw,go=rX $(DIR)
+	cd $(BUILD_DIR); tar -cjf linux-source-$(VERSION).tar.bz2 linux-source-$(VERSION)
+	rm -rf $(DIR)
+
+srcfiles := $(filter-out debian, $(wildcard *))
+$(STAMPS_DIR)/source: DIR=$(BUILD_DIR)/source
+$(STAMPS_DIR)/source: debian/bin/apply
+	rm -rf $(DIR)
+	mkdir -p $(DIR)
+	cp -al $(srcfiles) $(DIR)
+	cd $(DIR); override_version=$(SOURCE_VERSION) home=$(CURDIR)/debian/patches-debian $(CURDIR)/debian/bin/apply
+	#make-kpkg does this when building kernel-source.
+	mv $(DIR)/scripts/package/Makefile $(DIR)/scripts/package/Makefile.dist
+	mv $(DIR)/scripts/package/builddeb $(DIR)/scripts/package/builddeb.dist
+	echo "# Dummy Makefile" > $(DIR)/scripts/package/Makefile
+	echo "all:" >> $(DIR)/scripts/package/Makefile
+	touch $@
+
+patches  := $(wildcard debian/patches-arch/$(SUBARCH).*)
+patches  += $(wildcard debian/patches-arch/$(SUBARCH)_*)
+patches  += $(wildcard debian/patches-arch/$(ARCH).*)
+patches  += $(wildcard debian/patches-arch/$(ARCH)_*)
+patches  := $(strip $(patches))
+$(STAMPS_DIR)/source-$(ARCH)-$(SUBARCH): SOURCE_DIR=$(BUILD_DIR)/source
+$(STAMPS_DIR)/source-$(ARCH)-$(SUBARCH): DIR=$(BUILD_DIR)/source-$(ARCH)-$(SUBARCH)
+$(STAMPS_DIR)/source-$(ARCH)-$(SUBARCH): $(BUILD_DIR)/post-install-$(ARCH)-$(SUBARCH) $(STAMPS_DIR)/source
+	rm -rf $(DIR)
+	cp -al $(SOURCE_DIR) $(DIR)
+	mkdir -p $(DIR)/debian
+	cp debian/changelog $(DIR)/debian
+	cp debian/copyright $(DIR)/debian
+	cp debian/control $(DIR)/debian/control
+	touch $(DIR)/debian/official
+	if [ -n '$(patches)' ]; then			\
+	  cd $(DIR);					\
+	  cat $(addprefix $(CURDIR)/,$(patches)) | patch -p1;	\
+	fi
+	install $< $(DIR)/debian/post-install
+	touch $@
+#
+# This target performs a build for a particular flavour. Note
+# that in this file it should be always placed *before* the
+# build-$(subarch)-% target, which creates the build directory.
+#
+$(STAMPS_DIR)/build-$(ARCH)-$(SUBARCH)-$(FLAVOUR): DIR=$(BUILD_DIR)/build-$(ARCH)-$(SUBARCH)-$(FLAVOUR)
+$(STAMPS_DIR)/build-$(ARCH)-$(SUBARCH)-$(FLAVOUR): $(STAMPS_DIR)/setup-$(ARCH)-$(SUBARCH)-$(FLAVOUR)
+	ln -fs $$(command -v touch) debian/build/touch.orig
+	cd $(DIR); $(setup_env) PATH=$(CURDIR)/build:$(CURDIR)/bin:$(PATH) $(kpkg_image) build
+ifdef image_postproc
+	cd $(DIR); $(image_postproc)
+endif
+	touch $@
+
+$(STAMPS_DIR)/setup-$(ARCH)-$(SUBARCH)-$(FLAVOUR): SOURCE_DIR=$(BUILD_DIR)/source-$(ARCH)-$(SUBARCH)
+$(STAMPS_DIR)/setup-$(ARCH)-$(SUBARCH)-$(FLAVOUR): DIR=$(BUILD_DIR)/build-$(ARCH)-$(SUBARCH)-$(FLAVOUR)
+$(STAMPS_DIR)/setup-$(ARCH)-$(SUBARCH)-$(FLAVOUR): $(BUILD_DIR)/config.$(ARCH)-$(SUBARCH)-$(FLAVOUR) $(STAMPS_DIR)/source-$(ARCH)-$(SUBARCH)
+	rm -rf $(DIR)
+	cp -al $(SOURCE_DIR) $(DIR)
+	cp $< $(DIR)/.config
+	cd $(DIR); $(setup_env) $(kpkg_image) configure
+	touch $@
+
+$(STAMPS_DIR)/setup-$(ARCH)-$(SUBARCH): SOURCE_DIR=$(BUILD_DIR)/source-$(ARCH)-$(SUBARCH)
+$(STAMPS_DIR)/setup-$(ARCH)-$(SUBARCH): DIR=$(BUILD_DIR)/build-$(ARCH)-$(SUBARCH)
+$(STAMPS_DIR)/setup-$(ARCH)-$(SUBARCH): $(STAMPS_DIR)/source-$(ARCH)-$(SUBARCH)
+	rm -rf $(DIR)
+	cp -al $(SOURCE_DIR) $(DIR)
+	cd $(DIR); $(setup_env) $(kpkg_header) configure
+	touch $@
+
+install-base:
+	dh_compress
+	dh_fixperms
+	dh_installdeb
+	dh_gencontrol -- $(GENCONTROL_ARGS)
+	dh_md5sums
+	dh_builddeb
+
+install-doc: SOURCE_DIR=$(BUILD_DIR)/source
+install-doc: DIR=$(BUILD_DIR)/$@
+install-doc: $(STAMPS_DIR)/source
+	rm -rf $(DIR)
+	cp -al $(SOURCE_DIR) $(DIR)
+	mkdir -p $(DIR)/debian
+	cp debian/changelog $(DIR)/debian
+	cp debian/copyright $(DIR)/debian
+	cp debian/control $(DIR)/debian/control
+	touch $(DIR)/debian/official
+	cd $(DIR) && $(setup_env) make-kpkg --stem linux kernel-doc
+	cat $(DIR)/debian/files >> debian/files
+	@for i in $$(awk '{ print $$1; }' $(DIR)/debian/files); do echo mv $(BUILD_DIR)/$$i ..; mv $(BUILD_DIR)/$$i ..; done
+	rm -rf $(DIR)
+
+install-dummy:
+	dh_testdir
+	dh_testroot
+	dh_clean -d -k
+	dh_installchangelogs
+	dh_installdocs
+	$(MAKE) -f debian/rules.real install-base
+
+install-image-$(ARCH)-$(SUBARCH)-$(FLAVOUR): SOURCE_DIR=$(BUILD_DIR)/build-$(ARCH)-$(SUBARCH)-$(FLAVOUR)
+install-image-$(ARCH)-$(SUBARCH)-$(FLAVOUR): DIR=$(BUILD_DIR)/$@
+install-image-$(ARCH)-$(SUBARCH)-$(FLAVOUR): $(STAMPS_DIR)/build-$(ARCH)-$(SUBARCH)-$(FLAVOUR)
+	rm -rf $(DIR)
+	cp -al $(SOURCE_DIR) $(DIR)
+	cd $(DIR); $(setup_env) $(kpkg_image) kernel-image
+	cat $(DIR)/debian/files >> debian/files
+	@for i in $$(awk '{ print $$1; }' $(DIR)/debian/files); do echo mv $(BUILD_DIR)/$$i ..; mv $(BUILD_DIR)/$$i ..; done
+	rm -rf $(DIR)
+
+install-header-$(ARCH)-$(SUBARCH): SOURCE_DIR=$(BUILD_DIR)/build-$(ARCH)-$(SUBARCH)
+install-header-$(ARCH)-$(SUBARCH): DIR=$(BUILD_DIR)/$@
+install-header-$(ARCH)-$(SUBARCH): $(STAMPS_DIR)/setup-$(ARCH)-$(SUBARCH) $(BUILD_DIR)/header-install-$(ARCH)-$(SUBARCH)
+	rm -rf $(DIR)
+	cp -al $(SOURCE_DIR) $(DIR)
+	cd $(DIR); $(setup_env) $(kpkg_header) kernel-headers
+	cat $(DIR)/debian/files >> debian/files
+	@for i in $$(awk '{ print $$1; }' $(DIR)/debian/files); do echo mv $(BUILD_DIR)/$$i ..; mv $(BUILD_DIR)/$$i ..; done
+	rm -rf $(DIR)
+
+install-patch: PACKAGE = linux-patch-debian-$(VERSION)
+install-patch: pbase := /usr/src/kernel-patches/all/$(VERSION)
+install-patch: pfull := debian/$(PACKAGE)$(pbase)
+install-patch: ptchs := $(notdir $(wildcard debian/patches-arch/*))
+install-patch: DH_OPTIONS = -p$(PACKAGE)
+install-patch:
+	dh_testdir
+	dh_testroot
+	dh_clean -d -k $(DH_OPTIONS)
+	dh_installdirs $(DH_OPTIONS) $(pbase)/apply $(pbase)/debian $(pbase)/unpatch
+	dh_install $(DH_OPTIONS) debian/patches-debian/* $(pbase)/debian
+#	Install the debian patches
+	sed 's/@version@/$(release)/g' debian/bin/apply > $(pfull)/apply/debian
+	sed 's/@upstream@/$(version)/g' debian/bin/unpatch > $(pfull)/unpatch/debian
+	chmod 755 $(pfull)/apply/debian $(pfull)/unpatch/debian
+	chmod 644 $(pfull)/debian/*.patch
+	bzip2 -9 $(pfull)/debian/*.patch
+#	Now the arch/subarch-specific patches
+	for i in $(ptchs); do \
+	  arch=$${i%%.*}; \
+	  ( \
+	    echo "Patch-name: $${arch}"; \
+	    echo "Patch-id: $${arch}_$(subst .,_,$(VERSION))"; \
+	    echo "Path-strip-level: 1"; \
+	    echo; \
+	    echo "Patch-file: debian/patches-arch/$${i}"; \
+	    echo "Architecture: $${arch}"; \
+	    echo "Kernel-version: $(VERSION)"; \
+	    echo; \
+	  ) > debian/$(PACKAGE).kpatches.arch; \
+	  dh_installkpatches $(DH_OPTIONS); \
+	done
+	dh_installdocs $(DH_OPTIONS)
+	dh_installchangelogs $(DH_OPTIONS)
+	$(MAKE) -f debian/rules.real install-base DH_OPTIONS=$(DH_OPTIONS)
+
+install-source: DH_OPTIONS = -plinux-source-$(VERSION)
+install-source: $(BUILD_DIR)/linux-source-$(VERSION).tar.bz2
+	dh_testdir
+	dh_testroot
+	dh_install $(DH_OPTIONS) $< /usr/src
+	dh_installdocs $(DH_OPTIONS) README
+	dh_installchangelogs $(DH_OPTIONS)
+	$(MAKE) -f debian/rules.real install-base DH_OPTIONS=$(DH_OPTIONS)
+
+install-tree: DH_OPTIONS = -plinux-tree-$(VERSION)
+install-tree:
+	$(MAKE) -f debian/rules.real install-dummy DH_OPTIONS=$(DH_OPTIONS)
+

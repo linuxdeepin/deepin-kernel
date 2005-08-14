@@ -143,8 +143,8 @@ def read_template(name):
     return read_rfc822(file("debian/templates/control.%s.in" % name))
 
 def parse_version(version):
-    match = re.match("^((\d+\.\d+)\..+?)-([^-]+)$", version)
-    return (match.group(0), match.group(1), match.group(2), match.group(3))
+    match = re.match("^(?P<source>(?P<version>(?P<major>\d+\.\d+)\..+?)-(?P<debian>[^-]+))$", version)
+    return match.groupdict()
 
 def process_depends(key, e, in_e, vars):
     in_dep = in_e[key].split(',')
@@ -188,6 +188,9 @@ def process_packages(in_entries, vars):
     return entries
 
 def process_real_image(in_entry, vars):
+    in_entry = in_entry.copy()
+    if vars.has_key('desc'):
+        in_entry['Description'] += "\n.\n" + vars['desc']
     entry = process_package(in_entry, vars)
     for i in (('Depends', 'Provides', 'Suggests')):
         value = []
@@ -209,8 +212,6 @@ def process_real_image(in_entry, vars):
             if t is not None:
                 value.append(t)
         entry[i] = ', '.join(value)
-    if vars.has_key('desc'):
-        entry['Description'] += "\n.\n" + vars['desc']
     return entry
 
 def process_real_tree(in_entry, changelog, vars):
@@ -225,19 +226,11 @@ def process_real_tree(in_entry, changelog, vars):
         value = []
         tmp = entry.get(i, None)
         if tmp:
-            tmp = tmp.split(',')
-            for t in tmp:
-                value.append(t.strip())
+            value.extend([j.strip() for j in tmp.split(',')])
         if i == 'Depends':
-            tmp = []
-            for v in versions:
-                v = parse_version(v)
-                tmp.append("linux-source-%s (= %s)" % (v[1], v[0]))
-            value.append(' | '.join(tmp))
+            value.append(' | '.join(["linux-source-%(version)s (= %(source)s)" % parse_version(v) for v in versions]))
         elif i == 'Provides':
-            for v in versions:
-                v = parse_version(v)
-                value.append("linux-tree-%s" % v[0])
+            value.extend(["linux-tree-%(source)s" % parse_version(v) for v in versions])
         entry[i] = ', '.join(value)
     return entry
 
@@ -248,16 +241,16 @@ def substitute(s, vars):
 
 def vars_changelog(vars, changelog):
     version = parse_version(changelog[0]['Version'])
-    vars['srcver'] = version[0]
-    vars['version'] = version[1]
-    vars['major'] = version[2]
+    vars['srcver'] = version['source']
+    vars['version'] = version['version']
+    vars['major'] = version['major']
     return vars
 
 def write_control(list):
     write_rfc822(file("debian/control", 'w'), list)
 
 def write_makefile(list):
-    f = file("debian/Makefile.inc", 'w')
+    f = file("debian/rules.gen", 'w')
     for i in list:
         f.write("%s\n" % i[0])
         if i[1] is not None:
@@ -281,6 +274,7 @@ if __name__ == '__main__':
     vars = {}
     vars = vars_changelog(vars, changelog)
 
+    version = vars['version']
     source_version = vars['srcver']
 
     vars.update(config().defaults())
@@ -323,16 +317,30 @@ if __name__ == '__main__':
     image = read_template("image")
     image_latest = read_template("image.latest")
 
-    i1 = arches.keys()
-    i1.sort()
-    for arch in i1:
+    makeflags = ["VERSION='%s'" % version, "SOURCE_VERSION='%s'" % source_version]
+    cmds_binary_indep = []
+    cmds_binary_indep.append(("$(MAKE) -f debian/rules.real binary-indep %s" % ' '.join(makeflags),))
+    makefile.append(("binary-indep:", cmds_binary_indep))
+
+    arch_list = arches.keys()
+    arch_list.sort()
+    for arch in arch_list:
         arch_vars = vars.copy()
         arch_vars['arch'] = arch
         arch_vars.update(config_arch(arch).defaults())
 
-        i2 = arches[arch].keys()
-        i2.sort()
-        for subarch in i2:
+        for i in (('setup',)):
+            makefile.append(("%s-%s:: %s-%s-real" % (i, arch, i, arch), None))
+
+        arch_makeflags = makeflags[:]
+        arch_makeflags.append("ARCH='%s'" % arch)
+        cmds_setup = []
+        cmds_setup.append(("$(MAKE) -f debian/rules.real setup-arch %s" % ' '.join(arch_makeflags),))
+        makefile.append(("setup-%s-real:" % arch, cmds_setup))
+
+        subarch_list = arches[arch].keys()
+        subarch_list.sort()
+        for subarch in subarch_list:
             subarch_config = config_subarch(arch, subarch)
             subarch_vars = arch_vars.copy()
             subarch_vars.update(subarch_config.defaults())
@@ -344,12 +352,24 @@ if __name__ == '__main__':
                 subarch_text = 'none'
                 subarch_vars['subarch'] = ''
 
-            for i in ('binary', 'build', 'unpack'):
+            for i in ('binary-arch', 'build', 'setup'):
                 makefile.append(("%s-%s:: %s-%s-%s" % (i, arch, i, arch, subarch_text), None))
+                makefile.append(("%s-%s-%s::" % (i, arch, subarch_text), None))
+            for i in ('binary-arch', 'setup'):
+                makefile.append(("%s-%s-%s:: %s-%s-%s-real" % (i, arch, subarch_text, i, arch, subarch_text), None))
 
-            i3 = arches[arch][subarch].keys()
-            i3.sort()
-            for flavour in i3:
+            subarch_makeflags = arch_makeflags[:]
+            subarch_makeflags.extend(["SUBARCH='%s'" % subarch_text, "ABINAME='%s'" % subarch_vars['abiname']])
+            cmds_binary_arch = []
+            cmds_binary_arch.append(("$(MAKE) -f debian/rules.real binary-arch-subarch %s" % ' '.join(subarch_makeflags),))
+            cmds_setup = []
+            cmds_setup.append(("$(MAKE) -f debian/rules.real setup-subarch %s" % ' '.join(subarch_makeflags),))
+            makefile.append(("binary-arch-%s-%s-real:" % (arch, subarch_text), cmds_binary_arch))
+            makefile.append(("setup-%s-%s-real:" % (arch, subarch_text), cmds_setup))
+
+            flavour_list = arches[arch][subarch].keys()
+            flavour_list.sort()
+            for flavour in flavour_list:
                 flavour_vars = subarch_vars.copy()
                 flavour_vars['flavour'] = flavour
                 try:
@@ -367,9 +387,24 @@ if __name__ == '__main__':
                 packages.append(process_package(headers[0], flavour_vars))
                 packages.extend(dummy_packages)
 
-                for i in ('binary', 'build', 'unpack'):
+                for i in ('binary-arch', 'build', 'setup'):
                     makefile.append(("%s-%s-%s:: %s-%s-%s-%s" % (i, arch, subarch_text, i, arch, subarch_text, flavour), None))
-                makefile.append(("binary-%s-%s-%s:" % (arch, subarch_text, flavour), ("$(MAKE) -f debian/Makefile binary-dummy PACKAGES_ARG='%s'" % ' '.join(["-p%s" % i['Package'] for i in dummy_packages]),)))
+                    makefile.append(("%s-%s-%s-%s:: %s-%s-%s-%s-real" % (i, arch, subarch_text, flavour, i, arch, subarch_text, flavour), None))
+
+                flavour_makeflags = subarch_makeflags[:]
+                flavour_makeflags.append("FLAVOUR='%s'" % flavour)
+                if flavour_vars.has_key('kpkg-subarch'):
+                    flavour_makeflags.append("KPKG_SUBARCH='%s'" % flavour_vars['kpkg-subarch'])
+                cmds_binary_arch = []
+                cmds_binary_arch.append(("$(MAKE) -f debian/rules.real binary-arch-flavour %s" % ' '.join(flavour_makeflags),))
+                cmds_binary_arch.append(("$(MAKE) -f debian/rules.real install-dummy DH_OPTIONS='%s'" % ' '.join(["-p%s" % i['Package'] for i in dummy_packages]),))
+                cmds_build = []
+                cmds_build.append(("$(MAKE) -f debian/rules.real build %s" % ' '.join(flavour_makeflags),))
+                cmds_setup = []
+                cmds_setup.append(("$(MAKE) -f debian/rules.real setup-flavour %s" % ' '.join(flavour_makeflags),))
+                makefile.append(("binary-arch-%s-%s-%s-real:" % (arch, subarch_text, flavour), cmds_binary_arch))
+                makefile.append(("build-%s-%s-%s-real:" % (arch, subarch_text, flavour), cmds_build))
+                makefile.append(("setup-%s-%s-%s-real:" % (arch, subarch_text, flavour), cmds_setup))
 
     extra = read_template("extra")
     packages.extend(process_packages(extra, vars))
@@ -387,12 +422,12 @@ if __name__ == '__main__':
 
         cmds = []
         for i in extra_pn[arch]:
-            makeflags = ""
+            tmp = []
             if i.has_key('X-Version-Overwrite-Epoch'):
-                    makeflags = "GENCONTROL_ARGS='-v1:%s'" % source_version
-            cmds.append("$(MAKE) -f debian/Makefile binary-dummy PACKAGES_ARG='-p%s' %s" % (i['Package'], makeflags))
-        makefile.append(("binary-%s:: binary-%s-extra" % (arch, arch), None))
-        makefile.append(("binary-%s-extra:" % arch, cmds))
+                    tmp.append("-v1:%s" % source_version)
+            cmds.append("$(MAKE) -f debian/rules.real install-dummy DH_OPTIONS='-p%s' GENCONTROL_ARGS='%s'" % (i['Package'], ' '.join(tmp)))
+        makefile.append(("binary-arch-%s:: binary-arch-%s-extra" % (arch, arch), None))
+        makefile.append(("binary-arch-%s-extra:" % arch, cmds))
 
     write_control(packages)
     write_makefile(makefile)
