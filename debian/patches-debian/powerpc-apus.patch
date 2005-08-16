@@ -1,0 +1,3085 @@
+# 
+# PowerPC/Apus support patch
+# Needed support for Amiga PowerUP boards.
+# Author: mostly Roman Zippel <zippel@linux-m68k.org>
+# Upstream status: got synced with 2.6.12 recently, so in better status than
+# previous apus patches. Only 81k left.
+#
+
+diff -Nur -x CVS linux-2.6.12/arch/ppc/amiga/amiints.c 2.6/arch/ppc/amiga/amiints.c
+--- linux-2.6.12/arch/ppc/amiga/amiints.c	2005-06-17 21:48:29.000000000 +0200
++++ 2.6/arch/ppc/amiga/amiints.c	2004-02-04 22:21:34.000000000 +0100
+@@ -67,9 +67,10 @@
+ 
+ static short ami_ablecount[AMI_IRQS];
+ 
+-static void ami_badint(int irq, void *dev_id, struct pt_regs *fp)
++static irqreturn_t ami_badint(int irq, void *dev_id, struct pt_regs *fp)
+ {
+ /*	num_spurious += 1;*/
++	return IRQ_NONE;
+ }
+ 
+ /*
+@@ -206,7 +207,7 @@
+  * The builtin Amiga hardware interrupt handlers.
+  */
+ 
+-static void ami_int1(int irq, void *dev_id, struct pt_regs *fp)
++static irqreturn_t ami_int1(int irq, void *dev_id, struct pt_regs *fp)
+ {
+ 	unsigned short ints = custom.intreqr & custom.intenar;
+ 
+@@ -227,9 +228,10 @@
+ 		custom.intreq = IF_SOFT;
+ 		amiga_do_irq(IRQ_AMIGA_SOFT, fp);
+ 	}
++	return IRQ_HANDLED;
+ }
+ 
+-static void ami_int3(int irq, void *dev_id, struct pt_regs *fp)
++static irqreturn_t ami_int3(int irq, void *dev_id, struct pt_regs *fp)
+ {
+ 	unsigned short ints = custom.intreqr & custom.intenar;
+ 
+@@ -248,9 +250,11 @@
+ 	/* if a vertical blank interrupt */
+ 	if (ints & IF_VERTB)
+ 		amiga_do_irq_list(IRQ_AMIGA_VERTB, fp);
++
++	return IRQ_HANDLED;
+ }
+ 
+-static void ami_int4(int irq, void *dev_id, struct pt_regs *fp)
++static irqreturn_t ami_int4(int irq, void *dev_id, struct pt_regs *fp)
+ {
+ 	unsigned short ints = custom.intreqr & custom.intenar;
+ 
+@@ -277,9 +281,10 @@
+ 		custom.intreq = IF_AUD3;
+ 		amiga_do_irq(IRQ_AMIGA_AUD3, fp);
+ 	}
++	return IRQ_HANDLED;
+ }
+ 
+-static void ami_int5(int irq, void *dev_id, struct pt_regs *fp)
++static irqreturn_t ami_int5(int irq, void *dev_id, struct pt_regs *fp)
+ {
+ 	unsigned short ints = custom.intreqr & custom.intenar;
+ 
+@@ -294,11 +299,13 @@
+ 		custom.intreq = IF_DSKSYN;
+ 		amiga_do_irq(IRQ_AMIGA_DSKSYN, fp);
+ 	}
++	return IRQ_HANDLED;
+ }
+ 
+-static void ami_int7(int irq, void *dev_id, struct pt_regs *fp)
++static irqreturn_t ami_int7(int irq, void *dev_id, struct pt_regs *fp)
+ {
+ 	panic ("level 7 interrupt received\n");
++	return IRQ_NONE;
+ }
+ 
+ #ifdef CONFIG_APUS
+diff -Nur -x CVS linux-2.6.12/arch/ppc/amiga/cia.c 2.6/arch/ppc/amiga/cia.c
+--- linux-2.6.12/arch/ppc/amiga/cia.c	2005-06-17 21:48:29.000000000 +0200
++++ 2.6/arch/ppc/amiga/cia.c	2004-02-04 22:21:34.000000000 +0100
+@@ -134,7 +134,7 @@
+ 	return cia_able_irq_private(base, mask);
+ }
+ 
+-static void cia_handler(int irq, void *dev_id, struct pt_regs *fp)
++static irqreturn_t cia_handler(int irq, void *dev_id, struct pt_regs *fp)
+ {
+ 	struct ciabase *base = (struct ciabase *)dev_id;
+ 	irq_desc_t *desc;
+@@ -156,6 +156,7 @@
+ 		desc++;
+ 	}
+ 	amiga_do_irq_list(base->server_irq, fp);
++	return IRQ_HANDLED;
+ }
+ 
+ void __init cia_init_IRQ(struct ciabase *base)
+diff -Nur -x CVS linux-2.6.12/arch/ppc/amiga/config.c 2.6/arch/ppc/amiga/config.c
+--- linux-2.6.12/arch/ppc/amiga/config.c	2005-06-17 21:48:29.000000000 +0200
++++ 2.6/arch/ppc/amiga/config.c	2005-07-30 20:52:47.000000000 +0200
+@@ -20,11 +20,12 @@
+ #include <linux/mm.h>
+ #include <linux/kd.h>
+ #include <linux/tty.h>
++#include <linux/rtc.h>
+ #include <linux/console.h>
+ #include <linux/init.h>
+-#ifdef CONFIG_ZORRO
++#include <linux/interrupt.h>
+ #include <linux/zorro.h>
+-#endif
++#include <linux/delay.h>
+ 
+ #include <asm/bootinfo.h>
+ #include <asm/setup.h>
+@@ -71,29 +72,9 @@
+ 
+ extern char m68k_debug_device[];
+ 
+-static void amiga_sched_init(irqreturn_t (*handler)(int, void *, struct pt_regs *));
+-/* amiga specific irq functions */
+-extern void amiga_init_IRQ (void);
+-extern void (*amiga_default_handler[]) (int, void *, struct pt_regs *);
+-extern int amiga_request_irq (unsigned int irq,
+-			      void (*handler)(int, void *, struct pt_regs *),
+-                              unsigned long flags, const char *devname,
+-			      void *dev_id);
+-extern void amiga_free_irq (unsigned int irq, void *dev_id);
+-extern void amiga_enable_irq (unsigned int);
+-extern void amiga_disable_irq (unsigned int);
+ static void amiga_get_model(char *model);
+ static int amiga_get_hardware_list(char *buffer);
+ /* amiga specific timer functions */
+-static unsigned long amiga_gettimeoffset (void);
+-static void a3000_gettod (int *, int *, int *, int *, int *, int *);
+-static void a2000_gettod (int *, int *, int *, int *, int *, int *);
+-static int amiga_hwclk (int, struct hwclk_time *);
+-static int amiga_set_clock_mmss (unsigned long);
+-#ifdef CONFIG_AMIGA_FLOPPY
+-extern void amiga_floppy_setup(char *, int *);
+-#endif
+-static void amiga_reset (void);
+ extern void amiga_init_sound(void);
+ static void amiga_savekmsg_init(void);
+ static void amiga_mem_console_write(struct console *co, const char *b,
+@@ -101,9 +82,6 @@
+ void amiga_serial_console_write(struct console *co, const char *s,
+ 				unsigned int count);
+ static void amiga_debug_init(void);
+-#ifdef CONFIG_HEARTBEAT
+-static void amiga_heartbeat(int on);
+-#endif
+ 
+ static struct console amiga_console_driver = {
+ 	.name =		"debug",
+@@ -384,48 +362,15 @@
+   for (i = 0; i < 4; i++)
+     request_resource(&iomem_resource, &((struct resource *)&mb_resources)[i]);
+ 
+-  mach_sched_init      = amiga_sched_init;
+-  mach_init_IRQ        = amiga_init_IRQ;
+-#ifndef CONFIG_APUS
+-  mach_default_handler = &amiga_default_handler;
+-  mach_request_irq     = amiga_request_irq;
+-  mach_free_irq        = amiga_free_irq;
+-  enable_irq           = amiga_enable_irq;
+-  disable_irq          = amiga_disable_irq;
+-#endif
+-  mach_get_model       = amiga_get_model;
+-  mach_get_hardware_list = amiga_get_hardware_list;
+-  mach_gettimeoffset   = amiga_gettimeoffset;
+   if (AMIGAHW_PRESENT(A3000_CLK)){
+-    mach_gettod  = a3000_gettod;
+     rtc_resource.name = "A3000 RTC";
+     request_resource(&iomem_resource, &rtc_resource);
+   }
+   else{ /* if (AMIGAHW_PRESENT(A2000_CLK)) */
+-    mach_gettod  = a2000_gettod;
+     rtc_resource.name = "A2000 RTC";
+     request_resource(&iomem_resource, &rtc_resource);
+   }
+ 
+-  mach_max_dma_address = 0xffffffff; /*
+-				      * default MAX_DMA=0xffffffff
+-				      * on all machines. If we don't
+-				      * do so, the SCSI code will not
+-				      * be able to allocate any mem
+-				      * for transfers, unless we are
+-				      * dealing with a Z2 mem only
+-				      * system.                  /Jes
+-				      */
+-
+-  mach_hwclk           = amiga_hwclk;
+-  mach_set_clock_mmss  = amiga_set_clock_mmss;
+-#ifdef CONFIG_AMIGA_FLOPPY
+-  mach_floppy_setup    = amiga_floppy_setup;
+-#endif
+-  mach_reset           = amiga_reset;
+-#ifdef CONFIG_HEARTBEAT
+-  mach_heartbeat = amiga_heartbeat;
+-#endif
+ 
+   /* Fill in the clock values (based on the 700 kHz E-Clock) */
+   amiga_masterclock = 40*amiga_eclock;	/* 28 MHz */
+@@ -473,242 +418,141 @@
+ 	  *(unsigned char *)ZTWO_VADDR(0xde0002) |= 0x80;
+ }
+ 
+-static unsigned short jiffy_ticks;
+-
+-static void __init amiga_sched_init(irqreturn_t (*timer_routine)(int, void *,
+-						struct pt_regs *))
+-{
+-	static struct resource sched_res = {
+-	    "timer", 0x00bfd400, 0x00bfd5ff,
+-	};
+-	jiffy_ticks = (amiga_eclock+HZ/2)/HZ;
+-
+-	if (request_resource(&mb_resources._ciab, &sched_res))
+-	    printk("Cannot allocate ciab.ta{lo,hi}\n");
+-	ciab.cra &= 0xC0;   /* turn off timer A, continuous mode, from Eclk */
+-	ciab.talo = jiffy_ticks % 256;
+-	ciab.tahi = jiffy_ticks / 256;
+-
+-	/* install interrupt service routine for CIAB Timer A
+-	 *
+-	 * Please don't change this to use ciaa, as it interferes with the
+-	 * SCSI code. We'll have to take a look at this later
+-	 */
+-	request_irq(IRQ_AMIGA_CIAB_TA, timer_routine, 0, "timer", NULL);
+-	/* start timer */
+-	ciab.cra |= 0x11;
+-}
+-
+ #define TICK_SIZE 10000
+ 
+-extern unsigned char cia_get_irq_mask(unsigned int irq);
+-
+-/* This is always executed with interrupts disabled.  */
+-static unsigned long amiga_gettimeoffset (void)
+-{
+-	unsigned short hi, lo, hi2;
+-	unsigned long ticks, offset = 0;
+-
+-	/* read CIA B timer A current value */
+-	hi  = ciab.tahi;
+-	lo  = ciab.talo;
+-	hi2 = ciab.tahi;
+-
+-	if (hi != hi2) {
+-		lo = ciab.talo;
+-		hi = hi2;
+-	}
+-
+-	ticks = hi << 8 | lo;
+-
+-	if (ticks > jiffy_ticks / 2)
+-		/* check for pending interrupt */
+-		if (cia_get_irq_mask(IRQ_AMIGA_CIAB) & CIA_ICR_TA)
+-			offset = 10000;
+-
+-	ticks = jiffy_ticks - ticks;
+-	ticks = (10000 * ticks) / jiffy_ticks;
+-
+-	return ticks + offset;
+-}
+-
+-static void a3000_gettod (int *yearp, int *monp, int *dayp,
+-			  int *hourp, int *minp, int *secp)
+-{
+-	volatile struct tod3000 *tod = TOD_3000;
+-
+-	tod->cntrl1 = TOD3000_CNTRL1_HOLD;
+-
+-	*secp  = tod->second1 * 10 + tod->second2;
+-	*minp  = tod->minute1 * 10 + tod->minute2;
+-	*hourp = tod->hour1   * 10 + tod->hour2;
+-	*dayp  = tod->day1    * 10 + tod->day2;
+-	*monp  = tod->month1  * 10 + tod->month2;
+-	*yearp = tod->year1   * 10 + tod->year2;
+-
+-	tod->cntrl1 = TOD3000_CNTRL1_FREE;
+-}
+-
+-static void a2000_gettod (int *yearp, int *monp, int *dayp,
+-			  int *hourp, int *minp, int *secp)
+-{
+-	volatile struct tod2000 *tod = TOD_2000;
+-
+-	tod->cntrl1 = TOD2000_CNTRL1_HOLD;
+-
+-	while (tod->cntrl1 & TOD2000_CNTRL1_BUSY)
+-		;
+-
+-	*secp  = tod->second1     * 10 + tod->second2;
+-	*minp  = tod->minute1     * 10 + tod->minute2;
+-	*hourp = (tod->hour1 & 3) * 10 + tod->hour2;
+-	*dayp  = tod->day1        * 10 + tod->day2;
+-	*monp  = tod->month1      * 10 + tod->month2;
+-	*yearp = tod->year1       * 10 + tod->year2;
+-
+-	if (!(tod->cntrl3 & TOD2000_CNTRL3_24HMODE)){
+-		if (!(tod->hour1 & TOD2000_HOUR1_PM) && *hourp == 12)
+-			*hourp = 0;
+-		else if ((tod->hour1 & TOD2000_HOUR1_PM) && *hourp != 12)
+-			*hourp += 12;
+-	}
+-
+-	tod->cntrl1 &= ~TOD2000_CNTRL1_HOLD;
+-}
+-
+-static int amiga_hwclk(int op, struct hwclk_time *t)
++int amiga_hwclk(int op, struct rtc_time *t)
+ {
+ 	if (AMIGAHW_PRESENT(A3000_CLK)) {
+-		volatile struct tod3000 *tod = TOD_3000;
+-
+-		tod->cntrl1 = TOD3000_CNTRL1_HOLD;
++		tod_3000.cntrl1 = TOD3000_CNTRL1_HOLD;
+ 
+ 		if (!op) { /* read */
+-			t->sec  = tod->second1 * 10 + tod->second2;
+-			t->min  = tod->minute1 * 10 + tod->minute2;
+-			t->hour = tod->hour1   * 10 + tod->hour2;
+-			t->day  = tod->day1    * 10 + tod->day2;
+-			t->wday = tod->weekday;
+-			t->mon  = tod->month1  * 10 + tod->month2 - 1;
+-			t->year = tod->year1   * 10 + tod->year2;
+-			if (t->year <= 69)
+-				t->year += 100;
++			t->tm_sec  = tod_3000.second1 * 10 + tod_3000.second2;
++			t->tm_min  = tod_3000.minute1 * 10 + tod_3000.minute2;
++			t->tm_hour = tod_3000.hour1   * 10 + tod_3000.hour2;
++			t->tm_mday = tod_3000.day1    * 10 + tod_3000.day2;
++			t->tm_wday = tod_3000.weekday;
++			t->tm_mon  = tod_3000.month1  * 10 + tod_3000.month2 - 1;
++			t->tm_year = tod_3000.year1   * 10 + tod_3000.year2;
++			if (t->tm_year <= 69)
++				t->tm_year += 100;
+ 		} else {
+-			tod->second1 = t->sec / 10;
+-			tod->second2 = t->sec % 10;
+-			tod->minute1 = t->min / 10;
+-			tod->minute2 = t->min % 10;
+-			tod->hour1   = t->hour / 10;
+-			tod->hour2   = t->hour % 10;
+-			tod->day1    = t->day / 10;
+-			tod->day2    = t->day % 10;
+-			if (t->wday != -1)
+-				tod->weekday = t->wday;
+-			tod->month1  = (t->mon + 1) / 10;
+-			tod->month2  = (t->mon + 1) % 10;
+-			if (t->year >= 100)
+-				t->year -= 100;
+-			tod->year1   = t->year / 10;
+-			tod->year2   = t->year % 10;
++			tod_3000.second1 = t->tm_sec / 10;
++			tod_3000.second2 = t->tm_sec % 10;
++			tod_3000.minute1 = t->tm_min / 10;
++			tod_3000.minute2 = t->tm_min % 10;
++			tod_3000.hour1   = t->tm_hour / 10;
++			tod_3000.hour2   = t->tm_hour % 10;
++			tod_3000.day1    = t->tm_mday / 10;
++			tod_3000.day2    = t->tm_mday % 10;
++			if (t->tm_wday != -1)
++				tod_3000.weekday = t->tm_wday;
++			tod_3000.month1  = (t->tm_mon + 1) / 10;
++			tod_3000.month2  = (t->tm_mon + 1) % 10;
++			if (t->tm_year >= 100)
++				t->tm_year -= 100;
++			tod_3000.year1   = t->tm_year / 10;
++			tod_3000.year2   = t->tm_year % 10;
+ 		}
+ 
+-		tod->cntrl1 = TOD3000_CNTRL1_FREE;
++		tod_3000.cntrl1 = TOD3000_CNTRL1_FREE;
+ 	} else /* if (AMIGAHW_PRESENT(A2000_CLK)) */ {
+-		volatile struct tod2000 *tod = TOD_2000;
++		int cnt = 5;
+ 
+-		tod->cntrl1 = TOD2000_CNTRL1_HOLD;
+-	
+-		while (tod->cntrl1 & TOD2000_CNTRL1_BUSY)
+-			;
++		tod_2000.cntrl1 = TOD2000_CNTRL1_HOLD;
++
++		while ((tod_2000.cntrl1 & TOD2000_CNTRL1_BUSY) && cnt--) {
++			tod_2000.cntrl1 &= ~TOD2000_CNTRL1_HOLD;
++			udelay(70);
++			tod_2000.cntrl1 |= TOD2000_CNTRL1_HOLD;
++		}
++
++		if (!cnt)
++			printk(KERN_INFO "hwclk: timed out waiting for RTC (0x%x)\n", tod_2000.cntrl1);
+ 
+ 		if (!op) { /* read */
+-			t->sec  = tod->second1     * 10 + tod->second2;
+-			t->min  = tod->minute1     * 10 + tod->minute2;
+-			t->hour = (tod->hour1 & 3) * 10 + tod->hour2;
+-			t->day  = tod->day1        * 10 + tod->day2;
+-			t->wday = tod->weekday;
+-			t->mon  = tod->month1      * 10 + tod->month2 - 1;
+-			t->year = tod->year1       * 10 + tod->year2;
+-			if (t->year <= 69)
+-				t->year += 100;
+-
+-			if (!(tod->cntrl3 & TOD2000_CNTRL3_24HMODE)){
+-				if (!(tod->hour1 & TOD2000_HOUR1_PM) && t->hour == 12)
+-					t->hour = 0;
+-				else if ((tod->hour1 & TOD2000_HOUR1_PM) && t->hour != 12)
+-					t->hour += 12;
++			t->tm_sec  = tod_2000.second1     * 10 + tod_2000.second2;
++			t->tm_min  = tod_2000.minute1     * 10 + tod_2000.minute2;
++			t->tm_hour = (tod_2000.hour1 & 3) * 10 + tod_2000.hour2;
++			t->tm_mday = tod_2000.day1        * 10 + tod_2000.day2;
++			t->tm_wday = tod_2000.weekday;
++			t->tm_mon  = tod_2000.month1      * 10 + tod_2000.month2 - 1;
++			t->tm_year = tod_2000.year1       * 10 + tod_2000.year2;
++			if (t->tm_year <= 69)
++				t->tm_year += 100;
++
++			if (!(tod_2000.cntrl3 & TOD2000_CNTRL3_24HMODE)){
++				if (!(tod_2000.hour1 & TOD2000_HOUR1_PM) && t->tm_hour == 12)
++					t->tm_hour = 0;
++				else if ((tod_2000.hour1 & TOD2000_HOUR1_PM) && t->tm_hour != 12)
++					t->tm_hour += 12;
+ 			}
+ 		} else {
+-			tod->second1 = t->sec / 10;
+-			tod->second2 = t->sec % 10;
+-			tod->minute1 = t->min / 10;
+-			tod->minute2 = t->min % 10;
+-			if (tod->cntrl3 & TOD2000_CNTRL3_24HMODE)
+-				tod->hour1 = t->hour / 10;
+-			else if (t->hour >= 12)
+-				tod->hour1 = TOD2000_HOUR1_PM +
+-					(t->hour - 12) / 10;
++			tod_2000.second1 = t->tm_sec / 10;
++			tod_2000.second2 = t->tm_sec % 10;
++			tod_2000.minute1 = t->tm_min / 10;
++			tod_2000.minute2 = t->tm_min % 10;
++			if (tod_2000.cntrl3 & TOD2000_CNTRL3_24HMODE)
++				tod_2000.hour1 = t->tm_hour / 10;
++			else if (t->tm_hour >= 12)
++				tod_2000.hour1 = TOD2000_HOUR1_PM +
++					(t->tm_hour - 12) / 10;
+ 			else
+-				tod->hour1 = t->hour / 10;
+-			tod->hour2   = t->hour % 10;
+-			tod->day1    = t->day / 10;
+-			tod->day2    = t->day % 10;
+-			if (t->wday != -1)
+-				tod->weekday = t->wday;
+-			tod->month1  = (t->mon + 1) / 10;
+-			tod->month2  = (t->mon + 1) % 10;
+-			if (t->year >= 100)
+-				t->year -= 100;
+-			tod->year1   = t->year / 10;
+-			tod->year2   = t->year % 10;
++				tod_2000.hour1 = t->tm_hour / 10;
++			tod_2000.hour2   = t->tm_hour % 10;
++			tod_2000.day1    = t->tm_mday / 10;
++			tod_2000.day2    = t->tm_mday % 10;
++			if (t->tm_wday != -1)
++				tod_2000.weekday = t->tm_wday;
++			tod_2000.month1  = (t->tm_mon + 1) / 10;
++			tod_2000.month2  = (t->tm_mon + 1) % 10;
++			if (t->tm_year >= 100)
++				t->tm_year -= 100;
++			tod_2000.year1   = t->tm_year / 10;
++			tod_2000.year2   = t->tm_year % 10;
+ 		}
+ 
+-		tod->cntrl1 &= ~TOD2000_CNTRL1_HOLD;
++		tod_2000.cntrl1 &= ~TOD2000_CNTRL1_HOLD;
+ 	}
+ 
+ 	return 0;
+ }
+ 
+-static int amiga_set_clock_mmss (unsigned long nowtime)
++int amiga_set_clock_mmss(unsigned long nowtime)
+ {
+ 	short real_seconds = nowtime % 60, real_minutes = (nowtime / 60) % 60;
+ 
+ 	if (AMIGAHW_PRESENT(A3000_CLK)) {
+-		volatile struct tod3000 *tod = TOD_3000;
+-
+-		tod->cntrl1 = TOD3000_CNTRL1_HOLD;
++		tod_3000.cntrl1 = TOD3000_CNTRL1_HOLD;
+ 
+-		tod->second1 = real_seconds / 10;
+-		tod->second2 = real_seconds % 10;
+-		tod->minute1 = real_minutes / 10;
+-		tod->minute2 = real_minutes % 10;
++		tod_3000.second1 = real_seconds / 10;
++		tod_3000.second2 = real_seconds % 10;
++		tod_3000.minute1 = real_minutes / 10;
++		tod_3000.minute2 = real_minutes % 10;
+ 
+-		tod->cntrl1 = TOD3000_CNTRL1_FREE;
++		tod_3000.cntrl1 = TOD3000_CNTRL1_FREE;
+ 	} else /* if (AMIGAHW_PRESENT(A2000_CLK)) */ {
+-		volatile struct tod2000 *tod = TOD_2000;
++		int cnt = 5;
+ 
+-		tod->cntrl1 = TOD2000_CNTRL1_HOLD;
+-	
+-		while (tod->cntrl1 & TOD2000_CNTRL1_BUSY)
+-			;
+-
+-		tod->second1 = real_seconds / 10;
+-		tod->second2 = real_seconds % 10;
+-		tod->minute1 = real_minutes / 10;
+-		tod->minute2 = real_minutes % 10;
++		tod_2000.cntrl1 |= TOD2000_CNTRL1_HOLD;
+ 
+-		tod->cntrl1 &= ~TOD2000_CNTRL1_HOLD;
+-	}
++		while ((tod_2000.cntrl1 & TOD2000_CNTRL1_BUSY) && cnt--) {
++			tod_2000.cntrl1 &= ~TOD2000_CNTRL1_HOLD;
++			udelay(70);
++			tod_2000.cntrl1 |= TOD2000_CNTRL1_HOLD;
++		}
+ 
+-	return 0;
+-}
++		if (!cnt)
++			printk(KERN_INFO "set_clock_mmss: timed out waiting for RTC (0x%x)\n", tod_2000.cntrl1);
+ 
+-static NORET_TYPE void amiga_reset( void )
+-    ATTRIB_NORET;
++		tod_2000.second1 = real_seconds / 10;
++		tod_2000.second2 = real_seconds % 10;
++		tod_2000.minute1 = real_minutes / 10;
++		tod_2000.minute2 = real_minutes % 10;
+ 
+-static void amiga_reset (void)
+-{
+-  for (;;);
++		tod_2000.cntrl1 &= ~TOD2000_CNTRL1_HOLD;
++	}
++
++	return 0;
+ }
+ 
+ 
+@@ -841,16 +685,6 @@
+ 	}
+ }
+ 
+-#ifdef CONFIG_HEARTBEAT
+-static void amiga_heartbeat(int on)
+-{
+-    if (on)
+-	ciaa.pra &= ~2;
+-    else
+-	ciaa.pra |= 2;
+-}
+-#endif
+-
+     /*
+      *  Amiga specific parts of /proc
+      */
+@@ -943,19 +777,14 @@
+ 	u_long mem;
+ 	int i;
+ 
+-	if (mach_get_model)
+-		mach_get_model(model);
+-	else
+-		strcpy(model, "Unknown PowerPC");
++	amiga_get_model(model);
+ 
+ 	len += sprintf(buffer+len, "Model:\t\t%s\n", model);
+-	len += get_cpuinfo(buffer+len);
++	//len += get_cpuinfo(buffer+len);
+ 	for (mem = 0, i = 0; i < m68k_realnum_memory; i++)
+ 		mem += m68k_memory[i].size;
+ 	len += sprintf(buffer+len, "System Memory:\t%ldK\n", mem>>10);
+-
+-	if (mach_get_hardware_list)
+-		len += mach_get_hardware_list(buffer+len);
++	len += amiga_get_hardware_list(buffer+len);
+ 
+ 	return(len);
+ }
+diff -Nur -x CVS linux-2.6.12/arch/ppc/amiga/Makefile 2.6/arch/ppc/amiga/Makefile
+--- linux-2.6.12/arch/ppc/amiga/Makefile	2005-06-17 21:48:29.000000000 +0200
++++ 2.6/arch/ppc/amiga/Makefile	2004-07-03 19:53:51.000000000 +0200
+@@ -1,8 +1,8 @@
+ #
+-# Makefile for Linux arch/m68k/amiga source directory
++# Makefile for Linux arch/ppc/amiga source directory
+ #
+ 
+-obj-y		:= config.o amiints.o cia.o time.o bootinfo.o amisound.o \
+-			chipram.o amiga_ksyms.o
++obj-y	:= config.o amiints.o cia.o bootinfo.o \
++	   amisound.o chipram.o amiga_ksyms.o
+ 
+ obj-$(CONFIG_AMIGA_PCMCIA) += pcmcia.o
+diff -Nur -x CVS linux-2.6.12/arch/ppc/amiga/time.c 2.6/arch/ppc/amiga/time.c
+--- linux-2.6.12/arch/ppc/amiga/time.c	2005-06-17 21:48:29.000000000 +0200
++++ 2.6/arch/ppc/amiga/time.c	1970-01-01 01:00:00.000000000 +0100
+@@ -1,58 +0,0 @@
+-#include <linux/config.h> /* CONFIG_HEARTBEAT */
+-#include <linux/errno.h>
+-#include <linux/sched.h>
+-#include <linux/kernel.h>
+-#include <linux/param.h>
+-#include <linux/string.h>
+-#include <linux/mm.h>
+-
+-#include <asm/machdep.h>
+-#include <asm/io.h>
+-
+-#include <linux/timex.h>
+-
+-unsigned long m68k_get_rtc_time(void)
+-{
+-	unsigned int year, mon, day, hour, min, sec;
+-
+-	extern void arch_gettod(int *year, int *mon, int *day, int *hour,
+-				int *min, int *sec);
+-
+-	arch_gettod (&year, &mon, &day, &hour, &min, &sec);
+-
+-	if ((year += 1900) < 1970)
+-		year += 100;
+-
+-	return mktime(year, mon, day, hour, min, sec);
+-}
+-
+-int m68k_set_rtc_time(unsigned long nowtime)
+-{
+-  if (mach_set_clock_mmss)
+-    return mach_set_clock_mmss (nowtime);
+-  return -1;
+-}
+-
+-void apus_heartbeat (void)
+-{
+-#ifdef CONFIG_HEARTBEAT
+-	static unsigned cnt = 0, period = 0, dist = 0;
+-
+-	if (cnt == 0 || cnt == dist)
+-                mach_heartbeat( 1 );
+-	else if (cnt == 7 || cnt == dist+7)
+-                mach_heartbeat( 0 );
+-
+-	if (++cnt > period) {
+-                cnt = 0;
+-                /* The hyperbolic function below modifies the heartbeat period
+-                 * length in dependency of the current (5min) load. It goes
+-                 * through the points f(0)=126, f(1)=86, f(5)=51,
+-                 * f(inf)->30. */
+-                period = ((672<<FSHIFT)/(5*avenrun[0]+(7<<FSHIFT))) + 30;
+-                dist = period / 4;
+-	}
+-#endif
+-	/* should be made smarter */
+-	ppc_md.heartbeat_count = 1;
+-}
+diff -Nur -x CVS linux-2.6.12/arch/ppc/configs/apus_defconfig 2.6/arch/ppc/configs/apus_defconfig
+--- linux-2.6.12/arch/ppc/configs/apus_defconfig	2005-06-17 21:48:29.000000000 +0200
++++ 2.6/arch/ppc/configs/apus_defconfig	2005-08-04 20:04:09.000000000 +0200
+@@ -1,61 +1,99 @@
+ #
+ # Automatically generated make config: don't edit
++# Linux kernel version: 2.6.12
++# Sun Jul 31 18:13:08 2005
+ #
+ CONFIG_MMU=y
++CONFIG_GENERIC_HARDIRQS=y
+ CONFIG_RWSEM_XCHGADD_ALGORITHM=y
++CONFIG_GENERIC_CALIBRATE_DELAY=y
+ CONFIG_HAVE_DEC_LOCK=y
++CONFIG_PPC=y
++CONFIG_PPC32=y
++CONFIG_GENERIC_NVRAM=y
++CONFIG_SCHED_NO_NO_OMIT_FRAME_POINTER=y
+ 
+ #
+ # Code maturity level options
+ #
+ CONFIG_EXPERIMENTAL=y
++CONFIG_CLEAN_COMPILE=y
++CONFIG_BROKEN_ON_SMP=y
++CONFIG_INIT_ENV_ARG_LIMIT=32
+ 
+ #
+ # General setup
+ #
++CONFIG_LOCALVERSION=""
+ CONFIG_SWAP=y
+ CONFIG_SYSVIPC=y
+-# CONFIG_BSD_PROCESS_ACCT is not set
++CONFIG_POSIX_MQUEUE=y
++CONFIG_BSD_PROCESS_ACCT=y
++# CONFIG_BSD_PROCESS_ACCT_V3 is not set
+ CONFIG_SYSCTL=y
+-CONFIG_LOG_BUF_SHIFT=14
++# CONFIG_AUDIT is not set
++# CONFIG_HOTPLUG is not set
++CONFIG_KOBJECT_UEVENT=y
++# CONFIG_IKCONFIG is not set
+ # CONFIG_EMBEDDED is not set
++CONFIG_KALLSYMS=y
++# CONFIG_KALLSYMS_ALL is not set
++# CONFIG_KALLSYMS_EXTRA_PASS is not set
++CONFIG_PRINTK=y
++CONFIG_BUG=y
++CONFIG_BASE_FULL=y
+ CONFIG_FUTEX=y
+ CONFIG_EPOLL=y
++CONFIG_SHMEM=y
++CONFIG_CC_ALIGN_FUNCTIONS=0
++CONFIG_CC_ALIGN_LABELS=0
++CONFIG_CC_ALIGN_LOOPS=0
++CONFIG_CC_ALIGN_JUMPS=0
++# CONFIG_TINY_SHMEM is not set
++CONFIG_BASE_SMALL=0
+ 
+ #
+ # Loadable module support
+ #
+ CONFIG_MODULES=y
+ CONFIG_MODULE_UNLOAD=y
+-CONFIG_MODULE_FORCE_UNLOAD=y
++# CONFIG_MODULE_FORCE_UNLOAD is not set
+ CONFIG_OBSOLETE_MODPARM=y
+ # CONFIG_MODVERSIONS is not set
++# CONFIG_MODULE_SRCVERSION_ALL is not set
+ CONFIG_KMOD=y
+ 
+ #
+-# Platform support
++# Processor
+ #
+-CONFIG_PPC=y
+-CONFIG_PPC32=y
+ CONFIG_6xx=y
+ # CONFIG_40x is not set
++# CONFIG_44x is not set
+ # CONFIG_POWER3 is not set
++# CONFIG_POWER4 is not set
+ # CONFIG_8xx is not set
++# CONFIG_E500 is not set
++CONFIG_PPC_FPU=y
++# CONFIG_ALTIVEC is not set
++# CONFIG_TAU is not set
++# CONFIG_CPU_FREQ is not set
++# CONFIG_PM is not set
++CONFIG_PPC_STD_MMU=y
+ 
+ #
+-# IBM 4xx options
++# Platform options
+ #
+-# CONFIG_8260 is not set
+-CONFIG_GENERIC_ISA_DMA=y
+-CONFIG_PPC_STD_MMU=y
+-CONFIG_SERIAL_CONSOLE=y
+ # CONFIG_PPC_MULTIPLATFORM is not set
+ CONFIG_APUS=y
+-# CONFIG_WILLOW_2 is not set
++# CONFIG_KATANA is not set
++# CONFIG_WILLOW is not set
++# CONFIG_CPCI690 is not set
+ # CONFIG_PCORE is not set
+ # CONFIG_POWERPMC250 is not set
+-# CONFIG_EV64260 is not set
++# CONFIG_CHESTNUT is not set
+ # CONFIG_SPRUCE is not set
++# CONFIG_HDPU is not set
++# CONFIG_EV64260 is not set
+ # CONFIG_LOPEC is not set
+ # CONFIG_MCPN765 is not set
+ # CONFIG_MVME5100 is not set
+@@ -63,41 +101,25 @@
+ # CONFIG_PRPMC750 is not set
+ # CONFIG_PRPMC800 is not set
+ # CONFIG_SANDPOINT is not set
++# CONFIG_RADSTONE_PPC7D is not set
+ # CONFIG_ADIR is not set
+ # CONFIG_K2 is not set
+ # CONFIG_PAL4 is not set
+ # CONFIG_GEMINI is not set
++# CONFIG_EST8260 is not set
++# CONFIG_SBC82xx is not set
++# CONFIG_SBS8260 is not set
++# CONFIG_RPX8260 is not set
++# CONFIG_TQM8260 is not set
++# CONFIG_ADS8272 is not set
++# CONFIG_PQ2FADS is not set
++# CONFIG_LITE5200 is not set
++# CONFIG_MPC834x_SYS is not set
+ # CONFIG_SMP is not set
+ # CONFIG_PREEMPT is not set
+-# CONFIG_ALTIVEC is not set
+-# CONFIG_TAU is not set
+-# CONFIG_CPU_FREQ is not set
+-
+-#
+-# General setup
+-#
+ # CONFIG_HIGHMEM is not set
+-CONFIG_PCI=y
+-CONFIG_PCI_DOMAINS=y
+-CONFIG_PCI_PERMEDIA=y
+-CONFIG_KCORE_ELF=y
+ CONFIG_BINFMT_ELF=y
+-CONFIG_KERNEL_ELF=y
+ CONFIG_BINFMT_MISC=m
+-CONFIG_PCI_LEGACY_PROC=y
+-CONFIG_PCI_NAMES=y
+-# CONFIG_HOTPLUG is not set
+-
+-#
+-# Parallel port support
+-#
+-CONFIG_PARPORT=m
+-# CONFIG_PARPORT_PC is not set
+-CONFIG_PARPORT_AMIGA=m
+-# CONFIG_PARPORT_MFC3 is not set
+-# CONFIG_PARPORT_OTHER is not set
+-# CONFIG_PARPORT_1284 is not set
+-CONFIG_PPC601_SYNC_FIX=y
+ # CONFIG_CMDLINE_BOOL is not set
+ CONFIG_AMIGA=y
+ CONFIG_ZORRO=y
+@@ -105,16 +127,34 @@
+ CONFIG_APUS_FAST_EXCEPT=y
+ CONFIG_AMIGA_PCMCIA=y
+ CONFIG_AMIGA_BUILTIN_SERIAL=y
+-CONFIG_GVPIOEXT=y
++CONFIG_GVPIOEXT=m
+ CONFIG_GVPIOEXT_LP=m
+ CONFIG_GVPIOEXT_PLIP=m
+-CONFIG_MULTIFACE_III_TTY=y
+-CONFIG_A2232=y
+-CONFIG_WHIPPET_SERIAL=y
++CONFIG_MULTIFACE_III_TTY=m
++CONFIG_A2232=m
++CONFIG_WHIPPET_SERIAL=m
+ CONFIG_APNE=y
++CONFIG_SERIAL_CONSOLE=y
+ CONFIG_HEARTBEAT=y
+ CONFIG_PROC_HARDWARE=y
+ CONFIG_ZORRO_NAMES=y
++CONFIG_ISA_DMA_API=y
++
++#
++# Bus options
++#
++CONFIG_GENERIC_ISA_DMA=y
++CONFIG_PCI=y
++CONFIG_PCI_DOMAINS=y
++CONFIG_PCI_PERMEDIA=y
++CONFIG_PCI_LEGACY_PROC=y
++CONFIG_PCI_NAMES=y
++# CONFIG_PCI_DEBUG is not set
++
++#
++# PCCARD (PCMCIA/CardBus) support
++#
++# CONFIG_PCCARD is not set
+ 
+ #
+ # Advanced setup
+@@ -131,14 +171,36 @@
+ CONFIG_BOOT_LOAD=0x00800000
+ 
+ #
++# Device Drivers
++#
++
++#
++# Generic Driver Options
++#
++CONFIG_STANDALONE=y
++CONFIG_PREVENT_FIRMWARE_BUILD=y
++# CONFIG_FW_LOADER is not set
++# CONFIG_DEBUG_DRIVER is not set
++
++#
+ # Memory Technology Devices (MTD)
+ #
+ # CONFIG_MTD is not set
+ 
+ #
++# Parallel port support
++#
++CONFIG_PARPORT=m
++# CONFIG_PARPORT_PC is not set
++CONFIG_PARPORT_NOT_PC=y
++CONFIG_PARPORT_AMIGA=m
++# CONFIG_PARPORT_MFC3 is not set
++# CONFIG_PARPORT_GSC is not set
++# CONFIG_PARPORT_1284 is not set
++
++#
+ # Plug and Play support
+ #
+-# CONFIG_PNP is not set
+ 
+ #
+ # Block devices
+@@ -151,42 +213,41 @@
+ # CONFIG_BLK_CPQ_CISS_DA is not set
+ # CONFIG_BLK_DEV_DAC960 is not set
+ # CONFIG_BLK_DEV_UMEM is not set
++# CONFIG_BLK_DEV_COW_COMMON is not set
+ CONFIG_BLK_DEV_LOOP=y
++# CONFIG_BLK_DEV_CRYPTOLOOP is not set
+ CONFIG_BLK_DEV_NBD=m
+-CONFIG_BLK_DEV_RAM=y
++# CONFIG_BLK_DEV_SX8 is not set
++CONFIG_BLK_DEV_RAM=m
++CONFIG_BLK_DEV_RAM_COUNT=16
+ CONFIG_BLK_DEV_RAM_SIZE=4096
+-CONFIG_BLK_DEV_INITRD=y
++CONFIG_INITRAMFS_SOURCE=""
++# CONFIG_LBD is not set
++# CONFIG_CDROM_PKTCDVD is not set
+ 
+ #
+-# Multi-device support (RAID and LVM)
++# IO Schedulers
+ #
+-CONFIG_MD=y
+-CONFIG_BLK_DEV_MD=m
+-CONFIG_MD_LINEAR=m
+-CONFIG_MD_RAID0=m
+-CONFIG_MD_RAID1=m
+-CONFIG_MD_RAID5=m
+-# CONFIG_MD_MULTIPATH is not set
+-CONFIG_BLK_DEV_DM=m
++CONFIG_IOSCHED_NOOP=y
++CONFIG_IOSCHED_AS=y
++CONFIG_IOSCHED_DEADLINE=y
++CONFIG_IOSCHED_CFQ=y
++# CONFIG_ATA_OVER_ETH is not set
+ 
+ #
+-# ATA/IDE/MFM/RLL support
++# ATA/ATAPI/MFM/RLL support
+ #
+ CONFIG_IDE=y
+-
+-#
+-# IDE, ATA and ATAPI Block devices
+-#
+ CONFIG_BLK_DEV_IDE=y
+ 
+ #
+ # Please see Documentation/ide.txt for help/info on IDE drives
+ #
+-# CONFIG_BLK_DEV_HD is not set
++# CONFIG_BLK_DEV_IDE_SATA is not set
+ CONFIG_BLK_DEV_IDEDISK=y
+ # CONFIG_IDEDISK_MULTI_MODE is not set
+-# CONFIG_IDEDISK_STROKE is not set
+ CONFIG_BLK_DEV_IDECD=y
++# CONFIG_BLK_DEV_IDETAPE is not set
+ CONFIG_BLK_DEV_IDEFLOPPY=y
+ CONFIG_BLK_DEV_IDESCSI=m
+ # CONFIG_IDE_TASK_IOCTL is not set
+@@ -194,15 +255,21 @@
+ #
+ # IDE chipset support/bugfixes
+ #
++CONFIG_IDE_GENERIC=y
+ # CONFIG_BLK_DEV_IDEPCI is not set
++# CONFIG_IDE_ARM is not set
+ CONFIG_BLK_DEV_GAYLE=y
+ CONFIG_BLK_DEV_IDEDOUBLER=y
+ CONFIG_BLK_DEV_BUDDHA=y
++# CONFIG_BLK_DEV_IDEDMA is not set
++# CONFIG_IDEDMA_AUTO is not set
++# CONFIG_BLK_DEV_HD is not set
+ 
+ #
+-# SCSI support
++# SCSI device support
+ #
+ CONFIG_SCSI=y
++CONFIG_SCSI_PROC_FS=y
+ 
+ #
+ # SCSI support type (disk, tape, CD-ROM)
+@@ -218,53 +285,56 @@
+ # Some SCSI devices (e.g. CD jukebox) support multiple LUNs
+ #
+ # CONFIG_SCSI_MULTI_LUN is not set
+-# CONFIG_SCSI_REPORT_LUNS is not set
+ CONFIG_SCSI_CONSTANTS=y
+ CONFIG_SCSI_LOGGING=y
+ 
+ #
++# SCSI Transport Attributes
++#
++# CONFIG_SCSI_SPI_ATTRS is not set
++# CONFIG_SCSI_FC_ATTRS is not set
++# CONFIG_SCSI_ISCSI_ATTRS is not set
++
++#
+ # SCSI low-level drivers
+ #
+ # CONFIG_BLK_DEV_3W_XXXX_RAID is not set
++# CONFIG_SCSI_3W_9XXX is not set
+ # CONFIG_SCSI_ACARD is not set
+ # CONFIG_SCSI_AACRAID is not set
+ # CONFIG_SCSI_AIC7XXX is not set
+ # CONFIG_SCSI_AIC7XXX_OLD is not set
+ # CONFIG_SCSI_AIC79XX is not set
+ # CONFIG_SCSI_DPT_I2O is not set
+-# CONFIG_SCSI_ADVANSYS is not set
+-# CONFIG_SCSI_IN2000 is not set
+-# CONFIG_SCSI_AM53C974 is not set
+-# CONFIG_SCSI_MEGARAID is not set
++# CONFIG_MEGARAID_NEWGEN is not set
++# CONFIG_MEGARAID_LEGACY is not set
++# CONFIG_SCSI_SATA is not set
+ # CONFIG_SCSI_BUSLOGIC is not set
+-# CONFIG_SCSI_CPQFCTS is not set
+ # CONFIG_SCSI_DMX3191D is not set
+ # CONFIG_SCSI_EATA is not set
+-# CONFIG_SCSI_EATA_PIO is not set
+ # CONFIG_SCSI_FUTURE_DOMAIN is not set
+ # CONFIG_SCSI_GDTH is not set
+-# CONFIG_SCSI_GENERIC_NCR5380 is not set
+-# CONFIG_SCSI_GENERIC_NCR5380_MMIO is not set
++# CONFIG_SCSI_IPS is not set
+ # CONFIG_SCSI_INITIO is not set
+ # CONFIG_SCSI_INIA100 is not set
+ # CONFIG_SCSI_PPA is not set
+ # CONFIG_SCSI_IMM is not set
+-# CONFIG_SCSI_NCR53C7xx is not set
+ # CONFIG_SCSI_SYM53C8XX_2 is not set
+-# CONFIG_SCSI_NCR53C8XX is not set
+-# CONFIG_SCSI_SYM53C8XX is not set
+-# CONFIG_SCSI_PCI2000 is not set
+-# CONFIG_SCSI_PCI2220I is not set
+-# CONFIG_SCSI_QLOGIC_ISP is not set
++# CONFIG_SCSI_IPR is not set
+ # CONFIG_SCSI_QLOGIC_FC is not set
+ # CONFIG_SCSI_QLOGIC_1280 is not set
++CONFIG_SCSI_QLA2XXX=y
++# CONFIG_SCSI_QLA21XX is not set
++# CONFIG_SCSI_QLA22XX is not set
++# CONFIG_SCSI_QLA2300 is not set
++# CONFIG_SCSI_QLA2322 is not set
++# CONFIG_SCSI_QLA6312 is not set
++# CONFIG_SCSI_LPFC is not set
+ # CONFIG_SCSI_DC395x is not set
+ # CONFIG_SCSI_DC390T is not set
+-# CONFIG_SCSI_U14_34F is not set
+ # CONFIG_SCSI_NSP32 is not set
+ # CONFIG_SCSI_DEBUG is not set
+ CONFIG_A3000_SCSI=y
+-CONFIG_A4000T_SCSI=y
+ CONFIG_A2091_SCSI=y
+ CONFIG_GVP11_SCSI=y
+ CONFIG_CYBERSTORM_SCSI=y
+@@ -272,18 +342,35 @@
+ CONFIG_BLZ2060_SCSI=y
+ CONFIG_BLZ1230_SCSI=y
+ CONFIG_FASTLANE_SCSI=y
+-CONFIG_A4091_SCSI=y
+-CONFIG_WARPENGINE_SCSI=y
+-CONFIG_BLZ603EPLUS_SCSI=y
+ CONFIG_OKTAGON_SCSI=y
+ 
+ #
++# Multi-device support (RAID and LVM)
++#
++CONFIG_MD=y
++CONFIG_BLK_DEV_MD=m
++CONFIG_MD_LINEAR=m
++CONFIG_MD_RAID0=m
++CONFIG_MD_RAID1=m
++CONFIG_MD_RAID10=m
++CONFIG_MD_RAID5=m
++# CONFIG_MD_RAID6 is not set
++# CONFIG_MD_MULTIPATH is not set
++# CONFIG_MD_FAULTY is not set
++CONFIG_BLK_DEV_DM=m
++# CONFIG_DM_CRYPT is not set
++# CONFIG_DM_SNAPSHOT is not set
++# CONFIG_DM_MIRROR is not set
++# CONFIG_DM_ZERO is not set
++# CONFIG_DM_MULTIPATH is not set
++
++#
+ # Fusion MPT device support
+ #
+ # CONFIG_FUSION is not set
+ 
+ #
+-# IEEE 1394 (FireWire) support (EXPERIMENTAL)
++# IEEE 1394 (FireWire) support
+ #
+ # CONFIG_IEEE1394 is not set
+ 
+@@ -293,6 +380,10 @@
+ # CONFIG_I2O is not set
+ 
+ #
++# Macintosh device drivers
++#
++
++#
+ # Networking support
+ #
+ CONFIG_NET=y
+@@ -300,11 +391,8 @@
+ #
+ # Networking options
+ #
+-CONFIG_PACKET=m
++CONFIG_PACKET=y
+ CONFIG_PACKET_MMAP=y
+-CONFIG_NETLINK_DEV=m
+-CONFIG_NETFILTER=y
+-# CONFIG_NETFILTER_DEBUG is not set
+ CONFIG_UNIX=y
+ # CONFIG_NET_KEY is not set
+ CONFIG_INET=y
+@@ -314,16 +402,29 @@
+ # CONFIG_NET_IPIP is not set
+ # CONFIG_NET_IPGRE is not set
+ # CONFIG_ARPD is not set
+-# CONFIG_INET_ECN is not set
+ CONFIG_SYN_COOKIES=y
+ # CONFIG_INET_AH is not set
+ # CONFIG_INET_ESP is not set
+ # CONFIG_INET_IPCOMP is not set
++# CONFIG_INET_TUNNEL is not set
++CONFIG_IP_TCPDIAG=y
++# CONFIG_IP_TCPDIAG_IPV6 is not set
++
++#
++# IP: Virtual Server Configuration
++#
++# CONFIG_IP_VS is not set
++# CONFIG_IPV6 is not set
++CONFIG_NETFILTER=y
++# CONFIG_NETFILTER_DEBUG is not set
+ 
+ #
+ # IP: Netfilter Configuration
+ #
+ CONFIG_IP_NF_CONNTRACK=m
++# CONFIG_IP_NF_CT_ACCT is not set
++# CONFIG_IP_NF_CONNTRACK_MARK is not set
++# CONFIG_IP_NF_CT_PROTO_SCTP is not set
+ CONFIG_IP_NF_FTP=m
+ CONFIG_IP_NF_IRC=m
+ CONFIG_IP_NF_TFTP=m
+@@ -331,11 +432,13 @@
+ CONFIG_IP_NF_QUEUE=m
+ CONFIG_IP_NF_IPTABLES=m
+ CONFIG_IP_NF_MATCH_LIMIT=m
++# CONFIG_IP_NF_MATCH_IPRANGE is not set
+ CONFIG_IP_NF_MATCH_MAC=m
+ # CONFIG_IP_NF_MATCH_PKTTYPE is not set
+ CONFIG_IP_NF_MATCH_MARK=m
+ CONFIG_IP_NF_MATCH_MULTIPORT=m
+ CONFIG_IP_NF_MATCH_TOS=m
++# CONFIG_IP_NF_MATCH_RECENT is not set
+ # CONFIG_IP_NF_MATCH_ECN is not set
+ # CONFIG_IP_NF_MATCH_DSCP is not set
+ # CONFIG_IP_NF_MATCH_AH_ESP is not set
+@@ -345,15 +448,23 @@
+ CONFIG_IP_NF_MATCH_HELPER=m
+ CONFIG_IP_NF_MATCH_STATE=m
+ CONFIG_IP_NF_MATCH_CONNTRACK=m
+-CONFIG_IP_NF_MATCH_UNCLEAN=m
+ CONFIG_IP_NF_MATCH_OWNER=m
++# CONFIG_IP_NF_MATCH_ADDRTYPE is not set
++# CONFIG_IP_NF_MATCH_REALM is not set
++# CONFIG_IP_NF_MATCH_SCTP is not set
++# CONFIG_IP_NF_MATCH_COMMENT is not set
++# CONFIG_IP_NF_MATCH_HASHLIMIT is not set
+ CONFIG_IP_NF_FILTER=m
+ CONFIG_IP_NF_TARGET_REJECT=m
+-CONFIG_IP_NF_TARGET_MIRROR=m
++CONFIG_IP_NF_TARGET_LOG=m
++CONFIG_IP_NF_TARGET_ULOG=m
++CONFIG_IP_NF_TARGET_TCPMSS=m
+ CONFIG_IP_NF_NAT=m
+ CONFIG_IP_NF_NAT_NEEDED=y
+ CONFIG_IP_NF_TARGET_MASQUERADE=m
+ CONFIG_IP_NF_TARGET_REDIRECT=m
++# CONFIG_IP_NF_TARGET_NETMAP is not set
++# CONFIG_IP_NF_TARGET_SAME is not set
+ CONFIG_IP_NF_NAT_SNMP_BASIC=m
+ CONFIG_IP_NF_NAT_IRC=m
+ CONFIG_IP_NF_NAT_FTP=m
+@@ -364,64 +475,64 @@
+ CONFIG_IP_NF_TARGET_ECN=m
+ CONFIG_IP_NF_TARGET_DSCP=m
+ CONFIG_IP_NF_TARGET_MARK=m
+-CONFIG_IP_NF_TARGET_LOG=m
+-CONFIG_IP_NF_TARGET_ULOG=m
+-CONFIG_IP_NF_TARGET_TCPMSS=m
++# CONFIG_IP_NF_TARGET_CLASSIFY is not set
++# CONFIG_IP_NF_RAW is not set
+ CONFIG_IP_NF_ARPTABLES=m
+ CONFIG_IP_NF_ARPFILTER=m
+-CONFIG_IP_NF_COMPAT_IPCHAINS=m
+-# CONFIG_IP_NF_COMPAT_IPFWADM is not set
+-# CONFIG_IPV6 is not set
+-# CONFIG_XFRM_USER is not set
++# CONFIG_IP_NF_ARP_MANGLE is not set
+ 
+ #
+ # SCTP Configuration (EXPERIMENTAL)
+ #
+-CONFIG_IPV6_SCTP__=y
+ # CONFIG_IP_SCTP is not set
+ # CONFIG_ATM is not set
++# CONFIG_BRIDGE is not set
+ # CONFIG_VLAN_8021Q is not set
+-# CONFIG_LLC is not set
+ # CONFIG_DECNET is not set
+-# CONFIG_BRIDGE is not set
++# CONFIG_LLC2 is not set
++# CONFIG_IPX is not set
++# CONFIG_ATALK is not set
+ # CONFIG_X25 is not set
+ # CONFIG_LAPB is not set
+ # CONFIG_NET_DIVERT is not set
+ # CONFIG_ECONET is not set
+ # CONFIG_WAN_ROUTER is not set
+-# CONFIG_NET_HW_FLOWCONTROL is not set
+ 
+ #
+ # QoS and/or fair queueing
+ #
+ # CONFIG_NET_SCHED is not set
++# CONFIG_NET_CLS_ROUTE is not set
+ 
+ #
+ # Network testing
+ #
+ # CONFIG_NET_PKTGEN is not set
++# CONFIG_NETPOLL is not set
++# CONFIG_NET_POLL_CONTROLLER is not set
++# CONFIG_HAMRADIO is not set
++# CONFIG_IRDA is not set
++# CONFIG_BT is not set
+ CONFIG_NETDEVICES=y
++CONFIG_DUMMY=m
++# CONFIG_BONDING is not set
++# CONFIG_EQUALIZER is not set
++CONFIG_TUN=m
+ 
+ #
+ # ARCnet devices
+ #
+ # CONFIG_ARCNET is not set
+-CONFIG_DUMMY=m
+-# CONFIG_BONDING is not set
+-# CONFIG_EQUALIZER is not set
+-CONFIG_TUN=m
+-# CONFIG_ETHERTAP is not set
+ 
+ #
+ # Ethernet (10 or 100Mbit)
+ #
+ CONFIG_NET_ETHERNET=y
+ # CONFIG_MII is not set
+-# CONFIG_OAKNET is not set
+ CONFIG_ARIADNE=y
+-# CONFIG_ZORRO8390 is not set
+ CONFIG_A2065=y
+ CONFIG_HYDRA=y
++CONFIG_ZORRO8390=y
+ # CONFIG_HAPPYMEAL is not set
+ # CONFIG_SUNGEM is not set
+ # CONFIG_NET_VENDOR_3COM is not set
+@@ -445,11 +556,28 @@
+ # CONFIG_R8169 is not set
+ # CONFIG_SK98LIN is not set
+ # CONFIG_TIGON3 is not set
++# CONFIG_BNX2 is not set
+ 
+ #
+ # Ethernet (10000 Mbit)
+ #
+ # CONFIG_IXGB is not set
++# CONFIG_S2IO is not set
++
++#
++# Token Ring devices
++#
++# CONFIG_TR is not set
++
++#
++# Wireless LAN (non-hamradio)
++#
++# CONFIG_NET_RADIO is not set
++
++#
++# Wan interfaces
++#
++# CONFIG_WAN is not set
+ # CONFIG_FDDI is not set
+ # CONFIG_HIPPI is not set
+ CONFIG_PLIP=m
+@@ -465,96 +593,29 @@
+ CONFIG_SLIP_COMPRESSED=y
+ CONFIG_SLIP_SMART=y
+ CONFIG_SLIP_MODE_SLIP6=y
+-
+-#
+-# Wireless LAN (non-hamradio)
+-#
+-# CONFIG_NET_RADIO is not set
+-
+-#
+-# Token Ring devices (depends on LLC=y)
+-#
+ # CONFIG_NET_FC is not set
+-# CONFIG_RCPCI is not set
+ # CONFIG_SHAPER is not set
+-
+-#
+-# Wan interfaces
+-#
+-# CONFIG_WAN is not set
+-
+-#
+-# Amateur Radio support
+-#
+-# CONFIG_HAMRADIO is not set
+-
+-#
+-# IrDA (infrared) support
+-#
+-# CONFIG_IRDA is not set
++# CONFIG_NETCONSOLE is not set
+ 
+ #
+ # ISDN subsystem
+ #
+-# CONFIG_ISDN_BOOL is not set
++# CONFIG_ISDN is not set
+ 
+ #
+-# Graphics support
++# Telephony Support
+ #
+-CONFIG_FB=y
+-# CONFIG_FB_CIRRUS is not set
+-CONFIG_FB_PM2=y
+-# CONFIG_FB_PM2_FIFO_DISCONNECT is not set
+-# CONFIG_FB_PM2_PCI is not set
+-CONFIG_FB_PM2_CVPPC=y
+-CONFIG_FB_CYBER2000=y
+-CONFIG_FB_AMIGA=y
+-CONFIG_FB_AMIGA_OCS=y
+-CONFIG_FB_AMIGA_ECS=y
+-CONFIG_FB_AMIGA_AGA=y
+-CONFIG_FB_CYBER=y
+-CONFIG_FB_VIRGE=y
+-CONFIG_FB_RETINAZ3=y
+-CONFIG_FB_FM2=y
+-# CONFIG_FB_CT65550 is not set
+-# CONFIG_FB_IMSTT is not set
+-# CONFIG_FB_S3TRIO is not set
+-# CONFIG_FB_VGA16 is not set
+-# CONFIG_FB_RIVA is not set
+-# CONFIG_FB_MATROX is not set
+-# CONFIG_FB_RADEON is not set
+-# CONFIG_FB_ATY128 is not set
+-# CONFIG_FB_ATY is not set
+-# CONFIG_FB_SIS is not set
+-# CONFIG_FB_NEOMAGIC is not set
+-# CONFIG_FB_3DFX is not set
+-# CONFIG_FB_VOODOO1 is not set
+-# CONFIG_FB_TRIDENT is not set
+-# CONFIG_FB_PM3 is not set
+-# CONFIG_FB_VIRTUAL is not set
+-
+-#
+-# Logo configuration
+-#
+-CONFIG_LOGO=y
+-CONFIG_LOGO_LINUX_MONO=y
+-CONFIG_LOGO_LINUX_VGA16=y
+-CONFIG_LOGO_LINUX_CLUT224=y
+-
+-#
+-# Old CD-ROM drivers (not SCSI, not IDE)
+-#
+-# CONFIG_CD_NO_IDESCSI is not set
++# CONFIG_PHONE is not set
+ 
+ #
+ # Input device support
+ #
+-CONFIG_INPUT=m
++CONFIG_INPUT=y
+ 
+ #
+ # Userland interfaces
+ #
+-CONFIG_INPUT_MOUSEDEV=m
++CONFIG_INPUT_MOUSEDEV=y
+ CONFIG_INPUT_MOUSEDEV_PSAUX=y
+ CONFIG_INPUT_MOUSEDEV_SCREEN_X=1024
+ CONFIG_INPUT_MOUSEDEV_SCREEN_Y=768
+@@ -564,42 +625,37 @@
+ CONFIG_INPUT_EVBUG=m
+ 
+ #
+-# Input I/O drivers
+-#
+-# CONFIG_GAMEPORT is not set
+-CONFIG_SOUND_GAMEPORT=y
+-CONFIG_SERIO=y
+-# CONFIG_SERIO_I8042 is not set
+-CONFIG_SERIO_SERPORT=y
+-# CONFIG_SERIO_CT82C710 is not set
+-# CONFIG_SERIO_PARKBD is not set
+-
+-#
+ # Input Device Drivers
+ #
+ CONFIG_INPUT_KEYBOARD=y
+-CONFIG_KEYBOARD_ATKBD=m
++# CONFIG_KEYBOARD_ATKBD is not set
+ # CONFIG_KEYBOARD_SUNKBD is not set
++# CONFIG_KEYBOARD_LKKBD is not set
+ # CONFIG_KEYBOARD_XTKBD is not set
+ # CONFIG_KEYBOARD_NEWTON is not set
+-CONFIG_KEYBOARD_AMIGA=m
++CONFIG_KEYBOARD_AMIGA=y
+ CONFIG_INPUT_MOUSE=y
+-CONFIG_MOUSE_PS2=m
+-CONFIG_MOUSE_SERIAL=m
++# CONFIG_MOUSE_PS2 is not set
++# CONFIG_MOUSE_SERIAL is not set
+ CONFIG_MOUSE_AMIGA=m
++# CONFIG_MOUSE_VSXXXAA is not set
+ # CONFIG_INPUT_JOYSTICK is not set
+ # CONFIG_INPUT_TOUCHSCREEN is not set
+ CONFIG_INPUT_MISC=y
+-# CONFIG_INPUT_PCSPKR is not set
+ CONFIG_INPUT_UINPUT=m
+ 
+ #
+-# Macintosh device drivers
++# Hardware I/O ports
+ #
++# CONFIG_SERIO is not set
++# CONFIG_GAMEPORT is not set
+ 
+ #
+ # Character devices
+ #
++CONFIG_VT=y
++CONFIG_VT_CONSOLE=y
++CONFIG_HW_CONSOLE=y
+ # CONFIG_SERIAL_NONSTANDARD is not set
+ 
+ #
+@@ -610,34 +666,16 @@
+ #
+ # Non-8250 serial port support
+ #
++# CONFIG_SERIAL_JSM is not set
+ CONFIG_UNIX98_PTYS=y
+-CONFIG_UNIX98_PTY_COUNT=256
++CONFIG_LEGACY_PTYS=y
++CONFIG_LEGACY_PTY_COUNT=256
+ CONFIG_PRINTER=m
+ # CONFIG_LP_CONSOLE is not set
+ # CONFIG_PPDEV is not set
+ # CONFIG_TIPAR is not set
+ 
+ #
+-# I2C support
+-#
+-# CONFIG_I2C is not set
+-
+-#
+-# I2C Hardware Sensors Mainboard support
+-#
+-
+-#
+-# I2C Hardware Sensors Chip support
+-#
+-# CONFIG_I2C_SENSOR is not set
+-
+-#
+-# Mice
+-#
+-CONFIG_BUSMOUSE=y
+-# CONFIG_QIC02_TAPE is not set
+-
+-#
+ # IPMI
+ #
+ # CONFIG_IPMI_HANDLER is not set
+@@ -656,11 +694,28 @@
+ #
+ # Ftape, the floppy tape device driver
+ #
+-# CONFIG_FTAPE is not set
+ # CONFIG_AGP is not set
+ # CONFIG_DRM is not set
+ # CONFIG_RAW_DRIVER is not set
+-# CONFIG_HANGCHECK_TIMER is not set
++
++#
++# TPM devices
++#
++# CONFIG_TCG_TPM is not set
++
++#
++# I2C support
++#
++# CONFIG_I2C is not set
++
++#
++# Dallas's 1-wire bus
++#
++# CONFIG_W1 is not set
++
++#
++# Misc devices
++#
+ 
+ #
+ # Multimedia devices
+@@ -673,6 +728,154 @@
+ # CONFIG_DVB is not set
+ 
+ #
++# Graphics support
++#
++CONFIG_FB=y
++CONFIG_FB_CFB_FILLRECT=y
++CONFIG_FB_CFB_COPYAREA=y
++CONFIG_FB_CFB_IMAGEBLIT=y
++CONFIG_FB_SOFT_CURSOR=y
++# CONFIG_FB_MACMODES is not set
++# CONFIG_FB_MODE_HELPERS is not set
++# CONFIG_FB_TILEBLITTING is not set
++# CONFIG_FB_CIRRUS is not set
++# CONFIG_FB_PM2 is not set
++CONFIG_FB_CYBER2000=y
++CONFIG_FB_AMIGA=y
++CONFIG_FB_AMIGA_OCS=y
++CONFIG_FB_AMIGA_ECS=y
++CONFIG_FB_AMIGA_AGA=y
++CONFIG_FB_FM2=y
++# CONFIG_FB_CT65550 is not set
++# CONFIG_FB_ASILIANT is not set
++# CONFIG_FB_IMSTT is not set
++# CONFIG_FB_VGA16 is not set
++# CONFIG_FB_NVIDIA is not set
++# CONFIG_FB_RIVA is not set
++# CONFIG_FB_MATROX is not set
++# CONFIG_FB_RADEON_OLD is not set
++# CONFIG_FB_RADEON is not set
++# CONFIG_FB_ATY128 is not set
++# CONFIG_FB_ATY is not set
++# CONFIG_FB_SAVAGE is not set
++# CONFIG_FB_SIS is not set
++# CONFIG_FB_NEOMAGIC is not set
++# CONFIG_FB_KYRO is not set
++# CONFIG_FB_3DFX is not set
++# CONFIG_FB_VOODOO1 is not set
++# CONFIG_FB_TRIDENT is not set
++# CONFIG_FB_S1D13XXX is not set
++# CONFIG_FB_VIRTUAL is not set
++
++#
++# Console display driver support
++#
++CONFIG_VGA_CONSOLE=y
++CONFIG_DUMMY_CONSOLE=y
++CONFIG_FRAMEBUFFER_CONSOLE=y
++# CONFIG_FONTS is not set
++CONFIG_FONT_8x8=y
++CONFIG_FONT_8x16=y
++CONFIG_FONT_PEARL_8x8=y
++
++#
++# Logo configuration
++#
++CONFIG_LOGO=y
++CONFIG_LOGO_LINUX_MONO=y
++CONFIG_LOGO_LINUX_VGA16=y
++CONFIG_LOGO_LINUX_CLUT224=y
++# CONFIG_BACKLIGHT_LCD_SUPPORT is not set
++
++#
++# Sound
++#
++CONFIG_SOUND=y
++CONFIG_DMASOUND_PAULA=m
++CONFIG_DMASOUND=m
++
++#
++# Advanced Linux Sound Architecture
++#
++# CONFIG_SND is not set
++
++#
++# Open Sound System
++#
++CONFIG_SOUND_PRIME=m
++# CONFIG_SOUND_BT878 is not set
++# CONFIG_SOUND_CMPCI is not set
++# CONFIG_SOUND_EMU10K1 is not set
++# CONFIG_SOUND_FUSION is not set
++# CONFIG_SOUND_CS4281 is not set
++# CONFIG_SOUND_ES1370 is not set
++# CONFIG_SOUND_ES1371 is not set
++# CONFIG_SOUND_ESSSOLO1 is not set
++# CONFIG_SOUND_MAESTRO is not set
++# CONFIG_SOUND_MAESTRO3 is not set
++# CONFIG_SOUND_ICH is not set
++# CONFIG_SOUND_SONICVIBES is not set
++# CONFIG_SOUND_TRIDENT is not set
++# CONFIG_SOUND_MSNDCLAS is not set
++# CONFIG_SOUND_MSNDPIN is not set
++# CONFIG_SOUND_VIA82CXXX is not set
++CONFIG_SOUND_OSS=m
++CONFIG_SOUND_TRACEINIT=y
++# CONFIG_SOUND_DMAP is not set
++# CONFIG_SOUND_AD1816 is not set
++# CONFIG_SOUND_AD1889 is not set
++# CONFIG_SOUND_SGALAXY is not set
++# CONFIG_SOUND_ADLIB is not set
++# CONFIG_SOUND_ACI_MIXER is not set
++# CONFIG_SOUND_CS4232 is not set
++# CONFIG_SOUND_SSCAPE is not set
++# CONFIG_SOUND_GUS is not set
++CONFIG_SOUND_VMIDI=m
++# CONFIG_SOUND_TRIX is not set
++# CONFIG_SOUND_MSS is not set
++# CONFIG_SOUND_MPU401 is not set
++# CONFIG_SOUND_NM256 is not set
++# CONFIG_SOUND_MAD16 is not set
++# CONFIG_SOUND_PAS is not set
++# CONFIG_SOUND_PSS is not set
++# CONFIG_SOUND_SB is not set
++# CONFIG_SOUND_AWE32_SYNTH is not set
++# CONFIG_SOUND_WAVEFRONT is not set
++# CONFIG_SOUND_MAUI is not set
++# CONFIG_SOUND_YM3812 is not set
++# CONFIG_SOUND_OPL3SA1 is not set
++# CONFIG_SOUND_OPL3SA2 is not set
++# CONFIG_SOUND_YMFPCI is not set
++# CONFIG_SOUND_UART6850 is not set
++# CONFIG_SOUND_AEDSP16 is not set
++# CONFIG_SOUND_ALI5455 is not set
++# CONFIG_SOUND_FORTE is not set
++# CONFIG_SOUND_RME96XX is not set
++# CONFIG_SOUND_AD1980 is not set
++
++#
++# USB support
++#
++CONFIG_USB_ARCH_HAS_HCD=y
++CONFIG_USB_ARCH_HAS_OHCI=y
++# CONFIG_USB is not set
++
++#
++# USB Gadget Support
++#
++# CONFIG_USB_GADGET is not set
++
++#
++# MMC/SD Card support
++#
++# CONFIG_MMC is not set
++
++#
++# InfiniBand support
++#
++# CONFIG_INFINIBAND is not set
++
++#
+ # File systems
+ #
+ CONFIG_EXT2_FS=y
+@@ -686,10 +889,15 @@
+ CONFIG_FS_MBCACHE=y
+ # CONFIG_REISERFS_FS is not set
+ # CONFIG_JFS_FS is not set
++
++#
++# XFS support
++#
+ # CONFIG_XFS_FS is not set
+ CONFIG_MINIX_FS=y
+-CONFIG_ROMFS_FS=y
++CONFIG_ROMFS_FS=m
+ # CONFIG_QUOTA is not set
++CONFIG_DNOTIFY=y
+ CONFIG_AUTOFS_FS=m
+ CONFIG_AUTOFS4_FS=m
+ 
+@@ -707,16 +915,21 @@
+ CONFIG_FAT_FS=y
+ CONFIG_MSDOS_FS=y
+ CONFIG_VFAT_FS=y
++CONFIG_FAT_DEFAULT_CODEPAGE=437
++CONFIG_FAT_DEFAULT_IOCHARSET="iso8859-1"
+ # CONFIG_NTFS_FS is not set
+ 
+ #
+ # Pseudo filesystems
+ #
+ CONFIG_PROC_FS=y
++CONFIG_PROC_KCORE=y
++CONFIG_SYSFS=y
+ # CONFIG_DEVFS_FS is not set
+-CONFIG_DEVPTS_FS=y
+ # CONFIG_DEVPTS_FS_XATTR is not set
+ CONFIG_TMPFS=y
++# CONFIG_TMPFS_XATTR is not set
++# CONFIG_HUGETLB_PAGE is not set
+ CONFIG_RAMFS=y
+ 
+ #
+@@ -725,10 +938,11 @@
+ # CONFIG_ADFS_FS is not set
+ CONFIG_AFFS_FS=y
+ CONFIG_HFS_FS=y
++# CONFIG_HFSPLUS_FS is not set
+ # CONFIG_BEFS_FS is not set
+ # CONFIG_BFS_FS is not set
+ # CONFIG_EFS_FS is not set
+-CONFIG_CRAMFS=y
++CONFIG_CRAMFS=m
+ # CONFIG_VXFS_FS is not set
+ # CONFIG_HPFS_FS is not set
+ # CONFIG_QNX4FS_FS is not set
+@@ -741,6 +955,7 @@
+ CONFIG_NFS_FS=y
+ CONFIG_NFS_V3=y
+ # CONFIG_NFS_V4 is not set
++# CONFIG_NFS_DIRECTIO is not set
+ CONFIG_NFSD=m
+ CONFIG_NFSD_V3=y
+ # CONFIG_NFSD_V4 is not set
+@@ -749,13 +964,14 @@
+ CONFIG_LOCKD_V4=y
+ CONFIG_EXPORTFS=m
+ CONFIG_SUNRPC=y
+-# CONFIG_SUNRPC_GSS is not set
++# CONFIG_RPCSEC_GSS_KRB5 is not set
++# CONFIG_RPCSEC_GSS_SPKM3 is not set
+ CONFIG_SMB_FS=m
+ # CONFIG_SMB_NLS_DEFAULT is not set
+ # CONFIG_CIFS is not set
+ # CONFIG_NCP_FS is not set
+ CONFIG_CODA_FS=m
+-# CONFIG_INTERMEZZO_FS is not set
++# CONFIG_CODA_FS_OLD_API is not set
+ # CONFIG_AFS_FS is not set
+ 
+ #
+@@ -773,17 +989,15 @@
+ CONFIG_SOLARIS_X86_PARTITION=y
+ CONFIG_UNIXWARE_DISKLABEL=y
+ # CONFIG_LDM_PARTITION is not set
+-# CONFIG_NEC98_PARTITION is not set
+ # CONFIG_SGI_PARTITION is not set
+ # CONFIG_ULTRIX_PARTITION is not set
+ # CONFIG_SUN_PARTITION is not set
+ # CONFIG_EFI_PARTITION is not set
+-CONFIG_SMB_NLS=y
+-CONFIG_NLS=y
+ 
+ #
+ # Native Language Support
+ #
++CONFIG_NLS=y
+ CONFIG_NLS_DEFAULT="iso8859-1"
+ CONFIG_NLS_CODEPAGE_437=m
+ CONFIG_NLS_CODEPAGE_737=m
+@@ -806,8 +1020,9 @@
+ CONFIG_NLS_CODEPAGE_949=m
+ CONFIG_NLS_CODEPAGE_874=m
+ CONFIG_NLS_ISO8859_8=m
+-# CONFIG_NLS_CODEPAGE_1250 is not set
++CONFIG_NLS_CODEPAGE_1250=m
+ CONFIG_NLS_CODEPAGE_1251=m
++CONFIG_NLS_ASCII=m
+ CONFIG_NLS_ISO8859_1=m
+ CONFIG_NLS_ISO8859_2=m
+ CONFIG_NLS_ISO8859_3=m
+@@ -824,97 +1039,47 @@
+ CONFIG_NLS_UTF8=m
+ 
+ #
+-# Sound
+-#
+-CONFIG_SOUND=y
+-CONFIG_DMASOUND_PAULA=m
+-CONFIG_DMASOUND=m
+-
+-#
+-# Advanced Linux Sound Architecture
+-#
+-# CONFIG_SND is not set
+-
+-#
+-# Open Sound System
+-#
+-CONFIG_SOUND_PRIME=m
+-# CONFIG_SOUND_BT878 is not set
+-# CONFIG_SOUND_CMPCI is not set
+-# CONFIG_SOUND_EMU10K1 is not set
+-# CONFIG_SOUND_FUSION is not set
+-# CONFIG_SOUND_CS4281 is not set
+-# CONFIG_SOUND_ES1370 is not set
+-# CONFIG_SOUND_ES1371 is not set
+-# CONFIG_SOUND_ESSSOLO1 is not set
+-# CONFIG_SOUND_MAESTRO is not set
+-# CONFIG_SOUND_MAESTRO3 is not set
+-# CONFIG_SOUND_ICH is not set
+-# CONFIG_SOUND_RME96XX is not set
+-# CONFIG_SOUND_SONICVIBES is not set
+-# CONFIG_SOUND_TRIDENT is not set
+-# CONFIG_SOUND_MSNDCLAS is not set
+-# CONFIG_SOUND_MSNDPIN is not set
+-# CONFIG_SOUND_VIA82CXXX is not set
+-CONFIG_SOUND_OSS=m
+-CONFIG_SOUND_TRACEINIT=y
+-CONFIG_SOUND_DMAP=y
+-# CONFIG_SOUND_AD1816 is not set
+-# CONFIG_SOUND_SGALAXY is not set
+-# CONFIG_SOUND_ADLIB is not set
+-# CONFIG_SOUND_ACI_MIXER is not set
+-# CONFIG_SOUND_CS4232 is not set
+-# CONFIG_SOUND_SSCAPE is not set
+-# CONFIG_SOUND_GUS is not set
+-CONFIG_SOUND_VMIDI=m
+-# CONFIG_SOUND_TRIX is not set
+-# CONFIG_SOUND_MSS is not set
+-# CONFIG_SOUND_MPU401 is not set
+-# CONFIG_SOUND_NM256 is not set
+-# CONFIG_SOUND_MAD16 is not set
+-# CONFIG_SOUND_PAS is not set
+-# CONFIG_SOUND_PSS is not set
+-# CONFIG_SOUND_SB is not set
+-# CONFIG_SOUND_AWE32_SYNTH is not set
+-# CONFIG_SOUND_WAVEFRONT is not set
+-# CONFIG_SOUND_MAUI is not set
+-# CONFIG_SOUND_YM3812 is not set
+-# CONFIG_SOUND_OPL3SA1 is not set
+-# CONFIG_SOUND_OPL3SA2 is not set
+-# CONFIG_SOUND_YMFPCI is not set
+-# CONFIG_SOUND_UART6850 is not set
+-# CONFIG_SOUND_AEDSP16 is not set
+-
+-#
+-# USB support
+-#
+-# CONFIG_USB is not set
+-# CONFIG_USB_GADGET is not set
+-
+-#
+-# Bluetooth support
+-#
+-# CONFIG_BT is not set
+-
+-#
+ # Library routines
+ #
+-# CONFIG_CRC32 is not set
++CONFIG_CRC_CCITT=y
++CONFIG_CRC32=y
++CONFIG_LIBCRC32C=m
+ CONFIG_ZLIB_INFLATE=y
+ CONFIG_ZLIB_DEFLATE=y
+ 
+ #
++# Profiling support
++#
++# CONFIG_PROFILING is not set
++
++#
+ # Kernel hacking
+ #
+-# CONFIG_DEBUG_KERNEL is not set
+-# CONFIG_KALLSYMS is not set
++# CONFIG_PRINTK_TIME is not set
++CONFIG_DEBUG_KERNEL=y
++CONFIG_MAGIC_SYSRQ=y
++CONFIG_LOG_BUF_SHIFT=14
++# CONFIG_SCHEDSTATS is not set
++# CONFIG_DEBUG_SLAB is not set
++# CONFIG_DEBUG_SPINLOCK is not set
++# CONFIG_DEBUG_SPINLOCK_SLEEP is not set
++# CONFIG_DEBUG_KOBJECT is not set
++# CONFIG_DEBUG_INFO is not set
++# CONFIG_DEBUG_FS is not set
++# CONFIG_XMON is not set
++# CONFIG_BDI_SWITCH is not set
+ 
+ #
+ # Security options
+ #
++# CONFIG_KEYS is not set
+ # CONFIG_SECURITY is not set
+ 
+ #
+ # Cryptographic options
+ #
+ # CONFIG_CRYPTO is not set
++
++#
++# Hardware crypto devices
++#
+diff -Nur -x CVS linux-2.6.12/arch/ppc/kernel/entry.S 2.6/arch/ppc/kernel/entry.S
+--- linux-2.6.12/arch/ppc/kernel/entry.S	2005-06-17 21:48:29.000000000 +0200
++++ 2.6/arch/ppc/kernel/entry.S	2005-07-31 03:18:11.000000000 +0200
+@@ -1026,3 +1026,6 @@
+ 	/* XXX load up BATs and panic */
+ 
+ #endif /* CONFIG_PPC_OF */
++
++	.global	__head_end
++__head_end:
+diff -Nur -x CVS linux-2.6.12/arch/ppc/kernel/head.S 2.6/arch/ppc/kernel/head.S
+--- linux-2.6.12/arch/ppc/kernel/head.S	2005-06-17 21:48:29.000000000 +0200
++++ 2.6/arch/ppc/kernel/head.S	2005-08-04 01:40:55.000000000 +0200
+@@ -353,6 +353,28 @@
+ #if defined(CONFIG_GEMINI) && defined(CONFIG_SMP)
+ 	. = 0x100
+ 	b	__secondary_start_gemini
++#elif defined(CONFIG_APUS)
++	. = 0x100
++	mfspr	r4,SPRN_HID0
++	li	r3,0
++	ori	r3,r3,0xc000
++	andc	r4,r4,r3
++	mtspr	SPRN_HID0,r4
++	isync
++	sync
++	lis	r8,0x6170
++	ori	r8,r8,0x7573
++	lis	r9,0xfff0
++	lwz	r9,0x1f8(r9)
++	lis	r1,init_thread_union@ha
++	addi	r1,r1,init_thread_union@l
++	addi	r1,r1,THREAD_SIZE-STACK_FRAME_OVERHEAD
++	subis	r1,r1,KERNELBASE@h
++	add	r1,r1,r9
++	mr	r3,r8
++	mr	r4,r9
++	mtlr	r4
++	blrl
+ #else
+ 	EXCEPTION(0x100, Reset, UnknownException, EXC_XFER_STD)
+ #endif
+@@ -408,7 +430,15 @@
+ 	bne	1f			/* if not, try to put a PTE */
+ 	mfspr	r4,SPRN_DAR		/* into the hash table */
+ 	rlwinm	r3,r10,32-15,21,21	/* DSISR_STORE -> _PAGE_RW */
++#ifndef CONFIG_APUS
+ 	bl	hash_page
++#else
++	lis     r5,hash_page@h
++	ori	r5,r5,hash_page@l
++	tophys(r5,r5)
++	mtlr	r5
++	blrl
++#endif
+ 1:	stw	r10,_DSISR(r11)
+ 	mr	r5,r10
+ 	mfspr	r4,SPRN_DAR
+@@ -433,7 +463,15 @@
+ 	beq	1f			/* if so, try to put a PTE */
+ 	li	r3,0			/* into the hash table */
+ 	mr	r4,r12			/* SRR0 is fault address */
++#ifndef CONFIG_APUS
+ 	bl	hash_page
++#else
++	lis     r5,hash_page@h
++	ori	r5,r5,hash_page@l
++	tophys(r5,r5)
++	mtlr	r5
++	blrl
++#endif
+ 1:	mr	r4,r12
+ 	mr	r5,r9
+ 	EXC_XFER_EE_LITE(0x400, handle_page_fault)
+@@ -1201,19 +1239,6 @@
+ 	bl	machine_init
+ 	bl	MMU_init
+ 
+-#ifdef CONFIG_APUS
+-	/* Copy exception code to exception vector base on APUS. */
+-	lis	r4,KERNELBASE@h
+-#ifdef CONFIG_APUS_FAST_EXCEPT
+-	lis	r3,0xfff0		/* Copy to 0xfff00000 */
+-#else
+-	lis	r3,0			/* Copy to 0x00000000 */
+-#endif
+-	li	r5,0x4000		/* # bytes of memory to copy */
+-	li	r6,0
+-	bl	copy_and_flush		/* copy the first 0x4000 bytes */
+-#endif  /* CONFIG_APUS */
+-
+ /*
+  * Go back to running unmapped so we can load up new values
+  * for SDR1 (hash table pointer) and the segment registers
+@@ -1231,6 +1256,22 @@
+ /* Load up the kernel context */
+ 2:	bl	load_up_mmu
+ 
++#ifdef CONFIG_APUS
++	/* Copy exception code to exception vector base on APUS. */
++	lis	r4,KERNELBASE@h
++	tophys(r4,r4)
++#ifdef CONFIG_APUS_FAST_EXCEPT
++	lis	r3,0xfff0		/* Copy to 0xfff00000 */
++#else
++	lis	r3,0			/* Copy to 0x00000000 */
++#endif
++	lis	r5,__head_end@h		/* # bytes of memory to copy */
++	ori	r5,r5,__head_end@l
++	subis	r5,r5,KERNELBASE@h
++	li	r6,0
++	bl	copy_and_flush		/* copy the first 0x4000 bytes */
++#endif  /* CONFIG_APUS */
++
+ #ifdef CONFIG_BDI_SWITCH
+ 	/* Add helper information for the Abatron bdiGDB debugger.
+ 	 * We do this here because we know the mmu is disabled, and
+@@ -1411,6 +1452,17 @@
+ 	mtspr	SPRN_DBAT0U,r11		/* bit in upper BAT register */
+ 	mtspr	SPRN_IBAT0L,r8
+ 	mtspr	SPRN_IBAT0U,r11
++#ifdef CONFIG_APUS
++	/* map ZII space for early debug prints */
++	lis	r8,0x8000
++	ori	r8,r8,0x01ff
++	mtspr	SPRN_DBAT2U,r8
++	mtspr	SPRN_IBAT2U,r8
++	lis	r8,0x0000
++	ori	r8,r8,0x002a
++	mtspr	SPRN_DBAT2L,r8
++	mtspr	SPRN_IBAT2L,r8
++#endif
+ 	isync
+ 	blr
+ 
+diff -Nur -x CVS linux-2.6.12/arch/ppc/kernel/Makefile 2.6/arch/ppc/kernel/Makefile
+--- linux-2.6.12/arch/ppc/kernel/Makefile	2005-06-17 21:48:29.000000000 +0200
++++ 2.6/arch/ppc/kernel/Makefile	2005-07-31 03:18:11.000000000 +0200
+@@ -9,10 +9,11 @@
+ extra-$(CONFIG_8xx)		:= head_8xx.o
+ extra-$(CONFIG_6xx)		+= idle_6xx.o
+ extra-$(CONFIG_POWER4)		+= idle_power4.o
++extra-y				+= entry.o
+ extra-$(CONFIG_PPC_FPU)		+= fpu.o
+ extra-y				+= vmlinux.lds
+ 
+-obj-y				:= entry.o traps.o irq.o idle.o time.o misc.o \
++obj-y				:= traps.o irq.o idle.o time.o misc.o \
+ 					process.o signal.o ptrace.o align.o \
+ 					semaphore.o syscalls.o setup.o \
+ 					cputable.o ppc_htab.o perfmon.o
+diff -Nur -x CVS linux-2.6.12/arch/ppc/kernel/misc.S 2.6/arch/ppc/kernel/misc.S
+--- linux-2.6.12/arch/ppc/kernel/misc.S	2005-06-17 21:48:29.000000000 +0200
++++ 2.6/arch/ppc/kernel/misc.S	2005-07-31 03:18:12.000000000 +0200
+@@ -1368,7 +1368,11 @@
+ 	.long sys_fstat64
+ 	.long sys_pciconfig_read
+ 	.long sys_pciconfig_write
++#ifdef CONFIG_PCI
+ 	.long sys_pciconfig_iobase 	/* 200 */
++#else
++	.long sys_ni_syscall
++#endif
+ 	.long sys_ni_syscall		/* 201 - reserved - MacOnLinux - new */
+ 	.long sys_getdents64
+ 	.long sys_pivot_root
+diff -Nur -x CVS linux-2.6.12/arch/ppc/kernel/ppc_ksyms.c 2.6/arch/ppc/kernel/ppc_ksyms.c
+--- linux-2.6.12/arch/ppc/kernel/ppc_ksyms.c	2005-06-17 21:48:29.000000000 +0200
++++ 2.6/arch/ppc/kernel/ppc_ksyms.c	2005-07-31 03:18:12.000000000 +0200
+@@ -69,8 +69,6 @@
+ long long __ashldi3(long long, int);
+ long long __lshrdi3(long long, int);
+ 
+-extern unsigned long mm_ptov (unsigned long paddr);
+-
+ EXPORT_SYMBOL(clear_pages);
+ EXPORT_SYMBOL(clear_user_page);
+ EXPORT_SYMBOL(do_signal);
+@@ -147,7 +145,6 @@
+ EXPORT_SYMBOL(_insl_ns);
+ EXPORT_SYMBOL(_outsl_ns);
+ EXPORT_SYMBOL(iopa);
+-EXPORT_SYMBOL(mm_ptov);
+ EXPORT_SYMBOL(ioremap);
+ #ifdef CONFIG_44x
+ EXPORT_SYMBOL(ioremap64);
+diff -Nur -x CVS linux-2.6.12/arch/ppc/kernel/setup.c 2.6/arch/ppc/kernel/setup.c
+--- linux-2.6.12/arch/ppc/kernel/setup.c	2005-06-17 21:48:29.000000000 +0200
++++ 2.6/arch/ppc/kernel/setup.c	2005-08-04 01:42:52.000000000 +0200
+@@ -550,6 +550,7 @@
+ #endif /* CONFIG_SERIAL_CORE_CONSOLE */
+ #endif /* CONFIG_PPC_MULTIPLATFORM */
+ 
++#ifndef CONFIG_APUS
+ struct bi_record *find_bootinfo(void)
+ {
+ 	struct bi_record *rec;
+@@ -601,6 +602,7 @@
+ 		rec = (struct bi_record *)((ulong)rec + rec->size);
+ 	}
+ }
++#endif
+ 
+ /*
+  * Find out what kind of machine we're on and save any data we need
+diff -Nur -x CVS linux-2.6.12/arch/ppc/kernel/time.c 2.6/arch/ppc/kernel/time.c
+--- linux-2.6.12/arch/ppc/kernel/time.c	2005-06-17 21:48:29.000000000 +0200
++++ 2.6/arch/ppc/kernel/time.c	2005-07-31 03:18:12.000000000 +0200
+@@ -150,6 +150,7 @@
+ 		tb_last_stamp = jiffy_stamp;
+ 		do_timer(regs);
+ 
++#ifndef CONFIG_APUS
+ 		/*
+ 		 * update the rtc when needed, this should be performed on the
+ 		 * right fraction of a second. Half or full second ?
+@@ -176,6 +177,7 @@
+ 				/* Try again one minute later */
+ 				last_rtc_update += 60;
+ 		}
++#endif
+ 		write_sequnlock(&xtime_lock);
+ 	}
+ 	if ( !disarm_decr[smp_processor_id()] )
+diff -Nur -x CVS linux-2.6.12/arch/ppc/Makefile 2.6/arch/ppc/Makefile
+--- linux-2.6.12/arch/ppc/Makefile	2005-06-17 21:48:29.000000000 +0200
++++ 2.6/arch/ppc/Makefile	2005-07-31 03:18:11.000000000 +0200
+@@ -51,6 +51,8 @@
+ head-$(CONFIG_44x)		:= arch/ppc/kernel/head_44x.o
+ head-$(CONFIG_FSL_BOOKE)	:= arch/ppc/kernel/head_fsl_booke.o
+ 
++head-y				+= arch/ppc/mm/hashtable.o
++head-y				+= arch/ppc/kernel/entry.o
+ head-$(CONFIG_6xx)		+= arch/ppc/kernel/idle_6xx.o
+ head-$(CONFIG_POWER4)		+= arch/ppc/kernel/idle_power4.o
+ head-$(CONFIG_PPC_FPU)		+= arch/ppc/kernel/fpu.o
+@@ -73,7 +75,9 @@
+ 
+ .PHONY: $(BOOT_TARGETS)
+ 
++ifndef CONFIG_APUS
+ all: uImage zImage
++endif
+ 
+ CPPFLAGS_vmlinux.lds	:= -Upowerpc
+ 
+diff -Nur -x CVS linux-2.6.12/arch/ppc/mm/init.c 2.6/arch/ppc/mm/init.c
+--- linux-2.6.12/arch/ppc/mm/init.c	2005-06-17 21:48:29.000000000 +0200
++++ 2.6/arch/ppc/mm/init.c	2005-07-31 03:18:12.000000000 +0200
+@@ -61,9 +61,6 @@
+ unsigned long total_memory;
+ unsigned long total_lowmem;
+ 
+-unsigned long ppc_memstart;
+-unsigned long ppc_memoffset = PAGE_OFFSET;
+-
+ int mem_init_done;
+ int init_bootmem_done;
+ int boot_mapsize;
+diff -Nur -x CVS linux-2.6.12/arch/ppc/mm/Makefile 2.6/arch/ppc/mm/Makefile
+--- linux-2.6.12/arch/ppc/mm/Makefile	2005-06-17 21:48:29.000000000 +0200
++++ 2.6/arch/ppc/mm/Makefile	2004-09-25 23:09:43.000000000 +0200
+@@ -5,7 +5,8 @@
+ obj-y				:= fault.o init.o mem_pieces.o \
+ 					mmu_context.o pgtable.o
+ 
+-obj-$(CONFIG_PPC_STD_MMU)	+= hashtable.o ppc_mmu.o tlb.o
++extra-$(CONFIG_PPC_STD_MMU)	:= hashtable.o
++obj-$(CONFIG_PPC_STD_MMU)	+= ppc_mmu.o tlb.o
+ obj-$(CONFIG_40x)		+= 4xx_mmu.o
+ obj-$(CONFIG_44x)		+= 44x_mmu.o
+ obj-$(CONFIG_FSL_BOOKE)		+= fsl_booke_mmu.o
+diff -Nur -x CVS linux-2.6.12/arch/ppc/mm/pgtable.c 2.6/arch/ppc/mm/pgtable.c
+--- linux-2.6.12/arch/ppc/mm/pgtable.c	2005-06-17 21:48:29.000000000 +0200
++++ 2.6/arch/ppc/mm/pgtable.c	2005-07-31 03:18:12.000000000 +0200
+@@ -191,8 +191,8 @@
+ 	 * Don't allow anybody to remap normal RAM that we're using.
+ 	 * mem_init() sets high_memory so only do the check after that.
+ 	 */
+-	if ( mem_init_done && (p < virt_to_phys(high_memory)) )
+-	{
++	if (mem_init_done && (p + size >= virt_to_phys(KERNELBASE)) &&
++	    (p < virt_to_phys(high_memory))) {
+ 		printk("__ioremap(): phys addr "PHYS_FMT" is RAM lr %p\n", p,
+ 		       __builtin_return_address(0));
+ 		return NULL;
+@@ -430,42 +430,3 @@
+ 
+ 	return(pa);
+ }
+-
+-/* This is will find the virtual address for a physical one....
+- * Swiped from APUS, could be dangerous :-).
+- * This is only a placeholder until I really find a way to make this
+- * work.  -- Dan
+- */
+-unsigned long
+-mm_ptov (unsigned long paddr)
+-{
+-	unsigned long ret;
+-#if 0
+-	if (paddr < 16*1024*1024)
+-		ret = ZTWO_VADDR(paddr);
+-	else {
+-		int i;
+-
+-		for (i = 0; i < kmap_chunk_count;){
+-			unsigned long phys = kmap_chunks[i++];
+-			unsigned long size = kmap_chunks[i++];
+-			unsigned long virt = kmap_chunks[i++];
+-			if (paddr >= phys
+-			    && paddr < (phys + size)){
+-				ret = virt + paddr - phys;
+-				goto exit;
+-			}
+-		}
+-	
+-		ret = (unsigned long) __va(paddr);
+-	}
+-exit:
+-#ifdef DEBUGPV
+-	printk ("PTOV(%lx)=%lx\n", paddr, ret);
+-#endif
+-#else
+-	ret = (unsigned long)paddr + KERNELBASE;
+-#endif
+-	return ret;
+-}
+-
+diff -Nur -x CVS linux-2.6.12/arch/ppc/platforms/apus_setup.c 2.6/arch/ppc/platforms/apus_setup.c
+--- linux-2.6.12/arch/ppc/platforms/apus_setup.c	2005-06-17 21:48:29.000000000 +0200
++++ 2.6/arch/ppc/platforms/apus_setup.c	2005-08-04 01:43:41.000000000 +0200
+@@ -17,11 +17,14 @@
+ #include <linux/kernel.h>
+ #include <linux/sched.h>
+ #include <linux/init.h>
++#include <linux/interrupt.h>
++#include <linux/irq.h>
+ #include <linux/initrd.h>
++#include <linux/module.h>
+ #include <linux/seq_file.h>
+ 
+ /* Needs INITSERIAL call in head.S! */
+-#undef APUS_DEBUG
++#define APUS_DEBUG
+ 
+ #include <asm/bootinfo.h>
+ #include <asm/setup.h>
+@@ -32,52 +35,26 @@
+ #include <asm/dma.h>
+ #include <asm/machdep.h>
+ #include <asm/time.h>
++#include <asm/tlbflush.h>
+ 
+ unsigned long m68k_machtype;
+ char debug_device[6] = "";
+ 
+-extern void amiga_init_IRQ(void);
+-
+-extern void apus_setup_pci_ptrs(void);
+-
+-void (*mach_sched_init) (void (*handler)(int, void *, struct pt_regs *)) __initdata = NULL;
+-/* machine dependent irq functions */
+-void (*mach_init_IRQ) (void) __initdata = NULL;
+-void (*(*mach_default_handler)[]) (int, void *, struct pt_regs *) = NULL;
+-void (*mach_get_model) (char *model) = NULL;
+-int (*mach_get_hardware_list) (char *buffer) = NULL;
+-int (*mach_get_irq_list) (struct seq_file *, void *) = NULL;
+-void (*mach_process_int) (int, struct pt_regs *) = NULL;
+-/* machine dependent timer functions */
+-unsigned long (*mach_gettimeoffset) (void);
+-void (*mach_gettod) (int*, int*, int*, int*, int*, int*);
+-int (*mach_hwclk) (int, struct hwclk_time*) = NULL;
+-int (*mach_set_clock_mmss) (unsigned long) = NULL;
+-void (*mach_reset)( void );
+-long mach_max_dma_address = 0x00ffffff; /* default set to the lower 16MB */
+-#if defined(CONFIG_AMIGA_FLOPPY)
+-void (*mach_floppy_setup) (char *, int *) __initdata = NULL;
+-#endif
+-#ifdef CONFIG_HEARTBEAT
+-void (*mach_heartbeat) (int) = NULL;
+-extern void apus_heartbeat (void);
+-#endif
+-
+-extern unsigned long amiga_model;
+-extern unsigned decrementer_count;/* count value for 1e6/HZ microseconds */
+-extern unsigned count_period_num; /* 1 decrementer count equals */
+-extern unsigned count_period_den; /* count_period_num / count_period_den us */
+-
+ int num_memory = 0;
+ struct mem_info memory[NUM_MEMINFO];/* memory description */
+ /* FIXME: Duplicate memory data to avoid conflicts with m68k shared code. */
+ int m68k_realnum_memory = 0;
+ struct mem_info m68k_memory[NUM_MEMINFO];/* memory description */
+ 
++unsigned long ppc_memstart;
++unsigned long ppc_pgstart;
++unsigned long ppc_memoffset;
++
++EXPORT_SYMBOL(ppc_memoffset);
++EXPORT_SYMBOL(ppc_pgstart);
++
+ struct mem_info ramdisk;
+ 
+-extern void amiga_floppy_setup(char *, int *);
+-extern void config_amiga(void);
+ 
+ static int __60nsram = 0;
+ 
+@@ -92,25 +69,43 @@
+  */
+ unsigned long apus_get_rtc_time(void)
+ {
+-#ifdef CONFIG_APUS
+-	extern unsigned long m68k_get_rtc_time(void);
++	struct rtc_time t;
+ 
+-	return m68k_get_rtc_time ();
+-#else
+-	return 0;
+-#endif
++	amiga_hwclk(0, &t);
++	t.tm_year += 1900;
++
++	return mktime(t.tm_year, t.tm_mon, t.tm_mday,
++		      t.tm_hour, t.tm_min, t.tm_sec);
+ }
+ 
+ int apus_set_rtc_time(unsigned long nowtime)
+ {
+-#ifdef CONFIG_APUS
+-	extern int m68k_set_rtc_time(unsigned long nowtime);
++	return amiga_set_clock_mmss(nowtime);
++}
+ 
+-	return m68k_set_rtc_time (nowtime);
+-#else
+-	return 0;
+-#endif
++#ifdef CONFIG_HEARTBEAT
++static void apus_heartbeat(void)
++{
++	static unsigned cnt = 0, period = 0, dist = 0;
++
++	if (cnt == 0 || cnt == dist)
++		ciaa.pra &= ~2;
++	else if (cnt == 7 || cnt == dist + 7)
++		ciaa.pra |= 2;
++
++	if (++cnt > period) {
++		cnt = 0;
++		/* The hyperbolic function below modifies the heartbeat period
++		 * length in dependency of the current (5min) load. It goes
++		 * through the points f(0)=126, f(1)=86, f(5)=51,
++		 * f(inf)->30. */
++		period = ((672<<FSHIFT) / (5*avenrun[0] + (7<<FSHIFT))) + 30;
++		dist = period / 4;
++	}
++	/* should be made smarter */
++	ppc_md.heartbeat_count = 1;
+ }
++#endif
+ 
+ /*********************************************************** SETUP */
+ /* From arch/m68k/kernel/setup.c. */
+@@ -206,8 +201,8 @@
+ 
+ void apus_calibrate_decr(void)
+ {
+-#ifdef CONFIG_APUS
+ 	unsigned long freq;
++	unsigned int tmp;
+ 
+ 	/* This algorithm for determining the bus speed was
+            contributed by Ralph Schmidt. */
+@@ -239,15 +234,34 @@
+ 		freq = 15000000;
+ 	} else if ((bus_speed >= 63) && (bus_speed < 69)) {
+ 		bus_speed = 67;
+-		freq = 16666667;
++		freq = 16500000;
+ 	} else {
+ 		printk ("APUS: Unable to determine bus speed (%d). "
+-			"Defaulting to 50MHz", bus_speed);
++			"Defaulting to 50MHz\n", bus_speed);
+ 		bus_speed = 50;
+ 		freq = 12500000;
+ 		speed_test_failed = 1;
+ 	}
+ 
++	ciab.cra = (ciab.cra & 0xc0) | 0x08;
++	ciab.icr;
++	wmb();
++	ciab.talo = 0;
++	wmb();
++	ciab.tahi = 0x80;
++	wmb();
++
++	get_current_tb(&start);
++	while (!(ciab.icr & 1))
++		barrier();
++	get_current_tb(&stop);
++
++	tmp = stop - start;
++	start = tmp * amiga_eclock;
++	stop = mulhwu(tmp, amiga_eclock);
++	start += stop << 32;
++	freq = start / 0x8000;
++
+ 	/* Ease diagnostics... */
+ 	{
+ 		extern int __map_without_bats;
+@@ -285,36 +299,8 @@
+ 
+ 	__bus_speed = bus_speed;
+ 	__speed_test_failed = speed_test_failed;
+-#endif
+-}
+-
+-void arch_gettod(int *year, int *mon, int *day, int *hour,
+-		 int *min, int *sec)
+-{
+-#ifdef CONFIG_APUS
+-	if (mach_gettod)
+-		mach_gettod(year, mon, day, hour, min, sec);
+-	else
+-		*year = *mon = *day = *hour = *min = *sec = 0;
+-#endif
+ }
+ 
+-/* for "kbd-reset" cmdline param */
+-__init
+-void kbd_reset_setup(char *str, int *ints)
+-{
+-}
+-
+-/*********************************************************** FLOPPY */
+-#if defined(CONFIG_AMIGA_FLOPPY)
+-__init
+-void floppy_setup(char *str, int *ints)
+-{
+-	if (mach_floppy_setup)
+-		mach_floppy_setup (str, ints);
+-}
+-#endif
+-
+ /*********************************************************** MEMORY */
+ #define KMAP_MAX 32
+ unsigned long kmap_chunks[KMAP_MAX*3];
+@@ -330,26 +316,22 @@
+ 	va &= PAGE_MASK;
+ 
+ 	dir = pgd_offset( mm, va );
+-	if (dir)
+-	{
++	if (dir) {
+ 		pmd = pmd_offset(dir, va & PAGE_MASK);
+ 		if (pmd && pmd_present(*pmd))
+-		{
+-			pte = pte_offset(pmd, va);
+-		}
++			pte = pte_offset_kernel(pmd, va);
+ 	}
+ 	return pte;
+ }
+ 
+ 
+ /* Again simulating an m68k/mm/kmap.c function. */
+-void kernel_set_cachemode( unsigned long address, unsigned long size,
+-			   unsigned int cmode )
++void kernel_set_cachemode(unsigned long address, unsigned long size,
++			  unsigned int cmode)
+ {
+-	unsigned long mask, flags;
++	unsigned long mask, flags, end;
+ 
+-	switch (cmode)
+-	{
++	switch (cmode) {
+ 	case IOMAP_FULL_CACHING:
+ 		mask = ~(_PAGE_NO_CACHE | _PAGE_GUARDED);
+ 		flags = 0;
+@@ -359,60 +341,29 @@
+ 		flags = (_PAGE_NO_CACHE | _PAGE_GUARDED);
+ 		break;
+ 	default:
+-		panic ("kernel_set_cachemode() doesn't support mode %d\n",
+-		       cmode);
++		panic("kernel_set_cachemode() doesn't support mode %d\n", cmode);
+ 		break;
+ 	}
+ 
+-	size /= PAGE_SIZE;
++	end = address + size;
+ 	address &= PAGE_MASK;
+-	while (size--)
+-	{
++	while (address < end) {
+ 		pte_t *pte;
+ 
+ 		pte = my_find_pte(&init_mm, address);
+-		if ( !pte )
+-		{
++		if (!pte) {
+ 			printk("pte NULL in kernel_set_cachemode()\n");
+ 			return;
+ 		}
+ 
+-                pte_val (*pte) &= mask;
+-                pte_val (*pte) |= flags;
++                pte_val(*pte) &= mask;
++                pte_val(*pte) |= flags;
+                 flush_tlb_page(find_vma(&init_mm,address),address);
+ 
+ 		address += PAGE_SIZE;
+ 	}
+ }
+ 
+-unsigned long mm_ptov (unsigned long paddr)
+-{
+-	unsigned long ret;
+-	if (paddr < 16*1024*1024)
+-		ret = ZTWO_VADDR(paddr);
+-	else {
+-		int i;
+-
+-		for (i = 0; i < kmap_chunk_count;){
+-			unsigned long phys = kmap_chunks[i++];
+-			unsigned long size = kmap_chunks[i++];
+-			unsigned long virt = kmap_chunks[i++];
+-			if (paddr >= phys
+-			    && paddr < (phys + size)){
+-				ret = virt + paddr - phys;
+-				goto exit;
+-			}
+-		}
+-
+-		ret = (unsigned long) __va(paddr);
+-	}
+-exit:
+-#ifdef DEBUGPV
+-	printk ("PTOV(%lx)=%lx\n", paddr, ret);
+-#endif
+-	return ret;
+-}
+-
+ int mm_end_of_chunk (unsigned long addr, int len)
+ {
+ 	if (memory[0].addr + memory[0].size == addr + len)
+@@ -422,11 +373,10 @@
+ 
+ /*********************************************************** CACHE */
+ 
+-#define L1_CACHE_BYTES 32
+ #define MAX_CACHE_SIZE 8192
+-void cache_push(__u32 addr, int length)
++void cache_push(u32 paddr, int length)
+ {
+-	addr = mm_ptov(addr);
++	char *addr = __va(paddr);
+ 
+ 	if (MAX_CACHE_SIZE < length)
+ 		length = MAX_CACHE_SIZE;
+@@ -443,12 +393,14 @@
+ 	       : : "r" (addr));
+ }
+ 
+-void cache_clear(__u32 addr, int length)
++void cache_clear(u32 paddr, int length)
+ {
++	char *addr;
++
+ 	if (MAX_CACHE_SIZE < length)
+ 		length = MAX_CACHE_SIZE;
+ 
+-	addr = mm_ptov(addr);
++	addr = __va(paddr);
+ 
+ 	__asm ("dcbf 0,%0\n\t"
+ 	       "sync \n\t"
+@@ -518,6 +470,8 @@
+ 	level = (ipl_emu >> 3) & IPLEMU_IPLMASK;
+ 	mask = IPLEMU_SETRESET|IPLEMU_DISABLEINT|level;
+ 	level ^= 7;
++	if (!level)
++		return -1;
+ 
+ 	/* Save previous IPL value */
+ 	if (last_ipl[level])
+@@ -535,6 +489,15 @@
+ 	return level + IRQ_AMIGA_AUTO;
+ }
+ 
++unsigned int apus_startup_irq(unsigned int irq)
++{
++	return 0;
++}
++
++void apus_ack_irq(unsigned int irq)
++{
++}
++
+ void apus_end_irq(unsigned int irq)
+ {
+ 	unsigned char ipl_emu;
+@@ -646,10 +609,12 @@
+ 	__debug_ser_out('\r');
+ }
+ 
++#ifdef APUS_DEBUG
+ static void apus_progress(char *s, unsigned short value)
+ {
+ 	__debug_print_string(s);
+ }
++#endif
+ 
+ /****************************************************** init */
+ 
+@@ -664,6 +629,8 @@
+ 
+ struct hw_interrupt_type amiga_sys_irqctrl = {
+ 	.typename = "Amiga IPL",
++	.startup = apus_startup_irq,
++	.ack = apus_ack_irq,
+ 	.end = apus_end_irq,
+ };
+ 
+@@ -677,33 +644,32 @@
+ unsigned long __init apus_find_end_of_memory(void)
+ {
+ 	int shadow = 0;
+-	unsigned long total;
++	unsigned long total, size;
+ 
+ 	/* The memory size reported by ADOS excludes the 512KB
+ 	   reserved for PPC exception registers and possibly 512KB
+ 	   containing a shadow of the ADOS ROM. */
+-	{
+-		unsigned long size = memory[0].size;
+-
+-		/* If 2MB aligned, size was probably user
+-                   specified. We can't tell anything about shadowing
+-                   in this case so skip shadow assignment. */
+-		if (0 != (size & 0x1fffff)){
+-			/* Align to 512KB to ensure correct handling
+-			   of both memfile and system specified
+-			   sizes. */
+-			size = ((size+0x0007ffff) & 0xfff80000);
+-			/* If memory is 1MB aligned, assume
+-                           shadowing. */
+-			shadow = !(size & 0x80000);
+-		}
++	size = memory[0].size;
+ 
+-		/* Add the chunk that ADOS does not see. by aligning
+-                   the size to the nearest 2MB limit upwards.  */
+-		memory[0].size = ((size+0x001fffff) & 0xffe00000);
+-	}
++	/* If 2MB aligned, size was probably user
++	   specified. We can't tell anything about shadowing
++	   in this case so skip shadow assignment. */
++	if (size & 0x1fffff){
++		/* Align to 512KB to ensure correct handling
++		   of both memfile and system specified
++		   sizes. */
++		size = ((size+0x0007ffff) & 0xfff80000);
++		/* If memory is 1MB aligned, assume
++		   shadowing. */
++		shadow = !(size & 0x80000);
++	}
++
++	/* Add the chunk that ADOS does not see. by aligning
++	   the size to the nearest 2MB limit upwards.  */
++	memory[0].size = (size + 0x001fffff) & 0xffe00000;
+ 
+ 	ppc_memstart = memory[0].addr;
++	ppc_pgstart = memory[0].addr >> PAGE_SHIFT;
+ 	ppc_memoffset = PAGE_OFFSET - PPC_MEMSTART;
+ 	total = memory[0].size;
+ 
+diff -Nur -x CVS linux-2.6.12/arch/ppc/platforms/ivms8.h 2.6/arch/ppc/platforms/ivms8.h
+--- linux-2.6.12/arch/ppc/platforms/ivms8.h	2005-06-17 21:48:29.000000000 +0200
++++ 2.6/arch/ppc/platforms/ivms8.h	2004-02-01 00:24:09.000000000 +0100
+@@ -40,8 +40,7 @@
+ #define IDE0_BASE_OFFSET		0x0000	/* Offset in PCMCIA memory */
+ #define IDE0_DATA_REG_OFFSET		0x0000
+ #define IDE0_ERROR_REG_OFFSET		0x0081
+-#define IDE0_NSECTOR_REG_OFFSET		0x0082
+-#define IDE0_SECTOR_REG_OFFSET		0x0083
++#define IDE0_NSECTOR_REG_OFFine ID0_SEC#define IDE0_SECTOR_REG_OFFSET		0x0083
+ #define IDE0_LCYL_REG_OFFSET		0x0084
+ #define IDE0_HCYL_REG_OFFSET		0x0085
+ #define IDE0_SELECT_REG_OFFSET		0x0086
+diff -Nur -x CVS linux-2.6.12/drivers/block/amiflop.c 2.6/drivers/block/amiflop.c
+--- linux-2.6.12/drivers/block/amiflop.c	2005-06-17 21:48:29.000000000 +0200
++++ 2.6/drivers/block/amiflop.c	2005-07-31 01:06:43.000000000 +0200
+@@ -59,6 +59,7 @@
+ #include <linux/hdreg.h>
+ #include <linux/delay.h>
+ #include <linux/init.h>
++#include <linux/interrupt.h>
+ #include <linux/amifdreg.h>
+ #include <linux/amifd.h>
+ #include <linux/buffer_head.h>
+diff -Nur -x CVS linux-2.6.12/drivers/net/wan/sdla.c 2.6/drivers/net/wan/sdla.c
+--- linux-2.6.12/drivers/net/wan/sdla.c	2005-06-17 21:48:29.000000000 +0200
++++ 2.6/drivers/net/wan/sdla.c	2005-07-30 23:51:18.000000000 +0200
+@@ -128,7 +128,7 @@
+ 
+ 		addr += bytes;
+ 		temp += bytes;
+-		len  -= bic v;
++		len  -= bytes;
+ 	}
+ }
+ 
+diff -Nur -x CVS linux-2.6.12/include/asm-m68k/bootinfo.h 2.6/include/asm-m68k/bootinfo.h
+--- linux-2.6.12/include/asm-m68k/bootinfo.h	2005-06-17 21:48:29.000000000 +0200
++++ 2.6/include/asm-m68k/bootinfo.h	2005-07-30 22:49:24.000000000 +0200
+@@ -81,6 +81,8 @@
+ #define BI_AMIGA_ECLOCK		0x8005	/* EClock frequency (u_long) */
+ #define BI_AMIGA_CHIPSET	0x8006	/* native chipset present (u_long) */
+ #define BI_AMIGA_SERPER		0x8007	/* serial port period (u_short) */
++#define BI_AMIGA_PUP_BRIDGE	0x8008	/* powerup bridge (u_short) */
++#define BI_AMIGA_BPPC_SCSI	0x8009	/* blizzard ppc scsi*/
+ 
+     /*
+      *  Atari-specific tags
+diff -Nur -x CVS linux-2.6.12/include/asm-ppc/amigahw.h 2.6/include/asm-ppc/amigahw.h
+--- linux-2.6.12/include/asm-ppc/amigahw.h	2005-06-17 21:48:29.000000000 +0200
++++ 2.6/include/asm-ppc/amigahw.h	2004-07-03 19:59:46.000000000 +0200
+@@ -1,6 +1,6 @@
+-#ifdef __KERNEL__
+ #ifndef __ASMPPC_AMIGAHW_H
+ #define __ASMPPC_AMIGAHW_H
++#ifdef __KERNEL__
+ 
+ #include <linux/config.h>
+ #include <asm-m68k/amigahw.h>
+@@ -12,6 +12,13 @@
+ #define CHIP_PHYSADDR      (0x004000)
+ #endif
+ 
++struct rtc_time;
++
++extern void amiga_init_IRQ(void);
++extern int amiga_hwclk(int, struct rtc_time *);
++extern int amiga_set_clock_mmss (unsigned long nowtime);
++extern void config_amiga(void);
++extern void apus_setup_pci_ptrs(void);
+ 
+-#endif /* __ASMPPC_AMIGAHW_H */
+ #endif /* __KERNEL__ */
++#endif /* __ASMPPC_AMIGAHW_H */
+diff -Nur -x CVS linux-2.6.12/include/asm-ppc/bootinfo.h 2.6/include/asm-ppc/bootinfo.h
+--- linux-2.6.12/include/asm-ppc/bootinfo.h	2005-06-17 21:48:29.000000000 +0200
++++ 2.6/include/asm-ppc/bootinfo.h	2004-02-21 22:42:00.000000000 +0100
+@@ -36,7 +36,6 @@
+ extern void bootinfo_init(struct bi_record *rec);
+ extern void bootinfo_append(unsigned long tag, unsigned long size, void * data);
+ extern void parse_bootinfo(struct bi_record *rec);
+-extern unsigned long boot_mem_size;
+ 
+ static inline struct bi_record *
+ bootinfo_addr(unsigned long offset)
+@@ -47,6 +46,7 @@
+ }
+ #endif /* CONFIG_APUS */
+ 
++extern unsigned long boot_mem_size;
+ 
+ #endif /* _PPC_BOOTINFO_H */
+ #endif /* __KERNEL__ */
+diff -Nur -x CVS linux-2.6.12/include/asm-ppc/current.h 2.6/include/asm-ppc/current.h
+--- linux-2.6.12/include/asm-ppc/current.h	2005-06-17 21:48:29.000000000 +0200
++++ 2.6/include/asm-ppc/current.h	2004-02-04 22:21:36.000000000 +0100
+@@ -1,11 +1,11 @@
+-#ifdef __KERNEL__
+ #ifndef _PPC_CURRENT_H
+ #define _PPC_CURRENT_H
++#ifdef __KERNEL__
+ 
+ /*
+  * We keep `current' in r2 for speed.
+  */
+ register struct task_struct *current asm ("r2");
+ 
+-#endif /* !(_PPC_CURRENT_H) */
+ #endif /* __KERNEL__ */
++#endif /* !(_PPC_CURRENT_H) */
+diff -Nur -x CVS linux-2.6.12/include/asm-ppc/io.h 2.6/include/asm-ppc/io.h
+--- linux-2.6.12/include/asm-ppc/io.h	2005-06-17 21:48:29.000000000 +0200
++++ 2.6/include/asm-ppc/io.h	2005-07-31 03:18:36.000000000 +0200
+@@ -1,6 +1,6 @@
+-#ifdef __KERNEL__
+ #ifndef _PPC_IO_H
+ #define _PPC_IO_H
++#ifdef __KERNEL__
+ 
+ #include <linux/config.h>
+ #include <linux/string.h>
+@@ -294,10 +294,10 @@
+ __do_out_asm(outb, "stbx")
+ #ifdef CONFIG_APUS
+ __do_in_asm(inb, "lbzx")
+-__do_in_asm(inw, "lhz%U1%X1")
+-__do_in_asm(inl, "lwz%U1%X1")
+-__do_out_asm(outl,"stw%U0%X0")
+-__do_out_asm(outw, "sth%U0%X0")
++__do_in_asm(inw, "lhzx")
++__do_in_asm(inl, "lwzx")
++__do_out_asm(outl,"stwx")
++__do_out_asm(outw, "sthx")
+ #elif defined (CONFIG_8260_PCI9)
+ /* in asm cannot be defined if PCI9 workaround is used */
+ #define inb(port)		in_8((port)+___IO_BASE)
+@@ -377,12 +377,19 @@
+ extern void __iomem *ioremap64(unsigned long long address, unsigned long size);
+ #endif
+ #define ioremap_nocache(addr, size)	ioremap((addr), (size))
++#define ioremap_writethrough(addr, size) __ioremap((addr), (size), _PAGE_WRITETHRU)
+ extern void iounmap(volatile void __iomem *addr);
+ extern unsigned long iopa(unsigned long addr);
+ extern unsigned long mm_ptov(unsigned long addr) __attribute_const__;
+ extern void io_block_mapping(unsigned long virt, phys_addr_t phys,
+ 			     unsigned int size, int flags);
+ 
++/* Values for nocacheflag and cmode */
++#define IOMAP_FULL_CACHING		0
++#define IOMAP_NOCACHE_SER		1
++#define IOMAP_NOCACHE_NONSER		2
++#define IOMAP_WRITETHROUGH		3
++
+ /*
+  * The PCI bus is inherently Little-Endian.  The PowerPC is being
+  * run Big-Endian.  Thus all values which cross the [PCI] barrier
+@@ -392,24 +399,16 @@
+  */
+ extern inline unsigned long virt_to_bus(volatile void * address)
+ {
+-#ifndef CONFIG_APUS
+         if (address == (void *)0)
+ 		return 0;
+-        return (unsigned long)address - KERNELBASE + PCI_DRAM_OFFSET;
+-#else
+-	return iopa ((unsigned long) address);
+-#endif
++	return __pa(address) + PCI_DRAM_OFFSET;
+ }
+ 
+ extern inline void * bus_to_virt(unsigned long address)
+ {
+-#ifndef CONFIG_APUS
+         if (address == 0)
+ 		return NULL;
+-        return (void *)(address - PCI_DRAM_OFFSET + KERNELBASE);
+-#else
+-	return (void*) mm_ptov (address);
+-#endif
++	return __va(address) - PCI_DRAM_OFFSET;
+ }
+ 
+ /*
+@@ -418,20 +417,12 @@
+  */
+ extern inline unsigned long virt_to_phys(volatile void * address)
+ {
+-#ifndef CONFIG_APUS
+-	return (unsigned long) address - KERNELBASE;
+-#else
+-	return iopa ((unsigned long) address);
+-#endif
++	return __pa(address);
+ }
+ 
+ extern inline void * phys_to_virt(unsigned long address)
+ {
+-#ifndef CONFIG_APUS
+-	return (void *) (address + KERNELBASE);
+-#else
+-	return (void*) mm_ptov (address);
+-#endif
++	return __va(address);
+ }
+ 
+ /*
+@@ -546,8 +537,6 @@
+ extern void __iomem *pci_iomap(struct pci_dev *dev, int bar, unsigned long max);
+ extern void pci_iounmap(struct pci_dev *dev, void __iomem *);
+ 
+-#endif /* _PPC_IO_H */
+-
+ #ifdef CONFIG_8260_PCI9
+ #include <asm/mpc8260_pci9.h>
+ #endif
+@@ -564,3 +553,4 @@
+ #define xlate_dev_kmem_ptr(p)	p
+ 
+ #endif /* __KERNEL__ */
++#endif /* _PPC_IO_H */
+diff -Nur -x CVS linux-2.6.12/include/asm-ppc/machdep.h 2.6/include/asm-ppc/machdep.h
+--- linux-2.6.12/include/asm-ppc/machdep.h	2005-06-17 21:48:29.000000000 +0200
++++ 2.6/include/asm-ppc/machdep.h	2005-07-31 03:18:37.000000000 +0200
+@@ -8,10 +8,6 @@
+ #include <asm/setup.h>
+ #include <asm/page.h>
+ 
+-#ifdef CONFIG_APUS
+-#include <asm-m68k/machdep.h>
+-#endif
+-
+ struct pt_regs;
+ struct pci_bus;	
+ struct pci_dev;
+diff -Nur -x CVS linux-2.6.12/include/asm-ppc/pgtable.h 2.6/include/asm-ppc/pgtable.h
+--- linux-2.6.12/include/asm-ppc/pgtable.h	2005-06-17 21:48:29.000000000 +0200
++++ 2.6/include/asm-ppc/pgtable.h	2005-07-31 03:18:37.000000000 +0200
+@@ -679,7 +679,7 @@
+ #define pmd_page_kernel(pmd)	\
+ 	((unsigned long) __va(pmd_val(pmd) & PAGE_MASK))
+ #define pmd_page(pmd)		\
+-	(mem_map + (pmd_val(pmd) >> PAGE_SHIFT))
++	pfn_to_page(pmd_val(pmd) >> PAGE_SHIFT)
+ #else
+ #define pmd_page_kernel(pmd)	\
+ 	((unsigned long) (pmd_val(pmd) & PAGE_MASK))
+diff -Nur -x CVS linux-2.6.12/include/asm-ppc/zorro.h 2.6/include/asm-ppc/zorro.h
+--- linux-2.6.12/include/asm-ppc/zorro.h	2005-06-17 21:48:29.000000000 +0200
++++ 2.6/include/asm-ppc/zorro.h	2005-08-04 01:48:26.000000000 +0200
+@@ -3,13 +3,50 @@
+ 
+ #include <asm/io.h>
+ 
+-#define z_readb in_8
+-#define z_readw in_be16
+-#define z_readl in_be32
+-
+-#define z_writeb(val, port) out_8((port), (val))
+-#define z_writew(val, port) out_be16((port), (val))
+-#define z_writel(val, port) out_be32((port), (val))
++static inline unsigned int z_readb(unsigned long addr)
++{
++	unsigned int ret;
++
++	ret = *(volatile u8 *)addr;
++	eieio();
++	return ret;
++}
++
++static inline unsigned int z_readw(unsigned long addr)
++{
++	unsigned int ret;
++
++	ret = *(volatile u16 *)addr;
++	eieio();
++	return ret;
++}
++
++static inline unsigned int z_readl(unsigned long addr)
++{
++	unsigned int ret;
++
++	ret = *(volatile u32 *)addr;
++	eieio();
++	return ret;
++}
++
++static inline void z_writeb(unsigned int val, unsigned long addr)
++{
++	*(volatile u8 *)addr = val;
++	eieio();
++}
++
++static inline void z_writew(unsigned int val, unsigned long addr)
++{
++	*(volatile u16 *)addr = val;
++	eieio();
++}
++
++static inline void z_writel(unsigned int val,unsigned long addr)
++{
++	*(volatile u32 *)addr = val;
++	eieio();
++}
+ 
+ #define z_memset_io(a,b,c)	memset((void *)(a),(b),(c))
+ #define z_memcpy_fromio(a,b,c)	memcpy((a),(void *)(b),(c))
+@@ -19,7 +56,6 @@
+ 		       unsigned long flags);
+ 
+ extern void *ioremap(unsigned long address, unsigned long size);
+-extern void iounmap(void *addr);
+ 
+ extern void *__ioremap(unsigned long address, unsigned long size,
+                        unsigned long flags);
+diff -Nur -x CVS linux-2.6.12/include/net/dn_route.h 2.6/include/net/dn_route.h
+--- linux-2.6.12/include/net/dn_route.h	2005-06-17 21:48:29.000000000 +0200
++++ 2.6/include/net/dn_route.h	2004-02-01 00:44:56.000000000 +0100
+@@ -26,8 +26,7 @@
+ #define DN_RT_F_PF  0x80 /* Padding Follows                           */
+ #define DN_RT_F_VER 0x40 /* Version =0 discard packet if ==1          */
+ #define DN_RT_F_IE  0x20 /* Intra Ethernet, Reserved in short pkt     */
+-#define DN_RT_F_RTS 0x10 /* Packet is being re        */
+-#defi        */
++#define DN_RT_F_RTS 0x10 /* Packet is being returned to sender        */
+ #define DN_RT_F_RQR 0x08 /* Return packet to sender upon non-delivery */
+ 
+ /* Mask for types of routing packets */
+diff -Nur -x CVS linux-2.6.12/include/video/vga.h 2.6/include/video/vga.h
+--- linux-2.6.12/include/video/vga.h	2005-06-17 21:48:29.000000000 +0200
++++ 2.6/include/video/vga.h	2005-07-30 20:52:54.000000000 +0200
+@@ -28,6 +28,7 @@
+  * Ugh, we don't have PCI space, so map readb() and friends to use Zorro space
+  * for MMIO accesses. This should make cirrusfb work again on Amiga
+  */
++#include <asm/zorro.h>
+ #undef inb_p
+ #undef inw_p
+ #undef outb_p
+@@ -36,11 +37,17 @@
+ #undef writeb
+ #undef writew
+ #define inb_p(port)	0
++#undef inw_p
+ #define inw_p(port)	0
++#undef outb_p
+ #define outb_p(port, val)	do { } while (0)
++#undef outw
+ #define outw(port, val)		do { } while (0)
++#undef readb
+ #define readb		z_readb
++#undef writeb
+ #define writeb		z_writeb
++#undef writew
+ #define writew		z_writew
+ #endif
+ #include <asm/byteorder.h>
+diff -Nur -x CVS linux-2.6.12/Makefile 2.6/Makefile
+--- linux-2.6.12/Makefile	2005-06-17 21:48:29.000000000 +0200
++++ 2.6/Makefile	2005-07-31 03:18:04.000000000 +0200
+@@ -190,8 +190,8 @@
+ # Default value for CROSS_COMPILE is not to prefix executables
+ # Note: Some architectures assign CROSS_COMPILE in their arch/*/Makefile
+ 
+-ARCH		?= $(SUBARCH)
+-CROSS_COMPILE	?=
++ARCH		?= ppc
++CROSS_COMPILE	?= powerpc-linux-
+ 
+ # Architecture as present in compile.h
+ UTS_MACHINE := $(ARCH)
