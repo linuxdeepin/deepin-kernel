@@ -159,7 +159,7 @@ def read_changelog():
         if match.group('header'):
             e = entry()
             e['Source'] = match.group('header_source')
-            e['Version'] = match.group('header_version')
+            e['Version'] = parse_version(match.group('header_version'))
             entries.append(e)
     return entries
 
@@ -196,7 +196,29 @@ def read_template(name):
     return read_rfc822(file("debian/templates/control.%s.in" % name))
 
 def parse_version(version):
-    match = re.match("^(?P<source>(?P<version>(?P<major>\d+\.\d+)\..+?)-(?P<debian>[^-]+))$", version)
+    version_re = ur"""
+^
+(?P<source>
+    (
+        \d+\.\d+\.\d+\+
+    )?
+    (?P<upstream>
+        (?P<version>
+            (?P<major>\d+\.\d+)
+            \.
+            \d+
+        )
+        (
+            -
+            .+?
+        )?
+    )
+    -
+    (?P<debian>[^-]+)
+)
+$
+"""
+    match = re.match(version_re, version, re.X)
     return match.groupdict()
 
 def process_depends(key, e, in_e, vars):
@@ -281,9 +303,9 @@ def process_real_tree(in_entry, changelog, vars):
         if tmp:
             value.extend([j.strip() for j in tmp.split(',')])
         if i == 'Depends':
-            value.append(' | '.join(["linux-source-%(version)s (= %(source)s)" % parse_version(v) for v in versions]))
+            value.append(' | '.join(["linux-source-%(version)s (= %(source)s)" % v for v in versions]))
         elif i == 'Provides':
-            value.extend(["linux-tree-%(source)s" % parse_version(v) for v in versions])
+            value.extend(["linux-tree-%(source)s" % v for v in versions])
         entry[i] = ', '.join(value)
     return entry
 
@@ -293,7 +315,7 @@ def substitute(s, vars):
     return re.sub(r'@([a-z_]+)@', subst, s)
 
 def vars_changelog(vars, changelog):
-    version = parse_version(changelog[0]['Version'])
+    version = changelog[0]['Version']
     vars['srcver'] = version['source']
     vars['version'] = version['version']
     vars['major'] = version['major']
@@ -327,8 +349,7 @@ def main():
     vars = {}
     vars = vars_changelog(vars, changelog)
 
-    version = vars['version']
-    source_version = vars['srcver']
+    version = changelog[0]['Version']
 
     c = config()
 
@@ -379,7 +400,11 @@ def main():
     image = read_template("image")
     image_latest = read_template("image.latest")
 
-    makeflags = ["VERSION='%s'" % version, "SOURCE_VERSION='%s'" % source_version]
+    makeflags = [
+        "VERSION='%s'" % version['version'],
+        "SOURCE_VERSION='%s'" % version['source'],
+        "UPSTREAM_VERSION='%s'" % version['upstream'],
+    ]
     cmds_binary_indep = []
     cmds_binary_indep.append(("$(MAKE) -f debian/rules.real binary-indep %s" % ' '.join(makeflags),))
     makefile.append(("binary-indep:", cmds_binary_indep))
@@ -490,7 +515,7 @@ def main():
         for i in extra_pn[arch]:
             tmp = []
             if i.has_key('X-Version-Overwrite-Epoch'):
-                    tmp.append("-v1:%s" % source_version)
+                    tmp.append("-v1:%s" % version['source'])
             cmds.append("$(MAKE) -f debian/rules.real install-dummy DH_OPTIONS='-p%s' GENCONTROL_ARGS='%s'" % (i['Package'], ' '.join(tmp)))
         makefile.append(("binary-arch-%s:: binary-arch-%s-extra" % (arch, arch), None))
         makefile.append(("binary-arch-%s-extra:" % arch, cmds))
