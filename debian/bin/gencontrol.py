@@ -1,6 +1,108 @@
 #!/usr/bin/env python
 import os, os.path, re, sys, textwrap, ConfigParser
 
+config_name = "defines"
+
+class schema_item_boolean(object):
+    def __call__(self, i):
+        i = i.strip().lower()
+        if i in ("true", "1"):
+            return True
+        if i in ("false", "0"):
+            return False
+        raise Error
+
+class schema_item_integer(object):
+    def __call__(self, i):
+        return int(i)
+
+class schema_item_list(object):
+    def __call__(self, i):
+        return re.split("\s+", i.strip())
+
+class schema_item_string(object):
+    def __call__(self, i):
+        return str(i)
+
+class config(dict):
+    schema = {
+        'abiname': schema_item_string,
+        'arches': schema_item_list,
+        'available': schema_item_boolean,
+        'class': schema_item_string,
+        'depends': schema_item_string,
+        'desc': schema_item_string,
+        'flavours': schema_item_list,
+        'kpkg-subarch': schema_item_string,
+        'longclass': schema_item_string,
+        'subarches': schema_item_list,
+        'suggests': schema_item_string,
+    }
+
+    def __init__(self):
+        self._read_base()
+#        import pprint
+#        pprint.pprint(dict(self))
+
+    def _read_arch(self, arch, base):
+        file = "debian/arch/%s/%s" % (arch, config_name)
+        c = config_parser(self.schema)
+        c.read(file)
+        t = c.items_convert('base')
+        base.update(t)
+        self[arch] = t
+        subarches = t.get('subarches', [])
+        for subarch in subarches:
+            raise RuntimeError
+        flavours = t.get('flavours', None)
+        if flavours:
+            for flavour in flavours:
+                self._read_flavour(arch, 'none', flavour, c)
+            subarches.append('none')
+        t['subarches'] = subarches
+
+    def _read_base(self):
+        file = "debian/arch/%s" % config_name
+        c = config_parser(self.schema)
+        c.read(file)
+        t1 = c.items_convert('base')
+        self['base'] = t1
+        for arch in t1['arches']:
+            try:
+                t2 = c.items_convert(arch)
+                avail = t2.get('available', True)
+            except ConfigParser.NoSectionError:
+                t2 = {}
+                avail = True
+            if avail:
+                self._read_arch(arch, t2)
+            else:
+                self[arch] = t2
+
+    def _read_flavour(self, arch, subarch, flavour, c):
+        try:
+            t = c.items_convert(flavour)
+        except ConfigParser.NoSectionError:
+            try:
+                t = c.items_convert("%s-none-%s" % (arch, flavour))
+            except ConfigParser.NoSectionError:
+                #raise RuntimeError("Don't find config for %s-none-%s!" % (arch, flavour))
+                t = {}
+        self["%s-%s-%s" % (arch, subarch, flavour)] = t
+
+class config_parser(object, ConfigParser.ConfigParser):
+    def __init__(self, schema):
+        ConfigParser.ConfigParser.__init__(self)
+        self.schema = schema
+
+    def items_convert(self, section):
+        items = self.items(section)
+        ret = {}
+        for key, value in items:
+            convert = self.schema[key]()
+            ret[key] = convert(value)
+        return ret
+
 class entry(dict):
     __slots__ = ('_list')
 
@@ -34,55 +136,6 @@ class wrap(textwrap.TextWrapper):
     wordsep_re = re.compile(
         r'(\s+|'                                  # any whitespace
         r'(?<=[\w\!\"\'\&\.\,\?])-{2,}(?=\w))')   # em-dash
-
-def config():
-    c = ConfigParser.ConfigParser()
-    c.read("debian/arch/defines")
-    return c
-
-def config_arch(arch):
-    c = config()
-    c.read("debian/arch/%s/defines" % arch)
-    return c
-
-def config_subarch(arch, subarch):
-    c = config_arch(arch)
-    if subarch is not None:
-        c.read("debian/arch/%s/%s/defines" % (arch, subarch))
-    return c
-
-def list_dirs(dir):
-    ret = []
-    for i in os.listdir(dir):
-        if i not in ('.svn',) and os.path.isdir(os.path.join(dir, i)):
-            ret.append(i)
-    return ret
-
-def list_files(dir):
-    ret = []
-    for i in os.listdir(dir):
-        if os.path.isfile(os.path.join(dir, i)):
-            ret.append(i)
-    return ret
-
-def list_arches():
-    return list_dirs("debian/arch")
-
-def list_subarches(arch):
-    ret = [None]
-    ret.extend(list_dirs("debian/arch/%s" % arch))
-    return ret
-
-def list_flavours(arch, subarch):
-    dir = "debian/arch/%s" % arch
-    if subarch is not None:
-        dir += "/%s" % subarch
-    tmp = list_files(dir)
-    ret = []
-    for i in tmp:
-        if i[:7] == 'config.':
-            ret.append(i[7:])
-    return ret
 
 def read_changelog():
     r = re.compile(r"""
@@ -268,7 +321,7 @@ def write_rfc822(f, list):
               f.write(" %s\n" % k)
         f.write('\n')
 
-if __name__ == '__main__':
+def main():
     changelog = read_changelog()
 
     vars = {}
@@ -277,16 +330,25 @@ if __name__ == '__main__':
     version = vars['version']
     source_version = vars['srcver']
 
-    vars.update(config().defaults())
+    c = config()
+
+    vars.update(c['base'])
 
     arches = {}
     subarches_architecture = {}
-    for arch in list_arches():
+    for arch in c['base']['arches']:
+        if not c[arch].get('available', True):
+            continue
         t1 = {}
-        for subarch in list_subarches(arch):
+        for subarch in c[arch].get('subarches', []):
             t2 = {}
-            for flavour in list_flavours(arch, subarch):
-                t2[flavour] = True
+            if subarch != 'none':
+                for flavour in c["%s-%s" % (arch, subarch)].get('flavours', []):
+                    t2[flavour] = True
+            else:
+                for flavour in c[arch].get('flavours', []):
+                    t2[flavour] = True
+                subarch = None
             t1[subarch] = t2
             t3 = subarches_architecture.get(subarch, {})
             t3[arch] = True
@@ -327,7 +389,7 @@ if __name__ == '__main__':
     for arch in arch_list:
         arch_vars = vars.copy()
         arch_vars['arch'] = arch
-        arch_vars.update(config_arch(arch).defaults())
+        arch_vars.update(c[arch])
 
         for i in (('setup',)):
             makefile.append(("%s-%s:: %s-%s-real" % (i, arch, i, arch), None))
@@ -341,13 +403,12 @@ if __name__ == '__main__':
         subarch_list = arches[arch].keys()
         subarch_list.sort()
         for subarch in subarch_list:
-            subarch_config = config_subarch(arch, subarch)
             subarch_vars = arch_vars.copy()
-            subarch_vars.update(subarch_config.defaults())
 
             if subarch is not None:
                 subarch_text = subarch
                 subarch_vars['subarch'] = '%s-' % subarch
+                subarch_vars.update(c['%s-%s' % (arch, subarch)])
             else:
                 subarch_text = 'none'
                 subarch_vars['subarch'] = ''
@@ -360,6 +421,10 @@ if __name__ == '__main__':
 
             subarch_makeflags = arch_makeflags[:]
             subarch_makeflags.extend(["SUBARCH='%s'" % subarch_text, "ABINAME='%s'" % subarch_vars['abiname']])
+            subarch_makeflags_clean = subarch_makeflags[:]
+            if subarch_vars.has_key('kpkg-subarch'):
+                subarch_makeflags.append("KPKG_SUBARCH='%s'" % subarch_vars['kpkg-subarch'])
+
             cmds_binary_arch = []
             cmds_binary_arch.append(("$(MAKE) -f debian/rules.real binary-arch-subarch %s" % ' '.join(subarch_makeflags),))
             cmds_setup = []
@@ -372,8 +437,9 @@ if __name__ == '__main__':
             for flavour in flavour_list:
                 flavour_vars = subarch_vars.copy()
                 flavour_vars['flavour'] = flavour
+
                 try:
-                    flavour_vars.update(dict(subarch_config.items(flavour)))
+                    flavour_vars.update(c['%s-%s-%s' % (arch, subarch_text, flavour)])
                 except ConfigParser.NoSectionError: pass
                 if not flavour_vars.has_key('class'):
                     flavour_vars['class'] = '%s-class' % flavour
@@ -391,7 +457,7 @@ if __name__ == '__main__':
                     makefile.append(("%s-%s-%s:: %s-%s-%s-%s" % (i, arch, subarch_text, i, arch, subarch_text, flavour), None))
                     makefile.append(("%s-%s-%s-%s:: %s-%s-%s-%s-real" % (i, arch, subarch_text, flavour, i, arch, subarch_text, flavour), None))
 
-                flavour_makeflags = subarch_makeflags[:]
+                flavour_makeflags = subarch_makeflags_clean[:]
                 flavour_makeflags.append("FLAVOUR='%s'" % flavour)
                 if flavour_vars.has_key('kpkg-subarch'):
                     flavour_makeflags.append("KPKG_SUBARCH='%s'" % flavour_vars['kpkg-subarch'])
@@ -418,7 +484,7 @@ if __name__ == '__main__':
     archs.sort()
     for arch in archs:
         arch_vars = vars.copy()
-        arch_vars.update(config_arch(arch).defaults())
+        arch_vars.update(c[arch])
 
         cmds = []
         for i in extra_pn[arch]:
@@ -433,3 +499,5 @@ if __name__ == '__main__':
     write_makefile(makefile)
 
 
+if __name__ == '__main__':
+    main()
