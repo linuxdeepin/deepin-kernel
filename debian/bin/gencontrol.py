@@ -41,8 +41,6 @@ class config(dict):
 
     def __init__(self):
         self._read_base()
-#        import pprint
-#        pprint.pprint(dict(self))
 
     def _read_arch(self, arch, base):
         file = "debian/arch/%s/%s" % (arch, config_name)
@@ -142,7 +140,20 @@ def read_changelog():
 ^
 (
     (?P<header>
-        (?P<header_source>\w[-+0-9a-z.]+)\ \((?P<header_version>[^\(\)\ \t]+)\)((\s+[-0-9a-zA-Z]+)+)\;
+        (?P<header_source>
+            \w[-+0-9a-z.]+
+        )
+        \ 
+        \(
+        (?P<header_version>
+            [^\(\)\ \t]+
+        )
+        \)
+        \s+
+        (?P<header_distribution>
+            [-0-9a-zA-Z]+
+        )
+        \;
     )
 )
 """, re.VERBOSE)
@@ -158,6 +169,7 @@ def read_changelog():
             continue
         if match.group('header'):
             e = entry()
+            e['Distribution'] = match.group('header_distribution')
             e['Source'] = match.group('header_source')
             e['Version'] = parse_version(match.group('header_version'))
             entries.append(e)
@@ -291,10 +303,10 @@ def process_real_image(in_entry, vars):
 
 def process_real_tree(in_entry, changelog, vars):
     entry = process_package(in_entry, vars)
-    tmp = changelog[0]['Source']
+    tmp = changelog[0]['Version']['upstream']
     versions = []
     for i in changelog:
-        if i['Source'] != tmp:
+        if i['Version']['upstream'] != tmp:
             break
         versions.insert(0, i['Version'])
     for i in (('Depends', 'Provides')):
