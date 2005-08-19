@@ -315,6 +315,7 @@ def process_real_tree(in_entry, changelog, vars):
         if tmp:
             value.extend([j.strip() for j in tmp.split(',')])
         if i == 'Depends':
+            value.append("linux-patch-debian-%(version)s (= %(source)s)" % changelog[0]['Version'])
             value.append(' | '.join(["linux-source-%(version)s (= %(source)s)" % v for v in versions]))
         elif i == 'Provides':
             value.extend(["linux-tree-%(source)s" % v for v in versions])
@@ -328,7 +329,6 @@ def substitute(s, vars):
 
 def vars_changelog(vars, changelog):
     version = changelog[0]['Version']
-    vars['srcver'] = version['source']
     vars['version'] = version['version']
     vars['major'] = version['major']
     return vars
