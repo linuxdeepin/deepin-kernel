@@ -211,7 +211,7 @@ def parse_version(version):
     version_re = ur"""
 ^
 (?P<source>
-    (
+    (?:
         \d+\.\d+\.\d+\+
     )?
     (?P<upstream>
@@ -220,9 +220,11 @@ def parse_version(version):
             \.
             \d+
         )
-        (
+        (?:
             -
-            .+?
+            (?P<modifier>
+                .+?
+            )
         )?
     )
     -
@@ -361,11 +363,18 @@ def main():
     vars = {}
     vars = vars_changelog(vars, changelog)
 
-    version = changelog[0]['Version']
-
     c = config()
 
     vars.update(c['base'])
+
+    version = changelog[0]['Version']
+    if version['modifier'] is not None:
+        abiname = version['modifier']
+        kpkg_abiname = ""
+        vars['abiname'] = abiname
+    else:
+        abiname = c['base']['abiname']
+        kpkg_abiname = "-%s" % abiname
 
     arches = {}
     subarches_architecture = {}
@@ -457,7 +466,11 @@ def main():
                 makefile.append(("%s-%s-%s:: %s-%s-%s-real" % (i, arch, subarch_text, i, arch, subarch_text), None))
 
             subarch_makeflags = arch_makeflags[:]
-            subarch_makeflags.extend(["SUBARCH='%s'" % subarch_text, "ABINAME='%s'" % subarch_vars['abiname']])
+            subarch_makeflags.extend([
+                "SUBARCH='%s'" % subarch_text,
+                "ABINAME='%s'" % abiname,
+                "KPKG_ABINAME='%s'" % kpkg_abiname,
+            ])
             subarch_makeflags_clean = subarch_makeflags[:]
             if subarch_vars.has_key('kpkg-subarch'):
                 subarch_makeflags.append("KPKG_SUBARCH='%s'" % subarch_vars['kpkg-subarch'])
