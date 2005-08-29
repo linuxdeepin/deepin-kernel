@@ -111,7 +111,7 @@ $
     match = re.match(version_re, version, re.X)
     return match.groupdict()
 
-def process_changelog(in_vars, changelog):
+def process_changelog(in_vars, config, changelog):
     ret = [None, None, None, None]
     ret[0] = version = changelog[0]['Version']
     vars = in_vars.copy()
@@ -119,7 +119,7 @@ def process_changelog(in_vars, changelog):
         ret[1] = vars['abiname'] = version['modifier']
         ret[2] = ""
     else:
-        ret[1] = vars['abiname'] = c['base']['abiname']
+        ret[1] = vars['abiname'] = config['base']['abiname']
         ret[2] = "-%s" % vars['abiname']
     vars['version'] = version['version']
     vars['major'] = version['major']
@@ -431,7 +431,7 @@ def main():
 
     c = config()
 
-    version, abiname, kpkg_abiname, vars = process_changelog({}, changelog)
+    version, abiname, kpkg_abiname, vars = process_changelog({}, c, changelog)
 
     packages = packages_list()
     makefile = []
