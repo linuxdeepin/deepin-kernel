@@ -1,7 +1,5 @@
 import os, os.path, re, sys, textwrap, ConfigParser
 
-config_name = "defines"
-
 class schema_item_boolean(object):
     def __call__(self, i):
         i = i.strip().lower()
@@ -32,36 +30,56 @@ class config(dict):
         'depends': schema_item_string,
         'desc': schema_item_string,
         'flavours': schema_item_list,
+        'kernel-arch': schema_item_string,
         'kpkg-subarch': schema_item_string,
         'longclass': schema_item_string,
         'subarches': schema_item_list,
         'suggests': schema_item_string,
     }
 
-    def __init__(self):
+    config_name = "defines"
+
+    def __init__(self, overlay_dir = None):
+        self._overlay_dir = overlay_dir
         self._read_base()
 
+    def _get_files(self, name):
+        ret = []
+        if self._overlay_dir is not None:
+            ret.append(os.path.join(self._overlay_dir, name))
+        ret.append(name)
+        return ret
+
     def _read_arch(self, arch, base):
-        file = "debian/arch/%s/%s" % (arch, config_name)
+        files = self._get_files("debian/arch/%s/%s" % (arch, self.config_name))
         c = config_parser(self.schema)
-        c.read(file)
+        c.read(files)
         t = c.items_convert('base')
         base.update(t)
         self[arch] = t
         subarches = t.get('subarches', [])
         for subarch in subarches:
-            raise RuntimeError
+            try:
+                t2 = c.items_convert(subarch)
+                avail = t2.get('available', True)
+            except ConfigParser.NoSectionError:
+                t2 = {}
+                avail = True
+            if avail:
+                self._read_subarch(arch, subarch, t2)
+            else:
+                self['-'.join((arch, subarch))] = t2
         flavours = t.get('flavours', None)
         if flavours:
             for flavour in flavours:
                 self._read_flavour(arch, 'none', flavour, c)
-            subarches.append('none')
+            subarches.insert(0, 'none')
         t['subarches'] = subarches
 
     def _read_base(self):
-        file = "debian/arch/%s" % config_name
+        files = self._get_files("debian/arch/%s" % self.config_name)
         c = config_parser(self.schema)
-        c.read(file)
+        c.read(files)
         t1 = c.items_convert('base')
         self['base'] = t1
         for arch in t1['arches']:
@@ -87,6 +105,17 @@ class config(dict):
                 t = {}
         self["%s-%s-%s" % (arch, subarch, flavour)] = t
 
+    def _read_subarch(self, arch, subarch, base):
+        files = self._get_files("debian/arch/%s/%s/%s" % (arch, subarch, self.config_name))
+        c = config_parser(self.schema)
+        c.read(files)
+        t = c.items_convert('base')
+        base.update(t)
+        self['-'.join((arch, subarch))] = t
+        flavours = t.get('flavours', None)
+        for flavour in flavours:
+            self._read_flavour(arch, subarch, flavour, c)
+
 class config_parser(object, ConfigParser.ConfigParser):
     def __init__(self, schema):
         ConfigParser.ConfigParser.__init__(self)
@@ -100,34 +129,47 @@ class config_parser(object, ConfigParser.ConfigParser):
             ret[key] = convert(value)
         return ret
 
-class entry(dict):
+class _sorted_dict(dict):
     __slots__ = ('_list')
 
     def __init__(self):
-        super(entry, self).__init__()
+        super(_sorted_dict, self).__init__()
         self._list = []
 
     def __delitem__(self, key):
-        super(entry, self).__delitem__(key)
+        super(_sorted_dict, self).__delitem__(key)
         self._list.remove(key)
+
+    def iterkeys(self):
+        for i in iter(self._list):
+            yield i
+
+    def iteritems(self):
+        for i in iter(self._list):
+            yield (i, self[i])
+
+    def itervalues(self):
+        for i in iter(self._list):
+            yield self[i]
+
+class sorted_dict(_sorted_dict):
+    __slots__ = ()
+
+    def __setitem__(self, key, value):
+        super(sorted_dict, self).__setitem__(key, value)
+        if key not in self._list:
+            self._list.append(key)
+
+class entry(_sorted_dict):
+    __slots__ = ()
 
     def __setitem__(self, key, value):
         super(entry, self).__setitem__(key, value)
-        if key.startswith('_'):
-            return
         if key not in self._list:
             if 'Description' in self._list:
                 self._list.insert(len(self._list)-1, key)
             else:
                 self._list.append(key)
-
-    def iterkeys(self):
-        for i in self._list:
-            yield i
-
-    def iteritems(self):
-        for i in self._list:
-            yield (i, self[i])
 
 class wrap(textwrap.TextWrapper):
     wordsep_re = re.compile(
