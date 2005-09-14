@@ -320,8 +320,9 @@ def process_real_flavour(packages, makefile, config, arch, subarch, flavour, var
         makefile.append(("%s-%s-%s-%s:: %s-%s-%s-%s-real" % (i, arch, subarch, flavour, i, arch, subarch, flavour), None))
 
     makeflags['FLAVOUR'] = flavour
-    if config_entry.has_key('kpkg-subarch'):
-        makeflags['KPKG_SUBARCH'] = config_entry['kpkg-subarch']
+    for i in (('compiler', 'COMPILER'), ('kpkg-subarch', 'KPKG_SUBARCH')):
+        if config_entry.has_key(i[0]):
+            makeflags[i[1]] = config_entry[i[0]]
     makeflags_string = ' '.join(["%s='%s'" % i for i in makeflags.iteritems()])
 
     cmds_binary_arch = []
@@ -413,8 +414,9 @@ def process_real_subarch(packages, makefile, config, arch, subarch, vars, makefl
         makefile.append(("%s-%s-%s:: %s-%s-%s-real" % (i, arch, subarch, i, arch, subarch), None))
 
     makeflags['SUBARCH'] = subarch
-    if config_entry.has_key('kpkg-subarch'):
-        makeflags['KPKG_SUBARCH'] = config_entry['kpkg-subarch']
+    for i in (('compiler', 'COMPILER'), ('kpkg-subarch', 'KPKG_SUBARCH')):
+        if config_entry.has_key(i[0]):
+            makeflags[i[1]] = config_entry[i[0]]
     makeflags_string = ' '.join(["%s='%s'" % i for i in makeflags.iteritems()])
 
     cmds_binary_arch = []

@@ -27,6 +27,7 @@ class config(dict):
         'arches': schema_item_list,
         'available': schema_item_boolean,
         'class': schema_item_string,
+        'compiler': schema_item_string,
         'depends': schema_item_string,
         'desc': schema_item_string,
         'flavours': schema_item_list,
