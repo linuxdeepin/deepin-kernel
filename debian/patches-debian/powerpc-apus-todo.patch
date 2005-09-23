@@ -1,0 +1,186 @@
+# 
+# PowerPC/Apus support patch
+# Needed support for Amiga PowerUP boards.
+# Author: mostly Roman Zippel <zippel@linux-m68k.org>
+# Upstream status: got synced with 2.6.12 recently, so in better status than
+# previous apus patches. Only 81k left.
+# This is the part which needs checking and which is not yet applied, added for
+# completeness though
+#
+
+diff -Nur -x CVS linux-2.6.13/drivers/block/amiflop.c linux-2.6.13-apus/drivers/block/amiflop.c
+--- linux-2.6.13/drivers/block/amiflop.c	2005-08-29 01:41:01.000000000 +0200
++++ linux-2.6.13-apus/drivers/block/amiflop.c	2005-07-31 01:06:43.000000000 +0200
+@@ -59,6 +59,7 @@
+ #include <linux/hdreg.h>
+ #include <linux/delay.h>
+ #include <linux/init.h>
++#include <linux/interrupt.h>
+ #include <linux/amifdreg.h>
+ #include <linux/amifd.h>
+ #include <linux/buffer_head.h>
+diff -Nur -x CVS linux-2.6.13/include/asm-ppc/io.h linux-2.6.13-apus/include/asm-ppc/io.h
+--- linux-2.6.13/include/asm-ppc/io.h	2005-08-29 01:41:01.000000000 +0200
++++ linux-2.6.13-apus/include/asm-ppc/io.h	2005-07-31 03:18:36.000000000 +0200
+@@ -1,6 +1,6 @@
+-#ifdef __KERNEL__
+ #ifndef _PPC_IO_H
+ #define _PPC_IO_H
++#ifdef __KERNEL__
+ 
+ #include <linux/config.h>
+ #include <linux/string.h>
+@@ -294,10 +294,10 @@
+ __do_out_asm(outb, "stbx")
+ #ifdef CONFIG_APUS
+ __do_in_asm(inb, "lbzx")
+-__do_in_asm(inw, "lhz%U1%X1")
+-__do_in_asm(inl, "lwz%U1%X1")
+-__do_out_asm(outl,"stw%U0%X0")
+-__do_out_asm(outw, "sth%U0%X0")
++__do_in_asm(inw, "lhzx")
++__do_in_asm(inl, "lwzx")
++__do_out_asm(outl,"stwx")
++__do_out_asm(outw, "sthx")
+ #elif defined (CONFIG_8260_PCI9)
+ /* in asm cannot be defined if PCI9 workaround is used */
+ #define inb(port)		in_8((port)+___IO_BASE)
+@@ -377,12 +377,19 @@
+ extern void __iomem *ioremap64(unsigned long long address, unsigned long size);
+ #endif
+ #define ioremap_nocache(addr, size)	ioremap((addr), (size))
++#define ioremap_writethrough(addr, size) __ioremap((addr), (size), _PAGE_WRITETHRU)
+ extern void iounmap(volatile void __iomem *addr);
+ extern unsigned long iopa(unsigned long addr);
+ extern unsigned long mm_ptov(unsigned long addr) __attribute_const__;
+ extern void io_block_mapping(unsigned long virt, phys_addr_t phys,
+ 			     unsigned int size, int flags);
+ 
++/* Values for nocacheflag and cmode */
++#define IOMAP_FULL_CACHING		0
++#define IOMAP_NOCACHE_SER		1
++#define IOMAP_NOCACHE_NONSER		2
++#define IOMAP_WRITETHROUGH		3
++
+ /*
+  * The PCI bus is inherently Little-Endian.  The PowerPC is being
+  * run Big-Endian.  Thus all values which cross the [PCI] barrier
+@@ -392,24 +399,16 @@
+  */
+ extern inline unsigned long virt_to_bus(volatile void * address)
+ {
+-#ifndef CONFIG_APUS
+         if (address == (void *)0)
+ 		return 0;
+-        return (unsigned long)address - KERNELBASE + PCI_DRAM_OFFSET;
+-#else
+-	return iopa ((unsigned long) address);
+-#endif
++	return __pa(address) + PCI_DRAM_OFFSET;
+ }
+ 
+ extern inline void * bus_to_virt(unsigned long address)
+ {
+-#ifndef CONFIG_APUS
+         if (address == 0)
+ 		return NULL;
+-        return (void *)(address - PCI_DRAM_OFFSET + KERNELBASE);
+-#else
+-	return (void*) mm_ptov (address);
+-#endif
++	return __va(address) - PCI_DRAM_OFFSET;
+ }
+ 
+ /*
+@@ -418,20 +417,12 @@
+  */
+ extern inline unsigned long virt_to_phys(volatile void * address)
+ {
+-#ifndef CONFIG_APUS
+-	return (unsigned long) address - KERNELBASE;
+-#else
+-	return iopa ((unsigned long) address);
+-#endif
++	return __pa(address);
+ }
+ 
+ extern inline void * phys_to_virt(unsigned long address)
+ {
+-#ifndef CONFIG_APUS
+-	return (void *) (address + KERNELBASE);
+-#else
+-	return (void*) mm_ptov (address);
+-#endif
++	return __va(address);
+ }
+ 
+ /*
+@@ -546,8 +537,6 @@
+ extern void __iomem *pci_iomap(struct pci_dev *dev, int bar, unsigned long max);
+ extern void pci_iounmap(struct pci_dev *dev, void __iomem *);
+ 
+-#endif /* _PPC_IO_H */
+-
+ #ifdef CONFIG_8260_PCI9
+ #include <asm/mpc8260_pci9.h>
+ #endif
+@@ -564,3 +553,4 @@
+ #define xlate_dev_kmem_ptr(p)	p
+ 
+ #endif /* __KERNEL__ */
++#endif /* _PPC_IO_H */
+diff -Nur -x CVS linux-2.6.13/include/asm-ppc/pgtable.h linux-2.6.13-apus/include/asm-ppc/pgtable.h
+--- linux-2.6.13/include/asm-ppc/pgtable.h	2005-08-29 01:41:01.000000000 +0200
++++ linux-2.6.13-apus/include/asm-ppc/pgtable.h	2005-09-18 15:03:36.000000000 +0200
+@@ -723,7 +723,7 @@
+ #define pmd_page_kernel(pmd)	\
+ 	((unsigned long) __va(pmd_val(pmd) & PAGE_MASK))
+ #define pmd_page(pmd)		\
+-	(mem_map + (pmd_val(pmd) >> PAGE_SHIFT))
++	pfn_to_page(pmd_val(pmd) >> PAGE_SHIFT)
+ #else
+ #define pmd_page_kernel(pmd)	\
+ 	((unsigned long) (pmd_val(pmd) & PAGE_MASK))
+diff -Nur -x CVS linux-2.6.13/include/video/vga.h linux-2.6.13-apus/include/video/vga.h
+--- linux-2.6.13/include/video/vga.h	2005-08-29 01:41:01.000000000 +0200
++++ linux-2.6.13-apus/include/video/vga.h	2005-07-30 20:52:54.000000000 +0200
+@@ -28,6 +28,7 @@
+  * Ugh, we don't have PCI space, so map readb() and friends to use Zorro space
+  * for MMIO accesses. This should make cirrusfb work again on Amiga
+  */
++#include <asm/zorro.h>
+ #undef inb_p
+ #undef inw_p
+ #undef outb_p
+@@ -36,11 +37,17 @@
+ #undef writeb
+ #undef writew
+ #define inb_p(port)	0
++#undef inw_p
+ #define inw_p(port)	0
++#undef outb_p
+ #define outb_p(port, val)	do { } while (0)
++#undef outw
+ #define outw(port, val)		do { } while (0)
++#undef readb
+ #define readb		z_readb
++#undef writeb
+ #define writeb		z_writeb
++#undef writew
+ #define writew		z_writew
+ #endif
+ #include <asm/byteorder.h>
+diff -Nur -x CVS linux-2.6.13/arch/ppc/mm/pgtable.c linux-2.6.13-apus/arch/ppc/mm/pgtable.c
+--- linux-2.6.13/arch/ppc/mm/pgtable.c	2005-08-29 01:41:01.000000000 +0200
++++ linux-2.6.13-apus/arch/ppc/mm/pgtable.c	2005-09-18 15:03:35.000000000 +0200
+@@ -190,8 +190,8 @@
+ 	 * Don't allow anybody to remap normal RAM that we're using.
+ 	 * mem_init() sets high_memory so only do the check after that.
+ 	 */
+-	if ( mem_init_done && (p < virt_to_phys(high_memory)) )
+-	{
++	if (mem_init_done && (p + size >= virt_to_phys(KERNELBASE)) &&
++	    (p < virt_to_phys(high_memory))) {
+ 		printk("__ioremap(): phys addr "PHYS_FMT" is RAM lr %p\n", p,
+ 		       __builtin_return_address(0));
+ 		return NULL;
