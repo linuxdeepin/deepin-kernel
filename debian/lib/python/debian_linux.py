@@ -9,33 +9,16 @@ class schema_item_boolean(object):
             return False
         raise Error
 
-class schema_item_integer(object):
-    def __call__(self, i):
-        return int(i)
-
 class schema_item_list(object):
     def __call__(self, i):
         return re.split("\s+", i.strip())
 
-class schema_item_string(object):
-    def __call__(self, i):
-        return str(i)
-
 class config(dict):
     schema = {
-        'abiname': schema_item_string,
         'arches': schema_item_list,
         'available': schema_item_boolean,
-        'class': schema_item_string,
-        'compiler': schema_item_string,
-        'depends': schema_item_string,
-        'desc': schema_item_string,
         'flavours': schema_item_list,
-        'kernel-arch': schema_item_string,
-        'kpkg-subarch': schema_item_string,
-        'longclass': schema_item_string,
         'subarches': schema_item_list,
-        'suggests': schema_item_string,
     }
 
     config_name = "defines"
@@ -126,8 +109,11 @@ class config_parser(object, ConfigParser.ConfigParser):
         items = self.items(section)
         ret = {}
         for key, value in items:
-            convert = self.schema[key]()
-            ret[key] = convert(value)
+            try:
+                convert = self.schema[key]()
+                value = convert(value)
+            except KeyError: pass
+            ret[key] = value
         return ret
 
 class _sorted_dict(dict):
