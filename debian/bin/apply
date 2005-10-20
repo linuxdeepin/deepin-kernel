@@ -61,7 +61,6 @@ deapply_patch() {
 
 unpatch_series() {
 	series=$1
-	[ -f "$series" ] || die "I wasn't passed a series: $series"
 
 	tac $series | while read action patch; do
 		case "$action" in
@@ -83,7 +82,7 @@ unpatch_series() {
 
 patch_series() {
 	series=$1
-	[ -f "$series" ] || die "I wasn't passed a series: $series"
+	[ -f "$series" ] || return
 
 	while read action patch; do
 		case "$action" in
@@ -103,52 +102,6 @@ patch_series() {
 	echo "--> $(basename $series) fully applied."
 }
 
-bubble_sort ()
-{
-	DIR=$1
-	shift
-	SORTED=$@
-
-	SWAPED=1
-	while [ $SWAPED = 1 ]; do
-		X=0
-		A=""
-		SWAPED=0
-		NEW=""
-		for i in $SORTED; do
-			if [ -z "$A" ]; then
-				A="$i"
-				continue
-			fi
-			B="$i"
-		
-			if dpkg --compare-versions "$A" "$DIR" "$B"; then
-				SWAPED=1
-				NEW="$NEW $B"
-			else
-				NEW="$NEW $A"
-				A="$B"
-			fi
-
-			X=$(($X + 1))
-		done
-		SORTED="$NEW $A"
-	done
-
-	echo $SORTED
-}
-
-bubble_sort_fwd ()
-{
-	bubble_sort "lt" $@
-}
-
-bubble_sort_rev ()
-{
-	bubble_sort "gt" $@
-}
-
-
 if ! [ -d Documentation ] || ! [ -d kernel ]; then
 	die 'Not in kernel top level directory.  Exiting'
 	exit 1
@@ -156,15 +109,20 @@ fi
 
 # for THIS particular version of the source package
 version=${override_version:-@version@}
-upstream=${version%-*}
-revision=${version#*-}
+revision=$(echo $version | sed -ne 's,^\(.*\)-\([^-]*\)$,\2,p')
+upstream=$(echo $version | sed -ne 's,^\(.*\)-\([^-]*\)$,\1,p')
+revisions_count=0
+for i in ${override_revisions:-@revisions@}; do
+    revisions[$revisions_count]=$i
+	revisions_count=$(($revisions_count + 1))
+done
 
 home=${home:-/usr/src/kernel-patches/all/$upstream/debian}
 
 if [ -f version.Debian ]; then
 	current=$(cat version.Debian)
-	current_rev=${current#*-}
-	current_up=${current%-*}
+    current_rev=$(echo $current | sed -ne 's,^\(.*\)-\([^-]*\)$,\2,p')
+    current_up=$(echo $current | sed -ne 's,^\(.*\)-\([^-]*\)$,\1,p')
 
 	if [ "$current" = "$upstream" ]; then
 		current_rev=0
@@ -177,8 +135,8 @@ fi
 
 target=${1:-$version}
 
-target_rev=${target#*-}
-target_up=${target%-*}
+target_rev=$(echo $target | sed -ne 's,^\(.*\)-\([^-]*\)$,\2,p')
+target_up=$(echo $target | sed -ne 's,^\(.*\)-\([^-]*\)$,\1,p')
 
 # Sanity checks
 if dpkg --compare-versions "$target_up" ne "$upstream"; then
@@ -197,53 +155,33 @@ fi
 #    reverse each used series (tac) and unapply applied patches and vice versa.
 # 3. $target_rev is undefined, and $target is $upstream.
 
-# Revert to upstream.
-if [ "$target_rev" = "$target" ]; then
-	# already reverted
-	if [ "$current" = "$target" ]; then 
-		echo "Nothing to do, exiting."
-		exit 0
-	fi
-
-	for base in $(cd $home/series/ && bubble_sort_fwd $(ls -d *)); do
-		srev=${base#*-}
-		if [ -n "$srev" ]; then
-			if dpkg --compare-versions $srev "<=" $current_rev; then
-				unpatch_series $home/series/$base
-			fi
-		else
-			die "Series doesn't have a revision!"
-		fi
-	done
-elif dpkg --compare-versions "$current_rev" eq "$upstream" ||
-              dpkg --compare-versions "$target_rev" gt "$current_rev"; then
-	for base in $(cd $home/series/ && bubble_sort_rev $(ls -d *)); do
-		srev=${base#*-}
-		if [ -n "$srev" ]; then
-		    if dpkg --compare-versions "$srev" gt "$current_rev" && 
-			            dpkg --compare-versions "$srev" le "$target_rev"; then
-				patch_series $home/series/$base
-			fi
-		else
-			die "Series doesn't have a revision!"
-		fi
-	done
-elif dpkg --compare-versions "$target_rev" eq "$current_rev"; then
+if dpkg --compare-versions "$target_rev" eq "$current_rev"; then
 	echo "Nothing to do, exiting."
 	exit 0
-elif dpkg --compare-versions "$target_rev" lt "$current_rev"; then
-	for base in $(cd $home/series/ && bubble_sort_fwd $(ls -d *)); do
-		srev=${base#*-}
-		if [ -n "$srev" ]; then
-			# -gt because you don't want to unapply the target series
-			if dpkg --compare-versions "$srev" le "$current_rev" && 
-			            dpkg --compare-versions "$srev" gt "$target_rev"; then
-				unpatch_series $home/series/$base
-			fi
-		else
-			die "Series doesn't have a revision!"
-		fi
+else
+	cur_index=$revisions_count
+	while [ $cur_index -gt 0 ]; do
+		[ ${revisions[$(($cur_index - 1))]} == $current_rev ] && break
+		cur_index=$(($cur_index - 1))
 	done
+	target_index=$revisions_count
+	while [ $target_index -gt 0 ]; do
+		[ ${revisions[$(($target_index - 1))]} == $target_rev ] && break
+		target_index=$(($target_index - 1))
+	done
+	if [ $target_index -gt $cur_index ]; then
+		while [ $target_index -gt $cur_index ]; do
+			series="$home/series/${upstream}-${revisions[$cur_index]}"
+			[ -f "$series" ] && patch_series $series
+			cur_index=$(($cur_index + 1))
+		done
+	elif [ $target_index -lt $cur_index ]; then
+		while [ $target_index -lt $cur_index ]; do
+			cur_index=$(($cur_index - 1))
+			series="$home/series/${upstream}-${revisions[$cur_index]}"
+			[ -f "$series" ] && unpatch_series $series
+		done
+	fi
 fi
 
 echo $target > version.Debian
