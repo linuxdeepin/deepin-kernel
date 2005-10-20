@@ -48,7 +48,6 @@ def read_changelog():
             e['Distribution'] = match.group('header_distribution')
             e['Source'] = match.group('header_source')
             e['Version'] = parse_version(match.group('header_version'))
-            e['Version']['upstream'] = e['Version']['version']
             entries.append(e)
     return entries
 
@@ -89,14 +88,19 @@ def parse_version(version):
 ^
 (?P<source>
     (?:
-        (?P<parent>\d+\.\d+\.\d+)
-        \+
+        \d+\.\d+\.\d+\+
     )?
-    (?P<version>
-        (?P<major>\d+\.\d+)
-        \.\d+
+    (?P<upstream>
+        (?P<version>
+            (?P<major>\d+\.\d+)
+            \.
+            \d+
+        )
         (?:
-            -.+?
+            -
+            (?P<modifier>
+                .+?
+            )
         )?
     )
     -
@@ -111,16 +115,13 @@ def process_changelog(in_vars, config, changelog):
     ret = [None, None, None, None]
     ret[0] = version = changelog[0]['Version']
     vars = in_vars.copy()
-    ret[1] = vars['abiname'] = config['base']['abiname']
-    ret[2] = "-%s" % vars['abiname']
-    vars['version'] = version['version']
-    vars['upstream'] = version['version']
-    if version['parent'] is not None:
-        version['parent'] = version['parent']
-        version['parent_and_upstream'] = version['parent'] + '+' + version['upstream']
+    if version['modifier'] is not None:
+        ret[1] = vars['abiname'] = version['modifier']
+        ret[2] = ""
     else:
-        version['parent'] = ''
-        version['parent_and_upstream'] = version['upstream']
+        ret[1] = vars['abiname'] = config['base']['abiname']
+        ret[2] = "-%s" % vars['abiname']
+    vars['version'] = version['version']
     vars['major'] = version['major']
     ret[3] = vars
     return ret
@@ -349,7 +350,6 @@ def process_real_main(packages, makefile, config, version, abiname, kpkg_abiname
         'VERSION': version['version'],
         'SOURCE_VERSION': version['source'],
         'UPSTREAM_VERSION': version['upstream'],
-        'PARENT_AND_UPSTREAM_VERSION': version['parent_and_upstream'],
         'ABINAME': abiname,
         'KPKG_ABINAME': kpkg_abiname,
     }
