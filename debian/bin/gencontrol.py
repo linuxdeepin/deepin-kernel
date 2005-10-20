@@ -35,6 +35,7 @@ def read_changelog():
 """, re.VERBOSE)
     f = file("debian/changelog")
     entries = []
+    act_upstream = None
     while True:
         line = f.readline()
         if not line:
@@ -47,7 +48,12 @@ def read_changelog():
             e = entry()
             e['Distribution'] = match.group('header_distribution')
             e['Source'] = match.group('header_source')
-            e['Version'] = parse_version(match.group('header_version'))
+            version = parse_version(match.group('header_version'))
+            e['Version'] = version
+            if act_upstream is None:
+                act_upstream = version['upstream']
+            elif version['upstream'] != act_upstream:
+                break
             entries.append(e)
     return entries
 
@@ -87,7 +93,7 @@ def parse_version(version):
     version_re = ur"""
 ^
 (?P<source>
-    (?:
+    (?P<parent>
         \d+\.\d+\.\d+\+
     )?
     (?P<upstream>
@@ -109,7 +115,12 @@ def parse_version(version):
 $
 """
     match = re.match(version_re, version, re.X)
-    return match.groupdict()
+    ret = match.groupdict()
+    if ret['parent'] is not None:
+        ret['source_upstream'] = ret['parent'] + ret['upstream']
+    else:
+        ret['source_upstream'] = ret['upstream']
+    return ret
 
 def process_changelog(in_vars, config, changelog):
     ret = [None, None, None, None]
@@ -348,10 +359,12 @@ def process_real_main(packages, makefile, config, version, abiname, kpkg_abiname
 
     makeflags = {
         'VERSION': version['version'],
+        'SOURCE_UPSTREAM': version['source_upstream'],
         'SOURCE_VERSION': version['source'],
         'UPSTREAM_VERSION': version['upstream'],
         'ABINAME': abiname,
         'KPKG_ABINAME': kpkg_abiname,
+        'REVISIONS': ' '.join([i['Version']['debian'] for i in changelog[::-1]]),
     }
     makeflags_string = ' '.join(["%s='%s'" % i for i in makeflags.iteritems()])
 
