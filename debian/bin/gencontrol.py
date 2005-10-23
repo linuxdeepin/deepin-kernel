@@ -426,6 +426,9 @@ def process_real_subarch(packages, makefile, config, arch, subarch, vars, makefl
         makefile.append(("%s-%s-%s:: %s-%s-%s-real" % (i, arch, subarch, i, arch, subarch), None))
 
     makeflags['SUBARCH'] = subarch
+    for i in ('kernel-header-dirs', 'KERNEL_HEADER_DIRS'),:
+        if config_entry.has_key(i[0]):
+            makeflags[i[1]] = config_entry[i[0]]
     makeflags_string = ' '.join(["%s='%s'" % i for i in makeflags.iteritems()])
 
     cmds_binary_arch = []
