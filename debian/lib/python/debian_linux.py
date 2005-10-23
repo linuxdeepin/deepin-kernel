@@ -27,6 +27,24 @@ class config(dict):
         self._overlay_dir = overlay_dir
         self._read_base()
 
+    def __getitem__(self, key):
+        if isinstance(key, basestring):
+            return super(config, self).__getitem__(key)
+        if isinstance(key, tuple):
+            ret = {}
+            ret.update(super(config, self).__getitem__('base'))
+            if len(key) >= 1:
+                del ret['arches']
+                ret.update(super(config, self).__getitem__(key[0]))
+            if len(key) >= 2:
+                del ret['subarches']
+                ret.update(super(config, self).__getitem__('-'.join(key[0:2])))
+            if len(key) >= 3:
+                del ret['flavours']
+                ret.update(super(config, self).__getitem__('-'.join(key[0:3])))
+            return ret
+        raise NotImplemented
+
     def _get_files(self, name):
         ret = []
         if self._overlay_dir is not None:
@@ -57,6 +75,7 @@ class config(dict):
         if flavours:
             for flavour in flavours:
                 self._read_flavour(arch, 'none', flavour, c)
+                self['-'.join((arch, 'none'))] = {}
             subarches.insert(0, 'none')
         t['subarches'] = subarches
 

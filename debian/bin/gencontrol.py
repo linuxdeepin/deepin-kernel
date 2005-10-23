@@ -256,7 +256,7 @@ def write_rfc822(f, list):
         f.write('\n')
 
 def process_real_arch(packages, makefile, config, arch, vars, makeflags):
-    config_entry = config[arch]
+    config_entry = config[arch,]
     vars.update(config_entry)
 
     if not config_entry.get('available', True):
@@ -294,7 +294,7 @@ def process_real_arch(packages, makefile, config, arch, vars, makeflags):
     makefile.append(("binary-arch-%s-real:" % arch, cmds_binary_arch))
 
 def process_real_flavour(packages, makefile, config, arch, subarch, flavour, vars, makeflags, package_headers_arch_depends):
-    config_entry = config['-'.join((arch, subarch, flavour))]
+    config_entry = config[arch, subarch, flavour]
     vars.update(config_entry)
 
     vars['flavour'] = flavour
@@ -402,10 +402,9 @@ def process_real_main(packages, makefile, config, version, abiname, kpkg_abiname
 def process_real_subarch(packages, makefile, config, arch, subarch, vars, makeflags, package_headers_arch_depends):
     if subarch == 'none':
         vars['subarch'] = ''
-        config_entry = config[arch]
     else:
         vars['subarch'] = '%s-' % subarch
-        config_entry = config['%s-%s' % (arch, subarch)]
+    config_entry = config[arch, subarch]
     vars.update(config_entry)
 
     headers_subarch = read_template("headers.subarch")
@@ -427,9 +426,6 @@ def process_real_subarch(packages, makefile, config, arch, subarch, vars, makefl
         makefile.append(("%s-%s-%s:: %s-%s-%s-real" % (i, arch, subarch, i, arch, subarch), None))
 
     makeflags['SUBARCH'] = subarch
-    for i in (('compiler', 'COMPILER'), ('kpkg-subarch', 'KPKG_SUBARCH')):
-        if config_entry.has_key(i[0]):
-            makeflags[i[1]] = config_entry[i[0]]
     makeflags_string = ' '.join(["%s='%s'" % i for i in makeflags.iteritems()])
 
     cmds_binary_arch = []
