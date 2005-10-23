@@ -34,6 +34,8 @@ class config(dict):
             ret = {}
             ret.update(super(config, self).__getitem__('base'))
             if len(key) >= 1:
+                # XXX: workaround
+                del ret['abiname']
                 del ret['arches']
                 ret.update(super(config, self).__getitem__(key[0]))
             if len(key) >= 2:
