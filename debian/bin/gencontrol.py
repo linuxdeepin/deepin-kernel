@@ -162,7 +162,7 @@ def process_description(e, in_e, vars):
 def process_package(in_entry, vars):
     e = entry()
     for i in in_entry.iterkeys():
-        if i in (('Depends', 'Provides', 'Suggests', 'Recomends')):
+        if i in (('Depends', 'Provides', 'Suggests', 'Recommends')):
             process_depends(i, e, in_entry, vars)
         elif i == 'Description':
             process_description(e, in_entry, vars)
@@ -183,7 +183,7 @@ def process_real_image(in_entry, vars):
     if vars.has_key('desc'):
         in_entry['Description'] += "\n.\n" + vars['desc']
     entry = process_package(in_entry, vars)
-    for i in (('Depends', 'Provides', 'Suggests', 'Recomends')):
+    for i in (('Depends', 'Provides', 'Suggests', 'Recommends')):
         value = []
         tmp = entry.get(i, None)
         if tmp:
@@ -202,8 +202,8 @@ def process_real_image(in_entry, vars):
             t = vars.get('suggests', None)
             if t is not None:
                 value.append(t)
-        elif i == 'Recomends':
-            t = vars.get('Recomends', None)
+        elif i == 'Recommends':
+            t = vars.get('recommends', None)
             if t is not None:
                 value.append(t)
         entry[i] = ', '.join(value)
