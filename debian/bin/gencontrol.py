@@ -297,6 +297,8 @@ def process_real_arch(packages, makefile, config, arch, vars, makeflags):
     for subarch in config_entry['subarches']:
         process_real_subarch(packages, makefile, config, arch, subarch, vars.copy(), makeflags.copy(), package_headers_arch_depends)
 
+    # Append this here so it only occurs on the install-headers-all line
+    makeflags_string += " FLAVOURS='%s' " % ' '.join(['%s' % i for i in config_entry['flavours']])
     cmds_binary_arch = []
     cmds_binary_arch.append(("$(MAKE) -f debian/rules.real install-headers-all GENCONTROL_ARGS='\"-Vkernel:Depends=%s\"' %s" % (', '.join(package_headers_arch_depends), makeflags_string),))
     makefile.append(("binary-arch-%s-real:" % arch, cmds_binary_arch))
