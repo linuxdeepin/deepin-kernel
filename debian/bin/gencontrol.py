@@ -341,7 +341,7 @@ def process_real_flavour(packages, makefile, config, arch, subarch, flavour, var
         makefile.append(("%s-%s-%s-%s:: %s-%s-%s-%s-real" % (i, arch, subarch, flavour, i, arch, subarch, flavour), None))
 
     makeflags['FLAVOUR'] = flavour
-    for i in (('compiler', 'COMPILER'), ('kernel-header-dirs', 'KERNEL_HEADER_DIRS'), ('kpkg-subarch', 'KPKG_SUBARCH')):
+    for i in (('compiler', 'COMPILER'), ('kernel-header-dirs', 'KERNEL_HEADER_DIRS'), ('kpkg-subarch', 'KPKG_SUBARCH'), ('kpkg-arch', 'KPKG_ARCH')):
         if config_entry.has_key(i[0]):
             makeflags[i[1]] = config_entry[i[0]]
     makeflags_string = ' '.join(["%s='%s'" % i for i in makeflags.iteritems()])
