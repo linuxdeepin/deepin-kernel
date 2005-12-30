@@ -105,9 +105,9 @@ let () =
   begin
     if !verbose then
       if !config_name <> "" then
-        Printf.printf "Reading config file %s" !config_name
+        Printf.eprintf "Reading config file %s" !config_name
       else
-        Printf.printf "Creating config file for arch %s, subarch %s, flavour %s (basedir is %s)\n" !arch !subarch !flavour !basedir
+        Printf.eprintf "Creating config file for arch %s, subarch %s, flavour %s (basedir is %s)\n" !arch !subarch !flavour !basedir
   end;
   if !config_name <> "" then 
     try
@@ -115,24 +115,21 @@ let () =
       let m = parse_config config C.empty in
       print_config m;
       close_in config
-    with Sys_error s -> Printf.printf "Error: %s\n" s
+    with Sys_error s -> Printf.eprintf "Error: %s\n" s
   else if !arch <> "" && !flavour <> "" then
     try
       let dir = if !archindir then Filename.dirname !basedir else !basedir in
       let m = parse_config_file (dir ^ "/config") C.empty false in
       let archdir = dir ^ "/" ^ !arch in
       let m = parse_config_file (archdir ^ "/config") m false in
-      let () = if !verbose then Printf.printf "XXX archdir is %s\n" archdir else () in
       let m, archdir = 
         if !subarch <> ""  && !subarch <> "none" then 
-	  let () = if !verbose then Printf.printf "XXX subarch case ... subarch is %s\n" !subarch else () in
 	  let archdir = archdir ^ "/" ^ !subarch in
           parse_config_file (archdir ^ "/config") m false, archdir
 	else m, archdir
       in
-      let () = if !verbose then Printf.printf "XXX archdir is %s\n" archdir else () in
       let m = parse_config_file (archdir ^ "/config." ^ !flavour) m true in
       print_config m;
-    with Sys_error s -> Printf.printf "Error: %s\n" s
+    with Sys_error s -> Printf.eprintf "Error: %s\n" s
   else
     usage ()
