@@ -4,26 +4,25 @@
 # variable means that we are building for an arch without the subarch.
 # Additionally, variables version, abiname and ltver are
 # expected to be available (need to be exported from the parent process).
-# It is possible to override the flavours by setting the flavours
-# variable. It will also be passed a list of source files
 #
 SHELL  := sh -e
 DEB_HOST_ARCH     := $(shell dpkg-architecture -a'$(ARCH)' -qDEB_HOST_ARCH)
 DEB_HOST_GNU_TYPE := $(shell dpkg-architecture -a'$(ARCH)' -qDEB_HOST_GNU_TYPE)
 DEB_BUILD_ARCH    := $(shell dpkg-architecture -a'$(ARCH)' -qDEB_BUILD_ARCH)
+
+export PYTHONPATH = $(CURDIR)/debian/lib/python
+
 #
 # Build the list of common config files to be included
 #
 ifeq ($(SUBARCH),none)
   basedir := debian/arch/$(ARCH)
+  LOCALVERSION := -$(FLAVOUR)
+  LOCALVERSION_HEADERS :=
 else
   basedir := debian/arch/$(ARCH)/$(SUBARCH)
-endif
-
-configs := $(notdir $(wildcard $(basedir)/config.*))
-configs := $(filter-out config, $(configs))
-ifndef flavours
-  flavours := $(patsubst config.%,%,$(configs))
+  LOCALVERSION := -$(SUBARCH)-$(FLAVOUR)
+  LOCALVERSION_HEADERS := -$(SUBARCH)
 endif
 
 -include $(basedir)/Makefile.inc
@@ -37,11 +36,11 @@ include debian/rules.defs
 # in Makefile.inc. @flavour@ in the expressions is going to be
 # replaced by the flavour for which the command is run. 
 #
-kpkg_header += make-kpkg --append-to-version '$(KPKG_ABINAME)'
+kpkg_header += make-kpkg --append-to-version '$(KPKG_ABINAME)$(LOCALVERSION_HEADERS)'
 kpkg_header += --arch '$(ARCH)'
 kpkg_header += --stem linux
 kpkg_header += --config defconfig
-kpkg_image := make-kpkg --append-to-version '$(KPKG_ABINAME)-$(FLAVOUR)'
+kpkg_image := make-kpkg --append-to-version '$(KPKG_ABINAME)$(LOCALVERSION)'
 kpkg_image += --arch '$(ARCH)'
 kpkg_image += --stem linux
 kpkg_image += --initrd
@@ -54,7 +53,9 @@ ifneq ($(DEB_BUILD_ARCH),$(DEB_HOST_ARCH))
   kpkg_image += --cross-compile='$(DEB_HOST_GNU_TYPE)'
 endif
 setup_env := env -u ABINAME -u ARCH -u SUBARCH -u FLAVOUR -u VERSION
-setup_env += DEBIAN_ABINAME='$(ABINAME)' DEBIAN_FLAVOUR='$(FLAVOUR)' DEBIAN_VERSION='$(VERSION)'
+setup_env += DEBIAN_LOCALVERSION='-$(ABINAME)$(LOCALVERSION)'
+setup_env += DEBIAN_LOCALVERSION_HEADERS='-$(ABINAME)$(LOCALVERSION_HEADERS)'
+setup_env += DEBIAN_VERSION='$(VERSION)'
 setup_makeflags =
 ifdef COMPILER
   setup_makeflags += CC="$$$$(CROSS_COMPILE)$(COMPILER)"
@@ -93,7 +94,7 @@ ifneq ($(SUBARCH),none)
 endif
 $(BUILD_DIR)/config.$(ARCH)-$(SUBARCH)-$(FLAVOUR): $(basedir)/config.$(FLAVOUR) $(config_common)
 	@echo "Generating configuration file $@:"
-	ocaml debian/bin/kconfig.ml -ba -b "$(basedir)" -a "$(ARCH)" -s "$(SUBARCH)" -f "$(FLAVOUR)" > '$@'
+	ocaml debian/bin/kconfig.ml -b "debian/arch" -a "$(ARCH)" -s "$(SUBARCH)" -f "$(FLAVOUR)" > '$@'
 
 $(BUILD_DIR)/linux-source-$(UPSTREAM_VERSION).tar.bz2: SOURCE_DIR=$(BUILD_DIR)/source
 $(BUILD_DIR)/linux-source-$(UPSTREAM_VERSION).tar.bz2: DIR = $(BUILD_DIR)/linux-source-$(UPSTREAM_VERSION)
@@ -104,13 +105,17 @@ $(BUILD_DIR)/linux-source-$(UPSTREAM_VERSION).tar.bz2: $(STAMPS_DIR)/source
 	cd '$(BUILD_DIR)'; tar -cjf 'linux-source-$(UPSTREAM_VERSION).tar.bz2' 'linux-source-$(UPSTREAM_VERSION)'
 	rm -rf '$(DIR)'
 
+define patch_cmd
+cd '$(DIR)'; python2.4 '$(CURDIR)/debian/bin/apply.py' --overwrite-home='$(CURDIR)/debian/patches-debian' --overwrite-source='$(SOURCE_VERSION)' --overwrite-revisions='$(REVISIONS)'
+endef
+
 srcfiles := $(filter-out debian, $(wildcard *))
 $(STAMPS_DIR)/source: DIR=$(BUILD_DIR)/source
-$(STAMPS_DIR)/source: debian/bin/apply
+$(STAMPS_DIR)/source: debian/bin/apply.py
 	rm -rf '$(DIR)'
 	mkdir -p '$(DIR)'
 	cp -al $(srcfiles) '$(DIR)'
-	cd '$(DIR)'; override_version='$(SOURCE_VERSION)' override_revisions='$(REVISIONS)' home='$(CURDIR)/debian/patches-debian' sh '$(CURDIR)/debian/bin/apply'
+	$(patch_cmd)
 	#make-kpkg does this when building kernel-source.
 	mv '$(DIR)/scripts/package/Makefile' '$(DIR)/scripts/package/Makefile.dist'
 	mv '$(DIR)/scripts/package/builddeb' '$(DIR)/scripts/package/builddeb.dist'
@@ -118,11 +123,6 @@ $(STAMPS_DIR)/source: debian/bin/apply
 	echo "all:" >> '$(DIR)/scripts/package/Makefile'
 	touch '$@'
 
-patches  := $(wildcard debian/patches-arch/$(SUBARCH).*)
-patches  += $(wildcard debian/patches-arch/$(SUBARCH)_*)
-patches  += $(wildcard debian/patches-arch/$(ARCH).*)
-patches  += $(wildcard debian/patches-arch/$(ARCH)_*)
-patches  := $(strip $(patches))
 $(STAMPS_DIR)/source-$(ARCH)-$(SUBARCH): SOURCE_DIR=$(BUILD_DIR)/source
 $(STAMPS_DIR)/source-$(ARCH)-$(SUBARCH): DIR=$(BUILD_DIR)/source-$(ARCH)-$(SUBARCH)
 $(STAMPS_DIR)/source-$(ARCH)-$(SUBARCH): $(STAMPS_DIR)/source
@@ -133,12 +133,7 @@ $(STAMPS_DIR)/source-$(ARCH)-$(SUBARCH): $(STAMPS_DIR)/source
 	cp debian/copyright '$(DIR)/debian'
 	cp debian/control '$(DIR)/debian/control'
 	touch '$(DIR)/debian/official'
-	if [ -n '$(patches)' ]; then			\
-	  cd '$(DIR)';					\
-	  for patch in $(patches); do			\
-	    cat "$(CURDIR)/$$patch" | patch -p1;	\
-	  done;						\
-	fi
+	$(patch_cmd) -a $(ARCH) -s $(SUBARCH)
 	touch '$@'
 #
 # This target performs a build for a particular flavour. Note
@@ -258,26 +253,15 @@ install-patch:
 	dh_installdirs $(DH_OPTIONS) '$(pbase)/apply' '$(pbase)/debian' '$(pbase)/unpatch'
 	dh_install $(DH_OPTIONS) debian/patches-debian/* '$(pbase)/debian'
 #	Install the debian patches
-	sed -e 's/@version@/$(SOURCE_VERSION)/g' -e 's/@revisions@/$(REVISIONS)/' debian/bin/apply > '$(pfull)/apply/debian'
+	sed \
+	  -e 's,@home@,$(pbase)/debian,' \
+	  -e 's,@revisions@,$(REVISIONS),' \
+	  -e 's,@source@,$(SOURCE_VERSION),' \
+	  debian/bin/apply.py > '$(pfull)/apply/debian'
 	sed -e 's/@upstream@/$(SOURCE_UPSTREAM)/g' debian/bin/unpatch > '$(pfull)/unpatch/debian'
 	chmod 755 '$(pfull)/apply/debian' '$(pfull)/unpatch/debian'
 	chmod 644 '$(pfull)/debian/'*.patch
 	bzip2 -9 '$(pfull)/debian/'*.patch
-#	Now the arch/subarch-specific patches
-	for i in $(ptchs); do \
-	  arch="$${i%%.*}"; \
-	  ( \
-	    echo "Patch-name: $${arch}"; \
-	    echo "Patch-id: $${arch}_$(subst .,_,$(VERSION))";	\
-	    echo "Path-strip-level: 1";				\
-	    echo;						\
-	    echo "Patch-file: debian/patches-arch/$${i}";	\
-	    echo "Architecture: $${arch}";			\
-	    echo "Kernel-version: $(VERSION)";			\
-	    echo;						\
-	  ) > 'debian/$(PACKAGE).kpatches.arch';		\
-	  dh_installkpatches $(DH_OPTIONS);			\
-	done
 	dh_installdocs $(DH_OPTIONS)
 	dh_installchangelogs $(DH_OPTIONS)
 	$(MAKE) -f debian/rules.real install-base DH_OPTIONS='$(DH_OPTIONS)'
