@@ -75,7 +75,7 @@ class series(list):
                 elif operation == '+':
                     self.patch_apply(patch, patchinfo)
                 elif operation == '-':
-                    self.patch_deapply(patch, patchinf)
+                    self.patch_deapply(patch, patchinfo)
                 elif operation == 'X':
                     os.rename(patchinfo[0], patchinfo[1])
                     print """\
