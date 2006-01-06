@@ -2,6 +2,7 @@
 import os, os.path, re, sys, textwrap, ConfigParser
 sys.path.append("debian/lib/python")
 import debian_linux.gencontrol
+from debian_linux.debian import *
 
 class gencontrol(debian_linux.gencontrol.gencontrol):
     def do_main_packages(self, packages):
@@ -126,7 +127,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
             in_entry['Description'] += "\n.\n" + vars['desc']
         entry = self.process_package(in_entry, vars)
         for field in 'Depends', 'Provides', 'Suggests', 'Recommends', 'Conflicts':
-            value = entry.get(field, [])
+            value = entry.get(field, package_relation_list())
             t = vars.get(field.lower(), [])
             value.extend(t)
             entry[field] = value
@@ -141,16 +142,14 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
                 break
             versions.insert(0, i['Version'])
         for i in (('Depends', 'Provides')):
-            value = []
-            tmp = entry.get(i, None)
-            if tmp:
-                value.extend([j.strip() for j in tmp.split(',')])
+            value = package_relation_list()
+            value.extend(entry.get(i, []))
             if i == 'Depends':
                 value.append("linux-patch-debian-%(version)s (= %(source)s)" % self.changelog[0]['Version'])
                 value.append(' | '.join(["linux-source-%(version)s (= %(source)s)" % v for v in versions]))
             elif i == 'Provides':
                 value.extend(["linux-tree-%(source)s" % v for v in versions])
-            entry[i] = ', '.join(value)
+            entry[i] = value
         return entry
 
 if __name__ == '__main__':

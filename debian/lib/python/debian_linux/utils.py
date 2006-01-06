@@ -1,4 +1,4 @@
-import re, textwrap
+import debian, re, textwrap
 
 class _sorted_dict(dict):
     __slots__ = ('_list')
@@ -77,48 +77,6 @@ class field_string(str):
     def __str__(self):
         return '\n '.join(self.split('\n'))
 
-class package(dict):
-    _fields = sorted_dict((
-        ('Package', str),
-        ('Source', str),
-        ('Architecture', field_list),
-        ('Section', str),
-        ('Priority', str),
-        ('Maintainer', str),
-        ('Uploaders', str),
-        ('Standards-Version', str),
-        ('Build-Depends', str),
-        ('Build-Depends-Indep', str),
-        ('Provides', field_list_commata),
-        ('Depends', field_list_commata),
-        ('Recommends', field_list_commata),
-        ('Suggests', field_list_commata),
-        ('Replaces', field_list_commata),
-        ('Conflicts', field_list_commata),
-        ('Description', field_string),
-    ))
-
-    def __setitem__(self, key, value):
-        try:
-            value = self._fields[key](value)
-        except KeyError: pass
-        super(package, self).__setitem__(key, value)
-
-    def iterkeys(self):
-        for i in self._fields.iterkeys():
-            if self.has_key(i) and self[i]:
-                yield i
-
-    def iteritems(self):
-        for i in self._fields.iterkeys():
-            if self.has_key(i) and self[i]:
-                yield (i, self[i])
-
-    def itervalues(self):
-        for i in self._fields.iterkeys():
-            if self.has_key(i) and self[i]:
-                yield self[i]
-
 class templates(dict):
     def __init__(self, dir = None):
         if dir is None:
@@ -143,7 +101,7 @@ class templates(dict):
         f = file("%s/%s.in" % (self.dir, filename))
 
         while True:
-            e = package()
+            e = debian.package()
             while True:
                 line = f.readline()
                 if not line:

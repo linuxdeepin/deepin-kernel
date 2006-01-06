@@ -6,7 +6,7 @@ _marker = object()
 
 class config_reader(dict):
     """
-    Read configs in debian/arch and in the overlay directory.
+    Read configs in debian/arch and in the underlay directory.
     """
 
     class schema_item_boolean(object):
@@ -34,8 +34,8 @@ class config_reader(dict):
 
     config_name = "defines"
 
-    def __init__(self, overlay_dir = None):
-        self._overlay_dir = overlay_dir
+    def __init__(self, underlay = None):
+        self._underlay = underlay
         self._read_base()
 
     def __getitem__(self, key):
@@ -43,8 +43,8 @@ class config_reader(dict):
 
     def _get_files(self, name):
         ret = []
-        if self._overlay_dir is not None:
-            ret.append(os.path.join(self._overlay_dir, name))
+        if self._underlay is not None:
+            ret.append(os.path.join(self._underlay, name))
         ret.append(os.path.join('debian/arch', name))
         return ret
 
@@ -181,21 +181,20 @@ class config_parser(object):
     def items(self, section, var = {}):
         ret = {}
         section = '_'.join(section)
-        exception = None
+        exceptions = []
         for config in self.configs:
             try:
                 items = config.items(section)
             except ConfigParser.NoSectionError, e:
-                exception = e
+                exceptions.append(e)
             else:
                 for key, value in items:
                     try:
                         value = self.schema[key](value)
                     except KeyError: pass
                     ret[key] = value
-                exception = None
-        if exception is not None:
-            raise exception
+        if len(exceptions) == len(self.configs):
+            raise exceptions[0]
         return ret
 
     def sections(self):

@@ -1,3 +1,4 @@
+import warnings
 from config import *
 from debian import *
 from utils import *
@@ -11,9 +12,9 @@ class packages_list(sorted_dict):
             self[package['Package']] = package
 
 class gencontrol(object):
-    def __init__(self):
+    def __init__(self, underlay = None):
         self.changelog = read_changelog()
-        self.config = config_reader()
+        self.config = config_reader(underlay)
         self.templates = templates()
         self.version, self.abiname, self.kpkg_abiname, self.changelog_vars = self.process_changelog({})
 
@@ -113,7 +114,8 @@ class gencontrol(object):
             makefile.append("%s-%s:: %s-%s-real" % (i, arch, i, arch))
 
     def do_arch_packages(self, packages, makefile, arch, vars, makeflags, extra):
-        pass
+        for i in (('binary-arch', 'build', 'setup',)):
+            makefile.append("%s-%s-real:" % (i, arch))
 
     def do_arch_packages_post(self, packages, makefile, arch, vars, makeflags, extra):
         pass
@@ -143,7 +145,8 @@ class gencontrol(object):
             makefile.append("%s-%s-%s:: %s-%s-%s-real" % (i, arch, subarch, i, arch, subarch))
 
     def do_subarch_packages(self, packages, makefile, arch, subarch, vars, makeflags, extra):
-        pass
+        for i in (('binary-arch', 'build', 'setup',)):
+            makefile.append("%s-%s-%s-real:" % (i, arch, subarch))
 
     def do_flavour(self, packages, makefile, arch, subarch, flavour, vars, makeflags, extra):
         config_entry = self.config['base', arch, subarch, flavour]
@@ -151,9 +154,19 @@ class gencontrol(object):
 
         vars['flavour'] = flavour
         if not vars.has_key('class'):
+            warnings.warn('No class entry in config for flavour %s, subarch %s, arch %s' % (flavour, subarch, arch), DeprecationWarning)
             vars['class'] = '%s-class' % flavour
         if not vars.has_key('longclass'):
             vars['longclass'] = vars['class']
+
+        config_base = self.config.merge('base', arch)
+        config_relations = self.config.merge('relations', arch)
+        compiler = config_base.get('compiler', 'gcc')
+        relations_compiler = package_relation_list(config_relations[compiler])
+        for group in relations_compiler:
+            for item in group:
+                item.arches = [arch]
+        packages['source']['Build-Depends'].extend(relations_compiler)
 
         makeflags['FLAVOUR'] = flavour
         self.do_flavour_makeflags(makeflags, arch, subarch, flavour)
@@ -161,7 +174,13 @@ class gencontrol(object):
         self.do_flavour_packages(packages, makefile, arch, subarch, flavour, vars, makeflags, extra)
 
     def do_flavour_makeflags(self, makeflags, arch, subarch, flavour):
-        pass
+        config_entry = self.config.merge('base', arch, subarch, flavour)
+        for i in (
+            ('compiler', 'COMPILER'),
+            ('kernel-arch', 'KERNEL_ARCH')
+        ):  
+            if config_entry.has_key(i[0]):
+                makeflags[i[1]] = config_entry[i[0]]
 
     def do_flavour_makefile(self, makefile, arch, subarch, flavour, makeflags):
         for i in ('binary-arch', 'build', 'setup'):
@@ -188,11 +207,17 @@ class gencontrol(object):
 
     def process_relation(self, key, e, in_e, vars):
         in_dep = in_e[key]
-        dep = type(in_dep)()
-        for d in in_dep:
-            d = self.substitute(d, vars)
-            if d:
-                dep.append(d)
+        dep = package_relation_list()
+        for in_groups in in_dep:
+            groups = package_relation_group()
+            for in_item in in_groups:
+                item = package_relation()
+                item.name = self.substitute(in_item.name, vars)
+                if in_item.version is not None:
+                    item.version = self.substitute(in_item.version, vars)
+                item.arches = in_item.arches
+                groups.append(item)
+            dep.append(groups)
         e[key] = dep
 
     def process_description(self, e, in_e, vars):
@@ -207,15 +232,15 @@ class gencontrol(object):
 
     def process_package(self, in_entry, vars):
         e = package()
-        for key in in_entry.iterkeys():
-            if key in (('Depends', 'Provides', 'Suggests', 'Recommends', 'Conflicts')):
+        for key, value in in_entry.iteritems():
+            if isinstance(value, package_relation_list):
                 self.process_relation(key, e, in_entry, vars)
             elif key == 'Description':
                 self.process_description(e, in_entry, vars)
             elif key[:2] == 'X-':
                 pass
             else:
-                e[key] = self.substitute(in_entry[key], vars)
+                e[key] = self.substitute(value, vars)
         return e
 
     def process_packages(self, in_entries, vars):

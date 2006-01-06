@@ -1,8 +1,7 @@
 #!/usr/bin/env python2.4
 
-import os.path, sys
+import os, os.path, re, sys
 from warnings import warn
-import debian_linux
 
 _default_home = "@home@"
 _default_revisions = "@revisions@"
@@ -207,12 +206,32 @@ class version(object):
 
     def __init__(self, string = None):
         if string is not None:
-            t = debian_linux.parse_version(string)
-            self.upstream = t['source_upstream']
-            self.revision = t['debian']
+            self.upstream, self.revision = self.parse(string)
 
     def __str__(self):
         return "%s-%s" % (self.upstream, self.revision)
+
+    _re = r"""
+^
+(
+    (?:
+        \d+\.\d+\.\d+\+
+    )?
+    \d+\.\d+\.\d+
+    (?:
+        -.+?
+    )?
+)
+-
+([^-]+)
+$
+"""
+
+    def parse(self, version):
+        match = re.match(self._re, version, re.X)
+        if match is None:
+            raise ValueError
+        return match.groups()
 
 class version_file(object):
     _file = 'version.Debian'
@@ -252,6 +271,8 @@ class version_file(object):
             self.extra = tuple(list[1].split('_'))
 
     def _write(self):
+        if os.path.lexists(self._file):
+            os.unlink(self._file)
         file(self._file, 'w').write('%s\n' % self)
 
     def begin(self):
