@@ -2,6 +2,7 @@
 
 (* Command line arguments parsing *)
 let basedir = ref "debian/arch"
+let sourcedir = ref "."
 let arch = ref ""
 let subarch = ref ""
 let flavour = ref ""
@@ -16,6 +17,7 @@ let set_action a () = action := a
 
 let spec = [
   "-b", Arg.Set_string basedir, "base dir of the arch configurations [default: debian/arch]";
+  "-bs", Arg.Set_string sourcedir, "base source dir containing the patched debian linux source tree [default: .]";
   "-ba", Arg.Set archindir, "basedir includes arch";
   "-a", Arg.Set_string arch, "arch";
   "-s", Arg.Set_string subarch, "subarch";
@@ -26,7 +28,7 @@ let spec = [
 let usage =
   "Check single config file : ./kconfig.ml config_file\n" ^
   "Create config file       : ./kconfig.ml [ -ba ] [ -b basedir ] -a arch [ -s subarch ] -f flavour" ^ "\n" ^
-  "Check all config files   : ./kconfig.ml -c [ -b basedir ] -a arch [ -s subarch ] -f flavour" ^ "\n"
+  "Check all config files   : ./kconfig.ml -c [ -ba ] [ -b basedir ] [ -bs sourcedir ] [ -a arch ] [ -s subarch ] [ -f flavour ]" ^ "\n"
 
 let () = Arg.parse
   spec
@@ -185,11 +187,9 @@ let do_single () =
   with Sys_error s -> Printf.eprintf "Error: %s\n" s
 
 let do_create () =
-  if !arch <> "" && !flavour <> "" then
-    try
-      begin if !verbose then 
-        Printf.eprintf "Creating config file for arch %s, subarch %s, flavour %s (basedir is %s)\n" !arch !subarch !flavour !basedir
-      end;
+  if !arch <> "" && !flavour <> "" then begin
+      if !verbose then 
+        Printf.eprintf "Creating config file for arch %s, subarch %s, flavour %s (basedir is %s)\n" !arch !subarch !flavour !basedir;
       let dir = get_archdir () in
       let m = parse_config_file (dir ^ "/config") C.empty false in
       let archdir = dir ^ "/" ^ !arch in
@@ -201,24 +201,20 @@ let do_create () =
         else m, archdir
       in
       let m = parse_config_file (archdir ^ "/config." ^ !flavour) m true in
-      print_config m;
-    with Sys_error s -> Printf.eprintf "Error: %s\n" s
+      print_config m
+    end
   else
     usage ()
     
 let do_check () = 
-  if !arch <> "" && !flavour <> "" then
-    let dir = get_archdir () in
-    begin if !verbose then Printf.eprintf "Checking config files in %s\n" dir end;
-    try
-      let m = parse_defines_file (dir ^ "/defines") [] true in
-      print_defines m
-    with Sys_error s -> Printf.eprintf "Error: %s\n" s
-  else
-    usage ()
+  let dir = get_archdir () in
+  begin if !verbose then Printf.eprintf "Checking config files in %s\n" dir end;
+  let m = parse_defines_file (dir ^ "/defines") [] true in
+  print_defines m
 
-let () =
-  match !action with
-  | Single -> do_single ()
-  | Create -> do_create ()
-  | Check -> do_check ()
+let () = try 
+    match !action with
+    | Single -> do_single ()
+    | Create -> do_create ()
+    | Check -> do_check ()
+  with Sys_error s -> Printf.eprintf "Error: %s\n" s; usage ()
