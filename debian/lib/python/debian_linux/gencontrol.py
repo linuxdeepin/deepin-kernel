@@ -200,6 +200,7 @@ class gencontrol(object):
         else:
             ret[1] = vars['abiname'] = self.config['base',]['abiname']
             ret[2] = "-%s" % vars['abiname']
+        vars['version'] = version['source']
         vars['version'] = version['version']
         vars['major'] = version['major']
         ret[3] = vars
