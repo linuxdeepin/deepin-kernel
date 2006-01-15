@@ -1,0 +1,652 @@
+diff --git a/arch/ppc/boot/simple/Makefile b/arch/ppc/boot/simple/Makefile
+index f3e9c53..9533f8d 100644
+--- a/arch/ppc/boot/simple/Makefile
++++ b/arch/ppc/boot/simple/Makefile
+@@ -190,6 +190,8 @@ boot-$(CONFIG_REDWOOD_5)	+= embed_config
+ boot-$(CONFIG_REDWOOD_6)	+= embed_config.o
+ boot-$(CONFIG_8xx)		+= embed_config.o
+ boot-$(CONFIG_8260)		+= embed_config.o
++boot-$(CONFIG_EP405)		+= embed_config.o
++boot-$(CONFIG_XILINX_ML300)	+= embed_config.o
+ boot-$(CONFIG_BSEIP)		+= iic.o
+ boot-$(CONFIG_MBX)		+= iic.o pci.o qspan_pci.o
+ boot-$(CONFIG_MV64X60)		+= misc-mv64x60.o
+diff --git a/arch/sparc64/Kconfig b/arch/sparc64/Kconfig
+index c4b7ad7..3882069 100644
+--- a/arch/sparc64/Kconfig
++++ b/arch/sparc64/Kconfig
+@@ -179,7 +179,7 @@ config HUGETLB_PAGE_SIZE_512K
+ 	bool "512K"
+ 
+ config HUGETLB_PAGE_SIZE_64K
+-	depends on !SPARC64_PAGE_SIZE_4MB && !SPARC64_PAGE_SIZE_512K
++	depends on !SPARC64_PAGE_SIZE_4MB && !SPARC64_PAGE_SIZE_512KB
+ 	bool "64K"
+ 
+ endchoice
+diff --git a/arch/sparc64/kernel/entry.S b/arch/sparc64/kernel/entry.S
+index 11a8484..7100029 100644
+--- a/arch/sparc64/kernel/entry.S
++++ b/arch/sparc64/kernel/entry.S
+@@ -1657,13 +1657,10 @@ ret_sys_call:
+ 	/* Check if force_successful_syscall_return()
+ 	 * was invoked.
+ 	 */
+-	ldub		[%curptr + TI_SYS_NOERROR], %l0
+-	brz,pt		%l0, 1f
+-	 nop
+-	ba,pt		%xcc, 80f
++	ldub            [%curptr + TI_SYS_NOERROR], %l2
++	brnz,a,pn       %l2, 80f
+ 	 stb		%g0, [%curptr + TI_SYS_NOERROR]
+ 
+-1:
+ 	cmp		%o0, -ERESTART_RESTARTBLOCK
+ 	bgeu,pn		%xcc, 1f
+ 	 andcc		%l0, (_TIF_SYSCALL_TRACE|_TIF_SECCOMP|_TIF_SYSCALL_AUDIT), %l6
+diff --git a/arch/sparc64/kernel/systbls.S b/arch/sparc64/kernel/systbls.S
+index 53eaf23..4821ef1 100644
+--- a/arch/sparc64/kernel/systbls.S
++++ b/arch/sparc64/kernel/systbls.S
+@@ -98,7 +98,7 @@ sys_call_table:
+ 	.word sys_umount, sys_setgid, sys_getgid, sys_signal, sys_geteuid
+ /*50*/	.word sys_getegid, sys_acct, sys_memory_ordering, sys_nis_syscall, sys_ioctl
+ 	.word sys_reboot, sys_nis_syscall, sys_symlink, sys_readlink, sys_execve
+-/*60*/	.word sys_umask, sys_chroot, sys_newfstat, sys_stat64, sys_getpagesize
++/*60*/	.word sys_umask, sys_chroot, sys_newfstat, sys_fstat64, sys_getpagesize
+ 	.word sys_msync, sys_vfork, sys_pread64, sys_pwrite64, sys_nis_syscall
+ /*70*/	.word sys_nis_syscall, sys_mmap, sys_nis_syscall, sys64_munmap, sys_mprotect
+ 	.word sys_madvise, sys_vhangup, sys_nis_syscall, sys_mincore, sys_getgroups
+diff --git a/drivers/char/moxa.c b/drivers/char/moxa.c
+index 79e490e..6884443 100644
+--- a/drivers/char/moxa.c
++++ b/drivers/char/moxa.c
+@@ -1661,6 +1661,8 @@ int MoxaDriverIoctl(unsigned int cmd, un
+ 	case MOXA_FIND_BOARD:
+ 	case MOXA_LOAD_C320B:
+ 	case MOXA_LOAD_CODE:
++		if (!capable(CAP_SYS_RAWIO))
++			return -EPERM;
+ 		break;
+ 	}
+ 
+diff --git a/drivers/net/skge.c b/drivers/net/skge.c
+index 00d6830..7f53a58 100644
+--- a/drivers/net/skge.c
++++ b/drivers/net/skge.c
+@@ -43,7 +43,7 @@
+ #include "skge.h"
+ 
+ #define DRV_NAME		"skge"
+-#define DRV_VERSION		"1.2"
++#define DRV_VERSION		"1.3"
+ #define PFX			DRV_NAME " "
+ 
+ #define DEFAULT_TX_RING_SIZE	128
+@@ -88,15 +88,14 @@ MODULE_DEVICE_TABLE(pci, skge_id_table);
+ 
+ static int skge_up(struct net_device *dev);
+ static int skge_down(struct net_device *dev);
++static void skge_phy_reset(struct skge_port *skge);
+ static void skge_tx_clean(struct skge_port *skge);
+ static int xm_phy_write(struct skge_hw *hw, int port, u16 reg, u16 val);
+ static int gm_phy_write(struct skge_hw *hw, int port, u16 reg, u16 val);
+ static void genesis_get_stats(struct skge_port *skge, u64 *data);
+ static void yukon_get_stats(struct skge_port *skge, u64 *data);
+ static void yukon_init(struct skge_hw *hw, int port);
+-static void yukon_reset(struct skge_hw *hw, int port);
+ static void genesis_mac_init(struct skge_hw *hw, int port);
+-static void genesis_reset(struct skge_hw *hw, int port);
+ static void genesis_link_up(struct skge_port *skge);
+ 
+ /* Avoid conditionals by using array */
+@@ -276,10 +275,9 @@ static int skge_set_settings(struct net_
+ 	skge->autoneg = ecmd->autoneg;
+ 	skge->advertising = ecmd->advertising;
+ 
+-	if (netif_running(dev)) {
+-		skge_down(dev);
+-		skge_up(dev);
+-	}
++	if (netif_running(dev))
++		skge_phy_reset(skge);
++
+ 	return (0);
+ }
+ 
+@@ -399,6 +397,7 @@ static int skge_set_ring_param(struct ne
+ 			       struct ethtool_ringparam *p)
+ {
+ 	struct skge_port *skge = netdev_priv(dev);
++	int err;
+ 
+ 	if (p->rx_pending == 0 || p->rx_pending > MAX_RX_RING_SIZE ||
+ 	    p->tx_pending == 0 || p->tx_pending > MAX_TX_RING_SIZE)
+@@ -409,7 +408,11 @@ static int skge_set_ring_param(struct ne
+ 
+ 	if (netif_running(dev)) {
+ 		skge_down(dev);
+-		skge_up(dev);
++		err = skge_up(dev);
++		if (err)
++			dev_close(dev);
++		else
++			dev->set_multicast_list(dev);
+ 	}
+ 
+ 	return 0;
+@@ -430,21 +433,11 @@ static void skge_set_msglevel(struct net
+ static int skge_nway_reset(struct net_device *dev)
+ {
+ 	struct skge_port *skge = netdev_priv(dev);
+-	struct skge_hw *hw = skge->hw;
+-	int port = skge->port;
+ 
+ 	if (skge->autoneg != AUTONEG_ENABLE || !netif_running(dev))
+ 		return -EINVAL;
+ 
+-	spin_lock_bh(&hw->phy_lock);
+-	if (hw->chip_id == CHIP_ID_GENESIS) {
+-		genesis_reset(hw, port);
+-		genesis_mac_init(hw, port);
+-	} else {
+-		yukon_reset(hw, port);
+-		yukon_init(hw, port);
+-	}
+-	spin_unlock_bh(&hw->phy_lock);
++	skge_phy_reset(skge);
+ 	return 0;
+ }
+ 
+@@ -516,10 +509,8 @@ static int skge_set_pauseparam(struct ne
+ 	else
+ 		skge->flow_control = FLOW_MODE_NONE;
+ 
+-	if (netif_running(dev)) {
+-		skge_down(dev);
+-		skge_up(dev);
+-	}
++	if (netif_running(dev))
++		skge_phy_reset(skge);
+ 	return 0;
+ }
+ 
+@@ -1935,7 +1926,6 @@ static void yukon_link_down(struct skge_
+ 
+ 	}
+ 
+-	yukon_reset(hw, port);
+ 	skge_link_down(skge);
+ 
+ 	yukon_init(hw, port);
+@@ -2019,6 +2009,22 @@ static void yukon_phy_intr(struct skge_p
+ 	/* XXX restart autonegotiation? */
+ }
+ 
++static void skge_phy_reset(struct skge_port *skge)
++{
++	struct skge_hw *hw = skge->hw;
++	int port = skge->port;
++
++	netif_stop_queue(skge->netdev);
++	netif_carrier_off(skge->netdev);
++
++	spin_lock_bh(&hw->phy_lock);
++	if (hw->chip_id == CHIP_ID_GENESIS)
++		genesis_mac_init(hw, port);
++	else
++		yukon_init(hw, port);
++	spin_unlock_bh(&hw->phy_lock);
++}
++
+ /* Basic MII support */
+ static int skge_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
+ {
+@@ -2187,6 +2193,7 @@ static int skge_up(struct net_device *de
+ 	kfree(skge->rx_ring.start);
+  free_pci_mem:
+ 	pci_free_consistent(hw->pdev, skge->mem_size, skge->mem, skge->dma);
++	skge->mem = NULL;
+ 
+ 	return err;
+ }
+@@ -2197,6 +2204,9 @@ static int skge_down(struct net_device *
+ 	struct skge_hw *hw = skge->hw;
+ 	int port = skge->port;
+ 
++	if (skge->mem == NULL)
++		return 0;
++
+ 	if (netif_msg_ifdown(skge))
+ 		printk(KERN_INFO PFX "%s: disabling interface\n", dev->name);
+ 
+@@ -2253,6 +2263,7 @@ static int skge_down(struct net_device *
+ 	kfree(skge->rx_ring.start);
+ 	kfree(skge->tx_ring.start);
+ 	pci_free_consistent(hw->pdev, skge->mem_size, skge->mem, skge->dma);
++	skge->mem = NULL;
+ 	return 0;
+ }
+ 
+@@ -2413,18 +2424,23 @@ static void skge_tx_timeout(struct net_d
+ 
+ static int skge_change_mtu(struct net_device *dev, int new_mtu)
+ {
+-	int err = 0;
+-	int running = netif_running(dev);
++	int err;
+ 
+ 	if (new_mtu < ETH_ZLEN || new_mtu > ETH_JUMBO_MTU)
+ 		return -EINVAL;
+ 
++	if (!netif_running(dev)) {
++		dev->mtu = new_mtu;
++		return 0;
++	}
++
++	skge_down(dev);
+ 
+-	if (running)
+-		skge_down(dev);
+ 	dev->mtu = new_mtu;
+-	if (running)
+-		skge_up(dev);
++
++	err = skge_up(dev);
++	if (err)
++		dev_close(dev);
+ 
+ 	return err;
+ }
+@@ -3398,8 +3414,8 @@ static int skge_resume(struct pci_dev *p
+ 		struct net_device *dev = hw->dev[i];
+ 		if (dev) {
+ 			netif_device_attach(dev);
+-			if (netif_running(dev))
+-				skge_up(dev);
++			if (netif_running(dev) && skge_up(dev))
++				dev_close(dev);
+ 		}
+ 	}
+ 	return 0;
+diff --git a/drivers/video/aty/atyfb_base.c b/drivers/video/aty/atyfb_base.c
+index 08edbfc..3fefdb0 100644
+--- a/drivers/video/aty/atyfb_base.c
++++ b/drivers/video/aty/atyfb_base.c
+@@ -403,7 +403,7 @@ static struct {
+ 	{ PCI_CHIP_MACH64GM, "3D RAGE XL (Mach64 GM, AGP)", 230, 83, 63, ATI_CHIP_264XL },
+ 	{ PCI_CHIP_MACH64GN, "3D RAGE XL (Mach64 GN, AGP)", 230, 83, 63, ATI_CHIP_264XL },
+ 	{ PCI_CHIP_MACH64GO, "3D RAGE XL (Mach64 GO, PCI-66/BGA)", 230, 83, 63, ATI_CHIP_264XL },
+-	{ PCI_CHIP_MACH64GR, "3D RAGE XL (Mach64 GR, PCI-33MHz)", 230, 83, 63, ATI_CHIP_264XL },
++	{ PCI_CHIP_MACH64GR, "3D RAGE XL (Mach64 GR, PCI-33MHz)", 235, 83, 63, ATI_CHIP_264XL | M64F_SDRAM_MAGIC_PLL },
+ 	{ PCI_CHIP_MACH64GL, "3D RAGE XL (Mach64 GL, PCI)", 230, 83, 63, ATI_CHIP_264XL },
+ 	{ PCI_CHIP_MACH64GS, "3D RAGE XL (Mach64 GS, PCI)", 230, 83, 63, ATI_CHIP_264XL },
+ 
+diff --git a/drivers/video/console/vgacon.c b/drivers/video/console/vgacon.c
+index 167de39..f4e1c4b 100644
+--- a/drivers/video/console/vgacon.c
++++ b/drivers/video/console/vgacon.c
+@@ -503,10 +503,16 @@ static int vgacon_doresize(struct vc_dat
+ {
+ 	unsigned long flags;
+ 	unsigned int scanlines = height * c->vc_font.height;
+-	u8 scanlines_lo, r7, vsync_end, mode;
++	u8 scanlines_lo, r7, vsync_end, mode, max_scan;
+ 
+ 	spin_lock_irqsave(&vga_lock, flags);
+ 
++	outb_p(VGA_CRTC_MAX_SCAN, vga_video_port_reg);
++	max_scan = inb_p(vga_video_port_val);
++
++	if (max_scan & 0x80)
++		scanlines <<= 1;
++
+ 	outb_p(VGA_CRTC_MODE, vga_video_port_reg);
+ 	mode = inb_p(vga_video_port_val);
+ 
+diff --git a/fs/ufs/super.c b/fs/ufs/super.c
+index 54828eb..2ba11a9 100644
+--- a/fs/ufs/super.c
++++ b/fs/ufs/super.c
+@@ -1296,8 +1296,10 @@ static ssize_t ufs_quota_write(struct su
+ 		blk++;
+ 	}
+ out:
+-	if (len == towrite)
++	if (len == towrite) {
++		up(&inode->i_sem);
+ 		return err;
++	}
+ 	if (inode->i_size < off+len-towrite)
+ 		i_size_write(inode, off+len-towrite);
+ 	inode->i_version++;
+diff --git a/kernel/workqueue.c b/kernel/workqueue.c
+index 2bd5aee..d3123c2 100644
+--- a/kernel/workqueue.c
++++ b/kernel/workqueue.c
+@@ -29,7 +29,8 @@
+ #include <linux/kthread.h>
+ 
+ /*
+- * The per-CPU workqueue (if single thread, we always use cpu 0's).
++ * The per-CPU workqueue (if single thread, we always use the first
++ * possible cpu).
+  *
+  * The sequence counters are for flush_scheduled_work().  It wants to wait
+  * until until all currently-scheduled works are completed, but it doesn't
+@@ -69,6 +70,8 @@ struct workqueue_struct {
+ static DEFINE_SPINLOCK(workqueue_lock);
+ static LIST_HEAD(workqueues);
+ 
++static int singlethread_cpu;
++
+ /* If it's single threaded, it isn't in the list of workqueues. */
+ static inline int is_single_threaded(struct workqueue_struct *wq)
+ {
+@@ -102,7 +105,7 @@ int fastcall queue_work(struct workqueue
+ 
+ 	if (!test_and_set_bit(0, &work->pending)) {
+ 		if (unlikely(is_single_threaded(wq)))
+-			cpu = any_online_cpu(cpu_online_map);
++			cpu = singlethread_cpu;
+ 		BUG_ON(!list_empty(&work->entry));
+ 		__queue_work(per_cpu_ptr(wq->cpu_wq, cpu), work);
+ 		ret = 1;
+@@ -118,7 +121,7 @@ static void delayed_work_timer_fn(unsign
+ 	int cpu = smp_processor_id();
+ 
+ 	if (unlikely(is_single_threaded(wq)))
+-		cpu = any_online_cpu(cpu_online_map);
++		cpu = singlethread_cpu;
+ 
+ 	__queue_work(per_cpu_ptr(wq->cpu_wq, cpu), work);
+ }
+@@ -267,7 +270,7 @@ void fastcall flush_workqueue(struct wor
+ 
+ 	if (is_single_threaded(wq)) {
+ 		/* Always use first cpu's area. */
+-		flush_cpu_workqueue(per_cpu_ptr(wq->cpu_wq, any_online_cpu(cpu_online_map)));
++		flush_cpu_workqueue(per_cpu_ptr(wq->cpu_wq, singlethread_cpu));
+ 	} else {
+ 		int cpu;
+ 
+@@ -320,7 +323,7 @@ struct workqueue_struct *__create_workqu
+ 	lock_cpu_hotplug();
+ 	if (singlethread) {
+ 		INIT_LIST_HEAD(&wq->list);
+-		p = create_workqueue_thread(wq, any_online_cpu(cpu_online_map));
++		p = create_workqueue_thread(wq, singlethread_cpu);
+ 		if (!p)
+ 			destroy = 1;
+ 		else
+@@ -374,7 +377,7 @@ void destroy_workqueue(struct workqueue_
+ 	/* We don't need the distraction of CPUs appearing and vanishing. */
+ 	lock_cpu_hotplug();
+ 	if (is_single_threaded(wq))
+-		cleanup_workqueue_thread(wq, any_online_cpu(cpu_online_map));
++		cleanup_workqueue_thread(wq, singlethread_cpu);
+ 	else {
+ 		for_each_online_cpu(cpu)
+ 			cleanup_workqueue_thread(wq, cpu);
+@@ -543,6 +546,7 @@ static int __devinit workqueue_cpu_callb
+ 
+ void init_workqueues(void)
+ {
++	singlethread_cpu = first_cpu(cpu_possible_map);
+ 	hotcpu_notifier(workqueue_cpu_callback, 0);
+ 	keventd_wq = create_workqueue("events");
+ 	BUG_ON(!keventd_wq);
+diff --git a/net/bridge/br_stp_if.c b/net/bridge/br_stp_if.c
+index ac09b6a..491f49d 100644
+--- a/net/bridge/br_stp_if.c
++++ b/net/bridge/br_stp_if.c
+@@ -158,7 +158,7 @@ void br_stp_recalculate_bridge_id(struct
+ 
+ 	list_for_each_entry(p, &br->port_list, list) {
+ 		if (addr == br_mac_zero ||
+-		    compare_ether_addr(p->dev->dev_addr, addr) < 0)
++		    memcmp(p->dev->dev_addr, addr, ETH_ALEN) < 0)
+ 			addr = p->dev->dev_addr;
+ 
+ 	}
+diff --git a/net/bridge/netfilter/ebt_ip.c b/net/bridge/netfilter/ebt_ip.c
+index 7323805..f158fe6 100644
+--- a/net/bridge/netfilter/ebt_ip.c
++++ b/net/bridge/netfilter/ebt_ip.c
+@@ -15,6 +15,7 @@
+ #include <linux/netfilter_bridge/ebtables.h>
+ #include <linux/netfilter_bridge/ebt_ip.h>
+ #include <linux/ip.h>
++#include <net/ip.h>
+ #include <linux/in.h>
+ #include <linux/module.h>
+ 
+@@ -51,6 +52,8 @@ static int ebt_filter_ip(const struct sk
+ 		if (!(info->bitmask & EBT_IP_DPORT) &&
+ 		    !(info->bitmask & EBT_IP_SPORT))
+ 			return EBT_MATCH;
++		if (ntohs(ih->frag_off) & IP_OFFSET)
++			return EBT_NOMATCH;
+ 		pptr = skb_header_pointer(skb, ih->ihl*4,
+ 					  sizeof(_ports), &_ports);
+ 		if (pptr == NULL)
+diff --git a/net/core/net-sysfs.c b/net/core/net-sysfs.c
+index e2137f3..2941c02 100644
+--- a/net/core/net-sysfs.c
++++ b/net/core/net-sysfs.c
+@@ -16,6 +16,7 @@
+ #include <net/sock.h>
+ #include <linux/rtnetlink.h>
+ #include <linux/wireless.h>
++#include <net/iw_handler.h>
+ 
+ #define to_class_dev(obj) container_of(obj,struct class_device,kobj)
+ #define to_net_dev(class) container_of(class, struct net_device, class_dev)
+@@ -313,13 +314,19 @@ static ssize_t wireless_show(struct clas
+ 					       char *))
+ {
+ 	struct net_device *dev = to_net_dev(cd);
+-	const struct iw_statistics *iw;
++	const struct iw_statistics *iw = NULL;
+ 	ssize_t ret = -EINVAL;
+ 	
+ 	read_lock(&dev_base_lock);
+-	if (dev_isalive(dev) && dev->get_wireless_stats 
+-	    && (iw = dev->get_wireless_stats(dev)) != NULL) 
+-		ret = (*format)(iw, buf);
++	if (dev_isalive(dev)) {
++		if(dev->wireless_handlers &&
++		   dev->wireless_handlers->get_wireless_stats)
++			iw = dev->wireless_handlers->get_wireless_stats(dev);
++		else if (dev->get_wireless_stats)
++			iw = dev->get_wireless_stats(dev);
++		if (iw != NULL)
++			ret = (*format)(iw, buf);
++	}
+ 	read_unlock(&dev_base_lock);
+ 
+ 	return ret;
+@@ -420,7 +427,8 @@ void netdev_unregister_sysfs(struct net_
+ 		sysfs_remove_group(&class_dev->kobj, &netstat_group);
+ 
+ #ifdef WIRELESS_EXT
+-	if (net->get_wireless_stats)
++	if (net->get_wireless_stats || (net->wireless_handlers &&
++			net->wireless_handlers->get_wireless_stats))
+ 		sysfs_remove_group(&class_dev->kobj, &wireless_group);
+ #endif
+ 	class_device_del(class_dev);
+@@ -453,10 +461,12 @@ int netdev_register_sysfs(struct net_dev
+ 		goto out_unreg; 
+ 
+ #ifdef WIRELESS_EXT
+-	if (net->get_wireless_stats &&
+-	    (ret = sysfs_create_group(&class_dev->kobj, &wireless_group)))
+-		goto out_cleanup; 
+-
++	if (net->get_wireless_stats || (net->wireless_handlers &&
++			net->wireless_handlers->get_wireless_stats)) {
++		ret = sysfs_create_group(&class_dev->kobj, &wireless_group);
++		if (ret)
++			goto out_cleanup;
++	}
+ 	return 0;
+ out_cleanup:
+ 	if (net->get_stats)
+diff --git a/net/ipv4/netfilter/ip_nat_helper_pptp.c b/net/ipv4/netfilter/ip_nat_helper_pptp.c
+index e546203..50960cb 100644
+--- a/net/ipv4/netfilter/ip_nat_helper_pptp.c
++++ b/net/ipv4/netfilter/ip_nat_helper_pptp.c
+@@ -148,14 +148,14 @@ pptp_outbound_pkt(struct sk_buff **pskb,
+ {
+ 	struct ip_ct_pptp_master *ct_pptp_info = &ct->help.ct_pptp_info;
+ 	struct ip_nat_pptp *nat_pptp_info = &ct->nat.help.nat_pptp_info;
+-
+-	u_int16_t msg, *cid = NULL, new_callid;
++	u_int16_t msg, new_callid;
++	unsigned int cid_off;
+ 
+ 	new_callid = htons(ct_pptp_info->pns_call_id);
+ 	
+ 	switch (msg = ntohs(ctlh->messageType)) {
+ 		case PPTP_OUT_CALL_REQUEST:
+-			cid = &pptpReq->ocreq.callID;
++			cid_off = offsetof(union pptp_ctrl_union, ocreq.callID);
+ 			/* FIXME: ideally we would want to reserve a call ID
+ 			 * here.  current netfilter NAT core is not able to do
+ 			 * this :( For now we use TCP source port. This breaks
+@@ -172,10 +172,10 @@ pptp_outbound_pkt(struct sk_buff **pskb,
+ 			ct_pptp_info->pns_call_id = ntohs(new_callid);
+ 			break;
+ 		case PPTP_IN_CALL_REPLY:
+-			cid = &pptpReq->icreq.callID;
++			cid_off = offsetof(union pptp_ctrl_union, icreq.callID);
+ 			break;
+ 		case PPTP_CALL_CLEAR_REQUEST:
+-			cid = &pptpReq->clrreq.callID;
++			cid_off = offsetof(union pptp_ctrl_union, clrreq.callID);
+ 			break;
+ 		default:
+ 			DEBUGP("unknown outbound packet 0x%04x:%s\n", msg,
+@@ -197,18 +197,15 @@ pptp_outbound_pkt(struct sk_buff **pskb,
+ 
+ 	/* only OUT_CALL_REQUEST, IN_CALL_REPLY, CALL_CLEAR_REQUEST pass
+ 	 * down to here */
+-
+-	IP_NF_ASSERT(cid);
+-
+ 	DEBUGP("altering call id from 0x%04x to 0x%04x\n",
+-		ntohs(*cid), ntohs(new_callid));
++		ntohs(*(u_int16_t *)pptpReq + cid_off), ntohs(new_callid));
+ 
+ 	/* mangle packet */
+ 	if (ip_nat_mangle_tcp_packet(pskb, ct, ctinfo,
+-		(void *)cid - ((void *)ctlh - sizeof(struct pptp_pkt_hdr)),
+-				 	sizeof(new_callid), 
+-					(char *)&new_callid,
+-				 	sizeof(new_callid)) == 0)
++	                             cid_off + sizeof(struct pptp_pkt_hdr) +
++	                             sizeof(struct PptpControlHeader),
++	                             sizeof(new_callid), (char *)&new_callid,
++	                             sizeof(new_callid)) == 0)
+ 		return NF_DROP;
+ 
+ 	return NF_ACCEPT;
+@@ -299,7 +296,8 @@ pptp_inbound_pkt(struct sk_buff **pskb,
+ 		 union pptp_ctrl_union *pptpReq)
+ {
+ 	struct ip_nat_pptp *nat_pptp_info = &ct->nat.help.nat_pptp_info;
+-	u_int16_t msg, new_cid = 0, new_pcid, *pcid = NULL, *cid = NULL;
++	u_int16_t msg, new_cid = 0, new_pcid;
++	unsigned int pcid_off, cid_off = 0;
+ 
+ 	int ret = NF_ACCEPT, rv;
+ 
+@@ -307,23 +305,23 @@ pptp_inbound_pkt(struct sk_buff **pskb,
+ 
+ 	switch (msg = ntohs(ctlh->messageType)) {
+ 	case PPTP_OUT_CALL_REPLY:
+-		pcid = &pptpReq->ocack.peersCallID;	
+-		cid = &pptpReq->ocack.callID;
++		pcid_off = offsetof(union pptp_ctrl_union, ocack.peersCallID);
++		cid_off = offsetof(union pptp_ctrl_union, ocack.callID);
+ 		break;
+ 	case PPTP_IN_CALL_CONNECT:
+-		pcid = &pptpReq->iccon.peersCallID;
++		pcid_off = offsetof(union pptp_ctrl_union, iccon.peersCallID);
+ 		break;
+ 	case PPTP_IN_CALL_REQUEST:
+ 		/* only need to nat in case PAC is behind NAT box */
+-		break;
++		return NF_ACCEPT;
+ 	case PPTP_WAN_ERROR_NOTIFY:
+-		pcid = &pptpReq->wanerr.peersCallID;
++		pcid_off = offsetof(union pptp_ctrl_union, wanerr.peersCallID);
+ 		break;
+ 	case PPTP_CALL_DISCONNECT_NOTIFY:
+-		pcid = &pptpReq->disc.callID;
++		pcid_off = offsetof(union pptp_ctrl_union, disc.callID);
+ 		break;
+ 	case PPTP_SET_LINK_INFO:
+-		pcid = &pptpReq->setlink.peersCallID;
++		pcid_off = offsetof(union pptp_ctrl_union, setlink.peersCallID);
+ 		break;
+ 
+ 	default:
+@@ -345,25 +343,24 @@ pptp_inbound_pkt(struct sk_buff **pskb,
+ 	 * WAN_ERROR_NOTIFY, CALL_DISCONNECT_NOTIFY pass down here */
+ 
+ 	/* mangle packet */
+-	IP_NF_ASSERT(pcid);
+ 	DEBUGP("altering peer call id from 0x%04x to 0x%04x\n",
+-		ntohs(*pcid), ntohs(new_pcid));
++		ntohs(*(u_int16_t *)pptpReq + pcid_off), ntohs(new_pcid));
+ 	
+-	rv = ip_nat_mangle_tcp_packet(pskb, ct, ctinfo, 
+-				      (void *)pcid - ((void *)ctlh - sizeof(struct pptp_pkt_hdr)),
++	rv = ip_nat_mangle_tcp_packet(pskb, ct, ctinfo,
++	                              pcid_off + sizeof(struct pptp_pkt_hdr) +
++				      sizeof(struct PptpControlHeader),
+ 				      sizeof(new_pcid), (char *)&new_pcid, 
+ 				      sizeof(new_pcid));
+ 	if (rv != NF_ACCEPT) 
+ 		return rv;
+ 
+ 	if (new_cid) {
+-		IP_NF_ASSERT(cid);
+ 		DEBUGP("altering call id from 0x%04x to 0x%04x\n",
+-			ntohs(*cid), ntohs(new_cid));
+-		rv = ip_nat_mangle_tcp_packet(pskb, ct, ctinfo, 
+-					      (void *)cid - ((void *)ctlh - sizeof(struct pptp_pkt_hdr)), 
+-					      sizeof(new_cid),
+-					      (char *)&new_cid, 
++			ntohs(*(u_int16_t *)pptpReq + cid_off), ntohs(new_cid));
++		rv = ip_nat_mangle_tcp_packet(pskb, ct, ctinfo,
++		                              cid_off + sizeof(struct pptp_pkt_hdr) +
++					      sizeof(struct PptpControlHeader),
++					      sizeof(new_cid), (char *)&new_cid, 
+ 					      sizeof(new_cid));
+ 		if (rv != NF_ACCEPT)
+ 			return rv;
+diff --git a/net/netlink/af_netlink.c b/net/netlink/af_netlink.c
+index 96020d7..fc5a735 100644
+--- a/net/netlink/af_netlink.c
++++ b/net/netlink/af_netlink.c
+@@ -402,7 +402,7 @@ static int netlink_create(struct socket 
+ 	groups = nl_table[protocol].groups;
+ 	netlink_unlock_table();
+ 
+-	if ((err = __netlink_create(sock, protocol) < 0))
++	if ((err = __netlink_create(sock, protocol)) < 0)
+ 		goto out_module;
+ 
+ 	nlk = nlk_sk(sock->sk);
+@@ -1422,7 +1422,7 @@ static int netlink_rcv_skb(struct sk_buf
+ 	while (skb->len >= nlmsg_total_size(0)) {
+ 		nlh = (struct nlmsghdr *) skb->data;
+ 
+-		if (skb->len < nlh->nlmsg_len)
++		if (nlh->nlmsg_len < NLMSG_HDRLEN || skb->len < nlh->nlmsg_len)
+ 			return 0;
+ 
+ 		total_len = min(NLMSG_ALIGN(nlh->nlmsg_len), skb->len);
