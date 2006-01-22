@@ -48,6 +48,10 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         for i in ('kernel-header-dirs', 'KERNEL_HEADER_DIRS'),:
             if config_entry.has_key(i[0]):
                 makeflags[i[1]] = config_entry[i[0]]
+        localversion_headers = ''
+        if subarch != 'none':
+            localversion_headers = '-' + subarch
+        makeflags['LOCALVERSION_HEADERS'] = localversion_headers
 
     def do_subarch_packages(self, packages, makefile, arch, subarch, vars, makeflags, extra):
         headers_subarch = self.templates["control.headers.subarch"]
@@ -83,6 +87,14 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         ):
             if config_entry.has_key(i[0]):
                 makeflags[i[1]] = config_entry[i[0]]
+        localversion = ''
+        localversion_headers = ''
+        if subarch != 'none':
+            localversion = '-' + subarch
+            localversion_headers = '-' + subarch
+        localversion += '-' + flavour
+        makeflags['LOCALVERSION'] = localversion
+        makeflags['LOCALVERSION_HEADERS'] = localversion_headers
 
     def do_flavour_packages(self, packages, makefile, arch, subarch, flavour, vars, makeflags, extra):
         image = self.templates["control.image"]

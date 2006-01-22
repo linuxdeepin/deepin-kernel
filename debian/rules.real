@@ -17,12 +17,8 @@ export PYTHONPATH = $(CURDIR)/debian/lib/python
 #
 ifeq ($(SUBARCH),none)
   basedir := debian/arch/$(ARCH)
-  LOCALVERSION := -$(FLAVOUR)
-  LOCALVERSION_HEADERS :=
 else
   basedir := debian/arch/$(ARCH)/$(SUBARCH)
-  LOCALVERSION := -$(SUBARCH)-$(FLAVOUR)
-  LOCALVERSION_HEADERS := -$(SUBARCH)
 endif
 
 -include $(basedir)/Makefile.inc
@@ -36,20 +32,14 @@ include debian/rules.defs
 # in Makefile.inc. @flavour@ in the expressions is going to be
 # replaced by the flavour for which the command is run. 
 #
-kpkg_header += make-kpkg --append-to-version '$(KPKG_ABINAME)$(LOCALVERSION_HEADERS)'
-kpkg_header += --arch '$(ARCH)'
-kpkg_header += --stem linux
-kpkg_header += --config defconfig
 kpkg_image := make-kpkg --append-to-version '$(KPKG_ABINAME)$(LOCALVERSION)'
 kpkg_image += --arch '$(ARCH)'
 kpkg_image += --stem linux
 kpkg_image += --initrd
 ifdef KPKG_SUBARCH
   kpkg_image += --subarch '$(KPKG_SUBARCH)'
-  kpkg_header += --subarch '$(KPKG_SUBARCH)'
 endif
 ifneq ($(DEB_BUILD_ARCH),$(DEB_HOST_ARCH))
-  kpkg_header += --cross-compile='$(DEB_HOST_GNU_TYPE)'
   kpkg_image += --cross-compile='$(DEB_HOST_GNU_TYPE)'
 endif
 setup_env := env -u ABINAME -u ARCH -u SUBARCH -u FLAVOUR -u VERSION
@@ -73,7 +63,7 @@ binary-indep: install-doc install-patch install-source install-tree
 build: $(STAMPS_DIR)/build-$(ARCH)-$(SUBARCH)-$(FLAVOUR)
 
 setup-arch: $(STAMPS_DIR)/source
-setup-subarch: $(STAMPS_DIR)/setup-$(ARCH)-$(SUBARCH)
+setup-subarch:
 setup-flavour: $(STAMPS_DIR)/setup-$(ARCH)-$(SUBARCH)-$(FLAVOUR)
 
 #
@@ -103,7 +93,7 @@ define patch_cmd
 cd '$(DIR)'; python2.4 '$(CURDIR)/debian/bin/apply.py' --overwrite-home='$(CURDIR)/debian/patches' --overwrite-source='$(SOURCE_VERSION)' --overwrite-revisions='$(REVISIONS)'
 endef
 
-srcfiles := $(filter-out debian, $(wildcard *))
+srcfiles := $(filter-out debian, $(wildcard * .[^.]*))
 $(STAMPS_DIR)/source: DIR=$(BUILD_DIR)/source
 $(STAMPS_DIR)/source: debian/bin/apply.py
 	rm -rf '$(DIR)'
@@ -150,14 +140,6 @@ $(STAMPS_DIR)/setup-$(ARCH)-$(SUBARCH)-$(FLAVOUR): $(BUILD_DIR)/config.$(ARCH)-$
 	cp -al '$(SOURCE_DIR)' '$(DIR)'
 	cp '$<' '$(DIR)/.config'
 	cd '$(DIR)'; $(setup_env) $(kpkg_image) configure
-	touch '$@'
-
-$(STAMPS_DIR)/setup-$(ARCH)-$(SUBARCH): SOURCE_DIR=$(BUILD_DIR)/source-$(ARCH)-$(SUBARCH)
-$(STAMPS_DIR)/setup-$(ARCH)-$(SUBARCH): DIR=$(BUILD_DIR)/build-$(ARCH)-$(SUBARCH)
-$(STAMPS_DIR)/setup-$(ARCH)-$(SUBARCH): $(STAMPS_DIR)/source-$(ARCH)-$(SUBARCH)
-	rm -rf '$(DIR)'
-	cp -al '$(SOURCE_DIR)' '$(DIR)'
-	cd '$(DIR)'; $(setup_env) $(kpkg_header) configure
 	touch '$@'
 
 install-base:
@@ -211,26 +193,39 @@ install-image-$(ARCH)-$(SUBARCH)-$(FLAVOUR): $(STAMPS_DIR)/build-$(ARCH)-$(SUBAR
 	done
 	rm -rf '$(DIR)'
 
-install-header-$(ARCH)-$(SUBARCH): SOURCE_DIR=$(BUILD_DIR)/build-$(ARCH)-$(SUBARCH)
-install-header-$(ARCH)-$(SUBARCH): DIR=$(BUILD_DIR)/$@
-install-header-$(ARCH)-$(SUBARCH): $(STAMPS_DIR)/setup-$(ARCH)-$(SUBARCH)
-	rm -rf '$(DIR)'
-	cp -al '$(SOURCE_DIR)' '$(DIR)'
-	install debian/bin/install-header '$(DIR)/install-header'
-	cd '$(DIR)'; $(setup_env) HEADER_CLEAN_HOOK='$(CURDIR)/$(DIR)/install-header' $(kpkg_header) kernel-headers
-	cat '$(DIR)/debian/files' >> debian/files
-	@for i in $$(awk '{ print $$1; }' '$(DIR)/debian/files'); do	\
-	  echo "mv \"$(BUILD_DIR)/$$i\" ..";				\
-	  mv "$(BUILD_DIR)/$$i" ..;					\
-	done
-	rm -rf '$(DIR)'
+install-header-$(ARCH)-$(SUBARCH): PACKAGE_NAME = linux-headers-$(VERSION)-$(ABINAME)$(LOCALVERSION_HEADERS)
+install-header-$(ARCH)-$(SUBARCH): export DH_OPTIONS = -p$(PACKAGE_NAME)
+install-header-$(ARCH)-$(SUBARCH): BASE_DIR = /usr/src/$(PACKAGE_NAME)
+install-header-$(ARCH)-$(SUBARCH): SOURCE_DIR = $(BUILD_DIR)/source-$(ARCH)-$(SUBARCH)
+install-header-$(ARCH)-$(SUBARCH): DIR = $(CURDIR)/debian/$(PACKAGE_NAME)/$(BASE_DIR)
+install-header-$(ARCH)-$(SUBARCH): $(STAMPS_DIR)/source-$(ARCH)-$(SUBARCH)
+	dh_testdir
+	dh_testroot
+	dh_clean -k -d
+	cd $(SOURCE_DIR); \
+	( \
+	  find . \
+	    -path './Documentation/*' -prune -o \
+	    -path './arch/*' -prune -o \
+	    -path './include/asm*' -prune -o \
+	    -path './scripts/*' -prune -o \
+	    -path './include/' -o \
+	    \( -name 'Makefile*' -o -name 'Kconfig*' -o -name 'Rules.make' \) -print; \
+	  for i in $(KERNEL_HEADER_DIRS); do \
+	    find arch/$$i \
+	      \( -name 'Makefile*' -o -name 'Kconfig*' -o -name 'Rules.make' \) -print; \
+	    find include/asm-$$i -print; \
+	  done; \
+	) \
+	| \
+	cpio -pd --preserve-modification-time $(DIR)
+	$(MAKE) -f debian/rules.real install-base
 
 install-headers-all: DH_OPTIONS = -plinux-headers-$(VERSION)
 install-headers-all:
 	dh_testdir
 	dh_testroot
-	dh_install $(DH_OPTIONS) debian/arch '/usr/src/linux-headers-$(VERSION)'
-	dh_install $(DH_OPTIONS) debian/lib '/usr/src/linux-headers-$(VERSION)'
+	dh_install $(DH_OPTIONS) debian/arch debian/lib debian/modules '/usr/src/linux-headers-$(VERSION)'
 	dh_installdocs $(DH_OPTIONS)
 	dh_installchangelogs $(DH_OPTIONS)
 	dh_python $(DH_OPTIONS) -V 2.4 /usr/src/linux-headers-$(VERSION)/lib/python
