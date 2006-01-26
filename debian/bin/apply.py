@@ -24,7 +24,10 @@ class series(list):
                 continue
 
             items = line.split(' ')
-            operation, patch = items
+            if len(items) != 2:
+                raise RuntimeError, "Line '%s' in file %s malformed." % (line, filename)
+            else:
+                operation, patch = items
 
             if operation in ('+', '-'):
                 patchfile = os.path.join(home, patch)
