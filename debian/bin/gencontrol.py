@@ -83,6 +83,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
             ('kernel-header-dirs', 'KERNEL_HEADER_DIRS'),
             ('kpkg-arch', 'KPKG_ARCH'),
             ('kpkg-subarch', 'KPKG_SUBARCH'),
+            ('image-postproc', 'IMAGE_POSTPROC'),
             ('type', 'TYPE'),
         ):
             if config_entry.has_key(i[0]):
