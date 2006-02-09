@@ -94,6 +94,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
             localversion = '-' + subarch
             localversion_headers = '-' + subarch
         localversion += '-' + flavour
+        makeflags['LOCALVERSION'] = localversion
         makeflags['LOCALVERSION_HEADERS'] = localversion_headers
 
     def do_flavour_packages(self, packages, makefile, arch, subarch, flavour, vars, makeflags, extra):
