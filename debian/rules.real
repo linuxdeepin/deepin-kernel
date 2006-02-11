@@ -5,12 +5,13 @@
 # Additionally, variables version, abiname and ltver are
 # expected to be available (need to be exported from the parent process).
 #
-SHELL  := sh -e
+SHELL  := bash -e
 DEB_HOST_ARCH     := $(shell dpkg-architecture -a'$(ARCH)' -qDEB_HOST_ARCH)
 DEB_HOST_GNU_TYPE := $(shell dpkg-architecture -a'$(ARCH)' -qDEB_HOST_GNU_TYPE)
 DEB_BUILD_ARCH    := $(shell dpkg-architecture -a'$(ARCH)' -qDEB_BUILD_ARCH)
 
 export PYTHONPATH = $(CURDIR)/debian/lib/python
+export DH_OPTIONS
 
 #
 # Build the list of common config files to be included
@@ -56,7 +57,7 @@ setup_env += MAKEFLAGS='$(setup_makeflags)'
 # Targets
 #
 binary-arch-subarch: install-header-$(ARCH)-$(SUBARCH)
-binary-arch-flavour: install-image-$(ARCH)-$(SUBARCH)-$(FLAVOUR)
+binary-arch-flavour: install-image-$(ARCH)-$(SUBARCH)-$(FLAVOUR) install-header-$(ARCH)-$(SUBARCH)-$(FLAVOUR)
 
 binary-indep: install-doc install-patch install-source install-tree
 
@@ -181,10 +182,9 @@ install-dummy:
 
 install-image-$(ARCH)-$(SUBARCH)-$(FLAVOUR): SOURCE_DIR=$(BUILD_DIR)/build-$(ARCH)-$(SUBARCH)-$(FLAVOUR)
 install-image-$(ARCH)-$(SUBARCH)-$(FLAVOUR): DIR=$(BUILD_DIR)/$@
-install-image-$(ARCH)-$(SUBARCH)-$(FLAVOUR): $(STAMPS_DIR)/build-$(ARCH)-$(SUBARCH)-$(FLAVOUR) debian/bin/install-image
+install-image-$(ARCH)-$(SUBARCH)-$(FLAVOUR): $(STAMPS_DIR)/build-$(ARCH)-$(SUBARCH)-$(FLAVOUR)
 	rm -rf '$(DIR)'
 	cp -al '$(SOURCE_DIR)' '$(DIR)'
-	install debian/bin/install-image '$(DIR)/debian/post-install'
 	cd '$(DIR)'; $(setup_env) $(kpkg_image) kernel-image
 	cat '$(DIR)/debian/files' >> debian/files
 ifdef IMAGE_POSTPROC
@@ -197,7 +197,7 @@ endif
 	rm -rf '$(DIR)'
 
 install-header-$(ARCH)-$(SUBARCH): PACKAGE_NAME = linux-headers-$(VERSION)-$(ABINAME)$(LOCALVERSION_HEADERS)
-install-header-$(ARCH)-$(SUBARCH): export DH_OPTIONS = -p$(PACKAGE_NAME)
+install-header-$(ARCH)-$(SUBARCH): DH_OPTIONS = -p$(PACKAGE_NAME)
 install-header-$(ARCH)-$(SUBARCH): BASE_DIR = /usr/src/$(PACKAGE_NAME)
 install-header-$(ARCH)-$(SUBARCH): SOURCE_DIR = $(BUILD_DIR)/source-$(ARCH)-$(SUBARCH)
 install-header-$(ARCH)-$(SUBARCH): DIR = $(CURDIR)/debian/$(PACKAGE_NAME)/$(BASE_DIR)
@@ -212,8 +212,9 @@ install-header-$(ARCH)-$(SUBARCH): $(STAMPS_DIR)/source-$(ARCH)-$(SUBARCH)
 	    -path './arch/*' -prune -o \
 	    -path './include/asm*' -prune -o \
 	    -path './scripts/*' -prune -o \
-	    -path './include/' -o \
+	    -path './include/*' -print -o \
 	    \( -name 'Makefile*' -o -name 'Kconfig*' -o -name 'Rules.make' \) -print; \
+	  find include/asm-generic -print; \
 	  for i in $(KERNEL_HEADER_DIRS); do \
 	    find arch/$$i \
 	      \( -name 'Makefile*' -o -name 'Kconfig*' -o -name 'Rules.make' \) -print; \
@@ -222,6 +223,79 @@ install-header-$(ARCH)-$(SUBARCH): $(STAMPS_DIR)/source-$(ARCH)-$(SUBARCH)
 	) \
 	| \
 	cpio -pd --preserve-modification-time $(DIR)
+	$(MAKE) -f debian/rules.real install-base
+
+install-header-$(ARCH)-$(SUBARCH)-$(FLAVOUR): PACKAGE_NAME = linux-headers-$(VERSION)-$(ABINAME)$(LOCALVERSION)
+install-header-$(ARCH)-$(SUBARCH)-$(FLAVOUR): PACKAGE_NAME_HEADERS = linux-headers-$(VERSION)-$(ABINAME)$(LOCALVERSION_HEADERS)
+install-header-$(ARCH)-$(SUBARCH)-$(FLAVOUR): DH_OPTIONS = -p$(PACKAGE_NAME)
+install-header-$(ARCH)-$(SUBARCH)-$(FLAVOUR): BASE_DIR = /usr/src/$(PACKAGE_NAME)
+install-header-$(ARCH)-$(SUBARCH)-$(FLAVOUR): SOURCE_DIR = $(BUILD_DIR)/build-$(ARCH)-$(SUBARCH)-$(FLAVOUR)
+install-header-$(ARCH)-$(SUBARCH)-$(FLAVOUR): REF_DIR = $(BUILD_DIR)/source-$(ARCH)-$(SUBARCH)
+install-header-$(ARCH)-$(SUBARCH)-$(FLAVOUR): PACKAGE_DIR = $(CURDIR)/debian/$(PACKAGE_NAME)
+install-header-$(ARCH)-$(SUBARCH)-$(FLAVOUR): DIR = $(PACKAGE_DIR)/$(BASE_DIR)
+install-header-$(ARCH)-$(SUBARCH)-$(FLAVOUR): $(STAMPS_DIR)/build-$(ARCH)-$(SUBARCH)-$(FLAVOUR)
+	dh_testdir
+	dh_testroot
+	dh_clean -k -d
+
+	mkdir -p "${DIR}/arch/${KERNEL_ARCH}/kernel"
+	mkdir -p "${DIR}/include"
+	cp -a ${SOURCE_DIR}/{.config,Module.symvers}  "${DIR}"
+	echo ${DEBIAN_LOCALVERSION} > "${DIR}/localversion"
+
+	cd ${SOURCE_DIR}; \
+	find . -mindepth 1 -maxdepth 1 \
+		! -name debian -a ! -name Documentation -a ! -name include -a \
+		! -name DEBIAN -a ! -name scripts -a ! -name arch -a ! -name '.*' -a \( \
+		-name Makefile -o -type d \) \
+		-printf "../${PACKAGE_NAME_HEADERS}/%f\n" | \
+		xargs ln -s --target-directory="${DIR}"
+	
+	cd ${SOURCE_DIR}; \
+	find "arch/${KERNEL_ARCH}" -mindepth 1 -maxdepth 1 \( \
+		-type d -a ! -name include -a ! -name kernel -o \
+		-type f -a \( -name 'Makefile*' -o -name 'Kconfig*' \) \) \
+		-printf "../../../${PACKAGE_NAME_HEADERS}/%p\n" | \
+		xargs ln -s --target-directory="${DIR}/arch/${KERNEL_ARCH}"
+
+	[ -d "${SOURCE_DIR}/arch/${KERNEL_ARCH}/include" ] && \
+		cp -a "${SOURCE_DIR}/arch/${KERNEL_ARCH}/include" "${DIR}/arch/${KERNEL_ARCH}/include" || :
+	[ -f "${SOURCE_DIR}/arch/${KERNEL_ARCH}/kernel/asm-offsets.s" ] && \
+		ln -f "${SOURCE_DIR}/arch/${KERNEL_ARCH}/kernel/asm-offsets.s" "${DIR}/arch/${KERNEL_ARCH}/kernel" || :
+	ln -s "../../../../${PACKAGE_NAME_HEADERS}/arch/${KERNEL_ARCH}/kernel/Makefile" "${DIR}/arch/${KERNEL_ARCH}/kernel"
+
+	cd ${SOURCE_DIR}; \
+	find include -mindepth 1 -maxdepth 1 \
+		! -name config -a ! -name linux -a ! -name 'asm-*' \
+		-printf "../../${PACKAGE_NAME_HEADERS}/%p\n" | \
+		xargs ln -s --target-directory="${DIR}/include"
+	cp -a ${SOURCE_DIR}/include/config "${DIR}/include"
+	
+	ln -sf "asm-${KERNEL_ARCH}" "${DIR}/include/asm"
+
+	cd ${SOURCE_DIR}; \
+	for dir in linux asm-generic $(foreach t, $(KERNEL_HEADER_DIRS), asm-$(t)); do \
+		mkdir "${DIR}/include/$$dir"; \
+		for file in $$(find "include/$$dir" -mindepth 1 -maxdepth 1); do \
+			if [ -e ${CURDIR}/${REF_DIR}/$$file ]; then \
+				ln -s --target-directory="${DIR}/include/$$dir" "../../../${PACKAGE_NAME_HEADERS}/${REF_DIR}/$$file"; \
+			elif [ -d ${CURDIR}/${SOURCE_DIR}/$$file ]; then \
+				cp -a "${CURDIR}/${SOURCE_DIR}/$$file" "${DIR}/include/$$dir"; \
+			else \
+				ln -f --target-directory="${DIR}/include/$$dir" "${CURDIR}/${SOURCE_DIR}/$$file"; \
+			fi \
+		done \
+	done
+	
+	mkdir -p "${PACKAGE_DIR}/lib/modules/${UPSTREAM_VERSION}"
+	ln -s "/usr/src/${PACKAGE_NAME}" "${PACKAGE_DIR}/lib/modules/${UPSTREAM_VERSION}/build"
+	
+	# Populate the scripts directory. The strategy here is to specify what
+	# *not* to copy, to make things a little bit more robust. We first create
+	# a file with exclude patterns, then copy everything minus excluded files.
+	#
+	tar $(foreach t, *.c *.h *.y *.l *.gperf *POTFILES.in .gitignore *lxdialog* *package* *.cc *.glade *_shipped, --exclude=$(t)) -chf - scripts | (cd "${DIR}"; umask 000; tar xsf -)
+	
 	$(MAKE) -f debian/rules.real install-base
 
 install-headers-all: DH_OPTIONS = -plinux-headers-$(VERSION)
