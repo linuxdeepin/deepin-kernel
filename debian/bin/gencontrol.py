@@ -80,6 +80,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         makeflags['TYPE'] = 'kernel-package'
         for i in (
             ('compiler', 'COMPILER'),
+            ('kernel-arch', 'KERNEL_ARCH'),
             ('kernel-header-dirs', 'KERNEL_HEADER_DIRS'),
             ('kpkg-arch', 'KPKG_ARCH'),
             ('kpkg-subarch', 'KPKG_SUBARCH'),
