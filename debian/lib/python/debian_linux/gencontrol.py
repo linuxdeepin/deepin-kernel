@@ -178,6 +178,7 @@ class gencontrol(object):
         for i in (
             ('compiler', 'COMPILER'),
             ('kernel-arch', 'KERNEL_ARCH')
+            ('initrd', 'INITRD')
         ):  
             if config_entry.has_key(i[0]):
                 makeflags[i[1]] = config_entry[i[0]]
