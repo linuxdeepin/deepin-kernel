@@ -1,18 +1,23 @@
 import debian, re, textwrap
 
-class _sorted_dict(dict):
-    __slots__ = ('_list')
+class sorted_dict(dict):
+    __slots__ = '_list',
 
     def __init__(self, entries = None):
-        super(_sorted_dict, self).__init__()
+        super(sorted_dict, self).__init__()
         self._list = []
         if entries is not None:
             for key, value in entries:
                 self[key] = value
 
     def __delitem__(self, key):
-        super(_sorted_dict, self).__delitem__(key)
+        super(sorted_dict, self).__delitem__(key)
         self._list.remove(key)
+
+    def __setitem__(self, key, value):
+        super(sorted_dict, self).__setitem__(key, value)
+        if key not in self._list:
+            self._list.append(key)
 
     def iterkeys(self):
         for i in iter(self._list):
@@ -25,14 +30,6 @@ class _sorted_dict(dict):
     def itervalues(self):
         for i in iter(self._list):
             yield self[i]
-
-class sorted_dict(_sorted_dict):
-    __slots__ = ()
-
-    def __setitem__(self, key, value):
-        super(sorted_dict, self).__setitem__(key, value)
-        if key not in self._list:
-            self._list.append(key)
 
 class field_list(list):
     TYPE_WHITESPACE = object()
