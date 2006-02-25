@@ -1,6 +1,6 @@
-import itertools, re, utils
+import itertools, os.path, re, utils
 
-def read_changelog():
+def read_changelog(dir = ''):
     r = re.compile(r"""
 ^
 (
@@ -22,7 +22,7 @@ def read_changelog():
 )
 )
 """, re.VERBOSE)
-    f = file("debian/changelog")
+    f = file(os.path.join(dir, "debian/changelog"))
     entries = []
     act_upstream = None
     while True:
