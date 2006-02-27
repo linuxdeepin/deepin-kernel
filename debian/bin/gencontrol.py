@@ -77,7 +77,6 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
 
     def do_flavour_makeflags(self, makeflags, arch, subarch, flavour):
         config_entry = self.config.merge('base', arch, subarch, flavour)
-        makeflags['TYPE'] = 'kernel-package'
         for i in (
             ('compiler', 'COMPILER'),
             ('kernel-arch', 'KERNEL_ARCH'),
