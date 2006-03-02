@@ -99,6 +99,8 @@ class templates(dict):
 
         while True:
             e = debian.package()
+            last = None
+            lines = []
             while True:
                 line = f.readline()
                 if not line:
@@ -109,13 +111,17 @@ class templates(dict):
                 if line[0] in ' \t':
                     if not last:
                         raise ValueError('Continuation line seen before first header')
-                    e[last] += '\n' + line.lstrip()
+                    lines.append(line.lstrip())
                     continue
+                if last:
+                    e[last] = '\n'.join(lines)
                 i = line.find(':')
                 if i < 0:
                     raise ValueError("Not a header, not a continuation: ``%s''" % line)
                 last = line[:i]
-                e[last] = line[i+1:].lstrip()
+                lines = [line[i+1:].lstrip()]
+            if last:
+                e[last] = '\n'.join(lines)
             if not e:
                 break
 

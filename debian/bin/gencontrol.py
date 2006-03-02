@@ -5,6 +5,9 @@ import debian_linux.gencontrol
 from debian_linux.debian import *
 
 class gencontrol(debian_linux.gencontrol.gencontrol):
+    def do_main_setup(self, vars, makeflags):
+        vars.update(self.config['image',])
+
     def do_main_packages(self, packages):
         vars = self.changelog_vars
 
@@ -37,21 +40,17 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
     def do_arch_packages_post(self, packages, makefile, arch, vars, makeflags, extra):
         makeflags_string = ' '.join(["%s='%s'" % i for i in makeflags.iteritems()])
 
-        # Append this here so it only occurs on the install-headers-all line
-#        makeflags_string += " FLAVOURS='%s' " % ' '.join(['%s' % i for i in config_entry['flavours']])
         cmds_binary_arch = []
         cmds_binary_arch.append(("$(MAKE) -f debian/rules.real install-headers-all GENCONTROL_ARGS='\"-Vkernel:Depends=%s\"' %s" % (', '.join(extra['headers_arch_depends']), makeflags_string),))
         makefile.append(("binary-arch-%s-real:" % arch, cmds_binary_arch))
 
-    def do_subarch_makeflags(self, makeflags, arch, subarch):
-        config_entry = self.config.merge('base', arch, subarch)
+    def do_subarch_setup(self, vars, makeflags, arch, subarch):
+        vars.update(self.config.get(('image', arch, subarch), {}))
         for i in ('kernel-header-dirs', 'KERNEL_HEADER_DIRS'),:
-            if config_entry.has_key(i[0]):
-                makeflags[i[1]] = config_entry[i[0]]
-        localversion_headers = ''
-        if subarch != 'none':
-            localversion_headers = '-' + subarch
-        makeflags['LOCALVERSION_HEADERS'] = localversion_headers
+            if vars.has_key(i[0]):
+                makeflags[i[1]] = vars[i[0]]
+        vars['localversion_headers'] = vars['localversion']
+        makeflags['LOCALVERSION_HEADERS'] = vars['localversion_headers']
 
     def do_subarch_packages(self, packages, makefile, arch, subarch, vars, makeflags, extra):
         headers_subarch = self.templates["control.headers.subarch"]
@@ -75,8 +74,8 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         makefile.append("build-%s-%s-real:" % (arch, subarch))
         makefile.append(("setup-%s-%s-real:" % (arch, subarch), cmds_setup))
 
-    def do_flavour_makeflags(self, makeflags, arch, subarch, flavour):
-        config_entry = self.config.merge('base', arch, subarch, flavour)
+    def do_flavour_setup(self, vars, makeflags, arch, subarch, flavour):
+        vars.update(self.config.get(('image', arch, subarch, flavour), {}))
         for i in (
             ('compiler', 'COMPILER'),
             ('kernel-arch', 'KERNEL_ARCH'),
@@ -84,19 +83,12 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
             ('kpkg-arch', 'KPKG_ARCH'),
             ('kpkg-subarch', 'KPKG_SUBARCH'),
             ('image-postproc', 'IMAGE_POSTPROC'),
-            ('initrd', 'INITRD',),
+            ('initramfs', 'INITRAMFS',),
             ('type', 'TYPE'),
         ):
-            if config_entry.has_key(i[0]):
-                makeflags[i[1]] = config_entry[i[0]]
-        localversion = ''
-        localversion_headers = ''
-        if subarch != 'none':
-            localversion = '-' + subarch
-            localversion_headers = '-' + subarch
-        localversion += '-' + flavour
-        makeflags['LOCALVERSION'] = localversion
-        makeflags['LOCALVERSION_HEADERS'] = localversion_headers
+            if vars.has_key(i[0]):
+                makeflags[i[1]] = vars[i[0]]
+        makeflags['LOCALVERSION'] = vars['localversion']
 
     def do_flavour_packages(self, packages, makefile, arch, subarch, flavour, vars, makeflags, extra):
         image = self.templates["control.image"]
@@ -104,9 +96,19 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         image_latest = self.templates["control.image.latest"]
         headers_latest = self.templates["control.headers.latest"]
 
+        image_depends = package_relation_list()
+        if vars.get('initramfs', True):
+            generators = vars['initramfs-generators']
+            config_entry_initramfs = self.config.merge('image-initramfs-generators', arch, subarch, flavour)
+            config_entry_relations_initramfs = self.config.merge('relations-image-initramfs-generators', arch, subarch, flavour)
+            l = package_relation_group()
+            l.extend([package_relation(config_entry_relations_initramfs[i]) for i in generators])
+            l.append(package_relation(config_entry_relations_initramfs['fallback']))
+            image_depends.append(l)
+
         packages_own = []
         packages_dummy = []
-        packages_own.append(self.process_real_image(image[0], vars))
+        packages_own.append(self.process_real_image(image[0], image_depends, vars))
         packages_own.append(self.process_package(headers[0], vars))
         packages_dummy.extend(self.process_packages(image_latest, vars))
         packages_dummy.append(self.process_package(headers_latest[0], vars))
@@ -135,15 +137,16 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         makefile.append(("build-%s-%s-%s-real:" % (arch, subarch, flavour), cmds_build))
         makefile.append(("setup-%s-%s-%s-real:" % (arch, subarch, flavour), cmds_setup))
 
-    def process_real_image(self, in_entry, vars):
-        in_entry = in_entry.copy()
-        if vars.has_key('desc'):
-            in_entry['Description'] += "\n.\n" + vars['desc']
+    def process_real_image(self, in_entry, depends, vars):
         entry = self.process_package(in_entry, vars)
+        if vars.has_key('desc'):
+            entry['Description'].long[1:1] = [vars['desc']]
         for field in 'Depends', 'Provides', 'Suggests', 'Recommends', 'Conflicts':
             value = entry.get(field, package_relation_list())
             t = vars.get(field.lower(), [])
             value.extend(t)
+            if depends and field == 'Depends':
+                value.append(depends)
             entry[field] = value
         return entry
 

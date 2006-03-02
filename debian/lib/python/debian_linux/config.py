@@ -29,24 +29,22 @@ class config_reader(dict):
         'arches': schema_item_list(),
         'available': schema_item_boolean(),
         'flavours': schema_item_list(),
+        'initramfs': schema_item_boolean(),
+        'initramfs-generators': schema_item_list(),
         'subarches': schema_item_list(),
     }
 
     config_name = "defines"
 
-    def __init__(self, underlay = None):
-        self._underlay = underlay
+    def __init__(self, dirs = []):
+        self._dirs = dirs
         self._read_base()
 
     def __getitem__(self, key):
         return self.get(key)
 
     def _get_files(self, name):
-        ret = []
-        if self._underlay is not None:
-            ret.append(os.path.join(self._underlay, name))
-        ret.append(os.path.join('debian/arch', name))
-        return ret
+        return [os.path.join(i, name) for i in self._dirs if i]
 
     def _read_arch(self, arch):
         files = self._get_files("%s/%s" % (arch, self.config_name))
@@ -57,12 +55,17 @@ class config_reader(dict):
 
         for section in iter(config):
             real = list(section)
+            # TODO
             if real[-1] in subarches:
                 real[0:0] = ['base', arch]
             elif real[-1] in flavours:
                 real[0:0] = ['base', arch, 'none']
             else:
-                real[0:] = [real.pop(), arch]
+                real[0:0] = [real.pop()]
+                if real[-1] in flavours:
+                    real[1:1] = [arch, 'none']
+                else:
+                    real[1:1] = [arch]
             real = tuple(real)
             s = self.get(real, {})
             s.update(config[section])
@@ -151,11 +154,6 @@ class config_reader(dict):
         ret = {}
         for i in xrange(0, len(args) + 1):
             ret.update(self.get(tuple([section] + list(args[:i])), {}))
-        if section == 'base':
-            for i in ('abiname', 'arches', 'flavours', 'subarches'):
-                try:
-                    del ret[i]
-                except KeyError: pass
         return ret
 
     def sections(self):

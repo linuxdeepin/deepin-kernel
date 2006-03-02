@@ -14,9 +14,9 @@ class packages_list(sorted_dict):
 class gencontrol(object):
     def __init__(self, underlay = None):
         self.changelog = read_changelog()
-        self.config = config_reader(underlay)
+        self.config = config_reader(["debian/arch", underlay])
         self.templates = templates()
-        self.version, self.abiname, self.kpkg_abiname, self.changelog_vars = self.process_changelog({})
+        self.version, self.abiname, self.changelog_vars = self.process_changelog({})
 
     def __call__(self):
         packages = packages_list()
@@ -37,18 +37,23 @@ class gencontrol(object):
         makeflags = {
             'VERSION': self.version['version'],
             'SOURCE_UPSTREAM': self.version['source_upstream'],
-            'SOURCE_VERSION': self.version['source'],
-            'UPSTREAM_VERSION': self.version['upstream'],
+            'SOURCEVERSION': self.version['source'],
+            'UPSTREAMVERSION': self.version['upstream'],
             'ABINAME': self.abiname,
-            'KPKG_ABINAME': self.kpkg_abiname,
             'REVISIONS': ' '.join([i['Version']['debian'] for i in self.changelog[::-1]]),
         }
 
+        vars = self.changelog_vars.copy()
+
+        self.do_main_setup(vars, makeflags)
         self.do_main_packages(packages)
         self.do_main_makefile(makefile, makeflags)
 
         for arch in iter(self.config['base',]['arches']):
-            self.do_arch(packages, makefile, arch, self.changelog_vars.copy(), makeflags.copy())
+            self.do_arch(packages, makefile, arch, vars.copy(), makeflags.copy())
+
+    def do_main_setup(self, vars, makeflags):
+        pass
 
     def do_main_makefile(self, makefile, makeflags):
         makeflags_string = ' '.join(["%s='%s'" % i for i in makeflags.iteritems()])
@@ -89,6 +94,7 @@ class gencontrol(object):
     def do_arch(self, packages, makefile, arch, vars, makeflags):
         config_entry = self.config['base', arch]
         vars.update(config_entry)
+        vars.update(self.config['image', arch])
 
         if not config_entry.get('available', True):
             for i in ('binary-arch', 'build', 'setup'):
@@ -97,7 +103,10 @@ class gencontrol(object):
 
         extra = {}
         makeflags['ARCH'] = arch
-        self.do_arch_makeflags(makeflags, arch)
+
+        vars['localversion'] = vars['abiname']
+
+        self.do_arch_setup(vars, makeflags, arch)
         self.do_arch_makefile(makefile, arch, makeflags)
         self.do_arch_packages(packages, makefile, arch, vars, makeflags, extra)
 
@@ -106,7 +115,7 @@ class gencontrol(object):
 
         self.do_arch_packages_post(packages, makefile, arch, vars, makeflags, extra)
 
-    def do_arch_makeflags(self, makeflags, arch):
+    def do_arch_setup(self, vars, makeflags, arch):
         pass
 
     def do_arch_makefile(self, makefile, arch, makeflags):
@@ -121,22 +130,22 @@ class gencontrol(object):
         pass
 
     def do_subarch(self, packages, makefile, arch, subarch, vars, makeflags, extra):
-        if subarch == 'none':
-            vars['subarch'] = ''
-        else:
-            vars['subarch'] = '-%s' % subarch
         config_entry = self.config['base', arch, subarch]
         vars.update(config_entry)
+        vars.update(self.config.get(('image', arch, subarch), {}))
 
         makeflags['SUBARCH'] = subarch
-        self.do_subarch_makeflags(makeflags, arch, subarch)
+        if subarch != 'none':
+            vars['localversion'] += '-' + subarch
+
+        self.do_subarch_setup(vars, makeflags, arch, subarch)
         self.do_subarch_makefile(makefile, arch, subarch, makeflags)
         self.do_subarch_packages(packages, makefile, arch, subarch, vars, makeflags, extra)
 
         for flavour in config_entry['flavours']:
             self.do_flavour(packages, makefile, arch, subarch, flavour, vars.copy(), makeflags.copy(), extra)
 
-    def do_subarch_makeflags(self, makeflags, arch, subarch):
+    def do_subarch_setup(self, vars, makeflags, arch, subarch):
         pass
 
     def do_subarch_makefile(self, makefile, arch, subarch, makeflags):
@@ -151,8 +160,8 @@ class gencontrol(object):
     def do_flavour(self, packages, makefile, arch, subarch, flavour, vars, makeflags, extra):
         config_entry = self.config['base', arch, subarch, flavour]
         vars.update(config_entry)
+        vars.update(self.config.get(('image', arch, subarch, flavour), {}))
 
-        vars['flavour'] = flavour
         if not vars.has_key('class'):
             warnings.warn('No class entry in config for flavour %s, subarch %s, arch %s' % (flavour, subarch, arch), DeprecationWarning)
             vars['class'] = '%s-class' % flavour
@@ -169,16 +178,17 @@ class gencontrol(object):
         packages['source']['Build-Depends'].extend(relations_compiler)
 
         makeflags['FLAVOUR'] = flavour
-        self.do_flavour_makeflags(makeflags, arch, subarch, flavour)
+        vars['localversion'] += '-' + flavour
+
+        self.do_flavour_setup(vars, makeflags, arch, subarch, flavour)
         self.do_flavour_makefile(makefile, arch, subarch, flavour, makeflags)
         self.do_flavour_packages(packages, makefile, arch, subarch, flavour, vars, makeflags, extra)
 
-    def do_flavour_makeflags(self, makeflags, arch, subarch, flavour):
+    def do_flavour_setup(self, vars, makeflags, arch, subarch, flavour):
         config_entry = self.config.merge('base', arch, subarch, flavour)
         for i in (
             ('compiler', 'COMPILER'),
             ('kernel-arch', 'KERNEL_ARCH')
-            ('initrd', 'INITRD')
         ):  
             if config_entry.has_key(i[0]):
                 makeflags[i[1]] = config_entry[i[0]]
@@ -192,19 +202,17 @@ class gencontrol(object):
         pass
 
     def process_changelog(self, in_vars):
-        ret = [None, None, None, None]
+        ret = [None, None, None]
         ret[0] = version = self.changelog[0]['Version']
         vars = in_vars.copy()
         if version['modifier'] is not None:
-            ret[1] = vars['abiname'] = version['modifier']
-            ret[2] = ""
+            ret[1] = vars['abiname'] = ''
         else:
-            ret[1] = vars['abiname'] = self.config['base',]['abiname']
-            ret[2] = "-%s" % vars['abiname']
-        vars['version'] = version['source']
+            ret[1] = vars['abiname'] = '-%s' % self.config['abiname',]['abiname']
+        vars['upstreamversion'] = version['upstream']
         vars['version'] = version['version']
         vars['major'] = version['major']
-        ret[3] = vars
+        ret[2] = vars
         return ret
 
     def process_relation(self, key, e, in_e, vars):
@@ -223,14 +231,12 @@ class gencontrol(object):
         e[key] = dep
 
     def process_description(self, e, in_e, vars):
-        desc = in_e['Description']
-        desc_short, desc_long = desc.split ("\n", 1)
-        desc_pars = [self.substitute(i, vars) for i in desc_long.split ("\n.\n")]
-        desc_pars_wrapped = []
-        w = wrap(width = 74, fix_sentence_endings = True)
-        for i in desc_pars:
-            desc_pars_wrapped.append(w.fill(i))
-        e['Description'] = "%s\n%s" % (self.substitute(desc_short, vars), '\n.\n'.join(desc_pars_wrapped))
+        in_desc = in_e['Description']
+        desc = in_desc.__class__()
+        desc.short = self.substitute(in_desc.short, vars)
+        for i in in_desc.long:
+            desc.long.append(self.substitute(i, vars))
+        e['Description'] = desc
 
     def process_package(self, in_entry, vars):
         e = package()

@@ -81,6 +81,25 @@ $
         ret['source_upstream'] = ret['upstream']
     return ret
 
+class package_description(object):
+    __slots__ = "short", "long"
+
+    def __init__(self, value = None):
+        if value is not None:
+            self.short, long = value.split ("\n", 1)
+            self.long = long.split ("\n.\n")
+        else:
+            self.short = None
+            self.long = []
+
+    def __str__(self):
+        ret = self.short + '\n'
+        w = utils.wrap(width = 74, fix_sentence_endings = True)
+        pars = []
+        for i in self.long:
+            pars.append('\n '.join(w.wrap(i)))
+        return self.short + '\n ' + '\n .\n '.join(pars)
+
 class package_relation(object):
     __slots__ = "name", "version", "arches"
 
@@ -183,12 +202,14 @@ class package(dict):
         ('Suggests', package_relation_list),
         ('Replaces', package_relation_list),
         ('Conflicts', package_relation_list),
-        ('Description', utils.field_string),
+        ('Description', package_description),
     ))
 
     def __setitem__(self, key, value):
         try:
-            value = self._fields[key](value)
+            cls = self._fields[key]
+            if not isinstance(value, cls):
+                value = cls(value)
         except KeyError: pass
         super(package, self).__setitem__(key, value)
 
