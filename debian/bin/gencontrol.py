@@ -93,6 +93,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
     def do_flavour_packages(self, packages, makefile, arch, subarch, flavour, vars, makeflags, extra):
         image = self.templates["control.image"]
         headers = self.templates["control.headers"]
+        modules = self.templates["control.modules"]
         image_latest = self.templates["control.image.latest"]
         headers_latest = self.templates["control.headers.latest"]
 
@@ -108,6 +109,13 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
 
         packages_own = []
         packages_dummy = []
+
+        if vars['type'] == 'plain-xen':
+            p = self.process_package(modules[0], vars)
+            image_depends.extend(p['Reverse-Depends'])
+            del p['Reverse-Depends']
+            packages_own.append(p)
+
         packages_own.append(self.process_real_image(image[0], image_depends, vars))
         packages_own.append(self.process_package(headers[0], vars))
         packages_dummy.extend(self.process_packages(image_latest, vars))
