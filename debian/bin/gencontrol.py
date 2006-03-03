@@ -46,11 +46,13 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
 
     def do_subarch_setup(self, vars, makeflags, arch, subarch):
         vars.update(self.config.get(('image', arch, subarch), {}))
-        for i in ('kernel-header-dirs', 'KERNEL_HEADER_DIRS'),:
+        vars['localversion_headers'] = vars['localversion']
+        for i in (
+            ('kernel-header-dirs', 'KERNEL_HEADER_DIRS'),
+            ('localversion_headers', 'LOCALVERSION_HEADERS'),
+        ):
             if vars.has_key(i[0]):
                 makeflags[i[1]] = vars[i[0]]
-        vars['localversion_headers'] = vars['localversion']
-        makeflags['LOCALVERSION_HEADERS'] = vars['localversion_headers']
 
     def do_subarch_packages(self, packages, makefile, arch, subarch, vars, makeflags, extra):
         headers_subarch = self.templates["control.headers.subarch"]
@@ -78,17 +80,17 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         vars.update(self.config.get(('image', arch, subarch, flavour), {}))
         for i in (
             ('compiler', 'COMPILER'),
+            ('image-postproc', 'IMAGE_POSTPROC'),
+            ('initramfs', 'INITRAMFS',),
             ('kernel-arch', 'KERNEL_ARCH'),
             ('kernel-header-dirs', 'KERNEL_HEADER_DIRS'),
             ('kpkg-arch', 'KPKG_ARCH'),
             ('kpkg-subarch', 'KPKG_SUBARCH'),
-            ('image-postproc', 'IMAGE_POSTPROC'),
-            ('initramfs', 'INITRAMFS',),
+            ('localversion', 'LOCALVERSION'),
             ('type', 'TYPE'),
         ):
             if vars.has_key(i[0]):
                 makeflags[i[1]] = vars[i[0]]
-        makeflags['LOCALVERSION'] = vars['localversion']
 
     def do_flavour_packages(self, packages, makefile, arch, subarch, flavour, vars, makeflags, extra):
         image = self.templates["control.image"]

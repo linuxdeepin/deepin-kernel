@@ -185,13 +185,13 @@ class gencontrol(object):
         self.do_flavour_packages(packages, makefile, arch, subarch, flavour, vars, makeflags, extra)
 
     def do_flavour_setup(self, vars, makeflags, arch, subarch, flavour):
-        config_entry = self.config.merge('base', arch, subarch, flavour)
         for i in (
             ('compiler', 'COMPILER'),
-            ('kernel-arch', 'KERNEL_ARCH')
+            ('kernel-arch', 'KERNEL_ARCH'),
+            ('localversion', 'LOCALVERSION'),
         ):  
-            if config_entry.has_key(i[0]):
-                makeflags[i[1]] = config_entry[i[0]]
+            if vars.has_key(i[0]):
+                makeflags[i[1]] = vars[i[0]]
 
     def do_flavour_makefile(self, makefile, arch, subarch, flavour, makeflags):
         for i in ('binary-arch', 'build', 'setup'):
