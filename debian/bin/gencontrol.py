@@ -32,10 +32,11 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
 
         makeflags_string = ' '.join(["%s='%s'" % i for i in makeflags.iteritems()])
 
-        cmds_setup = []
-        cmds_setup.append(("$(MAKE) -f debian/rules.real setup-arch %s" % makeflags_string,))
-        makefile.append(("setup-%s-real:" % arch, cmds_setup))
+        cmds_source = []
+        cmds_source.append(("$(MAKE) -f debian/rules.real source-arch %s" % makeflags_string,))
         makefile.append(("build-%s-real:" % arch))
+        makefile.append(("setup-%s-real:" % arch))
+        makefile.append(("source-%s-real:" % arch, cmds_source))
 
     def do_arch_packages_post(self, packages, makefile, arch, vars, makeflags, extra):
         makeflags_string = ' '.join(["%s='%s'" % i for i in makeflags.iteritems()])
@@ -70,11 +71,12 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
 
         cmds_binary_arch = []
         cmds_binary_arch.append(("$(MAKE) -f debian/rules.real binary-arch-subarch %s" % makeflags_string,))
-        cmds_setup = []
-        cmds_setup.append(("$(MAKE) -f debian/rules.real setup-subarch %s" % makeflags_string,))
+        cmds_source = []
+        cmds_source.append(("$(MAKE) -f debian/rules.real source-subarch %s" % makeflags_string,))
         makefile.append(("binary-arch-%s-%s-real:" % (arch, subarch), cmds_binary_arch))
         makefile.append("build-%s-%s-real:" % (arch, subarch))
-        makefile.append(("setup-%s-%s-real:" % (arch, subarch), cmds_setup))
+        makefile.append(("setup-%s-%s-real:" % (arch, subarch)))
+        makefile.append(("source-%s-%s-real:" % (arch, subarch), cmds_source))
 
     def do_flavour_setup(self, vars, makeflags, arch, subarch, flavour):
         vars.update(self.config.get(('image', arch, subarch, flavour), {}))
@@ -146,6 +148,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         makefile.append(("binary-arch-%s-%s-%s-real:" % (arch, subarch, flavour), cmds_binary_arch))
         makefile.append(("build-%s-%s-%s-real:" % (arch, subarch, flavour), cmds_build))
         makefile.append(("setup-%s-%s-%s-real:" % (arch, subarch, flavour), cmds_setup))
+        makefile.append(("source-%s-%s-%s-real:" % (arch, subarch, flavour)))
 
     def process_real_image(self, in_entry, depends, vars):
         entry = self.process_package(in_entry, vars)

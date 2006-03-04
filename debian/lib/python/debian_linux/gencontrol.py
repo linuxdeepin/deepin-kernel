@@ -12,6 +12,8 @@ class packages_list(sorted_dict):
             self[package['Package']] = package
 
 class gencontrol(object):
+    makefile_targets = ('binary-arch', 'build', 'setup', 'source')
+
     def __init__(self, underlay = None):
         self.changelog = read_changelog()
         self.config = config_reader(["debian/arch", underlay])
@@ -97,7 +99,7 @@ class gencontrol(object):
         vars.update(self.config['image', arch])
 
         if not config_entry.get('available', True):
-            for i in ('binary-arch', 'build', 'setup'):
+            for i in self.makefile_targets:
                 makefile.append(("%s-%s:" % (i, arch), ["@echo Architecture %s is not available!" % arch, "@exit 1"]))
             return
 
@@ -119,11 +121,12 @@ class gencontrol(object):
         pass
 
     def do_arch_makefile(self, makefile, arch, makeflags):
-        for i in (('binary-arch', 'build', 'setup',)):
+        for i in self.makefile_targets:
+            makefile.append("%s:: %s-%s" % (i, i, arch))
             makefile.append("%s-%s:: %s-%s-real" % (i, arch, i, arch))
 
     def do_arch_packages(self, packages, makefile, arch, vars, makeflags, extra):
-        for i in (('binary-arch', 'build', 'setup',)):
+        for i in self.makefile_targets:
             makefile.append("%s-%s-real:" % (i, arch))
 
     def do_arch_packages_post(self, packages, makefile, arch, vars, makeflags, extra):
@@ -149,12 +152,12 @@ class gencontrol(object):
         pass
 
     def do_subarch_makefile(self, makefile, arch, subarch, makeflags):
-        for i in ('binary-arch', 'build', 'setup'):
+        for i in self.makefile_targets:
             makefile.append("%s-%s:: %s-%s-%s" % (i, arch, i, arch, subarch))
             makefile.append("%s-%s-%s:: %s-%s-%s-real" % (i, arch, subarch, i, arch, subarch))
 
     def do_subarch_packages(self, packages, makefile, arch, subarch, vars, makeflags, extra):
-        for i in (('binary-arch', 'build', 'setup',)):
+        for i in self.makefile_targets:
             makefile.append("%s-%s-%s-real:" % (i, arch, subarch))
 
     def do_flavour(self, packages, makefile, arch, subarch, flavour, vars, makeflags, extra):
@@ -194,7 +197,7 @@ class gencontrol(object):
                 makeflags[i[1]] = vars[i[0]]
 
     def do_flavour_makefile(self, makefile, arch, subarch, flavour, makeflags):
-        for i in ('binary-arch', 'build', 'setup'):
+        for i in self.makefile_targets:
             makefile.append("%s-%s-%s:: %s-%s-%s-%s" % (i, arch, subarch, i, arch, subarch, flavour))
             makefile.append("%s-%s-%s-%s:: %s-%s-%s-%s-real" % (i, arch, subarch, flavour, i, arch, subarch, flavour))
 
