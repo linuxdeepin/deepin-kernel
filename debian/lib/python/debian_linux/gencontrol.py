@@ -16,7 +16,7 @@ class gencontrol(object):
 
     def __init__(self, underlay = None):
         self.changelog = read_changelog()
-        self.config = config_reader(["debian/arch", underlay])
+        self.config = config_reader([underlay, "debian/arch"])
         self.templates = templates()
         self.version, self.abiname, self.changelog_vars = self.process_changelog({})
 
