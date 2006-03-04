@@ -2,6 +2,7 @@
 import sys
 sys.path.append(sys.path[0] + "/../lib/python")
 import debian_linux.gencontrol
+from debian_linux.debian import *
 
 class gencontrol(debian_linux.gencontrol.gencontrol):
     def do_main_packages(self, packages):
@@ -9,6 +10,11 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
 
         main = self.templates["control.main"]
         packages.extend(self.process_packages(main, vars))
+
+    def do_main_packages(self, packages):
+        l = package_relation_group()
+        l.extend([package_relation('linux-headers-%s-%s [%s]' % (self.version['version'], arch, arch)) for arch in self.config['base',]['arches']])
+        packages['source']['Build-Depends'].append(l)
 
     def do_flavour_packages(self, packages, makefile, arch, subarch, flavour, vars, makeflags, extra):
         modules = self.templates["control.modules"]
