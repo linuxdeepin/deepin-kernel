@@ -42,7 +42,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         makeflags_string = ' '.join(["%s='%s'" % i for i in makeflags.iteritems()])
 
         cmds_binary_arch = []
-        cmds_binary_arch.append(("$(MAKE) -f debian/rules.real install-headers-all GENCONTROL_ARGS='\"-Vkernel:Depends=%s\"' %s" % (', '.join(extra['headers_arch_depends']), makeflags_string),))
+        cmds_binary_arch.append(("$(MAKE) -f debian/rules.real install-headers-all GENCONTROL_ARGS='\"-Vkernel:Depends=%s\"' %s" % (', '.join(["%s (= %s)" % (i, self.version['source']) for i in extra['headers_arch_depends']]), makeflags_string),))
         makefile.append(("binary-arch-%s-real:" % arch, cmds_binary_arch))
 
     def do_subarch_setup(self, vars, makeflags, arch, subarch):
