@@ -17,6 +17,9 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         tree = self.templates["control.tree"]
         packages.append(self.process_real_tree(tree[0], vars))
 
+    def do_arch_setup(self, vars, makeflags, arch):
+        vars.update(self.config.get(('image', arch), {}))
+
     def do_arch_packages(self, packages, makefile, arch, vars, makeflags, extra):
         headers_arch = self.templates["control.headers.arch"]
         package_headers_arch = self.process_package(headers_arch[0], vars)

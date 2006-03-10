@@ -96,7 +96,6 @@ class gencontrol(object):
     def do_arch(self, packages, makefile, arch, vars, makeflags):
         config_entry = self.config['base', arch]
         vars.update(config_entry)
-        vars.update(self.config['image', arch])
 
         if not config_entry.get('available', True):
             for i in self.makefile_targets:
@@ -135,7 +134,6 @@ class gencontrol(object):
     def do_subarch(self, packages, makefile, arch, subarch, vars, makeflags, extra):
         config_entry = self.config['base', arch, subarch]
         vars.update(config_entry)
-        vars.update(self.config.get(('image', arch, subarch), {}))
 
         makeflags['SUBARCH'] = subarch
         if subarch != 'none':
@@ -163,7 +161,6 @@ class gencontrol(object):
     def do_flavour(self, packages, makefile, arch, subarch, flavour, vars, makeflags, extra):
         config_entry = self.config['base', arch, subarch, flavour]
         vars.update(config_entry)
-        vars.update(self.config.get(('image', arch, subarch, flavour), {}))
 
         if not vars.has_key('class'):
             warnings.warn('No class entry in config for flavour %s, subarch %s, arch %s' % (flavour, subarch, arch), DeprecationWarning)
