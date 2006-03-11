@@ -183,7 +183,13 @@ class series_extra(series):
 
     def _check_extra(self, extra):
         for i in (1, 2, 3):
-            t = tuple(self.extra[:i])
+            t = self.extra[:i]
+            if extra.has_key(t):
+                if i > len(self.extra_used):
+                    self.extra_used = t
+                return True
+        for i in (2, 3):
+            t = ('*',) + self.extra[1:i]
             if extra.has_key(t):
                 if i > len(self.extra_used):
                     self.extra_used = t
