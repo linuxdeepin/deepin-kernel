@@ -23,7 +23,10 @@ class config_reader(dict):
             self.type = type
 
         def __call__(self, i):
-            return [j.strip() for j in re.split(self.type, i.strip())]
+            i = i.strip()
+            if not i:
+                return []
+            return [j.strip() for j in re.split(self.type, i)]
 
     schema = {
         'arches': schema_item_list(),
