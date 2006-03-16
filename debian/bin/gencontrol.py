@@ -108,12 +108,12 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         if vars.get('initramfs', True):
             generators = vars['initramfs-generators']
             config_entry_commands_initramfs = self.config.merge('commands-image-initramfs-generators', arch, subarch, flavour)
-            config_entry_relations_initramfs = self.config.merge('relations-image-initramfs-generators', arch, subarch, flavour)
+            config_entry_relations = self.config.merge('relations', arch, subarch, flavour)
             commands = [config_entry_commands_initramfs[i] for i in generators if config_entry_commands_initramfs.has_key(i)]
             makeflags['INITRD_CMD'] = ' '.join(commands)
             l = package_relation_group()
-            l.extend([package_relation(config_entry_relations_initramfs[i]) for i in generators])
-            l.append(package_relation(config_entry_relations_initramfs['fallback']))
+            l.extend([package_relation(config_entry_relations[i]) for i in generators])
+            l.append(package_relation(config_entry_relations['initramfs-fallback']))
             image_depends.append(l)
 
         packages_own = []
