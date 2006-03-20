@@ -105,7 +105,7 @@ class gencontrol(object):
         extra = {}
         makeflags['ARCH'] = arch
 
-        vars['localversion'] = vars['abiname']
+        vars['localversion'] = ''
 
         self.do_arch_setup(vars, makeflags, arch)
         self.do_arch_makefile(makefile, arch, makeflags)
