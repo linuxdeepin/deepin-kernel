@@ -211,6 +211,7 @@ class gencontrol(object):
             ret[1] = vars['abiname'] = '-%s' % self.config['abiname',]['abiname']
         vars['upstreamversion'] = version['upstream']
         vars['version'] = version['version']
+        vars['source_upstream'] = version['source_upstream']
         vars['major'] = version['major']
         ret[2] = vars
         return ret
