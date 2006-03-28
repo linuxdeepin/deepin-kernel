@@ -13,7 +13,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
 
     def do_main_packages(self, packages):
         l = package_relation_group()
-        l.extend([package_relation('linux-headers-%s%s-%s [%s]' % (self.version['upstream'], self.abiname, arch, arch)) for arch in self.config['base',]['arches']])
+        l.extend([package_relation('linux-headers-%s%s-all-%s [%s]' % (self.version['upstream'], self.abiname, arch, arch)) for arch in self.config['base',]['arches']])
         packages['source']['Build-Depends'].append(l)
 
     def do_flavour_packages(self, packages, makefile, arch, subarch, flavour, vars, makeflags, extra):
