@@ -96,6 +96,7 @@ class gencontrol(object):
     def do_arch(self, packages, makefile, arch, vars, makeflags):
         config_entry = self.config['base', arch]
         vars.update(config_entry)
+        vars['arch'] = arch
 
         if not config_entry.get('available', True):
             for i in self.makefile_targets:
