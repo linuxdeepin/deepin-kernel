@@ -22,31 +22,28 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
 
     def do_arch_packages(self, packages, makefile, arch, vars, makeflags, extra):
         headers_arch = self.templates["control.headers.arch"]
-        package_headers_arch = self.process_package(headers_arch[0], vars)
-        extra['headers_arch_depends'] = []
+        packages_headers_arch = self.process_packages(headers_arch, vars)
+        extra['headers_arch_depends'] = packages_headers_arch[2]['Depends']
 
-        name = package_headers_arch['Package']
-        if packages.has_key(name):
-            package_headers_arch = packages.get(name)
-            package_headers_arch['Architecture'].append(arch)
-        else:
-            package_headers_arch['Architecture'] = [arch]
-            packages.append(package_headers_arch)
+        for package in packages_headers_arch:
+            name = package['Package']
+            if packages.has_key(name):
+                package = packages.get(name)
+                package['Architecture'].append(arch)
+            else:
+                package['Architecture'] = [arch]
+                packages.append(package)
 
-        makeflags_string = ' '.join(["%s='%s'" % i for i in makeflags.iteritems()])
-
-        cmds_source = []
-        cmds_source.append(("$(MAKE) -f debian/rules.real source-arch %s" % makeflags_string,))
-        makefile.append(("build-%s-real:" % arch))
-        makefile.append(("setup-%s-real:" % arch))
-        makefile.append(("source-%s-real:" % arch, cmds_source))
-
-    def do_arch_packages_post(self, packages, makefile, arch, vars, makeflags, extra):
         makeflags_string = ' '.join(["%s='%s'" % i for i in makeflags.iteritems()])
 
         cmds_binary_arch = []
-        cmds_binary_arch.append(("$(MAKE) -f debian/rules.real install-headers-all GENCONTROL_ARGS='\"-Vkernel:Depends=%s\"' %s" % (', '.join(["%s (= %s)" % (i, self.version['source']) for i in extra['headers_arch_depends']]), makeflags_string),))
+        cmds_binary_arch.append(("$(MAKE) -f debian/rules.real binary-arch-arch %s" % makeflags_string))
+        cmds_source = []
+        cmds_source.append(("$(MAKE) -f debian/rules.real source-arch %s" % makeflags_string,))
         makefile.append(("binary-arch-%s-real:" % arch, cmds_binary_arch))
+        makefile.append(("build-%s-real:" % arch))
+        makefile.append(("setup-%s-real:" % arch))
+        makefile.append(("source-%s-real:" % arch, cmds_source))
 
     def do_subarch_setup(self, vars, makeflags, arch, subarch):
         vars.update(self.config.get(('image', arch, subarch), {}))
@@ -139,7 +136,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
                 package['Architecture'] = [arch]
                 packages.append(package)
 
-        extra['headers_arch_depends'].append(packages_own[1]['Package'])
+        extra['headers_arch_depends'].append('%s (= ${Source-Version})' % packages_own[1]['Package'])
 
         makeflags_string = ' '.join(["%s='%s'" % i for i in makeflags.iteritems()])
 
