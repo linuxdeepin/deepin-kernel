@@ -89,6 +89,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
             ('kpkg-arch', 'KPKG_ARCH'),
             ('kpkg-subarch', 'KPKG_SUBARCH'),
             ('localversion', 'LOCALVERSION'),
+            ('modules', 'MODULES',),
             ('type', 'TYPE'),
         ):
             if vars.has_key(i[0]):
@@ -143,7 +144,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
 
         cmds_binary_arch = []
         cmds_binary_arch.append(("$(MAKE) -f debian/rules.real binary-arch-flavour %s" % makeflags_string,))
-        cmds_binary_arch.append(("$(MAKE) -f debian/rules.real install-dummy DH_OPTIONS='%s'" % ' '.join(["-p%s" % i['Package'] for i in packages_dummy]),))
+        cmds_binary_arch.append(("$(MAKE) -f debian/rules.real install-dummy DH_OPTIONS='%s' %s" % (' '.join(["-p%s" % i['Package'] for i in packages_dummy]), makeflags_string),))
         cmds_build = []
         cmds_build.append(("$(MAKE) -f debian/rules.real build %s" % makeflags_string,))
         cmds_setup = []
