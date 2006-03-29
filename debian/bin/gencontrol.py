@@ -89,16 +89,16 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
             ('kpkg-arch', 'KPKG_ARCH'),
             ('kpkg-subarch', 'KPKG_SUBARCH'),
             ('localversion', 'LOCALVERSION'),
-            ('modules', 'MODULES',),
             ('type', 'TYPE'),
         ):
             if vars.has_key(i[0]):
                 makeflags[i[1]] = vars[i[0]]
 
     def do_flavour_packages(self, packages, makefile, arch, subarch, flavour, vars, makeflags, extra):
-        image = self.templates["control.image"]
+        image_type_modulesextra = self.templates["control.image.type-modulesextra"]
+        image_type_modulesinline = self.templates["control.image.type-modulesinline"]
+        image_type_standalone = self.templates["control.image.type-standalone"]
         headers = self.templates["control.headers"]
-        modules = self.templates["control.modules"]
         image_latest = self.templates["control.image.latest"]
         headers_latest = self.templates["control.headers.latest"]
 
@@ -117,16 +117,19 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         packages_own = []
         packages_dummy = []
 
-        if vars['type'] == 'plain-xen':
-            p = self.process_package(modules[0], vars)
-            image_depends.extend(p['Reverse-Depends'])
-            del p['Reverse-Depends']
-            packages_own.append(p)
+        if vars['type'] == 'plain-s390-tape':
+            image = image_type_standalone
+        elif vars['type'] == 'plain-xen':
+            image = image_type_modulesextra
+        else:
+            image = image_type_modulesinline
 
         packages_own.append(self.process_real_image(image[0], image_depends, vars))
+        packages_own.extend(self.process_packages(image[1:], vars))
         packages_dummy.extend(self.process_packages(image_latest, vars))
 
-        if vars.get('modules', True):
+        if image in (image_type_modulesextra, image_type_modulesinline):
+            makeflags['MODULES'] = True
             packages_own.append(self.process_package(headers[0], vars))
             packages_dummy.append(self.process_package(headers_latest[0], vars))
             extra['headers_arch_depends'].append('%s (= ${Source-Version})' % packages_own[-1]['Package'])
