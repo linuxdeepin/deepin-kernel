@@ -202,7 +202,6 @@ class package(dict):
         ('Suggests', package_relation_list),
         ('Replaces', package_relation_list),
         ('Conflicts', package_relation_list),
-        ('Reverse-Depends', package_relation_list), # Some sort of hack
         ('Description', package_description),
     ))
 

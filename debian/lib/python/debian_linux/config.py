@@ -33,7 +33,6 @@ class config_reader(dict):
         'available': schema_item_boolean(),
         'flavours': schema_item_list(),
         'initramfs': schema_item_boolean(),
-        'modules': schema_item_boolean(),
         'initramfs-generators': schema_item_list(),
         'subarches': schema_item_list(),
     }
