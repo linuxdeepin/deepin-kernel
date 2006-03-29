@@ -123,9 +123,12 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
             packages_own.append(p)
 
         packages_own.append(self.process_real_image(image[0], image_depends, vars))
-        packages_own.append(self.process_package(headers[0], vars))
         packages_dummy.extend(self.process_packages(image_latest, vars))
-        packages_dummy.append(self.process_package(headers_latest[0], vars))
+
+        if self.config.merge('headers', arch, subarch, flavour).get('enable', True):
+            packages_own.append(self.process_package(headers[0], vars))
+            packages_dummy.append(self.process_package(headers_latest[0], vars))
+            extra['headers_arch_depends'].append('%s (= ${Source-Version})' % packages_own[-1]['Package'])
 
         for package in packages_own + packages_dummy:
             name = package['Package']
@@ -135,8 +138,6 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
             else:
                 package['Architecture'] = [arch]
                 packages.append(package)
-
-        extra['headers_arch_depends'].append('%s (= ${Source-Version})' % packages_own[1]['Package'])
 
         makeflags_string = ' '.join(["%s='%s'" % i for i in makeflags.iteritems()])
 
