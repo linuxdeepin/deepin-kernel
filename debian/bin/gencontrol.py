@@ -125,7 +125,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         packages_own.append(self.process_real_image(image[0], image_depends, vars))
         packages_dummy.extend(self.process_packages(image_latest, vars))
 
-        if self.config.merge('headers', arch, subarch, flavour).get('enable', True):
+        if vars.get('modules', True):
             packages_own.append(self.process_package(headers[0], vars))
             packages_dummy.append(self.process_package(headers_latest[0], vars))
             extra['headers_arch_depends'].append('%s (= ${Source-Version})' % packages_own[-1]['Package'])
