@@ -249,6 +249,27 @@ namespace linuxkernel
       };
 
     template<>
+      class table_entry_version<device_i2c, version_2_6_16> : public table_entry
+      {
+        public:
+          table_entry_version () throw ();
+          void write (std::ostream &) const throw (std::runtime_error);
+      };
+
+    template<typename Elf_class, typename Elf_data>
+      class table_entry_data<device_i2c, version_2_6_16, Elf_class, Elf_data> : public table_entry_version<device_i2c, version_2_6_16>
+      {
+        protected:
+          table_entry_data (const device_id<device_i2c, Elf_class> &) throw ();
+
+        public:
+          static void add (const device_id<device_i2c, Elf_class> &id, std::list<table_entry *> &table) throw ()
+          {
+            table.push_back (new table_entry_data<device_i2c, version_2_6_16, Elf_class, Elf_data> (id));
+          }
+      };
+
+    template<>
       class table_entry_version<device_ieee1394, version_2_6_16> : public table_entry
       {
         public:
@@ -276,6 +297,48 @@ namespace linuxkernel
       };
 
     template<>
+      class table_entry_version<device_input, version_2_6_16> : public table_entry
+      {
+        public:
+          table_entry_version () throw ();
+          void write (std::ostream &) const throw (std::runtime_error);
+      };
+
+    template<typename Elf_class, typename Elf_data>
+      class table_entry_data<device_input, version_2_6_16, Elf_class, Elf_data> : public table_entry_version<device_input, version_2_6_16>
+      {
+        protected:
+          table_entry_data (const device_id<device_input, Elf_class> &) throw ();
+
+        public:
+          static void add (const device_id<device_input, Elf_class> &id, std::list<table_entry *> &table) throw ()
+          {
+            table.push_back (new table_entry_data<device_input, version_2_6_16, Elf_class, Elf_data> (id));
+          }
+      };
+
+    template<>
+      class table_entry_version<device_of, version_2_6_16> : public table_entry
+      {
+        public:
+          table_entry_version () throw ();
+          void write (std::ostream &) const throw (std::runtime_error);
+      };
+
+    template<typename Elf_class, typename Elf_data>
+      class table_entry_data<device_of, version_2_6_16, Elf_class, Elf_data> : public table_entry_version<device_of, version_2_6_16>
+      {
+        protected:
+          table_entry_data (const device_id<device_of, Elf_class> &) throw ();
+
+        public:
+          static void add (const device_id<device_of, Elf_class> &id, std::list<table_entry *> &table) throw ()
+          {
+            table.push_back (new table_entry_data<device_of, version_2_6_16, Elf_class, Elf_data> (id));
+          }
+      };
+
+    template<>
       class table_entry_version<device_pci, version_2_6_16> : public table_entry
       {
         public:
@@ -297,6 +360,27 @@ namespace linuxkernel
           static void add (const device_id<device_pci, Elf_class> &id, std::list<table_entry *> &table) throw ()
           {
             table.push_back (new table_entry_data<device_pci, version_2_6_16, Elf_class, Elf_data> (id));
+          }
+      };
+
+    template<>
+      class table_entry_version<device_pcmcia, version_2_6_16> : public table_entry
+      {
+        public:
+          table_entry_version () throw ();
+          void write (std::ostream &) const throw (std::runtime_error);
+      };
+
+    template<typename Elf_class, typename Elf_data>
+      class table_entry_data<device_pcmcia, version_2_6_16, Elf_class, Elf_data> : public table_entry_version<device_pcmcia, version_2_6_16>
+      {
+        protected:
+          table_entry_data (const device_id<device_pcmcia, Elf_class> &) throw ();
+
+        public:
+          static void add (const device_id<device_pcmcia, Elf_class> &id, std::list<table_entry *> &table) throw ()
+          {
+            table.push_back (new table_entry_data<device_pcmcia, version_2_6_16, Elf_class, Elf_data> (id));
           }
       };
 
@@ -345,6 +429,27 @@ namespace linuxkernel
       };
 
     template<>
+      class table_entry_version<device_serio, version_2_6_16> : public table_entry
+      {
+        public:
+          table_entry_version () throw ();
+          void write (std::ostream &) const throw (std::runtime_error);
+      };
+
+    template<typename Elf_class, typename Elf_data>
+      class table_entry_data<device_serio, version_2_6_16, Elf_class, Elf_data> : public table_entry_version<device_serio, version_2_6_16>
+      {
+        protected:
+          table_entry_data (const device_id<device_serio, Elf_class> &) throw ();
+
+        public:
+          static void add (const device_id<device_serio, Elf_class> &id, std::list<table_entry *> &table) throw ()
+          {
+            table.push_back (new table_entry_data<device_serio, version_2_6_16, Elf_class, Elf_data> (id));
+          }
+      };
+
+    template<>
       class table_entry_version<device_usb, version_2_6_16> : public table_entry
       {
         public:
@@ -374,6 +479,27 @@ namespace linuxkernel
 
         public:
           static void add (const device_id<device_usb, Elf_class> &, std::list<table_entry *> &table) throw ();
+      };
+
+    template<>
+      class table_entry_version<device_vio, version_2_6_16> : public table_entry
+      {
+        public:
+          table_entry_version () throw ();
+          void write (std::ostream &) const throw (std::runtime_error);
+      };
+
+    template<typename Elf_class, typename Elf_data>
+      class table_entry_data<device_vio, version_2_6_16, Elf_class, Elf_data> : public table_entry_version<device_vio, version_2_6_16>
+      {
+        protected:
+          table_entry_data (const device_id<device_vio, Elf_class> &) throw ();
+
+        public:
+          static void add (const device_id<device_vio, Elf_class> &id, std::list<table_entry *> &table) throw ()
+          {
+            table.push_back (new table_entry_data<device_vio, version_2_6_16, Elf_class, Elf_data> (id));
+          }
       };
 
     template<typename device, typename Elf_class, typename Elf_data>

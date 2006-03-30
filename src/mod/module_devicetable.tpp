@@ -31,17 +31,17 @@ namespace linuxkernel
       void table_create (std::list<table_base *> &list, const module_real *m, const Elf::file *file) throw (std::runtime_error)
       {
         list.push_back (table<module_devicetable::device_ccw, Elf_class, Elf_data>::create (m, file));
-//        list.push_back (table<module_devicetable::device_i2c, Elf_class, Elf_data>::create (m, file));
+        list.push_back (table<module_devicetable::device_i2c, Elf_class, Elf_data>::create (m, file));
         list.push_back (table<module_devicetable::device_ieee1394, Elf_class, Elf_data>::create (m, file));
-//        list.push_back (table<module_devicetable::device_input, Elf_class, Elf_data>::create (m, file));
-//        list.push_back (table<module_devicetable::device_of, Elf_class, Elf_data>::create (m, file));
+        list.push_back (table<module_devicetable::device_input, Elf_class, Elf_data>::create (m, file));
+        list.push_back (table<module_devicetable::device_of, Elf_class, Elf_data>::create (m, file));
         list.push_back (table<module_devicetable::device_pci, Elf_class, Elf_data>::create (m, file));
-//        list.push_back (table<module_devicetable::device_pcmcia, Elf_class, Elf_data>::create (m, file));
+        list.push_back (table<module_devicetable::device_pcmcia, Elf_class, Elf_data>::create (m, file));
         list.push_back (table<module_devicetable::device_pnp, Elf_class, Elf_data>::create (m, file));
         list.push_back (table<module_devicetable::device_pnp_card, Elf_class, Elf_data>::create (m, file));
-//        list.push_back (table<module_devicetable::device_serio, Elf_class, Elf_data>::create (m, file));
+        list.push_back (table<module_devicetable::device_serio, Elf_class, Elf_data>::create (m, file));
         list.push_back (table<module_devicetable::device_usb, Elf_class, Elf_data>::create (m, file));
-//        list.push_back (table<module_devicetable::device_vio, Elf_class, Elf_data>::create (m, file));
+        list.push_back (table<module_devicetable::device_vio, Elf_class, Elf_data>::create (m, file));
       }
 
     template<typename device, typename Elf_class, typename Elf_data>

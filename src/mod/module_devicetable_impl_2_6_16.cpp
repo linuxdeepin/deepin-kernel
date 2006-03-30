@@ -66,6 +66,14 @@ void table_entry_version<device_ccw, version_2_6_16>::write (std::ostream &out) 
   dev_model.write (out, match_flags & CCW_DEVICE_ID_MATCH_DEVICE_TYPE);
 }
 
+table_entry_version<device_i2c, version_2_6_16>::table_entry_version () throw ()
+{
+}
+
+void table_entry_version<device_i2c, version_2_6_16>::write (std::ostream &out) const throw (std::runtime_error)
+{
+}
+
 table_entry_version<device_ieee1394, version_2_6_16>::table_entry_version () throw () :
   vendor_id ("ven"),
   model_id ("mo"),
@@ -80,6 +88,22 @@ void table_entry_version<device_ieee1394, version_2_6_16>::write (std::ostream &
   model_id.write (out, match_flags & IEEE1394_MATCH_MODEL_ID);
   specifier_id.write (out, match_flags & IEEE1394_MATCH_SPECIFIER_ID);
   version.write (out, match_flags & IEEE1394_MATCH_VERSION, true);
+}
+
+table_entry_version<device_input, version_2_6_16>::table_entry_version () throw ()
+{
+}
+
+void table_entry_version<device_input, version_2_6_16>::write (std::ostream &out) const throw (std::runtime_error)
+{
+}
+
+table_entry_version<device_of, version_2_6_16>::table_entry_version () throw ()
+{
+}
+
+void table_entry_version<device_of, version_2_6_16>::write (std::ostream &out) const throw (std::runtime_error)
+{
 }
 
 table_entry_version<device_pci, version_2_6_16>::table_entry_version () throw () :
@@ -114,6 +138,14 @@ void table_entry_version<device_pci, version_2_6_16>::write (std::ostream &out) 
   interface.write (out, interface_mask == 0xFF, true);
 }
 
+table_entry_version<device_pcmcia, version_2_6_16>::table_entry_version () throw ()
+{
+}
+
+void table_entry_version<device_pcmcia, version_2_6_16>::write (std::ostream &out) const throw (std::runtime_error)
+{
+}
+
 void table_entry_version<device_pnp, version_2_6_16>::write (std::ostream &out) const throw (std::runtime_error)
 {
   out << "pnp:" << str << '*';
@@ -122,6 +154,14 @@ void table_entry_version<device_pnp, version_2_6_16>::write (std::ostream &out) 
 void table_entry_version<device_pnp_card, version_2_6_16>::write (std::ostream &out) const throw (std::runtime_error)
 {
   out << "pnp:" << str << '*';
+}
+
+table_entry_version<device_serio, version_2_6_16>::table_entry_version () throw ()
+{
+}
+
+void table_entry_version<device_serio, version_2_6_16>::write (std::ostream &out) const throw (std::runtime_error)
+{
 }
 
 table_entry_version<device_usb, version_2_6_16>::table_entry_version () throw () :
@@ -164,6 +204,14 @@ void table_entry_version<device_usb, version_2_6_16>::write (std::ostream &out) 
   bInterfaceProtocol.write (out, match_flags & USB_DEVICE_ID_MATCH_INT_PROTOCOL, true);
 }
 
+table_entry_version<device_vio, version_2_6_16>::table_entry_version () throw ()
+{
+}
+
+void table_entry_version<device_vio, version_2_6_16>::write (std::ostream &out) const throw (std::runtime_error)
+{
+}
+
 #define _do_convert(name) name = Elf::convert<Elf_data, typeof (id.name)> () (id.name)
 
 template<typename Elf_class, typename Elf_data>
@@ -177,6 +225,12 @@ table_entry_data<device_ccw, version_2_6_16, Elf_class, Elf_data>::table_entry_d
 }
 
 template<typename Elf_class, typename Elf_data>
+table_entry_data<device_i2c, version_2_6_16, Elf_class, Elf_data>::table_entry_data (const device_id<device_i2c, Elf_class> &id) throw ()
+{
+  throw std::runtime_error ("Not implemented: I2C");
+}
+
+template<typename Elf_class, typename Elf_data>
 table_entry_data<device_ieee1394, version_2_6_16, Elf_class, Elf_data>::table_entry_data (const device_id<device_ieee1394, Elf_class> &id) throw ()
 {
   _do_convert (match_flags);
@@ -184,6 +238,18 @@ table_entry_data<device_ieee1394, version_2_6_16, Elf_class, Elf_data>::table_en
   _do_convert (model_id);
   _do_convert (specifier_id);
   _do_convert (version);
+}
+
+template<typename Elf_class, typename Elf_data>
+table_entry_data<device_input, version_2_6_16, Elf_class, Elf_data>::table_entry_data (const device_id<device_input, Elf_class> &id) throw ()
+{
+  throw std::runtime_error ("Not implemented: INPUT");
+}
+
+template<typename Elf_class, typename Elf_data>
+table_entry_data<device_of, version_2_6_16, Elf_class, Elf_data>::table_entry_data (const device_id<device_of, Elf_class> &id) throw ()
+{
+  throw std::runtime_error ("Not implemented: OF");
 }
 
 template<typename Elf_class, typename Elf_data>
@@ -195,6 +261,12 @@ table_entry_data<device_pci, version_2_6_16, Elf_class, Elf_data>::table_entry_d
   _do_convert (subdevice);
   _do_convert (class_id);
   _do_convert (class_mask);
+}
+
+template<typename Elf_class, typename Elf_data>
+table_entry_data<device_pcmcia, version_2_6_16, Elf_class, Elf_data>::table_entry_data (const device_id<device_pcmcia, Elf_class> &id) throw ()
+{
+  throw std::runtime_error ("Not implemented: PCMCIA");
 }
 
 template<typename Elf_class, typename Elf_data>
@@ -220,6 +292,12 @@ table_entry_data<device_pnp_card, version_2_6_16, Elf_class, Elf_data>::table_en
     s << static_cast <const char *> (static_cast <const void *> (id.devs[i].id));
   }
   str = s.str ();
+}
+
+template<typename Elf_class, typename Elf_data>
+table_entry_data<device_serio, version_2_6_16, Elf_class, Elf_data>::table_entry_data (const device_id<device_serio, Elf_class> &id) throw ()
+{
+  throw std::runtime_error ("Not implemented: SERIO");
 }
 
 template<typename Elf_class, typename Elf_data>
@@ -287,6 +365,12 @@ void table_entry_data<device_usb, version_2_6_16, Elf_class, Elf_data>::add (con
   }
 }
 
+template<typename Elf_class, typename Elf_data>
+table_entry_data<device_vio, version_2_6_16, Elf_class, Elf_data>::table_entry_data (const device_id<device_vio, Elf_class> &id) throw ()
+{
+  throw std::runtime_error ("Not implemented: VIO");
+}
+
 template<typename device, typename Elf_class, typename Elf_data>
 table_data<device, version_2_6_16, Elf_class, Elf_data>::table_data (const void *mem, size_t size) throw (std::runtime_error)
 {
@@ -306,8 +390,14 @@ template class table_data<name, version_2_6_16, Elf::file_class_32, Elf::file_da
 template class table_data<name, version_2_6_16, Elf::file_class_64, Elf::file_data_2LSB>; \
 template class table_data<name, version_2_6_16, Elf::file_class_64, Elf::file_data_2MSB>
 make_templates(device_ccw);
+make_templates(device_i2c);
 make_templates(device_ieee1394);
+make_templates(device_input);
+make_templates(device_of);
 make_templates(device_pci);
+make_templates(device_pcmcia);
 make_templates(device_pnp);
 make_templates(device_pnp_card);
+make_templates(device_serio);
 make_templates(device_usb);
+make_templates(device_vio);
