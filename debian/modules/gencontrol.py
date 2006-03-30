@@ -11,7 +11,6 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         main = self.templates["control.main"]
         packages.extend(self.process_packages(main, vars))
 
-    def do_main_packages(self, packages):
         l = ['linux-headers-%s%s-all-%s [%s]' % (self.version['upstream'], self.abiname, arch, arch) for arch in self.config['base',]['arches']]
         packages['source']['Build-Depends'].extend(l)
 
