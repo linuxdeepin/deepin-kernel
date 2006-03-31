@@ -37,6 +37,7 @@ class gencontrol(object):
 
     def do_main(self, packages, makefile):
         makeflags = {
+            'MAJOR': self.version['major'],
             'VERSION': self.version['version'],
             'SOURCE_UPSTREAM': self.version['source_upstream'],
             'SOURCEVERSION': self.version['source'],
