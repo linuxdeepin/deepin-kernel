@@ -17,17 +17,18 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         tree = self.templates["control.tree"]
         packages.append(self.process_real_tree(tree[0], vars))
 
+        packages.extend(self.process_packages(self.templates["control.support"], vars))
+
     def do_arch_setup(self, vars, makeflags, arch):
         vars.update(self.config.get(('image', arch), {}))
 
     def do_arch_packages(self, packages, makefile, arch, vars, makeflags, extra):
-        packages_support = self.process_packages(self.templates["control.support"], vars)
         headers_arch = self.templates["control.headers.arch"]
         packages_headers_arch = self.process_packages(headers_arch, vars)
         
         extra['headers_arch_depends'] = packages_headers_arch[-1]['Depends'] = package_relation_list()
 
-        for package in packages_support + packages_headers_arch:
+        for package in packages_headers_arch:
             name = package['Package']
             if packages.has_key(name):
                 package = packages.get(name)
