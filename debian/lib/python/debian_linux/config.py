@@ -1,6 +1,9 @@
 import os, os.path, re, sys, textwrap, ConfigParser
 
-__all__ = 'config_reader',
+__all__ = [
+    'config_parser',
+    'config_reader',
+]
 
 _marker = object()
 

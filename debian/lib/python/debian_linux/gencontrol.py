@@ -15,10 +15,8 @@ class gencontrol(object):
     makefile_targets = ('binary-arch', 'build', 'setup', 'source')
 
     def __init__(self, underlay = None):
-        self.changelog = read_changelog()
         self.config = config_reader([underlay, "debian/arch"])
         self.templates = templates()
-        self.version, self.abiname, self.changelog_vars = self.process_changelog({})
 
     def __call__(self):
         packages = packages_list()
@@ -43,6 +41,7 @@ class gencontrol(object):
             'SOURCEVERSION': self.version['source'],
             'UPSTREAMVERSION': self.version['upstream'],
             'ABINAME': self.abiname,
+            # TODO: Don't read this here, this is linux-2.6 specific
             'REVISIONS': ' '.join([i['Version']['debian'] for i in self.changelog[::-1]]),
         }
 
@@ -203,6 +202,7 @@ class gencontrol(object):
     def do_flavour_packages(self, packages, makefile, arch, subarch, flavour, vars, makeflags, extra):
         pass
 
+    # TODO: Move away, linux-2.6 specific; unify with modules process_config_version
     def process_changelog(self, in_vars):
         ret = [None, None, None]
         ret[0] = version = self.changelog[0]['Version']
