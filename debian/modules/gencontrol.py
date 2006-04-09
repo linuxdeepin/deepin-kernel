@@ -2,15 +2,27 @@
 import sys
 sys.path.append(sys.path[0] + "/../lib/python")
 import debian_linux.gencontrol
+from debian_linux.config import *
 from debian_linux.debian import *
 
 class gencontrol(debian_linux.gencontrol.gencontrol):
+    # TODO: workaround
+    changelog = []
+
+    def __init__(self, config):
+        super(gencontrol, self).__init__(config)
+        self.config_version = config_parser({}, [sys.path[0] + "/../version"])
+        self.version, self.abiname, self.changelog_vars = self.process_config_version()
+
     def do_main_packages(self, packages):
         vars = self.changelog_vars
 
         main = self.templates["control.main"]
         packages.extend(self.process_packages(main, vars))
 
+        # TODO
+        l1 = ['linux-support-%s%s' % (self.version['upstream'], self.abiname)]
+        packages['source']['Build-Depends'].extend(l1)
         l = ['linux-headers-%s%s-all-%s [%s]' % (self.version['upstream'], self.abiname, arch, arch) for arch in self.config['base',]['arches']]
         packages['source']['Build-Depends'].extend(l)
 
@@ -40,6 +52,16 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         makefile.append(("binary-arch-%s-%s-%s-real:" % (arch, subarch, flavour), cmds_binary_arch))
         makefile.append(("build-%s-%s-%s-real:" % (arch, subarch, flavour), cmds_build))
         makefile.append(("setup-%s-%s-%s-real:" % (arch, subarch, flavour), cmds_setup))
+
+    def process_config_version(self):
+        # TODO: unify with process_changelog
+        vars = self.config_version['version',]
+        version = parse_version(vars['source'])
+        vars['upstreamversion'] = version['upstream']
+        vars['version'] = version['version']
+        vars['source_upstream'] = version['source_upstream']
+        vars['major'] = version['major']
+        return version, vars['abiname'], vars
 
 if __name__ == '__main__':
     gencontrol(sys.path[0] + "/../arch")()

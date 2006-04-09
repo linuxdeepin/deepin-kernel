@@ -5,6 +5,11 @@ import debian_linux.gencontrol
 from debian_linux.debian import *
 
 class gencontrol(debian_linux.gencontrol.gencontrol):
+    def __init__(self):
+        super(gencontrol, self).__init__()
+        self.changelog = read_changelog()
+        self.version, self.abiname, self.changelog_vars = self.process_changelog({})
+
     def do_main_setup(self, vars, makeflags):
         vars.update(self.config['image',])
 
