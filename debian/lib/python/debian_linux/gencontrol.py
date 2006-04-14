@@ -252,10 +252,6 @@ class gencontrol(object):
             'source_upstream': version['source_upstream'],
             'major': version['major'],
         }
-        if version['modifier'] is not None:
-            self.abiname = vars['abiname'] = ''
-        else:
-            self.abiname = vars['abiname'] = '-%s' % self.config['abiname',]['abiname']
         return vars
 
     def substitute(self, s, vars):

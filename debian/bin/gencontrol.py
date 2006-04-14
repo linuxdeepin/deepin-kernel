@@ -168,6 +168,10 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
     def process_changelog(self):
         version = self.changelog[0]['Version']
         self.changelog_vars = self.process_version(version)
+        if version['modifier'] is not None:
+            self.abiname = self.changelog_vars['abiname'] = ''
+        else:
+            self.abiname = self.changelog_vars['abiname'] = '-%s' % self.config['abiname',]['abiname']
 
     def process_real_image(self, in_entry, depends, vars):
         entry = self.process_package(in_entry, vars)
