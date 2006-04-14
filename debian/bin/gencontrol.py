@@ -14,7 +14,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         vars.update(self.config['image',])
 
     def do_main_packages(self, packages):
-        vars = self.changelog_vars
+        vars = self.vars
 
         main = self.templates["control.main"]
         packages.extend(self.process_packages(main, vars))
@@ -167,11 +167,11 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
 
     def process_changelog(self):
         version = self.changelog[0]['Version']
-        self.changelog_vars = self.process_version(version)
+        self.process_version(version)
         if version['modifier'] is not None:
-            self.abiname = self.changelog_vars['abiname'] = ''
+            self.abiname = self.vars['abiname'] = ''
         else:
-            self.abiname = self.changelog_vars['abiname'] = '-%s' % self.config['abiname',]['abiname']
+            self.abiname = self.vars['abiname'] = '-%s' % self.config['abiname',]['abiname']
 
     def process_real_image(self, in_entry, depends, vars):
         entry = self.process_package(in_entry, vars)

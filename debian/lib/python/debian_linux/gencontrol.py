@@ -31,7 +31,7 @@ class gencontrol(object):
 
     def do_source(self, packages):
         source = self.templates["control.source"]
-        packages['source'] = self.process_package(source[0], self.changelog_vars)
+        packages['source'] = self.process_package(source[0], self.vars)
 
     def do_main(self, packages, makefile):
         makeflags = {
@@ -45,7 +45,7 @@ class gencontrol(object):
             'REVISIONS': ' '.join([i['Version']['debian'] for i in self.changelog[::-1]]),
         }
 
-        vars = self.changelog_vars.copy()
+        vars = self.vars.copy()
 
         self.do_main_setup(vars, makeflags)
         self.do_main_packages(packages)
@@ -246,13 +246,12 @@ class gencontrol(object):
 
     def process_version(self, version):
         self.version = version
-        vars = {
+        self.vars = {
             'upstreamversion': version['upstream'],
             'version': version['version'],
             'source_upstream': version['source_upstream'],
             'major': version['major'],
         }
-        return vars
 
     def substitute(self, s, vars):
         if isinstance(s, (list, tuple)):

@@ -11,11 +11,10 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
 
     def __init__(self, config):
         super(gencontrol, self).__init__(config)
-        self.config_version = config_parser({}, [sys.path[0] + "/../version"])
-        self.version, self.abiname, self.changelog_vars = self.process_config_version()
+        self.process_config_version(config_parser({}, [sys.path[0] + "/../version"]))
 
     def do_main_packages(self, packages):
-        vars = self.changelog_vars
+        vars = self.vars
 
         main = self.templates["control.main"]
         packages.extend(self.process_packages(main, vars))
@@ -53,15 +52,10 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         makefile.append(("build-%s-%s-%s-real:" % (arch, subarch, flavour), cmds_build))
         makefile.append(("setup-%s-%s-%s-real:" % (arch, subarch, flavour), cmds_setup))
 
-    def process_config_version(self):
-        # TODO: unify with process_changelog
-        vars = self.config_version['version',]
-        version = parse_version(vars['source'])
-        vars['upstreamversion'] = version['upstream']
-        vars['version'] = version['version']
-        vars['source_upstream'] = version['source_upstream']
-        vars['major'] = version['major']
-        return version, vars['abiname'], vars
+    def process_config_version(self, config):
+        entry = config['version',]
+        self.process_version(parse_version(entry['source']))
+        self.vars['abiname'] = self.abiname = entry['abiname']
 
 if __name__ == '__main__':
     gencontrol(sys.path[0] + "/../arch")()
