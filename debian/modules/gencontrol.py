@@ -6,9 +6,6 @@ from debian_linux.config import *
 from debian_linux.debian import *
 
 class gencontrol(debian_linux.gencontrol.gencontrol):
-    # TODO: workaround
-    changelog = []
-
     def __init__(self, config):
         super(gencontrol, self).__init__(config)
         self.process_config_version(config_parser({}, [sys.path[0] + "/../version"]))

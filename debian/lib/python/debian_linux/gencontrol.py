@@ -41,8 +41,6 @@ class gencontrol(object):
             'SOURCEVERSION': self.version['source'],
             'UPSTREAMVERSION': self.version['upstream'],
             'ABINAME': self.abiname,
-            # TODO: Don't read this here, this is linux-2.6 specific
-            'REVISIONS': ' '.join([i['Version']['debian'] for i in self.changelog[::-1]]),
         }
 
         vars = self.vars.copy()
