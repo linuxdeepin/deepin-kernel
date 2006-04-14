@@ -16,11 +16,13 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         main = self.templates["control.main"]
         packages.extend(self.process_packages(main, vars))
 
-        # TODO
-        l1 = ['linux-support-%s%s' % (self.version['upstream'], self.abiname)]
-        packages['source']['Build-Depends'].extend(l1)
-        l = ['linux-headers-%s%s-all-%s [%s]' % (self.version['upstream'], self.abiname, arch, arch) for arch in self.config['base',]['arches']]
-        packages['source']['Build-Depends'].extend(l)
+        packages['source']['Build-Depends'].extend(
+            ['linux-support-%s%s' % (self.version['upstream'], self.abiname)]
+        )
+        packages['source']['Build-Depends'].extend(
+            ['linux-headers-%s%s-all-%s [%s]' % (self.version['upstream'], self.abiname, arch, arch)
+            for arch in self.config['base',]['arches']],
+        )
 
     def do_flavour_packages(self, packages, makefile, arch, subarch, flavour, vars, makeflags, extra):
         modules = self.templates["control.modules"]
