@@ -202,22 +202,6 @@ class gencontrol(object):
     def do_flavour_packages(self, packages, makefile, arch, subarch, flavour, vars, makeflags, extra):
         pass
 
-    # TODO: Move away, linux-2.6 specific; unify with modules process_config_version
-    def process_changelog(self, in_vars):
-        ret = [None, None, None]
-        ret[0] = version = self.changelog[0]['Version']
-        vars = in_vars.copy()
-        if version['modifier'] is not None:
-            ret[1] = vars['abiname'] = ''
-        else:
-            ret[1] = vars['abiname'] = '-%s' % self.config['abiname',]['abiname']
-        vars['upstreamversion'] = version['upstream']
-        vars['version'] = version['version']
-        vars['source_upstream'] = version['source_upstream']
-        vars['major'] = version['major']
-        ret[2] = vars
-        return ret
-
     def process_relation(self, key, e, in_e, vars):
         in_dep = in_e[key]
         dep = package_relation_list()
@@ -259,6 +243,19 @@ class gencontrol(object):
         for i in in_entries:
             entries.append(self.process_package(i, vars))
         return entries
+
+    def process_version(self, version):
+        vars = {
+            'upstreamversion': version['upstream'],
+            'version': version['version'],
+            'source_upstream': version['source_upstream'],
+            'major': version['major'],
+        }
+        if version['modifier'] is not None:
+            vars['abiname'] = ''
+        else:
+            vars['abiname'] = '-%s' % self.config['abiname',]['abiname']
+        return vars
 
     def substitute(self, s, vars):
         if isinstance(s, (list, tuple)):
