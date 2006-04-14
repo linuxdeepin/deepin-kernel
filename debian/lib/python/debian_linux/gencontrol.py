@@ -245,6 +245,7 @@ class gencontrol(object):
         return entries
 
     def process_version(self, version):
+        self.version = version
         vars = {
             'upstreamversion': version['upstream'],
             'version': version['version'],
@@ -252,9 +253,9 @@ class gencontrol(object):
             'major': version['major'],
         }
         if version['modifier'] is not None:
-            vars['abiname'] = ''
+            self.abiname = vars['abiname'] = ''
         else:
-            vars['abiname'] = '-%s' % self.config['abiname',]['abiname']
+            self.abiname = vars['abiname'] = '-%s' % self.config['abiname',]['abiname']
         return vars
 
     def substitute(self, s, vars):

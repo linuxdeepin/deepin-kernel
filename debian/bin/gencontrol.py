@@ -8,7 +8,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
     def __init__(self):
         super(gencontrol, self).__init__()
         self.changelog = read_changelog()
-        self.version, self.abiname, self.changelog_vars = self.process_changelog()
+        self.process_changelog()
 
     def do_main_setup(self, vars, makeflags):
         vars.update(self.config['image',])
@@ -166,12 +166,8 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         makefile.append(("source-%s-%s-%s-real:" % (arch, subarch, flavour)))
 
     def process_changelog(self):
-        ret = [None, None, None]
-        ret[0] = version = self.changelog[0]['Version']
-        vars = self.process_version(version)
-        ret[1] = vars['abiname']
-        ret[2] = vars
-        return ret
+        version = self.changelog[0]['Version']
+        self.changelog_vars = self.process_version(version)
 
     def process_real_image(self, in_entry, depends, vars):
         entry = self.process_package(in_entry, vars)
