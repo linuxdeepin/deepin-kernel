@@ -26,7 +26,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
 
     def do_arch_setup(self, vars, makeflags, arch):
         vars.update(self.config.get(('image', arch), {}))
-        makeflags['REVISIONS'] = ' '.join([i['Version']['debian'] for i in self.changelog[::-1]]),
+        makeflags['REVISIONS'] = ' '.join([i['Version']['debian'] for i in self.changelog[::-1]])
 
     def do_arch_packages(self, packages, makefile, arch, vars, makeflags, extra):
         headers_arch = self.templates["control.headers.arch"]
