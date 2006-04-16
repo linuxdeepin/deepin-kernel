@@ -111,16 +111,16 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         image_latest = self.templates["control.image.latest"]
         headers_latest = self.templates["control.headers.latest"]
 
+        config_entry_relations = self.config.merge('relations', arch, subarch, flavour)
+
         image_depends = package_relation_list()
         if vars.get('initramfs', True):
             generators = vars['initramfs-generators']
             config_entry_commands_initramfs = self.config.merge('commands-image-initramfs-generators', arch, subarch, flavour)
-            config_entry_relations = self.config.merge('relations', arch, subarch, flavour)
             commands = [config_entry_commands_initramfs[i] for i in generators if config_entry_commands_initramfs.has_key(i)]
             makeflags['INITRD_CMD'] = ' '.join(commands)
             l = package_relation_group()
-            l.extend([package_relation(config_entry_relations[i]) for i in generators])
-            l.append(package_relation(config_entry_relations['initramfs-fallback']))
+            l.extend(generators + ['initramfs-fallback'])
             image_depends.append(l)
 
         packages_own = []
@@ -133,8 +133,8 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         else:
             image = image_type_modulesinline
 
-        packages_own.append(self.process_real_image(image[0], image_depends, vars))
-        packages_own.extend(self.process_packages(image[1:], vars))
+        for i in image:
+            packages_own.append(self.process_real_image(i, {'depends': image_depends}, config_entry_relations, vars))
         packages_dummy.extend(self.process_packages(image_latest, vars))
 
         if image in (image_type_modulesextra, image_type_modulesinline):
@@ -174,7 +174,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         else:
             self.abiname = self.vars['abiname'] = '-%s' % self.config['abiname',]['abiname']
 
-    def process_real_image(self, in_entry, depends, vars):
+    def process_real_image(self, in_entry, relations, config, vars):
         entry = self.process_package(in_entry, vars)
         if vars.has_key('desc'):
             entry['Description'].long[1:1] = [vars['desc']]
@@ -182,8 +182,9 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
             value = entry.get(field, package_relation_list())
             t = vars.get(field.lower(), [])
             value.extend(t)
-            if depends and field == 'Depends':
-                value.append(depends)
+            t = relations.get(field.lower(), [])
+            value.extend(t)
+            value.config(config)
             entry[field] = value
         return entry
 

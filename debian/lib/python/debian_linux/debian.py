@@ -107,16 +107,7 @@ class package_relation(object):
 
     def __init__(self, value = None):
         if value is not None:
-            match = self._re.match(value)
-            if match is None:
-                raise RuntimeError, "Can't parse dependency %s" % value
-            match = match.groups()
-            self.name = match[0]
-            self.version = match[1]
-            if match[2] is not None:
-                self.arches = re.split('\s+', match[2])
-            else:
-                self.arches = []
+            self.parse(value)
         else:
             self.name = None
             self.version = None
@@ -130,11 +121,29 @@ class package_relation(object):
             ret.extend([' [', ' '.join(self.arches), ']'])
         return ''.join(ret)
 
+    def config(self, entry):
+        if self.version is not None or self.arches:
+            return
+        value = entry.get(self.name, None)
+        if value is None:
+            return
+        self.parse(value)
+
+    def parse(self, value):
+        match = self._re.match(value)
+        if match is None:
+            raise RuntimeError, "Can't parse dependency %s" % value
+        match = match.groups()
+        self.name = match[0]
+        self.version = match[1]
+        if match[2] is not None:
+            self.arches = re.split('\s+', match[2])
+        else:
+            self.arches = []
+
 class package_relation_list(list):
     def __init__(self, value = None):
-        if isinstance(value, (list, tuple)):
-            self.extend(value)
-        elif value is not None:
+        if value is not None:
             self.extend(value)
 
     def __str__(self):
@@ -146,30 +155,36 @@ class package_relation_list(list):
                 return i
         return None
 
+    def append(self, value):
+        if isinstance(value, basestring):
+            value = package_relation_group(value)
+        elif not isinstance(value, package_relation_group):
+            raise ValueError, "got %s" % type(value)
+        j = self._match(value)
+        if j:
+            j._update_arches(value)
+        else:
+            super(package_relation_list, self).append(value)
+
+    def config(self, entry):
+        for i in self:
+            i.config(entry)
+
     def extend(self, value):
         if isinstance(value, basestring):
-            value = [package_relation_group(j.strip()) for j in re.split(',', value.strip())]
+            value = [j.strip() for j in re.split(',', value.strip())]
+        elif not isinstance(value, (list, tuple)):
+            raise ValueError, "got %s" % type(value)
         for i in value:
-            if isinstance(i, basestring):
-                i = package_relation_group(i)
-            j = self._match(i)
-            if j:
-                j._update_arches(i)
-            else:
-                self.append(i)
+            self.append(i)
 
 class package_relation_group(list):
     def __init__(self, value = None):
-        if isinstance(value, package_relation_list):
+        if value is not None:
             self.extend(value)
-        elif value is not None:
-            self._extend(value)
 
     def __str__(self):
         return ' | '.join([str(i) for i in self])
-
-    def _extend(self, value):
-        self.extend([package_relation(j.strip()) for j in re.split('\|', value.strip())])
 
     def _match(self, value):
         for i, j in itertools.izip(self, value):
@@ -183,6 +198,25 @@ class package_relation_group(list):
                 for arch in j.arches:
                     if arch not in i.arches:
                         i.arches.append(arch)
+
+    def append(self, value):
+        if isinstance(value, basestring):
+            value = package_relation(value)
+        elif not isinstance(value, package_relation):
+            raise ValueError
+        super(package_relation_group, self).append(value)
+
+    def config(self, entry):
+        for i in self:
+            i.config(entry)
+
+    def extend(self, value):
+        if isinstance(value, basestring):
+            value = [j.strip() for j in re.split('\|', value.strip())]
+        elif not isinstance(value, (list, tuple)):
+            raise ValueError
+        for i in value:
+            self.append(i)
 
 class package(dict):
     _fields = utils.sorted_dict((
