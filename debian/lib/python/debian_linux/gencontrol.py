@@ -34,6 +34,10 @@ class gencontrol(object):
         packages['source'] = self.process_package(source[0], self.vars)
 
     def do_main(self, packages, makefile):
+        config_entry = self.config['base',]
+        vars = self.vars.copy()
+        vars.update(config_entry)
+
         makeflags = {
             'MAJOR': self.version['major'],
             'VERSION': self.version['version'],
@@ -42,8 +46,6 @@ class gencontrol(object):
             'UPSTREAMVERSION': self.version['upstream'],
             'ABINAME': self.abiname,
         }
-
-        vars = self.vars.copy()
 
         self.do_main_setup(vars, makeflags)
         self.do_main_packages(packages)
