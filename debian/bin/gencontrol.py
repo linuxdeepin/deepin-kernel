@@ -144,7 +144,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
                 package['Architecture'] = [arch]
                 packages.append(package)
 
-        extra['headers_arch_depends'].append('%s (= ${Source-Version})' % packages_own[1]['Package'])
+        extra['headers_arch_depends'].append('%s (= ${Source-Version})' % packages_own[-1]['Package'])
 
         makeflags_string = ' '.join(["%s='%s'" % i for i in makeflags.iteritems()])
 
