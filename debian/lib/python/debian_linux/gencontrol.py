@@ -210,7 +210,7 @@ class gencontrol(object):
         if version['modifier'] is not None:
             ret[1] = vars['abiname'] = ''
         else:
-            ret[1] = vars['abiname'] = '-%s' % self.config['abiname',]['abiname']
+            ret[1] = vars['abiname'] = '-%s' % self.config['abi',]['abiname']
         vars['upstreamversion'] = version['upstream']
         vars['version'] = version['version']
         vars['source_upstream'] = version['source_upstream']
