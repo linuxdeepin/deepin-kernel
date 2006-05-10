@@ -8,7 +8,7 @@ class checker(object):
     def __init__(self, dir, arch, subarch, flavour):
         self.config = config_reader(["debian/arch"])
         self.filename_new = "%s/Module.symvers" % dir
-        abiname = self.config['abiname',]['abiname']
+        abiname = self.config['abi',]['abiname']
         if subarch == 'none':
             self.filename_ref = "debian/arch/%s/abi-%s.%s" % (arch, abiname, flavour)
         else:
