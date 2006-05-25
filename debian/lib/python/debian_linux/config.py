@@ -3,15 +3,12 @@ import os, os.path, re, sys, textwrap, ConfigParser
 __all__ = [
     'config_parser',
     'config_reader',
+    'config_reader_arch',
 ]
 
 _marker = object()
 
 class config_reader(dict):
-    """
-    Read configs in debian/arch and in the underlay directory.
-    """
-
     class schema_item_boolean(object):
         def __call__(self, i):
             i = i.strip().lower()
@@ -51,6 +48,33 @@ class config_reader(dict):
 
     def _get_files(self, name):
         return [os.path.join(i, name) for i in self._dirs if i]
+
+    def _update(self, ret, inputkey):
+        for key, value in super(config_reader, self).get(tuple(inputkey), {}).iteritems():
+            ret[key] = value
+
+    def get(self, key, default = _marker):
+        if isinstance(key, basestring):
+            key = key,
+
+        ret = super(config_reader, self).get(tuple(key), default)
+        if ret == _marker:
+            raise KeyError, key
+        return ret
+
+    def merge(self, section, *args):
+        ret = {}
+        for i in xrange(0, len(args) + 1):
+            ret.update(self.get(tuple([section] + list(args[:i])), {}))
+        return ret
+
+    def sections(self):
+        return super(config_reader, self).keys()
+
+class config_reader_arch(config_reader):
+    def __init__(self, dirs = []):
+        super(config_reader_arch, self).__init__(dirs)
+        self._read_base()
 
     def _read_arch(self, arch):
         files = self._get_files("%s/%s" % (arch, self.config_name))
@@ -142,28 +166,6 @@ class config_reader(dict):
 
         for flavour in flavours:
             self._read_flavour(arch, subarch, flavour)
-
-    def _update(self, ret, inputkey):
-        for key, value in super(config_reader, self).get(tuple(inputkey), {}).iteritems():
-            ret[key] = value
-
-    def get(self, key, default = _marker):
-        if isinstance(key, basestring):
-            key = key,
-
-        ret = super(config_reader, self).get(tuple(key), default)
-        if ret == _marker:
-            raise KeyError, key
-        return ret
-
-    def merge(self, section, *args):
-        ret = {}
-        for i in xrange(0, len(args) + 1):
-            ret.update(self.get(tuple([section] + list(args[:i])), {}))
-        return ret
-
-    def sections(self):
-        return super(config_reader, self).keys()
 
 class config_parser(object):
     __slots__ = 'configs', 'schema'
