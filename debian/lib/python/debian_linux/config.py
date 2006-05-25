@@ -8,35 +8,26 @@ __all__ = [
 
 _marker = object()
 
+class schema_item_boolean(object):
+    def __call__(self, i):
+        i = i.strip().lower()
+        if i in ("true", "1"):
+            return True
+        if i in ("false", "0"):
+            return False
+        raise Error
+
+class schema_item_list(object):
+    def __init__(self, type = "\s+"):
+        self.type = type
+
+    def __call__(self, i):
+        i = i.strip()
+        if not i:
+            return []
+        return [j.strip() for j in re.split(self.type, i)]
+
 class config_reader(dict):
-    class schema_item_boolean(object):
-        def __call__(self, i):
-            i = i.strip().lower()
-            if i in ("true", "1"):
-                return True
-            if i in ("false", "0"):
-                return False
-            raise Error
-
-    class schema_item_list(object):
-        def __init__(self, type = "\s+"):
-            self.type = type
-
-        def __call__(self, i):
-            i = i.strip()
-            if not i:
-                return []
-            return [j.strip() for j in re.split(self.type, i)]
-
-    schema = {
-        'arches': schema_item_list(),
-        'available': schema_item_boolean(),
-        'flavours': schema_item_list(),
-        'initramfs': schema_item_boolean(),
-        'initramfs-generators': schema_item_list(),
-        'subarches': schema_item_list(),
-    }
-
     config_name = "defines"
 
     def __init__(self, dirs = []):
@@ -72,6 +63,15 @@ class config_reader(dict):
         return super(config_reader, self).keys()
 
 class config_reader_arch(config_reader):
+    schema = {
+        'arches': schema_item_list(),
+        'available': schema_item_boolean(),
+        'flavours': schema_item_list(),
+        'initramfs': schema_item_boolean(),
+        'initramfs-generators': schema_item_list(),
+        'subarches': schema_item_list(),
+    }
+
     def __init__(self, dirs = []):
         super(config_reader_arch, self).__init__(dirs)
         self._read_base()
