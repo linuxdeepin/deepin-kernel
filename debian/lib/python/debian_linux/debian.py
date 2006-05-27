@@ -248,17 +248,29 @@ class package(dict):
         super(package, self).__setitem__(key, value)
 
     def iterkeys(self):
+        keys = set(self.keys())
         for i in self._fields.iterkeys():
-            if self.has_key(i) and self[i]:
+            if self.has_key(i):
+                keys.remove(i)
                 yield i
+        for i in keys:
+            yield i
 
     def iteritems(self):
+        keys = set(self.keys())
         for i in self._fields.iterkeys():
-            if self.has_key(i) and self[i]:
+            if self.has_key(i):
+                keys.remove(i)
                 yield (i, self[i])
+        for i in keys:
+            yield (i, self[i])
 
     def itervalues(self):
+        keys = set(self.keys())
         for i in self._fields.iterkeys():
-            if self.has_key(i) and self[i]:
+            if self.has_key(i):
+                keys.remove(i)
                 yield self[i]
+        for i in keys:
+            yield self[i]
 
