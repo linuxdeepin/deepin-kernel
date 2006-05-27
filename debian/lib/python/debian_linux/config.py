@@ -32,7 +32,6 @@ class config_reader(dict):
 
     def __init__(self, dirs = []):
         self._dirs = dirs
-        self._read_base()
 
     def __getitem__(self, key):
         return self.get(key)
