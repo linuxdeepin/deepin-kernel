@@ -172,7 +172,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         if version['modifier'] is not None:
             self.abiname = self.vars['abiname'] = ''
         else:
-            self.abiname = self.vars['abiname'] = '-%s' % self.config['abiname',]['abiname']
+            self.abiname = self.vars['abiname'] = '-%s' % self.config['abi',]['abiname']
 
     def process_real_image(self, in_entry, relations, config, vars):
         entry = self.process_package(in_entry, vars)
