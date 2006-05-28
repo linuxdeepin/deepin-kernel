@@ -75,11 +75,8 @@ class field_string(str):
         return '\n '.join(self.split('\n'))
 
 class templates(dict):
-    def __init__(self, dir = None):
-        if dir is None:
-            self.dir = "debian/templates"
-        else:
-            self.dir = dir
+    def __init__(self, dir = "debian/templates"):
+        self.dir = dir
 
     def __getitem__(self, key):
         try:
@@ -92,10 +89,17 @@ class templates(dict):
     def __setitem__(self, key, value):
         raise NotImplemented()
 
-    def _read(self, filename):
-        entries = []
+    def _read(self, name):
+        prefix, id = name.split('.', 1)
+        f = file("%s/%s.in" % (self.dir, name))
 
-        f = file("%s/%s.in" % (self.dir, filename))
+        if prefix == 'control':
+            return self._read_control(f)
+
+        return f.read()
+
+    def _read_control(self, f):
+        entries = []
 
         while True:
             e = debian.package()
