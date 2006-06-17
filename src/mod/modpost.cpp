@@ -36,7 +36,7 @@ int main (int argc, char *const argv[])
   const char *dump_read = 0, *dump_write = 0;
   bool all_versions = false, modversions = false;;
 
-  while ((opt = getopt (argc, argv, "ai:mo:")) != -1)
+  while ((opt = getopt (argc, argv, "ai:I:mo:")) != -1)
   {
     switch(opt) {
       case 'a':
@@ -45,6 +45,10 @@ int main (int argc, char *const argv[])
         return EXIT_FAILURE;
         break;
       case 'i':
+        dump_read = optarg;
+        break;
+      case 'I':
+        // Lacks special casing.
         dump_read = optarg;
         break;
       case 'm':
