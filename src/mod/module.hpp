@@ -41,17 +41,17 @@ namespace linuxkernel
     public:
       typedef std::map<std::string, symbol_exported> _symbols_exported;
 
-      module (const std::string &name) throw ();
+      module (const std::string &name, bool kernel) throw ();
 
+      bool get_kernel () const throw () { return kernel; }
       bool get_is_vmlinux () const throw () { return is_vmlinux; }
       const std::string &get_name () const throw () { return name; }
       const std::string &get_name_short () const throw () { return name_short; }
       const _symbols_exported &get_symbols_exported () const throw () { return symbols_exported; }
 
     protected:
-      module (const std::string &filename, bool) throw ();
-
       std::string name, name_short;
+      bool kernel;
       bool is_vmlinux;
       _symbols_exported symbols_exported;
 
@@ -117,8 +117,8 @@ namespace linuxkernel
       modulelist () throw ();
       ~modulelist () throw ();
 
-      void dump_read (const std::string &filename) throw (std::runtime_error);
-      void dump_write (const std::string &filename) const throw (std::runtime_error);
+      void dump_read (const std::string &filename, bool kernel) throw (std::runtime_error);
+      void dump_write (const std::string &filename, bool kernel) const throw (std::runtime_error);
 
       const _modules_real &get_modules_real () const throw () { return modules_real; }
       const _modules_shadow &get_modules_shadow () const throw () { return modules_shadow; }

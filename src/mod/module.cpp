@@ -34,21 +34,8 @@ const std::string module_real::symbol_name_init ("init_module");
 const std::string module_real::symbol_prefix_crc ("__crc_");
 const std::string module_real::symbol_prefix_ksymtab ("__ksymtab_");
 
-module::module (const std::string &name) throw ()
-: name (name)
-{
-  std::string::size_type t1 = name.find_last_of ('/');
-  if (t1 == std::string::npos)
-    t1 = 0;
-  else
-    t1++;
-  name_short = name.substr (t1, std::string::npos);
-
-  if (name == "vmlinux")
-    is_vmlinux = true;
-}
-
-module::module (const std::string &filename, bool) throw ()
+module::module (const std::string &filename, bool kernel) throw ()
+: kernel (kernel)
 {
   std::string::size_type t1 = filename.find_last_of ('/');
   std::string::size_type t2 = filename.find_last_of ('.');
@@ -327,7 +314,7 @@ modulelist::~modulelist () throw ()
     delete it->second;
 }
 
-void modulelist::dump_read (const std::string &filename) throw (std::runtime_error)
+void modulelist::dump_read (const std::string &filename, bool kernel) throw (std::runtime_error)
 {
   std::ifstream in (filename.c_str ());
   while (in.good ())
@@ -342,7 +329,7 @@ void modulelist::dump_read (const std::string &filename) throw (std::runtime_err
     module *mod;
     if (it == modules_shadow.end ())
     {
-      mod = new module (module_name);
+      mod = new module (module_name, kernel);
       modules_shadow.insert (_modules_shadow_pair (module_name, mod));
     }
     else
@@ -354,7 +341,7 @@ void modulelist::dump_read (const std::string &filename) throw (std::runtime_err
   }
 }
 
-void modulelist::dump_write (const std::string &filename) const throw (std::runtime_error)
+void modulelist::dump_write (const std::string &filename, bool kernel) const throw (std::runtime_error)
 {
   char buf[128];
   std::ofstream out (filename.c_str (), std::ios::trunc);
@@ -363,6 +350,8 @@ void modulelist::dump_write (const std::string &filename) const throw (std::runt
   {
     const module *mod = get_module (it->second);
     const symbol_exported &sym = get_symbol (it->first);
+    if (!kernel && mod->get_kernel ())
+      continue;
     snprintf (buf, sizeof (buf), "0x%08x\t%s\t%s\n", sym.get_crc (), it->first.c_str (), mod->get_name ().c_str ());
     out << buf;
   }

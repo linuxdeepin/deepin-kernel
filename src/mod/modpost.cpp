@@ -33,7 +33,7 @@ int main (int argc, char *const argv[])
 {
   int ret = EXIT_SUCCESS;
   int opt;
-  const char *dump_read = 0, *dump_write = 0;
+  const char *dump_read_kernel = 0, *dump_read_module = 0, *dump_write = 0;
   bool all_versions = false, modversions = false;;
 
   while ((opt = getopt (argc, argv, "ai:I:mo:")) != -1)
@@ -45,11 +45,10 @@ int main (int argc, char *const argv[])
         return EXIT_FAILURE;
         break;
       case 'i':
-        dump_read = optarg;
+        dump_read_kernel = optarg;
         break;
       case 'I':
-        // Lacks special casing.
-        dump_read = optarg;
+        dump_read_module = optarg;
         break;
       case 'm':
         modversions = true;
@@ -62,8 +61,10 @@ int main (int argc, char *const argv[])
     }
   }
 
-  if (dump_read)
-    modules.dump_read (dump_read);
+  if (dump_read_kernel)
+    modules.dump_read (dump_read_kernel, true);
+  if (dump_read_module)
+    modules.dump_read (dump_read_module, false);
 
   for (int i = optind; i < argc; i++)
   {
@@ -82,7 +83,7 @@ int main (int argc, char *const argv[])
   modules.write (modversions);
 
   if (dump_write)
-    modules.dump_write (dump_write);
+    modules.dump_write (dump_write, dump_read_module ? false : true);
 
   return ret;
 }
