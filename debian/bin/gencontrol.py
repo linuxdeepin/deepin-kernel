@@ -8,13 +8,14 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
     def __init__(self):
         super(gencontrol, self).__init__()
         self.changelog = read_changelog()
-        self.version, self.abiname, self.changelog_vars = self.process_changelog({})
+        self.process_changelog()
 
     def do_main_setup(self, vars, makeflags):
         vars.update(self.config['image',])
+        makeflags['REVISIONS'] = ' '.join([i['Version']['debian'] for i in self.changelog[::-1]])
 
     def do_main_packages(self, packages):
-        vars = self.changelog_vars
+        vars = self.vars
 
         main = self.templates["control.main"]
         packages.extend(self.process_packages(main, vars))
@@ -103,37 +104,44 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
                 makeflags[i[1]] = vars[i[0]]
 
     def do_flavour_packages(self, packages, makefile, arch, subarch, flavour, vars, makeflags, extra):
-        image = self.templates["control.image"]
+        image_type_modulesextra = self.templates["control.image.type-modulesextra"]
+        image_type_modulesinline = self.templates["control.image.type-modulesinline"]
+        image_type_standalone = self.templates["control.image.type-standalone"]
         headers = self.templates["control.headers"]
-        modules = self.templates["control.modules"]
         image_latest = self.templates["control.image.latest"]
         headers_latest = self.templates["control.headers.latest"]
+
+        config_entry_relations = self.config.merge('relations', arch, subarch, flavour)
 
         image_depends = package_relation_list()
         if vars.get('initramfs', True):
             generators = vars['initramfs-generators']
             config_entry_commands_initramfs = self.config.merge('commands-image-initramfs-generators', arch, subarch, flavour)
-            config_entry_relations = self.config.merge('relations', arch, subarch, flavour)
             commands = [config_entry_commands_initramfs[i] for i in generators if config_entry_commands_initramfs.has_key(i)]
             makeflags['INITRD_CMD'] = ' '.join(commands)
             l = package_relation_group()
-            l.extend([package_relation(config_entry_relations[i]) for i in generators])
-            l.append(package_relation(config_entry_relations['initramfs-fallback']))
+            l.extend(generators + ['initramfs-fallback'])
             image_depends.append(l)
 
         packages_own = []
         packages_dummy = []
 
-        if vars['type'] == 'plain-xen':
-            p = self.process_package(modules[0], vars)
-            image_depends.extend(p['Reverse-Depends'])
-            del p['Reverse-Depends']
-            packages_own.append(p)
+        if vars['type'] == 'plain-s390-tape':
+            image = image_type_standalone
+        elif vars['type'] == 'plain-xen':
+            image = image_type_modulesextra
+        else:
+            image = image_type_modulesinline
 
-        packages_own.append(self.process_real_image(image[0], image_depends, vars))
-        packages_own.append(self.process_package(headers[0], vars))
+        for i in image:
+            packages_own.append(self.process_real_image(i, {'depends': image_depends}, config_entry_relations, vars))
         packages_dummy.extend(self.process_packages(image_latest, vars))
-        packages_dummy.append(self.process_package(headers_latest[0], vars))
+
+        if image in (image_type_modulesextra, image_type_modulesinline):
+            makeflags['MODULES'] = True
+            packages_own.append(self.process_package(headers[0], vars))
+            packages_dummy.append(self.process_package(headers_latest[0], vars))
+            extra['headers_arch_depends'].append('%s (= ${Source-Version})' % packages_own[-1]['Package'])
 
         for package in packages_own + packages_dummy:
             name = package['Package']
@@ -144,13 +152,11 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
                 package['Architecture'] = [arch]
                 packages.append(package)
 
-        extra['headers_arch_depends'].append('%s (= ${Source-Version})' % packages_own[-1]['Package'])
-
         makeflags_string = ' '.join(["%s='%s'" % i for i in makeflags.iteritems()])
 
         cmds_binary_arch = []
         cmds_binary_arch.append(("$(MAKE) -f debian/rules.real binary-arch-flavour %s" % makeflags_string,))
-        cmds_binary_arch.append(("$(MAKE) -f debian/rules.real install-dummy DH_OPTIONS='%s'" % ' '.join(["-p%s" % i['Package'] for i in packages_dummy]),))
+        cmds_binary_arch.append(("$(MAKE) -f debian/rules.real install-dummy DH_OPTIONS='%s' %s" % (' '.join(["-p%s" % i['Package'] for i in packages_dummy]), makeflags_string),))
         cmds_build = []
         cmds_build.append(("$(MAKE) -f debian/rules.real build %s" % makeflags_string,))
         cmds_setup = []
@@ -160,7 +166,15 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         makefile.append(("setup-%s-%s-%s-real:" % (arch, subarch, flavour), cmds_setup))
         makefile.append(("source-%s-%s-%s-real:" % (arch, subarch, flavour)))
 
-    def process_real_image(self, in_entry, depends, vars):
+    def process_changelog(self):
+        version = self.changelog[0]['Version']
+        self.process_version(version)
+        if version['modifier'] is not None:
+            self.abiname = self.vars['abiname'] = ''
+        else:
+            self.abiname = self.vars['abiname'] = '-%s' % self.config['abi',]['abiname']
+
+    def process_real_image(self, in_entry, relations, config, vars):
         entry = self.process_package(in_entry, vars)
         if vars.has_key('desc'):
             entry['Description'].long[1:1] = [vars['desc']]
@@ -168,8 +182,9 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
             value = entry.get(field, package_relation_list())
             t = vars.get(field.lower(), [])
             value.extend(t)
-            if depends and field == 'Depends':
-                value.append(depends)
+            t = relations.get(field.lower(), [])
+            value.extend(t)
+            value.config(config)
             entry[field] = value
         return entry
 

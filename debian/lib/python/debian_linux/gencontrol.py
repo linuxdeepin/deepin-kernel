@@ -15,7 +15,7 @@ class gencontrol(object):
     makefile_targets = ('binary-arch', 'build', 'setup', 'source')
 
     def __init__(self, underlay = None):
-        self.config = config_reader([underlay, "debian/arch"])
+        self.config = config_reader_arch([underlay, "debian/arch"])
         self.templates = templates()
 
     def __call__(self):
@@ -31,9 +31,13 @@ class gencontrol(object):
 
     def do_source(self, packages):
         source = self.templates["control.source"]
-        packages['source'] = self.process_package(source[0], self.changelog_vars)
+        packages['source'] = self.process_package(source[0], self.vars)
 
     def do_main(self, packages, makefile):
+        config_entry = self.config['base',]
+        vars = self.vars.copy()
+        vars.update(config_entry)
+
         makeflags = {
             'MAJOR': self.version['major'],
             'VERSION': self.version['version'],
@@ -41,11 +45,7 @@ class gencontrol(object):
             'SOURCEVERSION': self.version['source'],
             'UPSTREAMVERSION': self.version['upstream'],
             'ABINAME': self.abiname,
-            # TODO: Don't read this here, this is linux-2.6 specific
-            'REVISIONS': ' '.join([i['Version']['debian'] for i in self.changelog[::-1]]),
         }
-
-        vars = self.changelog_vars.copy()
 
         self.do_main_setup(vars, makeflags)
         self.do_main_packages(packages)
@@ -202,22 +202,6 @@ class gencontrol(object):
     def do_flavour_packages(self, packages, makefile, arch, subarch, flavour, vars, makeflags, extra):
         pass
 
-    # TODO: Move away, linux-2.6 specific; unify with modules process_config_version
-    def process_changelog(self, in_vars):
-        ret = [None, None, None]
-        ret[0] = version = self.changelog[0]['Version']
-        vars = in_vars.copy()
-        if version['modifier'] is not None:
-            ret[1] = vars['abiname'] = ''
-        else:
-            ret[1] = vars['abiname'] = '-%s' % self.config['abi',]['abiname']
-        vars['upstreamversion'] = version['upstream']
-        vars['version'] = version['version']
-        vars['source_upstream'] = version['source_upstream']
-        vars['major'] = version['major']
-        ret[2] = vars
-        return ret
-
     def process_relation(self, key, e, in_e, vars):
         in_dep = in_e[key]
         dep = package_relation_list()
@@ -259,6 +243,15 @@ class gencontrol(object):
         for i in in_entries:
             entries.append(self.process_package(i, vars))
         return entries
+
+    def process_version(self, version):
+        self.version = version
+        self.vars = {
+            'upstreamversion': version['upstream'],
+            'version': version['version'],
+            'source_upstream': version['source_upstream'],
+            'major': version['major'],
+        }
 
     def substitute(self, s, vars):
         if isinstance(s, (list, tuple)):

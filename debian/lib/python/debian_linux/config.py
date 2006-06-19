@@ -3,34 +3,65 @@ import os, os.path, re, sys, textwrap, ConfigParser
 __all__ = [
     'config_parser',
     'config_reader',
+    'config_reader_arch',
 ]
 
 _marker = object()
 
+class schema_item_boolean(object):
+    def __call__(self, i):
+        i = i.strip().lower()
+        if i in ("true", "1"):
+            return True
+        if i in ("false", "0"):
+            return False
+        raise Error
+
+class schema_item_list(object):
+    def __init__(self, type = "\s+"):
+        self.type = type
+
+    def __call__(self, i):
+        i = i.strip()
+        if not i:
+            return []
+        return [j.strip() for j in re.split(self.type, i)]
+
 class config_reader(dict):
-    """
-    Read configs in debian/arch and in the underlay directory.
-    """
+    config_name = "defines"
 
-    class schema_item_boolean(object):
-        def __call__(self, i):
-            i = i.strip().lower()
-            if i in ("true", "1"):
-                return True
-            if i in ("false", "0"):
-                return False
-            raise Error
+    def __init__(self, dirs = []):
+        self._dirs = dirs
 
-    class schema_item_list(object):
-        def __init__(self, type = "\s+"):
-            self.type = type
+    def __getitem__(self, key):
+        return self.get(key)
 
-        def __call__(self, i):
-            i = i.strip()
-            if not i:
-                return []
-            return [j.strip() for j in re.split(self.type, i)]
+    def _get_files(self, name):
+        return [os.path.join(i, name) for i in self._dirs if i]
 
+    def _update(self, ret, inputkey):
+        for key, value in super(config_reader, self).get(tuple(inputkey), {}).iteritems():
+            ret[key] = value
+
+    def get(self, key, default = _marker):
+        if isinstance(key, basestring):
+            key = key,
+
+        ret = super(config_reader, self).get(tuple(key), default)
+        if ret == _marker:
+            raise KeyError, key
+        return ret
+
+    def merge(self, section, *args):
+        ret = {}
+        for i in xrange(0, len(args) + 1):
+            ret.update(self.get(tuple([section] + list(args[:i])), {}))
+        return ret
+
+    def sections(self):
+        return super(config_reader, self).keys()
+
+class config_reader_arch(config_reader):
     schema = {
         'arches': schema_item_list(),
         'available': schema_item_boolean(),
@@ -40,17 +71,9 @@ class config_reader(dict):
         'subarches': schema_item_list(),
     }
 
-    config_name = "defines"
-
     def __init__(self, dirs = []):
-        self._dirs = dirs
+        super(config_reader_arch, self).__init__(dirs)
         self._read_base()
-
-    def __getitem__(self, key):
-        return self.get(key)
-
-    def _get_files(self, name):
-        return [os.path.join(i, name) for i in self._dirs if i]
 
     def _read_arch(self, arch):
         files = self._get_files("%s/%s" % (arch, self.config_name))
@@ -142,28 +165,6 @@ class config_reader(dict):
 
         for flavour in flavours:
             self._read_flavour(arch, subarch, flavour)
-
-    def _update(self, ret, inputkey):
-        for key, value in super(config_reader, self).get(tuple(inputkey), {}).iteritems():
-            ret[key] = value
-
-    def get(self, key, default = _marker):
-        if isinstance(key, basestring):
-            key = key,
-
-        ret = super(config_reader, self).get(tuple(key), default)
-        if ret == _marker:
-            raise KeyError, key
-        return ret
-
-    def merge(self, section, *args):
-        ret = {}
-        for i in xrange(0, len(args) + 1):
-            ret.update(self.get(tuple([section] + list(args[:i])), {}))
-        return ret
-
-    def sections(self):
-        return super(config_reader, self).keys()
 
 class config_parser(object):
     __slots__ = 'configs', 'schema'
