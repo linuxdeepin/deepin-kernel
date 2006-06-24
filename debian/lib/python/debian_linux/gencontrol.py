@@ -38,15 +38,7 @@ class gencontrol(object):
         vars = self.vars.copy()
         vars.update(config_entry)
 
-        makeflags = {
-            'MAJOR': self.version['major'],
-            'VERSION': self.version['version'],
-            'SOURCE_UPSTREAM': self.version['source_upstream'],
-            'SOURCEVERSION': self.version['source'],
-            'UPSTREAMVERSION': self.version['upstream'],
-            'ABINAME': self.abiname,
-        }
-
+        makeflags = {}
         extra = {}
 
         self.do_main_setup(vars, makeflags, extra)
@@ -57,7 +49,14 @@ class gencontrol(object):
             self.do_arch(packages, makefile, arch, vars.copy(), makeflags.copy(), extra)
 
     def do_main_setup(self, vars, makeflags, extra):
-        pass
+        makeflags.update({
+            'MAJOR': self.version['major'],
+            'VERSION': self.version['version'],
+            'SOURCE_UPSTREAM': self.version['source_upstream'],
+            'SOURCEVERSION': self.version['source'],
+            'UPSTREAMVERSION': self.version['upstream'],
+            'ABINAME': self.abiname,
+        })
 
     def do_main_makefile(self, makefile, makeflags, extra):
         makeflags_string = ' '.join(["%s='%s'" % i for i in makeflags.iteritems()])

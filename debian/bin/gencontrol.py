@@ -11,6 +11,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         self.process_changelog()
 
     def do_main_setup(self, vars, makeflags, extra):
+        super(gencontrol, self).do_main_setup(vars, makeflags, extra)
         vars.update(self.config['image',])
         makeflags['REVISIONS'] = ' '.join([i['Version']['debian'] for i in self.changelog[::-1]])
 
