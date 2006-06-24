@@ -111,7 +111,16 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         image_latest = self.templates["control.image.latest"]
         headers_latest = self.templates["control.headers.latest"]
 
+        config_entry_base = self.config.merge('base', arch, subarch, flavour)
         config_entry_relations = self.config.merge('relations', arch, subarch, flavour)
+
+        compiler = config_entry_base.get('compiler', 'gcc')
+        relations_compiler = package_relation_list(config_entry_relations[compiler])
+        relations_compiler_build_dep = package_relation_list(config_entry_relations[compiler])
+        for group in relations_compiler_build_dep:
+            for item in group:
+                item.arches = [arch]
+        packages['source']['Build-Depends'].extend(relations_compiler_build_dep)
 
         image_depends = package_relation_list()
         if vars.get('initramfs', True):
@@ -139,7 +148,9 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
 
         if image in (image_type_modulesextra, image_type_modulesinline):
             makeflags['MODULES'] = True
-            packages_own.append(self.process_package(headers[0], vars))
+            package_headers = self.process_package(headers[0], vars)
+            package_headers['Depends'].extend(relations_compiler)
+            packages_own.append(package_headers)
             packages_dummy.append(self.process_package(headers_latest[0], vars))
             extra['headers_arch_depends'].append('%s (= ${Source-Version})' % packages_own[-1]['Package'])
 

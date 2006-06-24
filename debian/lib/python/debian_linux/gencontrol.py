@@ -169,15 +169,6 @@ class gencontrol(object):
         if not vars.has_key('longclass'):
             vars['longclass'] = vars['class']
 
-        config_base = self.config.merge('base', arch)
-        config_relations = self.config.merge('relations', arch)
-        compiler = config_base.get('compiler', 'gcc')
-        relations_compiler = package_relation_list(config_relations[compiler])
-        for group in relations_compiler:
-            for item in group:
-                item.arches = [arch]
-        packages['source']['Build-Depends'].extend(relations_compiler)
-
         makeflags['FLAVOUR'] = flavour
         vars['localversion'] += '-' + flavour
 
