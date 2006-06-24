@@ -47,17 +47,19 @@ class gencontrol(object):
             'ABINAME': self.abiname,
         }
 
-        self.do_main_setup(vars, makeflags)
-        self.do_main_packages(packages)
-        self.do_main_makefile(makefile, makeflags)
+        extra = {}
+
+        self.do_main_setup(vars, makeflags, extra)
+        self.do_main_packages(packages, extra)
+        self.do_main_makefile(makefile, makeflags, extra)
 
         for arch in iter(self.config['base',]['arches']):
-            self.do_arch(packages, makefile, arch, vars.copy(), makeflags.copy())
+            self.do_arch(packages, makefile, arch, vars.copy(), makeflags.copy(), extra)
 
-    def do_main_setup(self, vars, makeflags):
+    def do_main_setup(self, vars, makeflags, extra):
         pass
 
-    def do_main_makefile(self, makefile, makeflags):
+    def do_main_makefile(self, makefile, makeflags, extra):
         makeflags_string = ' '.join(["%s='%s'" % i for i in makeflags.iteritems()])
 
         cmds_binary_indep = []
@@ -93,7 +95,7 @@ class gencontrol(object):
             makefile.append("binary-arch-%s:: binary-arch-%s-extra" % (arch, arch))
             makefile.append(("binary-arch-%s-extra:" % arch, cmds))
 
-    def do_arch(self, packages, makefile, arch, vars, makeflags):
+    def do_arch(self, packages, makefile, arch, vars, makeflags, extra):
         config_entry = self.config['base', arch]
         vars.update(config_entry)
         vars['arch'] = arch
@@ -103,13 +105,12 @@ class gencontrol(object):
                 makefile.append(("%s-%s:" % (i, arch), ["@echo Architecture %s is not available!" % arch, "@exit 1"]))
             return
 
-        extra = {}
         makeflags['ARCH'] = arch
 
         vars['localversion'] = ''
 
-        self.do_arch_setup(vars, makeflags, arch)
-        self.do_arch_makefile(makefile, arch, makeflags)
+        self.do_arch_setup(vars, makeflags, arch, extra)
+        self.do_arch_makefile(makefile, arch, makeflags, extra)
         self.do_arch_packages(packages, makefile, arch, vars, makeflags, extra)
 
         for subarch in config_entry['subarches']:
@@ -117,10 +118,10 @@ class gencontrol(object):
 
         self.do_arch_packages_post(packages, makefile, arch, vars, makeflags, extra)
 
-    def do_arch_setup(self, vars, makeflags, arch):
+    def do_arch_setup(self, vars, makeflags, arch, extra):
         pass
 
-    def do_arch_makefile(self, makefile, arch, makeflags):
+    def do_arch_makefile(self, makefile, arch, makeflags, extra):
         for i in self.makefile_targets:
             makefile.append("%s:: %s-%s" % (i, i, arch))
             makefile.append("%s-%s:: %s-%s-real" % (i, arch, i, arch))
@@ -140,17 +141,17 @@ class gencontrol(object):
         if subarch != 'none':
             vars['localversion'] += '-' + subarch
 
-        self.do_subarch_setup(vars, makeflags, arch, subarch)
-        self.do_subarch_makefile(makefile, arch, subarch, makeflags)
+        self.do_subarch_setup(vars, makeflags, arch, subarch, extra)
+        self.do_subarch_makefile(makefile, arch, subarch, makeflags, extra)
         self.do_subarch_packages(packages, makefile, arch, subarch, vars, makeflags, extra)
 
         for flavour in config_entry['flavours']:
             self.do_flavour(packages, makefile, arch, subarch, flavour, vars.copy(), makeflags.copy(), extra)
 
-    def do_subarch_setup(self, vars, makeflags, arch, subarch):
+    def do_subarch_setup(self, vars, makeflags, arch, subarch, extra):
         pass
 
-    def do_subarch_makefile(self, makefile, arch, subarch, makeflags):
+    def do_subarch_makefile(self, makefile, arch, subarch, makeflags, extra):
         for i in self.makefile_targets:
             makefile.append("%s-%s:: %s-%s-%s" % (i, arch, i, arch, subarch))
             makefile.append("%s-%s-%s:: %s-%s-%s-real" % (i, arch, subarch, i, arch, subarch))
@@ -172,11 +173,11 @@ class gencontrol(object):
         makeflags['FLAVOUR'] = flavour
         vars['localversion'] += '-' + flavour
 
-        self.do_flavour_setup(vars, makeflags, arch, subarch, flavour)
-        self.do_flavour_makefile(makefile, arch, subarch, flavour, makeflags)
+        self.do_flavour_setup(vars, makeflags, arch, subarch, flavour, extra)
+        self.do_flavour_makefile(makefile, arch, subarch, flavour, makeflags, extra)
         self.do_flavour_packages(packages, makefile, arch, subarch, flavour, vars, makeflags, extra)
 
-    def do_flavour_setup(self, vars, makeflags, arch, subarch, flavour):
+    def do_flavour_setup(self, vars, makeflags, arch, subarch, flavour, extra):
         for i in (
             ('compiler', 'COMPILER'),
             ('kernel-arch', 'KERNEL_ARCH'),
@@ -185,7 +186,7 @@ class gencontrol(object):
             if vars.has_key(i[0]):
                 makeflags[i[1]] = vars[i[0]]
 
-    def do_flavour_makefile(self, makefile, arch, subarch, flavour, makeflags):
+    def do_flavour_makefile(self, makefile, arch, subarch, flavour, makeflags, extra):
         for i in self.makefile_targets:
             makefile.append("%s-%s-%s:: %s-%s-%s-%s" % (i, arch, subarch, i, arch, subarch, flavour))
             makefile.append("%s-%s-%s-%s:: %s-%s-%s-%s-real" % (i, arch, subarch, flavour, i, arch, subarch, flavour))

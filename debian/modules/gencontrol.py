@@ -10,7 +10,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         super(gencontrol, self).__init__(config)
         self.process_config_version(config_parser({}, [sys.path[0] + "/../version"]))
 
-    def do_main_packages(self, packages):
+    def do_main_packages(self, packages, extra):
         vars = self.vars
 
         main = self.templates["control.main"]

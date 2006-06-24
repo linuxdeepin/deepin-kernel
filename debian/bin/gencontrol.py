@@ -10,11 +10,11 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         self.changelog = read_changelog()
         self.process_changelog()
 
-    def do_main_setup(self, vars, makeflags):
+    def do_main_setup(self, vars, makeflags, extra):
         vars.update(self.config['image',])
         makeflags['REVISIONS'] = ' '.join([i['Version']['debian'] for i in self.changelog[::-1]])
 
-    def do_main_packages(self, packages):
+    def do_main_packages(self, packages, extra):
         vars = self.vars
 
         main = self.templates["control.main"]
@@ -25,7 +25,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
 
         packages.extend(self.process_packages(self.templates["control.support"], vars))
 
-    def do_arch_setup(self, vars, makeflags, arch):
+    def do_arch_setup(self, vars, makeflags, arch, extra):
         vars.update(self.config.get(('image', arch), {}))
 
     def do_arch_packages(self, packages, makefile, arch, vars, makeflags, extra):
@@ -54,7 +54,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         makefile.append(("setup-%s-real:" % arch))
         makefile.append(("source-%s-real:" % arch, cmds_source))
 
-    def do_subarch_setup(self, vars, makeflags, arch, subarch):
+    def do_subarch_setup(self, vars, makeflags, arch, subarch, extra):
         vars.update(self.config.get(('image', arch, subarch), {}))
         vars['localversion_headers'] = vars['localversion']
         for i in (
@@ -87,7 +87,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         makefile.append(("setup-%s-%s-real:" % (arch, subarch)))
         makefile.append(("source-%s-%s-real:" % (arch, subarch), cmds_source))
 
-    def do_flavour_setup(self, vars, makeflags, arch, subarch, flavour):
+    def do_flavour_setup(self, vars, makeflags, arch, subarch, flavour, extra):
         vars.update(self.config.get(('image', arch, subarch, flavour), {}))
         for i in (
             ('compiler', 'COMPILER'),
