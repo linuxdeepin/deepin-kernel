@@ -70,7 +70,7 @@ table_entry_version<device_i2c, version_2_6_16>::table_entry_version () throw ()
 {
 }
 
-void table_entry_version<device_i2c, version_2_6_16>::write (std::ostream &out) const throw (std::runtime_error)
+void table_entry_version<device_i2c, version_2_6_16>::write (std::ostream &out __attribute__ ((unused))) const throw (std::runtime_error)
 {
 }
 
@@ -94,7 +94,7 @@ table_entry_version<device_input, version_2_6_16>::table_entry_version () throw 
 {
 }
 
-void table_entry_version<device_input, version_2_6_16>::write (std::ostream &out) const throw (std::runtime_error)
+void table_entry_version<device_input, version_2_6_16>::write (std::ostream &out __attribute__ ((unused))) const throw (std::runtime_error)
 {
 }
 
@@ -102,7 +102,7 @@ table_entry_version<device_of, version_2_6_16>::table_entry_version () throw ()
 {
 }
 
-void table_entry_version<device_of, version_2_6_16>::write (std::ostream &out) const throw (std::runtime_error)
+void table_entry_version<device_of, version_2_6_16>::write (std::ostream &out __attribute__ ((unused))) const throw (std::runtime_error)
 {
 }
 
@@ -142,7 +142,7 @@ table_entry_version<device_pcmcia, version_2_6_16>::table_entry_version () throw
 {
 }
 
-void table_entry_version<device_pcmcia, version_2_6_16>::write (std::ostream &out) const throw (std::runtime_error)
+void table_entry_version<device_pcmcia, version_2_6_16>::write (std::ostream &out __attribute__ ((unused))) const throw (std::runtime_error)
 {
 }
 
@@ -160,7 +160,7 @@ table_entry_version<device_serio, version_2_6_16>::table_entry_version () throw 
 {
 }
 
-void table_entry_version<device_serio, version_2_6_16>::write (std::ostream &out) const throw (std::runtime_error)
+void table_entry_version<device_serio, version_2_6_16>::write (std::ostream &out __attribute__ ((unused))) const throw (std::runtime_error)
 {
 }
 
@@ -204,12 +204,9 @@ void table_entry_version<device_usb, version_2_6_16>::write (std::ostream &out) 
   bInterfaceProtocol.write (out, match_flags & USB_DEVICE_ID_MATCH_INT_PROTOCOL, true);
 }
 
-table_entry_version<device_vio, version_2_6_16>::table_entry_version () throw ()
-{
-}
-
 void table_entry_version<device_vio, version_2_6_16>::write (std::ostream &out) const throw (std::runtime_error)
 {
+  out << "vio:" << str << '*';
 }
 
 #define _do_convert(name) name = Elf::convert<Elf_data, typeof (id.name)> () (id.name)
@@ -225,7 +222,7 @@ table_entry_data<device_ccw, version_2_6_16, Elf_class, Elf_data>::table_entry_d
 }
 
 template<typename Elf_class, typename Elf_data>
-table_entry_data<device_i2c, version_2_6_16, Elf_class, Elf_data>::table_entry_data (const device_id<device_i2c, Elf_class> &id) throw ()
+table_entry_data<device_i2c, version_2_6_16, Elf_class, Elf_data>::table_entry_data (const device_id<device_i2c, Elf_class> &id __attribute__ ((unused))) throw ()
 {
   throw std::runtime_error ("Not implemented: I2C");
 }
@@ -241,13 +238,13 @@ table_entry_data<device_ieee1394, version_2_6_16, Elf_class, Elf_data>::table_en
 }
 
 template<typename Elf_class, typename Elf_data>
-table_entry_data<device_input, version_2_6_16, Elf_class, Elf_data>::table_entry_data (const device_id<device_input, Elf_class> &id) throw ()
+table_entry_data<device_input, version_2_6_16, Elf_class, Elf_data>::table_entry_data (const device_id<device_input, Elf_class> &id __attribute__ ((unused))) throw ()
 {
   throw std::runtime_error ("Not implemented: INPUT");
 }
 
 template<typename Elf_class, typename Elf_data>
-table_entry_data<device_of, version_2_6_16, Elf_class, Elf_data>::table_entry_data (const device_id<device_of, Elf_class> &id) throw ()
+table_entry_data<device_of, version_2_6_16, Elf_class, Elf_data>::table_entry_data (const device_id<device_of, Elf_class> &id __attribute__ ((unused))) throw ()
 {
   throw std::runtime_error ("Not implemented: OF");
 }
@@ -264,7 +261,7 @@ table_entry_data<device_pci, version_2_6_16, Elf_class, Elf_data>::table_entry_d
 }
 
 template<typename Elf_class, typename Elf_data>
-table_entry_data<device_pcmcia, version_2_6_16, Elf_class, Elf_data>::table_entry_data (const device_id<device_pcmcia, Elf_class> &id) throw ()
+table_entry_data<device_pcmcia, version_2_6_16, Elf_class, Elf_data>::table_entry_data (const device_id<device_pcmcia, Elf_class> &id __attribute__ ((unused))) throw ()
 {
   throw std::runtime_error ("Not implemented: PCMCIA");
 }
@@ -295,7 +292,7 @@ table_entry_data<device_pnp_card, version_2_6_16, Elf_class, Elf_data>::table_en
 }
 
 template<typename Elf_class, typename Elf_data>
-table_entry_data<device_serio, version_2_6_16, Elf_class, Elf_data>::table_entry_data (const device_id<device_serio, Elf_class> &id) throw ()
+table_entry_data<device_serio, version_2_6_16, Elf_class, Elf_data>::table_entry_data (const device_id<device_serio, Elf_class> &id __attribute__((unused))) throw ()
 {
   throw std::runtime_error ("Not implemented: SERIO");
 }
@@ -368,7 +365,10 @@ void table_entry_data<device_usb, version_2_6_16, Elf_class, Elf_data>::add (con
 template<typename Elf_class, typename Elf_data>
 table_entry_data<device_vio, version_2_6_16, Elf_class, Elf_data>::table_entry_data (const device_id<device_vio, Elf_class> &id) throw ()
 {
-  throw std::runtime_error ("Not implemented: VIO");
+  std::stringstream s;
+  s << 'T' << (id.type[0] ? id.type : "*");
+  s << 'S' << (id.compat[0] ? id.compat : "*");
+  str = s.str ();
 }
 
 template<typename device, typename Elf_class, typename Elf_data>

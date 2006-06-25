@@ -170,6 +170,13 @@ namespace
     USB_DEVICE_ID_MATCH_INT_PROTOCOL = 0x0200,
   };
 
+  template<typename Elf_class>
+    struct device_id<device_vio, Elf_class>
+    {
+      char type[32];
+      char compat[32];
+    };
+
   template<typename type>
     class identifier_value
     {
@@ -485,8 +492,9 @@ namespace linuxkernel
       class table_entry_version<device_vio, version_2_6_16> : public table_entry
       {
         public:
-          table_entry_version () throw ();
           void write (std::ostream &) const throw (std::runtime_error);
+
+          std::string str;
       };
 
     template<typename Elf_class, typename Elf_data>
