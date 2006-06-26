@@ -15,3 +15,5 @@ modpost: elf.o modpost.o module.o module_devicetable.o module_devicetable_impl_2
 
 %.o: %.cpp %.hpp endian.hpp
 
+clean:
+	rm $(PROGS) *.o
