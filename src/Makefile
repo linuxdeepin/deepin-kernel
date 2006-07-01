@@ -6,6 +6,16 @@ PROGS = \
 	kallsyms \
 	pnmtologo
 
+DATA = \
+	Kbuild.include \
+	Makefile.build \
+	Makefile.clean \
+	Makefile.host \
+	Makefile.lib \
+	Makefile.modinst \
+	Makefile.modpost \
+	mkversion
+
 SCRIPTS =  \
 	checkconfig.pl \
 	checkincludes.pl \
@@ -13,19 +23,11 @@ SCRIPTS =  \
 	checkversion.pl \
 	gcc-version.sh \
 	gen_initramfs_list.sh \
-	Kbuild.include \
 	kernel-doc \
 	Lindent \
-	Makefile.build \
-	Makefile.clean \
-	Makefile.host \
-	Makefile.lib \
-	Makefile.modinst \
-	Makefile.modpost \
 	makelst \
 	mksysmap \
 	mkuboot.sh \
-	mkversion \
 	namespace.pl \
 	patch-kernel \
 	reference_discarded.pl \
@@ -47,10 +49,14 @@ all-local: $(PROGS)
 install-local: $(PROGS)
 	@list='$(PROGS)'; for p in $$list; do \
 	  echo " install -D '$$p' '$(prefix)/scripts/$$p'"; \
-	  install -D "$$p" "$(prefix)/scripts/$$p"; \
+	  install -D -m755 "$$p" "$(prefix)/scripts/$$p"; \
 	done
 	@list='$(SCRIPTS)'; for p in $$list; do \
 	  echo " install -D '$(top_srcdir)/scripts/$$p' '$(prefix)/scripts/$$p'"; \
-	  install -D "$(top_srcdir)/scripts/$$p" "$(prefix)/scripts/$$p"; \
+	  install -D -m755 "$(top_srcdir)/scripts/$$p" "$(prefix)/scripts/$$p"; \
+	done
+	@list='$(DATA)'; for p in $$list; do \
+	  echo " install -D '$(top_srcdir)/scripts/$$p' '$(prefix)/scripts/$$p'"; \
+	  install -D -m644 "$(top_srcdir)/scripts/$$p" "$(prefix)/scripts/$$p"; \
 	done
 
