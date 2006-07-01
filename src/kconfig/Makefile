@@ -1,5 +1,3 @@
-include ../Makefile.inc
-
 PROGS = conf
 
 OUTDIR = kconfig
@@ -16,3 +14,5 @@ zconf.tab.c: zconf.hash.c lex.zconf.c
 
 %.h: %.h_shipped
 	ln -s $< $@
+
+include ../Makefile.inc

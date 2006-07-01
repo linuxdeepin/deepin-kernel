@@ -1,5 +1,3 @@
-include ../Makefile.inc
-
 PROGS = \
 	docproc \
 	fixdep \
@@ -8,3 +6,4 @@ PROGS = \
 OUTDIR = basic
 VPATH = $(top_srcdir)/scripts/basic
 
+include ../Makefile.inc

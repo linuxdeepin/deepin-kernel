@@ -1,5 +1,3 @@
-include ../Makefile.inc
-
 PROGS = genksyms
 
 OUTDIR = genksyms
@@ -16,3 +14,5 @@ lex.o: keywords.c parse.h
 
 %.h: %.h_shipped
 	ln -s $< $@
+
+include ../Makefile.inc

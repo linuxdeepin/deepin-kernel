@@ -1,5 +1,3 @@
-include ../Makefile.inc
-
 PROGS = modpost
 
 OUTDIR = mod
@@ -11,3 +9,5 @@ modpost: elf.o modpost.o module.o module_devicetable.o module_devicetable_impl_2
 
 clean:
 	rm $(PROGS) *.o
+
+include ../Makefile.inc

@@ -1,5 +1,3 @@
-include Makefile.inc
-
 PROGS = \
 	bin2c \
 	conmakehash \
@@ -44,3 +42,4 @@ SUBDIRS = \
 
 VPATH = $(top_srcdir)/scripts
 
+include Makefile.inc
