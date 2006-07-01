@@ -2,17 +2,10 @@ include ../Makefile.inc
 
 PROGS = genksyms
 
+OUTDIR = genksyms
 VPATH = $(top_srcdir)/scripts/genksyms
 
 CFLAGS += -I$(top_srcdir)/scripts/genksyms
-
-all-local: $(PROGS)
-
-install-local: $(PROGS)
-	@list='$(PROGS)'; for p in $$list; do \
-	  echo " install -D '$$p' '$(prefix)/scripts/genksyms/$$p'"; \
-	  install -D "$$p" "$(prefix)/scripts/genksyms/$$p"; \
-	done
 
 genksyms: genksyms.o parse.o lex.o
 

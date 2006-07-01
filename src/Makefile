@@ -44,19 +44,3 @@ SUBDIRS = \
 
 VPATH = $(top_srcdir)/scripts
 
-all-local: $(PROGS)
-
-install-local: $(PROGS)
-	@list='$(PROGS)'; for p in $$list; do \
-	  echo " install -D '$$p' '$(prefix)/scripts/$$p'"; \
-	  install -D -m755 "$$p" "$(prefix)/scripts/$$p"; \
-	done
-	@list='$(SCRIPTS)'; for p in $$list; do \
-	  echo " install -D '$(top_srcdir)/scripts/$$p' '$(prefix)/scripts/$$p'"; \
-	  install -D -m755 "$(top_srcdir)/scripts/$$p" "$(prefix)/scripts/$$p"; \
-	done
-	@list='$(DATA)'; for p in $$list; do \
-	  echo " install -D '$(top_srcdir)/scripts/$$p' '$(prefix)/scripts/$$p'"; \
-	  install -D -m644 "$(top_srcdir)/scripts/$$p" "$(prefix)/scripts/$$p"; \
-	done
-
