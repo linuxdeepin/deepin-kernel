@@ -35,7 +35,7 @@ const std::string module_real::symbol_prefix_crc ("__crc_");
 const std::string module_real::symbol_prefix_ksymtab ("__ksymtab_");
 
 module::module (const std::string &filename, bool kernel) throw ()
-: kernel (kernel)
+: kernel (kernel), is_vmlinux (false)
 {
   std::string::size_type t1 = filename.find_last_of ('/');
   std::string::size_type t2 = filename.find_last_of ('.');
