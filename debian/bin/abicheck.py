@@ -17,8 +17,7 @@ class checker(object):
     def __call__(self, out):
         ret = 0
 
-        new = symbols()
-        new.read_kernel(file(self.filename_new))
+        new = symbols(self.filename_new)
         try:
             ref = symbols(self.filename_ref)
         except IOError:

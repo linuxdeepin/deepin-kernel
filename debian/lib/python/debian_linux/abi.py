@@ -37,21 +37,7 @@ class symbols(object):
         self.symbols = {}
 
         for line in file.readlines():
-            symbol, module, version = line.strip().split()
-
-            symbols = self.modules.get(module, {})
-            symbols[symbol] = version
-            self.modules[module] = symbols
-            if self.symbols.has_key(symbol):
-                pass
-            self.symbols[symbol] = module, version
-
-    def read_kernel(self, file):
-        self.modules = {}
-        self.symbols = {}
-
-        for line in file.readlines():
-            version, symbol, module = line.strip().split('\t')
+            version, symbol, module = line.strip().split()
 
             symbols = self.modules.get(module, {})
             symbols[symbol] = version
@@ -65,7 +51,7 @@ class symbols(object):
         symbols.sort()
         for symbol, i in symbols:
             module, version = i
-            file.write("%s %s %s\n" % (symbol, module, version))
+            file.write("%s %s %s\n" % (version, symbol, module))
 
     def write_human(self, file):
         modules = self.modules.keys()
