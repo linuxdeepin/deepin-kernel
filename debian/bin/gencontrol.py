@@ -143,8 +143,8 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         else:
             image = image_type_modulesinline
 
-        for i in image:
-            packages_own.append(self.process_real_image(i, {'depends': image_depends}, config_entry_relations, vars))
+        packages_own.append(self.process_real_image(image[0], {'depends': image_depends}, config_entry_relations, vars))
+        packages_own.extend(self.process_packages(image[1:], vars))
         packages_dummy.extend(self.process_packages(image_latest, vars))
 
         if image in (image_type_modulesextra, image_type_modulesinline):
