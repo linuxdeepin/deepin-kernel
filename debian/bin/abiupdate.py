@@ -17,6 +17,7 @@ class main(object):
     override_flavour = None
 
     def __init__(self):
+        self.log = sys.stdout.write
         self.source = "linux-2.6"
         self.version = "2.6.17"
         self.abiname = "1"
@@ -34,7 +35,7 @@ class main(object):
         import tempfile
         self.dir = tempfile.mkdtemp(prefix = 'abiupdate')
         try:
-            print "Retreive config"
+            self.log("Retreive config\n")
             config = self.get_config()
             if self.override_arch:
                 arches = [self.override_arch]
@@ -130,16 +131,16 @@ class main(object):
         config_entry = config[('base', arch, subarch, flavour)]
         if not config_entry.get('modules', True):
             return
-        print "Updating ABI for arch %s, subarch %s, flavour %s" % (arch, subarch, flavour)
+        self.log("Updating ABI for arch %s, subarch %s, flavour %s: " % (arch, subarch, flavour))
         try:
             abi = self.get_abi(arch, subarch, flavour)
             self.save_abi(abi, arch, subarch, flavour)
-            print "Ok."
+            self.log("Ok.\n")
         except KeyboardInterrupt:
-            raise
+            self.log("Interrupted!\n")
+            sys.exit(1)
         except Exception, e:
-            print "FAILED!"
-            print e
+            self.log("FAILED! (%s)\n" % str(e))
 
 if __name__ == '__main__':
     main()()
