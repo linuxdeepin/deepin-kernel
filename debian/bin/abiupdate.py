@@ -18,11 +18,6 @@ class main(object):
 
     def __init__(self):
         self.log = sys.stdout.write
-        self.source = "linux-2.6"
-        self.version = "2.6.17"
-        self.abiname = "1"
-        self.version_abi = self.version + '-' + self.abiname
-        self.version_source = "2.6.17-2"
 
         if len(sys.argv) > 1:
             self.override_arch = sys.argv[1]
@@ -30,6 +25,18 @@ class main(object):
             self.override_subarch = sys.argv[2]
         if len(sys.argv) > 3:
             self.override_flavour = sys.argv[3]
+
+        changelog = read_changelog()
+        while changelog[0]['Distribution'] == 'UNRELEASED':
+            changelog.pop(0)
+        changelog = changelog[0]
+
+        self.source = changelog['Source']
+        self.version = changelog['Version']['version']
+        self.version_source = changelog['Version']['source']
+
+        self.abiname = "1"
+        self.version_abi = self.version + '-' + self.abiname
 
     def __call__(self):
         import tempfile
