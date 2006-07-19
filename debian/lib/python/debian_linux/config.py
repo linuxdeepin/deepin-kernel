@@ -68,6 +68,7 @@ class config_reader_arch(config_reader):
         'flavours': schema_item_list(),
         'initramfs': schema_item_boolean(),
         'initramfs-generators': schema_item_list(),
+        'modules': schema_item_boolean(),
         'subarches': schema_item_list(),
     }
 
