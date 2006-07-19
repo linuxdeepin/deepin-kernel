@@ -1,13 +1,20 @@
-PROGS = modpost
+PROGS = \
+	modpost \
+	modpost.real-lsb-32 \
+	modpost.real-lsb-64 \
+	modpost.real-msb-32 \
+	modpost.real-msb-64
 
 OUTDIR = mod
 
-modpost: elf.o modpost.o module.o module_devicetable.o module_devicetable_impl_2_6_16.o
-	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ $^
+modpost.real-%:
+	$(MAKE) -f Makefile.real TYPE=$* SOURCEDIR=$(top_srcdir)/scripts/mod
 
-%.o: %.cpp %.hpp endian.hpp
+%: %.o
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+
+include ../Makefile.inc
 
 clean:
 	rm $(PROGS) *.o
 
-include ../Makefile.inc
