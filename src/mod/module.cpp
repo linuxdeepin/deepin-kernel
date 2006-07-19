@@ -69,16 +69,13 @@ module_real::module_real (const std::string &filename, Elf::file *file) throw (s
       symtab = dynamic_cast <Elf::section_type<Elf::section_type_SYMTAB> *> (*it);
   }
 
-  if (!is_vmlinux && !modinfo)
-    throw std::runtime_error ("Not a kernel module, lacks modinfo section");
   if (!symtab)
     throw std::runtime_error ("Not a kernel module, lacks symbol table");
 
-  if (!is_vmlinux)
-  {
+  if (modinfo)
     read_modinfo (modinfo);
-    symbols_undefined.insert (std::pair<std::string, symbol_undefined> ("struct_module", symbol_undefined ("struct_module", 0)));
-  }
+  symbols_undefined.insert (std::pair<std::string, symbol_undefined> ("struct_module", symbol_undefined ("struct_module", 0)));
+
   read_symtab (symtab);
 }
 
