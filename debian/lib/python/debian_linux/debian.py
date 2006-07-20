@@ -85,12 +85,12 @@ class package_description(object):
     __slots__ = "short", "long"
 
     def __init__(self, value = None):
+        self.long = []
         if value is not None:
-            self.short, long = value.split ("\n", 1)
-            self.long = long.split ("\n.\n")
+            self.short, long = value.split("\n", 1)
+            self.append(long)
         else:
             self.short = None
-            self.long = []
 
     def __str__(self):
         ret = self.short + '\n'
@@ -99,6 +99,11 @@ class package_description(object):
         for i in self.long:
             pars.append('\n '.join(w.wrap(i)))
         return self.short + '\n ' + '\n .\n '.join(pars)
+
+    def append(self, str):
+        str = str.strip()
+        if str:
+            self.long.extend(str.split("\n.\n"))
 
 class package_relation(object):
     __slots__ = "name", "version", "arches"

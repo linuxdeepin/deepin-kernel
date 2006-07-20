@@ -213,7 +213,7 @@ class gencontrol(object):
         desc = in_desc.__class__()
         desc.short = self.substitute(in_desc.short, vars)
         for i in in_desc.long:
-            desc.long.append(self.substitute(i, vars))
+            desc.append(self.substitute(i, vars))
         e['Description'] = desc
 
     def process_package(self, in_entry, vars):
