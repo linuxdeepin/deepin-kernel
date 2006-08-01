@@ -1,6 +1,6 @@
 CC = gcc
 CXX = g++
-CFLAGS += -Wall -W -O2
+CFLAGS += -Wall -O2
 CXXFLAGS = $(CFLAGS)
 
 all: all-local all-recursive
