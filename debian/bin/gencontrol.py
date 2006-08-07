@@ -197,7 +197,8 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
             t = relations.get(field.lower(), [])
             value.extend(t)
             value.config(config)
-            entry[field] = value
+            if value:
+                entry[field] = value
         return entry
 
     def process_real_tree(self, in_entry, vars):
