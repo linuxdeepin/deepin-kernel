@@ -130,7 +130,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
             commands = [config_entry_commands_initramfs[i] for i in generators if config_entry_commands_initramfs.has_key(i)]
             makeflags['INITRD_CMD'] = ' '.join(commands)
             l = package_relation_group()
-            l.extend(generators + ['initramfs-fallback'])
+            l.extend(generators)
             image_depends.append(l)
 
         packages_own = []
