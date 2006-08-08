@@ -1,0 +1,350 @@
+# Backport of Thecus N2100 support
+# Upstream status: will go into 2.6.19
+
+diff -urN a/arch/arm/mach-iop3xx/Kconfig b/arch/arm/mach-iop3xx/Kconfig
+--- a/arch/arm/mach-iop3xx/Kconfig	2006-08-03 11:39:01.664742750 +0000
++++ b/arch/arm/mach-iop3xx/Kconfig	2006-08-03 13:49:30.197995500 +0000
+@@ -11,6 +11,12 @@
+ 	  Say Y here if you want to run your kernel on the Intel IQ80321
+ 	  evaluation kit for the IOP321 chipset.
+ 
++config MACH_N2100
++	bool "Enable support for the Thecus n2100"
++	help
++	  Say Y here if you want to run your kernel on the Thecus n2100
++	  NAS appliance.
++
+ config ARCH_IQ31244
+ 	bool "Enable support for IQ31244"
+ 	select ARCH_IOP321
+diff -urN a/arch/arm/mach-iop3xx/Makefile b/arch/arm/mach-iop3xx/Makefile
+--- a/arch/arm/mach-iop3xx/Makefile	2006-08-03 11:39:01.664742750 +0000
++++ b/arch/arm/mach-iop3xx/Makefile	2006-08-03 13:49:30.197995500 +0000
+@@ -21,3 +21,6 @@
+ obj-$(CONFIG_ARCH_IQ80331) += iq80331-mm.o iq80331-pci.o
+ 
+ obj-$(CONFIG_MACH_IQ80332) += iq80332-mm.o iq80332-pci.o
++
++obj-$(CONFIG_MACH_N2100) += n2100.o
++
+diff -urN a/arch/arm/mach-iop3xx/iop321-irq.c b/arch/arm/mach-iop3xx/iop321-irq.c
+--- a/arch/arm/mach-iop3xx/iop321-irq.c	2006-08-03 11:39:01.664742750 +0000
++++ b/arch/arm/mach-iop3xx/iop321-irq.c	2006-08-03 13:49:30.201995750 +0000
+@@ -82,7 +82,8 @@
+ 	intctl_write(0);		// disable all interrupts
+ 	intstr_write(0);		// treat all as IRQ
+ 	if(machine_is_iq80321() ||
+-	   machine_is_iq31244()) 	// all interrupts are inputs to chip
++	   machine_is_iq31244() ||
++	   machine_is_n2100())		// all interrupts are inputs to chip
+ 		*IOP321_PCIIRSR = 0x0f;
+ 
+ 	for(i = IOP321_IRQ_OFS; i < NR_IOP321_IRQS; i++)
+diff -urN a/arch/arm/mach-iop3xx/n2100.c b/arch/arm/mach-iop3xx/n2100.c
+--- a/arch/arm/mach-iop3xx/n2100.c	1970-01-01 00:00:00.000000000 +0000
++++ b/arch/arm/mach-iop3xx/n2100.c	2006-08-03 13:49:30.201995750 +0000
+@@ -0,0 +1,233 @@
++/*
++ * arch/arm/mach-iop32x/n2100.c
++ *
++ * Board support code the the Thecus N2100 platform.
++ *
++ * Author: Rory Bolt <rorybolt@pacbell.net>
++ * Copyright (C) 2002 Rory Bolt
++ * Copyright 2003 (c) MontaVista, Software, Inc.
++ * Copyright (C) 2004 Intel Corp.
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the
++ * Free Software Foundation; either version 2 of the License, or (at your
++ * option) any later version.
++ */
++
++#include <linux/mm.h>
++#include <linux/init.h>
++#include <linux/delay.h>
++#include <linux/kernel.h>
++#include <linux/pci.h>
++#include <linux/pm.h>
++#include <linux/string.h>
++#include <linux/slab.h>
++#include <linux/serial_core.h>
++#include <linux/serial_8250.h>
++#include <linux/mtd/physmap.h>
++#include <linux/platform_device.h>
++#include <linux/reboot.h>
++#include <asm/hardware.h>
++#include <asm/io.h>
++#include <asm/irq.h>
++#include <asm/mach/arch.h>
++#include <asm/mach/map.h>
++#include <asm/mach/pci.h>
++#include <asm/mach/time.h>
++#include <asm/mach-types.h>
++#include <asm/page.h>
++#include <asm/pgtable.h>
++
++/*
++ * N2100 timer tick configuration.
++ */
++static void __init n2100_timer_init(void)
++{
++	/* 33.000 MHz crystal.  */
++	iop3xx_init_time(198000000);
++}
++
++static struct sys_timer n2100_timer = {
++	.init		= n2100_timer_init,
++	.offset		= iop3xx_gettimeoffset,
++};
++
++
++/*
++ * N2100 I/O.
++ */
++static struct map_desc n2100_io_desc[] __initdata = {
++	{	/* on-board devices */
++		.virtual	= N2100_UART,
++		.pfn		= __phys_to_pfn(N2100_UART),
++		.length		= 0x00100000,
++		.type		= MT_DEVICE
++	},
++};
++
++void __init n2100_map_io(void)
++{
++	iop321_map_io();
++	iotable_init(n2100_io_desc, ARRAY_SIZE(n2100_io_desc));
++}
++
++
++/*
++ * N2100 PCI.
++ */
++static inline int __init
++n2100_pci_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
++{
++	int irq;
++
++	if (PCI_SLOT(dev->devfn) == 1) {
++		/* RTL8110SB #1 */
++		irq = IRQ_IOP321_XINT0;
++	} else if (PCI_SLOT(dev->devfn) == 2) {
++		/* RTL8110SB #2 */
++		irq = IRQ_IOP321_XINT1;
++	} else if (PCI_SLOT(dev->devfn) == 3) {
++		/* Sil3512 */
++		irq = IRQ_IOP321_XINT2;
++	} else if (PCI_SLOT(dev->devfn) == 4 && pin == 1) {
++		/* VT6212 INTA */
++		irq = IRQ_IOP321_XINT1;
++	} else if (PCI_SLOT(dev->devfn) == 4 && pin == 2) {
++		/* VT6212 INTB */
++		irq = IRQ_IOP321_XINT0;
++	} else if (PCI_SLOT(dev->devfn) == 4 && pin == 3) {
++		/* VT6212 INTC */
++		irq = IRQ_IOP321_XINT2;
++	} else if (PCI_SLOT(dev->devfn) == 5) {
++		/* Mini-PCI slot */
++		irq = IRQ_IOP321_XINT3;
++	} else {
++		printk(KERN_ERR "n2100_pci_map_irq() called for unknown "
++			"device PCI:%d:%d:%d\n", dev->bus->number,
++			PCI_SLOT(dev->devfn), PCI_FUNC(dev->devfn));
++		irq = -1;
++	}
++
++	return irq;
++}
++
++static int n2100_setup(int nr, struct pci_sys_data *sys)
++{
++	struct resource *res;
++
++	if(nr != 0)
++		return 0;
++
++	res = kzalloc(sizeof(struct resource) * 2, GFP_KERNEL);
++	if (!res)
++		panic("PCI: unable to alloc resources");
++
++	res[0].start = IOP321_PCI_LOWER_IO_VA;
++	res[0].end   = IOP321_PCI_UPPER_IO_VA;
++	res[0].name  = "N2100 PCI I/O Space";
++	res[0].flags = IORESOURCE_IO;
++	request_resource(&ioport_resource, &res[0]);
++
++	res[1].start = IOP321_PCI_LOWER_MEM_PA;
++	res[1].end   = IOP321_PCI_UPPER_MEM_PA;
++	res[1].name  = "N2100 PCI Memory Space";
++	res[1].flags = IORESOURCE_MEM;
++	request_resource(&iomem_resource, &res[1]);
++
++	sys->mem_offset = IOP321_PCI_MEM_OFFSET;
++	sys->io_offset  = IOP321_PCI_IO_OFFSET;
++
++	sys->resource[0] = &res[0];
++	sys->resource[1] = &res[1];
++	sys->resource[2] = NULL;
++
++	return 1;
++}
++
++static void n2100_preinit(void)
++{
++	iop321_init();
++}
++
++static struct hw_pci n2100_pci __initdata = {
++	.swizzle	= pci_std_swizzle,
++	.nr_controllers = 1,
++	.setup		= n2100_setup,
++	.scan		= iop321_scan_bus,
++	.preinit	= n2100_preinit,
++	.map_irq	= n2100_pci_map_irq,
++};
++
++static int __init n2100_pci_init(void)
++{
++	if (machine_is_n2100())
++		pci_common_init(&n2100_pci);
++
++	return 0;
++}
++
++subsys_initcall(n2100_pci_init);
++
++
++/*
++ * Pull PCA9532 GPIO #8 low to power off the machine.
++ */
++static void n2100_power_off(void)
++{
++	local_irq_disable();
++
++	/* Start condition, I2C address of PCA9532, write transaction.  */
++	*IOP321_IDBR0 = 0xc0;
++	*IOP321_ICR0 = 0xe9;
++	mdelay(1);
++
++	/* Write address 0x08.  */
++	*IOP321_IDBR0 = 0x08;
++	*IOP321_ICR0 = 0xe8;
++	mdelay(1);
++
++	/* Write data 0x01, stop condition.  */
++	*IOP321_IDBR0 = 0x01;
++	*IOP321_ICR0 = 0xea;
++
++	while (1)
++		;
++}
++
++
++static struct timer_list power_button_poll_timer;
++
++static void power_button_poll(unsigned long dummy)
++{
++	if (gpio_line_get(N2100_POWER_BUTTON) == 0) {
++		ctrl_alt_del();
++		return;
++	}
++
++	power_button_poll_timer.expires = jiffies + (HZ / 10);
++	add_timer(&power_button_poll_timer);
++}
++
++
++static void __init n2100_init_machine(void)
++{
++	platform_device_register(&iop32x_i2c_0_controller);
++
++	pm_power_off = n2100_power_off;
++
++	init_timer(&power_button_poll_timer);
++	power_button_poll_timer.function = power_button_poll;
++	power_button_poll_timer.expires = jiffies + (HZ / 10);
++	add_timer(&power_button_poll_timer);
++}
++
++MACHINE_START(N2100, "Thecus N2100")
++	/* Maintainer: Lennert Buytenhek <buytenh@wantstofly.org> */
++	.phys_io	= N2100_UART,
++	.io_pg_offst	= ((N2100_UART) >> 18) & 0xfffc,
++	.boot_params	= 0xa0000100,
++	.map_io		= n2100_map_io,
++	.init_irq	= iop321_init_irq,
++	.timer		= &n2100_timer,
++	.init_machine	= n2100_init_machine,
++MACHINE_END
+diff -urN a/arch/arm/tools/mach-types b/arch/arm/tools/mach-types
+--- a/arch/arm/tools/mach-types	2006-08-03 11:39:01.696744750 +0000
++++ b/arch/arm/tools/mach-types	2006-08-03 13:49:30.201995750 +0000
+@@ -1040,3 +1040,4 @@
+ ai2410			MACH_AI2410		AI2410			1027
+ ixp465			MACH_IXP465		IXP465			1028
+ balloon3		MACH_BALLOON3		BALLOON3		1029
++n2100			MACH_N2100		N2100			1101
+diff -urN a/include/asm-arm/arch-iop3xx/hardware.h b/include/asm-arm/arch-iop3xx/hardware.h
+--- a/include/asm-arm/arch-iop3xx/hardware.h	2006-08-03 11:39:08.109145500 +0000
++++ b/include/asm-arm/arch-iop3xx/hardware.h	2006-08-03 13:49:30.201995750 +0000
+@@ -53,5 +53,6 @@
+ #include "iq31244.h"
+ #include "iq80331.h"
+ #include "iq80332.h"
++#include "n2100.h"
+ 
+ #endif  /* _ASM_ARCH_HARDWARE_H */
+diff -urN a/include/asm-arm/arch-iop3xx/n2100.h b/include/asm-arm/arch-iop3xx/n2100.h
+--- a/include/asm-arm/arch-iop3xx/n2100.h	1970-01-01 00:00:00.000000000 +0000
++++ b/include/asm-arm/arch-iop3xx/n2100.h	2006-08-03 13:49:30.205996000 +0000
+@@ -0,0 +1,22 @@
++/*
++ * include/asm/arch-iop32x/n2100.h
++ *
++ * Thecus N2100 board registers
++ */
++
++#ifndef __N2100_H
++#define __N2100_H
++
++#define N2100_UART		0xfe800000	/* UART */
++
++#define N2100_FLASHBASE		0xf0000000
++#define N2100_FLASHSIZE		0x01000000
++#define N2100_FLASHWIDTH	2
++
++#define N2100_COPY_BUTTON	IOP3XX_GPIO_LINE(0)
++#define N2100_PCA9532_RESET	IOP3XX_GPIO_LINE(2)
++#define N2100_RESET_BUTTON	IOP3XX_GPIO_LINE(3)
++#define N2100_HARDWARE_RESET	IOP3XX_GPIO_LINE(4)
++#define N2100_POWER_BUTTON	IOP3XX_GPIO_LINE(5)
++
++#endif
+diff -urN a/include/asm-arm/arch-iop3xx/system.h b/include/asm-arm/arch-iop3xx/system.h
+--- a/include/asm-arm/arch-iop3xx/system.h	2006-08-03 11:39:08.133147000 +0000
++++ b/include/asm-arm/arch-iop3xx/system.h	2006-08-03 13:49:30.205996000 +0000
+@@ -8,6 +8,8 @@
+  * published by the Free Software Foundation.
+  */
+ 
++#include <asm/mach-types.h>
++
+ static inline void arch_idle(void)
+ {
+ 	cpu_do_idle();
+@@ -16,6 +18,14 @@
+ 
+ static inline void arch_reset(char mode)
+ {
++
++	if (machine_is_n2100()) {
++		gpio_line_set(N2100_HARDWARE_RESET, GPIO_LOW);
++		gpio_line_config(N2100_HARDWARE_RESET, GPIO_OUT);
++		while (1)
++			;
++}	
++
+ #ifdef CONFIG_ARCH_IOP321
+     *IOP321_PCSR = 0x30;
+ #endif
