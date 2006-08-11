@@ -1,0 +1,162 @@
+[PATCH] parisc specific kmap API implementation for pa8800
+
+This patch fixes the pa8800 at a gross level (there are still other
+subtle incoherency issues which can still cause crashes and HPMCs).
+
+What it does is try to force eject inequivalent aliases before they
+become visible to the L2 cache (which is where we get the incoherence
+problems).
+
+A new function (parisc_requires_coherency) is introduced in
+asm/processor.h to identify the pa8x00 processors (8800 and 8900)
+which have the issue.
+
+Signed-off-by: James Bottomley <James.Bottomley@SteelEye.com>
+Index: linux-2.6/arch/parisc/kernel/cache.c
+===================================================================
+--- linux-2.6.orig/arch/parisc/kernel/cache.c	2006-08-02 06:28:46.000000000 -0700
++++ linux-2.6/arch/parisc/kernel/cache.c	2006-08-02 06:35:42.000000000 -0700
+@@ -91,7 +91,8 @@
+ 
+ 		flush_kernel_dcache_page(page);
+ 		clear_bit(PG_dcache_dirty, &page->flags);
+-	}
++	} else if (parisc_requires_coherency())
++		flush_kernel_dcache_page(page);
+ }
+ 
+ void
+@@ -370,3 +371,35 @@
+ 
+ 	printk(KERN_INFO "Setting cache flush threshold to %x (%d CPUs online)\n", parisc_cache_flush_threshold, num_online_cpus());
+ }
++
++extern void purge_kernel_dcache_page(unsigned long);
++extern void clear_user_page_asm(void *page, unsigned long vaddr);
++
++void
++clear_user_page(void *page, unsigned long vaddr, struct page *pg)
++{
++	purge_kernel_dcache_page((unsigned long)page);
++	purge_tlb_start();
++	pdtlb_kernel(page);
++	purge_tlb_end();
++	clear_user_page_asm(page, vaddr);
++}
++
++void flush_kernel_dcache_page_addr(void *addr)
++{
++	flush_kernel_dcache_page_asm(addr);
++	purge_tlb_start();
++	pdtlb_kernel(addr);
++	purge_tlb_end();
++}
++EXPORT_SYMBOL(flush_kernel_dcache_page_addr);
++
++#ifdef CONFIG_PA8X00
++
++void kunmap_parisc(void *addr)
++{
++	if (parisc_requires_coherency())
++		flush_kernel_dcache_page_addr(addr);
++}
++EXPORT_SYMBOL(kunmap_parisc);
++#endif
+Index: linux-2.6/include/asm-parisc/cacheflush.h
+===================================================================
+--- linux-2.6.orig/include/asm-parisc/cacheflush.h	2006-08-02 06:28:45.000000000 -0700
++++ linux-2.6/include/asm-parisc/cacheflush.h	2006-08-02 06:37:00.000000000 -0700
+@@ -191,16 +191,38 @@
+ }
+ #define ARCH_HAS_FLUSH_ANON_PAGE
+ 
+-static inline void
+-flush_kernel_dcache_page(struct page *page)
++#define ARCH_HAS_FLUSH_KERNEL_DCACHE_PAGE
++void flush_kernel_dcache_page_addr(void *addr);
++static inline void flush_kernel_dcache_page(struct page *page)
+ {
+-	flush_kernel_dcache_page_asm(page_address(page));
++	flush_kernel_dcache_page_addr(page_address(page));
+ }
+-#define ARCH_HAS_FLUSH_KERNEL_DCACHE_PAGE
+ 
+ #ifdef CONFIG_DEBUG_RODATA
+ void mark_rodata_ro(void);
+ #endif
+ 
++#ifdef CONFIG_PA8X00
++/* Only pa8800, pa8900 needs this */
++#define ARCH_HAS_KMAP
++
++void kunmap_parisc(void *addr);
++
++static inline void *kmap(struct page *page)
++{
++	might_sleep();
++	return page_address(page);
++}
++
++#define kunmap(page)			kunmap_parisc(page_address(page))
++
++#define kmap_atomic(page, idx)		page_address(page)
++
++#define kunmap_atomic(addr, idx)	kunmap_parisc(addr)
++
++#define kmap_atomic_pfn(pfn, idx)	page_address(pfn_to_page(pfn))
++#define kmap_atomic_to_page(ptr)	virt_to_page(ptr)
++#endif
++
+ #endif /* _PARISC_CACHEFLUSH_H */
+ 
+Index: linux-2.6/include/asm-parisc/page.h
+===================================================================
+--- linux-2.6.orig/include/asm-parisc/page.h	2006-08-02 06:29:39.000000000 -0700
++++ linux-2.6/include/asm-parisc/page.h	2006-08-02 06:29:46.000000000 -0700
+@@ -34,24 +34,16 @@
+ 
+ struct page;
+ 
+-extern void purge_kernel_dcache_page(unsigned long);
+ extern void copy_user_page_asm(void *to, void *from);
+-extern void clear_user_page_asm(void *page, unsigned long vaddr);
+ 
+ static inline void
+ copy_user_page(void *vto, void *vfrom, unsigned long vaddr, struct page *pg)
+ {
++	/* no coherency needed (all in kmap/kunmap) */
+ 	copy_user_page_asm(vto, vfrom);
+-	flush_kernel_dcache_page_asm(vto);
+-	/* XXX: ppc flushes icache too, should we? */
+ }
+ 
+-static inline void
+-clear_user_page(void *page, unsigned long vaddr, struct page *pg)
+-{
+-	purge_kernel_dcache_page((unsigned long)page);
+-	clear_user_page_asm(page, vaddr);
+-}
++void clear_user_page(void *page, unsigned long vaddr, struct page *pg);
+ 
+ /*
+  * These are used to make use of C type-checking..
+Index: linux-2.6/include/asm-parisc/processor.h
+===================================================================
+--- linux-2.6.orig/include/asm-parisc/processor.h	2006-08-02 06:39:20.000000000 -0700
++++ linux-2.6/include/asm-parisc/processor.h	2006-08-02 06:50:34.000000000 -0700
+@@ -332,6 +332,15 @@
+ 
+ #define cpu_relax()	barrier()
+ 
++/* Used as a macro to identify the combined VIPT/PIPT cached
++ * CPUs which require a guarantee of coherency (no inequivalent
++ * aliases with different data, whether clean or not) to operate */
++static inline int parisc_requires_coherency(void)
++{
++	/* FIXME: also pa8900 - when we see one */
++	return boot_cpu_data.cpu_type == mako;
++}
++
+ #endif /* __ASSEMBLY__ */
+ 
+ #endif /* __ASM_PARISC_PROCESSOR_H */
