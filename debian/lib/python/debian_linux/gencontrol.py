@@ -65,7 +65,7 @@ class gencontrol(object):
         cmds_binary_indep.append(("$(MAKE) -f debian/rules.real binary-indep %s" % makeflags_string,))
         makefile.append(("binary-indep:", cmds_binary_indep))
 
-    def do_main_packages(self, packages):
+    def do_main_packages(self, packages, extra):
         pass
 
     def do_extra(self, packages, makefile):
