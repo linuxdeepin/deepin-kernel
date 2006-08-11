@@ -109,8 +109,6 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         image_type_modulesinline = self.templates["control.image.type-modulesinline"]
         image_type_standalone = self.templates["control.image.type-standalone"]
         headers = self.templates["control.headers"]
-        image_latest = self.templates["control.image.latest"]
-        headers_latest = self.templates["control.headers.latest"]
 
         config_entry_base = self.config.merge('base', arch, subarch, flavour)
         config_entry_relations = self.config.merge('relations', arch, subarch, flavour)
@@ -134,7 +132,6 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
             image_depends.append(l)
 
         packages_own = []
-        packages_dummy = []
 
         if vars['type'] == 'plain-s390-tape':
             image = image_type_standalone
@@ -145,17 +142,15 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
 
         packages_own.append(self.process_real_image(image[0], {'depends': image_depends}, config_entry_relations, vars))
         packages_own.extend(self.process_packages(image[1:], vars))
-        packages_dummy.extend(self.process_packages(image_latest, vars))
 
         if image in (image_type_modulesextra, image_type_modulesinline):
             makeflags['MODULES'] = True
             package_headers = self.process_package(headers[0], vars)
             package_headers['Depends'].extend(relations_compiler)
             packages_own.append(package_headers)
-            packages_dummy.append(self.process_package(headers_latest[0], vars))
             extra['headers_arch_depends'].append('%s (= ${Source-Version})' % packages_own[-1]['Package'])
 
-        for package in packages_own + packages_dummy:
+        for package in packages_own:
             name = package['Package']
             if packages.has_key(name):
                 package = packages.get(name)
@@ -168,7 +163,6 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
 
         cmds_binary_arch = []
         cmds_binary_arch.append(("$(MAKE) -f debian/rules.real binary-arch-flavour %s" % makeflags_string,))
-        cmds_binary_arch.append(("$(MAKE) -f debian/rules.real install-dummy DH_OPTIONS='%s' %s" % (' '.join(["-p%s" % i['Package'] for i in packages_dummy]), makeflags_string),))
         cmds_build = []
         cmds_build.append(("$(MAKE) -f debian/rules.real build %s" % makeflags_string,))
         cmds_setup = []
