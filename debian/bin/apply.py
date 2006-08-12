@@ -334,9 +334,12 @@ def main():
         return
 
     current_index = revisions.index(current.revision)
+    source_index = revisions.index(source.revision)
     target_index = revisions.index(target.revision)
 
     if current_extra:
+        if current_index != source_index:
+            raise RuntimeError, "Can't patch from %s with options %s" % (current, ' '.join(current_extra))
         consider = revisions[current_index:0:-1]
         s = series_extra.read_all(consider, home, current_extra, reverse = True)
         vfile.begin()
