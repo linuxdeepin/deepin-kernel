@@ -37,11 +37,6 @@ class series(list):
                         break
                 else:
                     raise RuntimeError, "Can't find patch %s for series %s" % (patchfile, name)
-            elif operation in ('X',):
-                backup = patch + ".bak"
-                if not os.path.exists(patch) and not os.path.exists(backup):
-                    raise RuntimeError, "Can't find neither original nor backup file %s for series %s" % (patch, name)
-                patchinfo = patch, backup
             else:
                 raise RuntimeError, 'Undefined operation "%s" in series %s' % (operation, name)
 
@@ -61,11 +56,6 @@ class series(list):
                     self.patch_deapply(patch, patchinfo)
                 elif operation == '-':
                     self.patch_apply(patch, patchinfo)
-                elif operation == 'X':
-                    os.rename(patchinfo[1], patchinfo[0])
-                    print """\
-  (X) RESTORED  %s\
-""" % patch
             print "--> %s fully unapplied." % self.name
 
         else:
@@ -78,11 +68,6 @@ class series(list):
                     self.patch_apply(patch, patchinfo)
                 elif operation == '-':
                     self.patch_deapply(patch, patchinfo)
-                elif operation == 'X':
-                    os.rename(patchinfo[0], patchinfo[1])
-                    print """\
-  (X) REMOVED   %s\
-""" % patch
             print "--> %s fully applied." % self.name
 
     def patch_apply(self, patch, patchinfo):
