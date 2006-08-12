@@ -13,7 +13,6 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
     def do_main_setup(self, vars, makeflags, extra):
         super(gencontrol, self).do_main_setup(vars, makeflags, extra)
         vars.update(self.config['image',])
-        makeflags['REVISIONS'] = ' '.join([i['Version']['debian'] for i in self.changelog[::-1]])
 
     def do_main_packages(self, packages, extra):
         vars = self.vars
@@ -171,6 +170,22 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         makefile.append(("build-%s-%s-%s-real:" % (arch, subarch, flavour), cmds_build))
         makefile.append(("setup-%s-%s-%s-real:" % (arch, subarch, flavour), cmds_setup))
         makefile.append(("source-%s-%s-%s-real:" % (arch, subarch, flavour)))
+
+    def do_extra(self, packages, makefile):
+        apply = self.templates['patch.apply']
+        unpatch = self.templates['patch.unpatch']
+
+        vars = {
+            'home': '/usr/src/kernel-patches/all/%s' % self.version['source_upstream'],
+            'revisions': ' '.join([i['Version']['debian'] for i in self.changelog[::-1]]),
+        }
+        vars.update(self.version)
+
+        apply = self.substitute(apply, vars)
+        unpatch = self.substitute(unpatch, vars)
+
+        file('debian/bin/patch-apply', 'w').write(apply)
+        file('debian/bin/patch-unpatch', 'w').write(unpatch)
 
     def process_changelog(self):
         version = self.changelog[0]['Version']
