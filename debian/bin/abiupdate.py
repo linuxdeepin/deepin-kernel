@@ -35,7 +35,9 @@ class main(object):
         self.version = changelog['Version']['version']
         self.version_source = changelog['Version']['source']
 
-        self.abiname = "1"
+        local_config = config_reader_arch(["debian/arch"])
+
+        self.abiname = local_config['abi',]['abiname']
         self.version_abi = self.version + '-' + self.abiname
 
     def __call__(self):
