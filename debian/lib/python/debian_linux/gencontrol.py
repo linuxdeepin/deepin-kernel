@@ -178,7 +178,6 @@ class gencontrol(object):
 
     def do_flavour_setup(self, vars, makeflags, arch, subarch, flavour, extra):
         for i in (
-            ('compiler', 'COMPILER'),
             ('kernel-arch', 'KERNEL_ARCH'),
             ('localversion', 'LOCALVERSION'),
         ):  
