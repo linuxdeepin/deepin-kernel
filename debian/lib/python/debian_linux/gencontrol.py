@@ -160,7 +160,7 @@ class gencontrol(object):
             makefile.append("%s-%s-%s-real:" % (i, arch, subarch))
 
     def do_flavour(self, packages, makefile, arch, subarch, flavour, vars, makeflags, extra):
-        config_entry = self.config['base', arch, subarch, flavour]
+        config_entry = self.config.merge('base', arch, subarch, flavour)
         vars.update(config_entry)
 
         if not vars.has_key('class'):
