@@ -176,10 +176,10 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         unpatch = self.templates['patch.unpatch']
 
         vars = {
-            'home': '/usr/src/kernel-patches/all/%s' % self.version['source_upstream'],
+            'home': '/usr/src/kernel-patches/all/%s' % self.version['linux']['source_upstream'],
             'revisions': ' '.join([i['Version']['debian'] for i in self.changelog[::-1]]),
         }
-        vars.update(self.version)
+        vars.update(self.version['linux'])
 
         apply = self.substitute(apply, vars)
         unpatch = self.substitute(unpatch, vars)
@@ -190,7 +190,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
     def process_changelog(self):
         version = self.changelog[0]['Version']
         self.process_version(version)
-        if version['modifier'] is not None:
+        if version['linux']['modifier'] is not None:
             self.abiname = self.vars['abiname'] = ''
         else:
             self.abiname = self.vars['abiname'] = '-%s' % self.config['abi',]['abiname']
@@ -212,17 +212,17 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
 
     def process_real_tree(self, in_entry, vars):
         entry = self.process_package(in_entry, vars)
-        tmp = self.changelog[0]['Version']['upstream']
+        tmp = self.changelog[0]['Version']['linux']['upstream']
         versions = []
         for i in self.changelog:
-            if i['Version']['upstream'] != tmp:
+            if i['Version']['linux']['upstream'] != tmp:
                 break
-            versions.insert(0, i['Version'])
+            versions.insert(0, i['Version']['linux'])
         for i in (('Depends', 'Provides')):
             value = package_relation_list()
             value.extend(entry.get(i, []))
             if i == 'Depends':
-                value.append("linux-patch-debian-%(version)s (= %(source)s)" % self.changelog[0]['Version'])
+                value.append("linux-patch-debian-%(version)s (= %(source)s)" % self.changelog[0]['Version']['linux'])
                 value.append(' | '.join(["linux-source-%(version)s (= %(source)s)" % v for v in versions]))
             elif i == 'Provides':
                 value.extend(["linux-tree-%(source)s" % v for v in versions])
