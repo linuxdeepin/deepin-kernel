@@ -173,11 +173,11 @@ class config_reader_arch(config_reader):
         ret.update(self.get((section,), {}))
         if arch:
             ret.update(self.get((section, arch), {}))
+        if flavour and subarch and subarch != 'none':
+            ret.update(self.get((section, arch, 'none', flavour), {}))
         if subarch:
             ret.update(self.get((section, arch, subarch), {}))
         if flavour:
-            if subarch != 'none':
-                ret.update(self.get((section, arch, 'none', flavour), {}))
             ret.update(self.get((section, arch, subarch, flavour), {}))
         return ret
 
