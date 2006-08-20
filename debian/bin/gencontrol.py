@@ -13,6 +13,9 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
     def do_main_setup(self, vars, makeflags, extra):
         super(gencontrol, self).do_main_setup(vars, makeflags, extra)
         vars.update(self.config['image',])
+        makeflags.update({
+            'SOURCEVERSION': self.version['linux']['source'],
+        })
 
     def do_main_packages(self, packages, extra):
         vars = self.vars
@@ -176,7 +179,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         unpatch = self.templates['patch.unpatch']
 
         vars = {
-            'home': '/usr/src/kernel-patches/all/%s' % self.version['linux']['source_upstream'],
+            'home': '/usr/src/kernel-patches/all/%s' % self.version['linux']['upstream'],
             'revisions': ' '.join([i['Version']['debian'] for i in self.changelog[::-1]]),
         }
         vars.update(self.version['linux'])

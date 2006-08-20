@@ -52,8 +52,6 @@ class gencontrol(object):
         makeflags.update({
             'MAJOR': self.version['linux']['major'],
             'VERSION': self.version['linux']['version'],
-            'SOURCE_UPSTREAM': self.version['linux']['source_upstream'],
-            'SOURCEVERSION': self.version['linux']['source'],
             'UPSTREAMVERSION': self.version['linux']['upstream'],
             'ABINAME': self.abiname,
         })
