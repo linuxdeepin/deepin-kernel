@@ -11,6 +11,17 @@ class packages_list(sorted_dict):
         for package in packages:
             self[package['Package']] = package
 
+class flags(dict):
+    def __repr__(self):
+        repr = super(flags, self).__repr__()
+        return "%s(%s)" % (self.__class__.__name__, repr)
+
+    def __str__(self):
+        return ' '.join(["%s='%s'" % i for i in self.iteritems()])
+
+    def copy(self):
+        return self.__class__(super(flags, self).copy())
+
 class gencontrol(object):
     makefile_targets = ('binary-arch', 'build', 'setup', 'source')
 
@@ -38,7 +49,7 @@ class gencontrol(object):
         vars = self.vars.copy()
         vars.update(config_entry)
 
-        makeflags = {}
+        makeflags = flags()
         extra = {}
 
         self.do_main_setup(vars, makeflags, extra)
@@ -57,10 +68,8 @@ class gencontrol(object):
         })
 
     def do_main_makefile(self, makefile, makeflags, extra):
-        makeflags_string = ' '.join(["%s='%s'" % i for i in makeflags.iteritems()])
-
         cmds_binary_indep = []
-        cmds_binary_indep.append(("$(MAKE) -f debian/rules.real binary-indep %s" % makeflags_string,))
+        cmds_binary_indep.append(("$(MAKE) -f debian/rules.real binary-indep %s" % makeflags,))
         makefile.append(("binary-indep:", cmds_binary_indep))
 
     def do_main_packages(self, packages, extra):

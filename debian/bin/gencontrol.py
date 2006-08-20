@@ -40,12 +40,10 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
                 package['Architecture'] = [arch]
                 packages.append(package)
 
-        makeflags_string = ' '.join(["%s='%s'" % i for i in makeflags.iteritems()])
-
         cmds_binary_arch = []
-        cmds_binary_arch.append(("$(MAKE) -f debian/rules.real binary-arch-arch %s" % makeflags_string))
+        cmds_binary_arch.append(("$(MAKE) -f debian/rules.real binary-arch-arch %s" % makeflags))
         cmds_source = []
-        cmds_source.append(("$(MAKE) -f debian/rules.real source-arch %s" % makeflags_string,))
+        cmds_source.append(("$(MAKE) -f debian/rules.real source-arch %s" % makeflags,))
         makefile.append(("binary-arch-%s-real:" % arch, cmds_binary_arch))
         makefile.append(("build-%s-real:" % arch))
         makefile.append(("setup-%s-real:" % arch))
@@ -73,12 +71,10 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
             package_headers['Architecture'] = [arch]
             packages.append(package_headers)
 
-        makeflags_string = ' '.join(["%s='%s'" % i for i in makeflags.iteritems()])
-
         cmds_binary_arch = []
-        cmds_binary_arch.append(("$(MAKE) -f debian/rules.real binary-arch-subarch %s" % makeflags_string,))
+        cmds_binary_arch.append(("$(MAKE) -f debian/rules.real binary-arch-subarch %s" % makeflags,))
         cmds_source = []
-        cmds_source.append(("$(MAKE) -f debian/rules.real source-subarch %s" % makeflags_string,))
+        cmds_source.append(("$(MAKE) -f debian/rules.real source-subarch %s" % makeflags,))
         makefile.append(("binary-arch-%s-%s-real:" % (arch, subarch), cmds_binary_arch))
         makefile.append("build-%s-%s-real:" % (arch, subarch))
         makefile.append(("setup-%s-%s-real:" % (arch, subarch)))
@@ -155,14 +151,12 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
                 package['Architecture'] = [arch]
                 packages.append(package)
 
-        makeflags_string = ' '.join(["%s='%s'" % i for i in makeflags.iteritems()])
-
         cmds_binary_arch = []
-        cmds_binary_arch.append(("$(MAKE) -f debian/rules.real binary-arch-flavour %s" % makeflags_string,))
+        cmds_binary_arch.append(("$(MAKE) -f debian/rules.real binary-arch-flavour %s" % makeflags,))
         cmds_build = []
-        cmds_build.append(("$(MAKE) -f debian/rules.real build %s" % makeflags_string,))
+        cmds_build.append(("$(MAKE) -f debian/rules.real build %s" % makeflags,))
         cmds_setup = []
-        cmds_setup.append(("$(MAKE) -f debian/rules.real setup-flavour %s" % makeflags_string,))
+        cmds_setup.append(("$(MAKE) -f debian/rules.real setup-flavour %s" % makeflags,))
         makefile.append(("binary-arch-%s-%s-%s-real:" % (arch, subarch, flavour), cmds_binary_arch))
         makefile.append(("build-%s-%s-%s-real:" % (arch, subarch, flavour), cmds_build))
         makefile.append(("setup-%s-%s-%s-real:" % (arch, subarch, flavour), cmds_setup))
