@@ -56,7 +56,7 @@ def parse_version(version):
     try:
         i = len(version) - version[::-1].index('-')
     except ValueError:
-        return
+        return ret
     ret['upstream'] = version[:i-1]
     ret['debian'] = version[i:]
     try:
