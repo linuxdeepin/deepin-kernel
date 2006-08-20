@@ -234,13 +234,13 @@ class gencontrol(object):
             entries.append(self.process_package(i, vars))
         return entries
 
-    def process_version(self, version):
-        self.version = version
-        self.vars = {
+    def process_version_linux(self, version, abiname):
+        return {
             'upstreamversion': version['linux']['upstream'],
             'version': version['linux']['version'],
             'source_upstream': version['linux']['source_upstream'],
             'major': version['linux']['major'],
+            'abiname': abiname,
         }
 
     def substitute(self, s, vars):

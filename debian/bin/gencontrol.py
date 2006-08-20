@@ -188,12 +188,12 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         file('debian/bin/patch-unpatch', 'w').write(unpatch)
 
     def process_changelog(self):
-        version = self.changelog[0]['Version']
-        self.process_version(version)
-        if version['linux']['modifier'] is not None:
-            self.abiname = self.vars['abiname'] = ''
+        self.version = self.changelog[0]['Version']
+        if self.version['linux']['modifier'] is not None:
+            self.abiname = ''
         else:
-            self.abiname = self.vars['abiname'] = '-%s' % self.config['abi',]['abiname']
+            self.abiname = '-%s' % self.config['abi',]['abiname']
+        self.vars = self.process_version_linux(self.version, self.abiname)
 
     def process_real_image(self, in_entry, relations, config, vars):
         entry = self.process_package(in_entry, vars)

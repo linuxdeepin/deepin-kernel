@@ -53,8 +53,9 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
 
     def process_config_version(self, config):
         entry = config['version',]
-        self.process_version(parse_version(entry['source']))
-        self.vars['abiname'] = self.abiname = entry['abiname']
+        self.version = parse_version(entry['source'])
+        self.abiname = entry['abiname']
+        self.vars = self.process_version_linux(self.version, self.abiname)
 
 if __name__ == '__main__':
     gencontrol(sys.path[0] + "/../arch")()
