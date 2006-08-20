@@ -18,15 +18,9 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         })
 
     def do_main_packages(self, packages, extra):
-        vars = self.vars
-
-        main = self.templates["control.main"]
-        packages.extend(self.process_packages(main, vars))
-
-        tree = self.templates["control.tree"]
-        packages.append(self.process_real_tree(tree[0], vars))
-
-        packages.extend(self.process_packages(self.templates["control.support"], vars))
+        packages.extend(self.process_packages(self.templates["control.main"], self.vars))
+        packages.append(self.process_real_tree(self.templates["control.tree"][0], self.vars))
+        packages.extend(self.process_packages(self.templates["control.support"], self.vars))
 
     def do_arch_setup(self, vars, makeflags, arch, extra):
         vars.update(self.config.get(('image', arch), {}))
