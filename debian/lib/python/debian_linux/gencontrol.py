@@ -113,8 +113,6 @@ class gencontrol(object):
         for subarch in config_entry['subarches']:
             self.do_subarch(packages, makefile, arch, subarch, vars.copy(), makeflags.copy(), extra)
 
-        self.do_arch_packages_post(packages, makefile, arch, vars, makeflags, extra)
-
     def do_arch_setup(self, vars, makeflags, arch, extra):
         pass
 
@@ -126,9 +124,6 @@ class gencontrol(object):
     def do_arch_packages(self, packages, makefile, arch, vars, makeflags, extra):
         for i in self.makefile_targets:
             makefile.append("%s-%s-real:" % (i, arch))
-
-    def do_arch_packages_post(self, packages, makefile, arch, vars, makeflags, extra):
-        pass
 
     def do_subarch(self, packages, makefile, arch, subarch, vars, makeflags, extra):
         config_entry = self.config['base', arch, subarch]
