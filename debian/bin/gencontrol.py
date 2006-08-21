@@ -123,12 +123,17 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
             l.extend(generators)
             image_depends.append(l)
 
+        packages_dummy = []
         packages_own = []
 
         if vars['type'] == 'plain-s390-tape':
             image = image_type_standalone
         elif vars['type'] == 'plain-xen':
             image = image_type_modulesextra
+            config_entry_xen = self.config.merge('xen', arch, subarch, flavour)
+            for i, j in config_entry_xen.iteritems():
+                vars['xen-%s' % i] = j
+            packages_dummy.extend(self.process_packages(self.templates['control.xen-linux-system'], vars))
         else:
             image = image_type_modulesinline
 
@@ -142,7 +147,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
             packages_own.append(package_headers)
             extra['headers_arch_depends'].append('%s (= ${Source-Version})' % packages_own[-1]['Package'])
 
-        for package in packages_own:
+        for package in packages_own + packages_dummy:
             name = package['Package']
             if packages.has_key(name):
                 package = packages.get(name)
@@ -153,6 +158,8 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
 
         cmds_binary_arch = []
         cmds_binary_arch.append(("$(MAKE) -f debian/rules.real binary-arch-flavour %s" % makeflags,))
+        if packages_dummy:
+            cmds_binary_arch.append(("$(MAKE) -f debian/rules.real install-dummy DH_OPTIONS='%s' %s" % (' '.join(["-p%s" % i['Package'] for i in packages_dummy]), makeflags),))
         cmds_build = []
         cmds_build.append(("$(MAKE) -f debian/rules.real build %s" % makeflags,))
         cmds_setup = []
