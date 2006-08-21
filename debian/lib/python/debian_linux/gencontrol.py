@@ -252,7 +252,7 @@ class gencontrol(object):
             return s
         def subst(match):
             return vars[match.group(1)]
-        return re.sub(r'@([a-z_]+)@', subst, s)
+        return re.sub(r'@([-_a-z]+)@', subst, s)
 
     def write_control(self, list):
         self.write_rfc822(file("debian/control", 'w'), list)
