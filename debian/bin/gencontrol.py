@@ -156,6 +156,11 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
                 package['Architecture'] = [arch]
                 packages.append(package)
 
+        if vars['type'] == 'plain-xen':
+            for i in ('postinst', 'prerm'):
+                j = self.substitute(self.templates["image.%s.simple" % i], vars)
+                file("debian/%s.%s" % (packages_own[0]['Package'], i), 'w').write(j)
+
         cmds_binary_arch = []
         cmds_binary_arch.append(("$(MAKE) -f debian/rules.real binary-arch-flavour %s" % makeflags,))
         if packages_dummy:
