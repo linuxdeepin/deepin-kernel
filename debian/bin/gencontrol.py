@@ -157,8 +157,8 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
                 packages.append(package)
 
         if vars['type'] == 'plain-xen':
-            for i in ('postinst', 'prerm'):
-                j = self.substitute(self.templates["image.%s.simple" % i], vars)
+            for i in ('postinst', 'postrm', 'prerm'):
+                j = self.substitute(self.templates["image.xen.%s" % i], vars)
                 file("debian/%s.%s" % (packages_own[0]['Package'], i), 'w').write(j)
 
         cmds_binary_arch = []
