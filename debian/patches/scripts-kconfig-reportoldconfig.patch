@@ -1,0 +1,306 @@
+diff --git a/scripts/kconfig/Makefile b/scripts/kconfig/Makefile
+index e6499db..c16974c 100644
+--- a/scripts/kconfig/Makefile
++++ b/scripts/kconfig/Makefile
+@@ -2,7 +2,7 @@ # ======================================
+ # Kernel configuration targets
+ # These targets are used from top-level makefile
+ 
+-PHONY += oldconfig xconfig gconfig menuconfig config silentoldconfig update-po-config
++PHONY += oldconfig xconfig gconfig menuconfig config reportoldconfig silentoldconfig updateoldconfig update-po-config
+ 
+ xconfig: $(obj)/qconf
+ 	$< arch/$(ARCH)/Kconfig
+@@ -20,9 +20,15 @@ config: $(obj)/conf
+ oldconfig: $(obj)/conf
+ 	$< -o arch/$(ARCH)/Kconfig
+ 
++reportoldconfig: $(obj)/conf
++	$< -R arch/$(ARCH)/Kconfig
++
+ silentoldconfig: $(obj)/conf
+ 	$< -s arch/$(ARCH)/Kconfig
+ 
++updateoldconfig: $(obj)/conf
++	$< -U arch/$(ARCH)/Kconfig
++
+ update-po-config: $(obj)/kxgettext
+ 	xgettext --default-domain=linux \
+           --add-comments --keyword=_ --keyword=N_ \
+diff --git a/scripts/kconfig/conf.c b/scripts/kconfig/conf.c
+index 4dcb886..e1a9782 100644
+--- a/scripts/kconfig/conf.c
++++ b/scripts/kconfig/conf.c
+@@ -4,6 +4,7 @@
+  */
+ 
+ #include <ctype.h>
++#include <stdbool.h>
+ #include <stdlib.h>
+ #include <stdio.h>
+ #include <string.h>
+@@ -490,11 +491,98 @@ static void check_conf(struct menu *menu
+ 		check_conf(child);
+ }
+ 
++void report_changes(void)
++{
++	struct symbol *sym;
++	struct menu *menu;
++	int type, l;
++	const char *str;
++
++	fprintf(stdout, "\n#\n"
++			"# Changes:\n"
++			"#\n");
++	menu = rootmenu.list;
++	while (menu) {
++		sym = menu->sym;
++		if (!sym) {
++			if (!menu_is_visible(menu))
++				goto next;
++		} else if (!(sym->flags & SYMBOL_CHOICE)) {
++			sym_calc_value(sym);
++			if (!(sym->flags & (SYMBOL_WRITE | SYMBOL_CHANGED_REAL)))
++				goto next;
++			sym->flags &= ~SYMBOL_WRITE;
++			type = sym->type;
++			if (type == S_TRISTATE) {
++				sym_calc_value(modules_sym);
++				if (modules_sym->curr.tri == no)
++					type = S_BOOLEAN;
++			}
++			switch (type) {
++			case S_BOOLEAN:
++			case S_TRISTATE:
++				switch (sym_get_tristate_value(sym)) {
++				case no:
++					fprintf(stdout, "# CONFIG_%s is not set\n", sym->name);
++					break;
++				case mod:
++					fprintf(stdout, "CONFIG_%s=m\n", sym->name);
++					break;
++				case yes:
++					fprintf(stdout, "CONFIG_%s=y\n", sym->name);
++					break;
++				}
++				break;
++			case S_STRING:
++				str = sym_get_string_value(sym);
++				fprintf(stdout, "CONFIG_%s=\"", sym->name);
++				while (1) {
++					l = strcspn(str, "\"\\");
++					if (l) {
++						fwrite(str, l, 1, stdout);
++						str += l;
++					}
++					if (!*str)
++						break;
++					fprintf(stdout, "\\%c", *str++);
++				}
++				fputs("\"\n", stdout);
++				break;
++			case S_HEX:
++				str = sym_get_string_value(sym);
++				if (str[0] != '0' || (str[1] != 'x' && str[1] != 'X')) {
++					fprintf(stdout, "CONFIG_%s=%s\n", sym->name, str);
++					break;
++				}
++			case S_INT:
++				str = sym_get_string_value(sym);
++				fprintf(stdout, "CONFIG_%s=%s\n", sym->name, str);
++				break;
++			}
++		}
++
++	next:
++		if (menu->list) {
++			menu = menu->list;
++			continue;
++		}
++		if (menu->next)
++			menu = menu->next;
++		else while ((menu = menu->parent)) {
++			if (menu->next) {
++				menu = menu->next;
++				break;
++			}
++		}
++	}
++}
++
+ int main(int ac, char **av)
+ {
+ 	int i = 1;
+ 	const char *name;
+ 	struct stat tmpstat;
++	bool report = false, update = false;
+ 
+ 	if (ac > i && av[i][0] == '-') {
+ 		switch (av[i++][1]) {
+@@ -530,6 +618,14 @@ int main(int ac, char **av)
+ 			input_mode = set_random;
+ 			srandom(time(NULL));
+ 			break;
++		case 'R':
++			input_mode = set_default;
++			report = update = true;
++			break;
++		case 'U':
++			input_mode = set_default;
++			update = true;
++			break;
+ 		case 'h':
+ 		case '?':
+ 			fprintf(stderr, "See README for usage info\n");
+@@ -545,13 +641,17 @@ int main(int ac, char **av)
+ 	//zconfdump(stdout);
+ 	switch (input_mode) {
+ 	case set_default:
+-		if (!defconfig_file)
+-			defconfig_file = conf_get_default_confname();
+-		if (conf_read(defconfig_file)) {
+-			printf("***\n"
+-				"*** Can't find default configuration \"%s\"!\n"
+-				"***\n", defconfig_file);
+-			exit(1);
++		if (update)
++			conf_read(NULL);
++		else {
++			if (!defconfig_file)
++				defconfig_file = conf_get_default_confname();
++			if (conf_read(defconfig_file)) {
++				printf("***\n"
++					"*** Can't find default configuration \"%s\"!\n"
++					"***\n", defconfig_file);
++				exit(1);
++			}
+ 		}
+ 		break;
+ 	case ask_silent:
+@@ -617,6 +717,9 @@ int main(int ac, char **av)
+ 		fprintf(stderr, _("\n*** Error during writing of the kernel configuration.\n\n"));
+ 		return 1;
+ 	}
++	if (report)
++		report_changes();
++
+ skip_check:
+ 	if (input_mode == ask_silent && conf_write_autoconf()) {
+ 		fprintf(stderr, _("\n*** Error during writing of the kernel configuration.\n\n"));
+diff --git a/scripts/kconfig/confdata.c b/scripts/kconfig/confdata.c
+diff --git a/scripts/kconfig/expr.h b/scripts/kconfig/expr.h
+index 6084525..9be2d56 100644
+--- a/scripts/kconfig/expr.h
++++ b/scripts/kconfig/expr.h
+@@ -101,6 +101,7 @@ #define SYMBOL_DEF_USER		0x10000
+ #define SYMBOL_DEF_AUTO		0x20000
+ #define SYMBOL_DEF3		0x40000
+ #define SYMBOL_DEF4		0x80000
++#define SYMBOL_CHANGED_REAL	0x100000
+ 
+ #define SYMBOL_MAXLENGTH	256
+ #define SYMBOL_HASHSIZE		257
+diff --git a/scripts/kconfig/lkc.h b/scripts/kconfig/lkc.h
+index 2628023..c7ecae9 100644
+--- a/scripts/kconfig/lkc.h
++++ b/scripts/kconfig/lkc.h
+@@ -103,7 +103,7 @@ const char *str_get(struct gstr *gs);
+ void sym_init(void);
+ void sym_clear_all_valid(void);
+ void sym_set_all_changed(void);
+-void sym_set_changed(struct symbol *sym);
++void sym_set_changed(struct symbol *sym, bool real);
+ struct symbol *sym_check_deps(struct symbol *sym);
+ struct property *prop_alloc(enum prop_type type, struct symbol *sym);
+ struct symbol *prop_get_symbol(struct property *prop);
+diff --git a/scripts/kconfig/symbol.c b/scripts/kconfig/symbol.c
+index ee225ce..f8a31ee 100644
+--- a/scripts/kconfig/symbol.c
++++ b/scripts/kconfig/symbol.c
+@@ -4,6 +4,7 @@
+  */
+ 
+ #include <ctype.h>
++#include <stdbool.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <regex.h>
+@@ -206,7 +207,7 @@ static void sym_calc_visibility(struct s
+ 		tri = yes;
+ 	if (sym->visible != tri) {
+ 		sym->visible = tri;
+-		sym_set_changed(sym);
++		sym_set_changed(sym, false);
+ 	}
+ 	if (sym_is_choice_value(sym))
+ 		return;
+@@ -217,7 +218,7 @@ static void sym_calc_visibility(struct s
+ 		tri = yes;
+ 	if (sym->rev_dep.tri != tri) {
+ 		sym->rev_dep.tri = tri;
+-		sym_set_changed(sym);
++		sym_set_changed(sym, false);
+ 	}
+ }
+ 
+@@ -354,7 +355,7 @@ void sym_calc_value(struct symbol *sym)
+ 	sym_validate_range(sym);
+ 
+ 	if (memcmp(&oldval, &sym->curr, sizeof(oldval))) {
+-		sym_set_changed(sym);
++		sym_set_changed(sym, false);
+ 		if (modules_sym == sym) {
+ 			sym_set_all_changed();
+ 			modules_val = modules_sym->curr.tri;
+@@ -367,7 +368,7 @@ void sym_calc_value(struct symbol *sym)
+ 		for (e = prop->expr; e; e = e->left.expr) {
+ 			e->right.sym->flags |= flags;
+ 			if (flags & SYMBOL_CHANGED)
+-				sym_set_changed(e->right.sym);
++				sym_set_changed(e->right.sym, false);
+ 		}
+ 	}
+ }
+@@ -384,11 +385,13 @@ void sym_clear_all_valid(void)
+ 		sym_calc_value(modules_sym);
+ }
+ 
+-void sym_set_changed(struct symbol *sym)
++void sym_set_changed(struct symbol *sym, bool real)
+ {
+ 	struct property *prop;
+ 
+ 	sym->flags |= SYMBOL_CHANGED;
++	if (real)
++		sym->flags |= SYMBOL_CHANGED_REAL;
+ 	for (prop = sym->prop; prop; prop = prop->next) {
+ 		if (prop->menu)
+ 			prop->menu->flags |= MENU_CHANGED;
+@@ -401,7 +404,7 @@ void sym_set_all_changed(void)
+ 	int i;
+ 
+ 	for_all_symbols(i, sym)
+-		sym_set_changed(sym);
++		sym_set_changed(sym, false);
+ }
+ 
+ bool sym_tristate_within_range(struct symbol *sym, tristate val)
+@@ -432,7 +435,7 @@ bool sym_set_tristate_value(struct symbo
+ 
+ 	if (!(sym->flags & SYMBOL_DEF_USER)) {
+ 		sym->flags |= SYMBOL_DEF_USER;
+-		sym_set_changed(sym);
++		sym_set_changed(sym, true);
+ 	}
+ 	/*
+ 	 * setting a choice value also resets the new flag of the choice
+@@ -594,7 +597,7 @@ bool sym_set_string_value(struct symbol 
+ 
+ 	if (!(sym->flags & SYMBOL_DEF_USER)) {
+ 		sym->flags |= SYMBOL_DEF_USER;
+-		sym_set_changed(sym);
++		sym_set_changed(sym, true);
+ 	}
+ 
+ 	oldval = sym->def[S_DEF_USER].val;
