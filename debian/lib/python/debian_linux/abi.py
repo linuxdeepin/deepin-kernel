@@ -37,21 +37,21 @@ class symbols(object):
         self.symbols = {}
 
         for line in file.readlines():
-            version, symbol, module = line.strip().split()
+            version, symbol, module, export = line.strip().split()
 
             symbols = self.modules.get(module, {})
             symbols[symbol] = version
             self.modules[module] = symbols
             if self.symbols.has_key(symbol):
                 pass
-            self.symbols[symbol] = module, version
+            self.symbols[symbol] = module, version, export
 
     def write(self, file):
         symbols = self.symbols.items()
         symbols.sort()
         for symbol, i in symbols:
-            module, version = i
-            file.write("%s %s %s\n" % (version, symbol, module))
+            module, version, export = i
+            file.write("%s %s %s %s\n" % (version, symbol, module, export))
 
     def write_human(self, file):
         modules = self.modules.keys()
@@ -61,13 +61,13 @@ class symbols(object):
         file.write("Symbols in vmlinux\n\n")
         symbols = self.modules['vmlinux'].items()
         symbols.sort()
-        for symbol, version in symbols:
-            file.write("%-48s %s\n" % (symbol, version))
+        for symbol, version, export in symbols:
+            file.write("%-48s %s %s\n" % (symbol, version, export))
 
         for module in modules:
             file.write("\n\nSymbols in module %s\n\n" % module)
             symbols = self.modules[module].items()
             symbols.sort()
-            for symbol, version in symbols:
-                file.write("%-48s %s\n" % (symbol, version))
+            for symbol, version, export in symbols:
+                file.write("%-48s %s %s\n" % (symbol, version, export))
 
