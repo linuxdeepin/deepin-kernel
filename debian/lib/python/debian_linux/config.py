@@ -143,8 +143,9 @@ class config_reader_arch(config_reader):
 
     def _read_flavour(self, arch, subarch, flavour):
         if not self.has_key(('base', arch, subarch, flavour)):
-            import warnings
-            warnings.warn('No config entry for flavour %s, subarch %s, arch %s' % (flavour, subarch, arch), DeprecationWarning)
+            if subarch == 'none':
+                import warnings
+                warnings.warn('No config entry for flavour %s, subarch none, arch %s' % (flavour, arch), DeprecationWarning)
             self['base', arch, subarch, flavour] = {}
 
     def _read_subarch(self, arch, subarch):
@@ -166,6 +167,19 @@ class config_reader_arch(config_reader):
 
         for flavour in flavours:
             self._read_flavour(arch, subarch, flavour)
+
+    def merge(self, section, arch = None, subarch = None, flavour = None):
+        ret = {}
+        ret.update(self.get((section,), {}))
+        if arch:
+            ret.update(self.get((section, arch), {}))
+        if flavour and subarch and subarch != 'none':
+            ret.update(self.get((section, arch, 'none', flavour), {}))
+        if subarch:
+            ret.update(self.get((section, arch, subarch), {}))
+        if flavour:
+            ret.update(self.get((section, arch, subarch, flavour), {}))
+        return ret
 
 class config_parser(object):
     __slots__ = 'configs', 'schema'

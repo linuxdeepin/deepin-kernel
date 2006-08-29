@@ -11,6 +11,17 @@ class packages_list(sorted_dict):
         for package in packages:
             self[package['Package']] = package
 
+class flags(dict):
+    def __repr__(self):
+        repr = super(flags, self).__repr__()
+        return "%s(%s)" % (self.__class__.__name__, repr)
+
+    def __str__(self):
+        return ' '.join(["%s='%s'" % i for i in self.iteritems()])
+
+    def copy(self):
+        return self.__class__(super(flags, self).copy())
+
 class gencontrol(object):
     makefile_targets = ('binary-arch', 'build', 'setup', 'source')
 
@@ -38,7 +49,7 @@ class gencontrol(object):
         vars = self.vars.copy()
         vars.update(config_entry)
 
-        makeflags = {}
+        makeflags = flags()
         extra = {}
 
         self.do_main_setup(vars, makeflags, extra)
@@ -50,22 +61,18 @@ class gencontrol(object):
 
     def do_main_setup(self, vars, makeflags, extra):
         makeflags.update({
-            'MAJOR': self.version['major'],
-            'VERSION': self.version['version'],
-            'SOURCE_UPSTREAM': self.version['source_upstream'],
-            'SOURCEVERSION': self.version['source'],
-            'UPSTREAMVERSION': self.version['upstream'],
+            'MAJOR': self.version['linux']['major'],
+            'VERSION': self.version['linux']['version'],
+            'UPSTREAMVERSION': self.version['linux']['upstream'],
             'ABINAME': self.abiname,
         })
 
     def do_main_makefile(self, makefile, makeflags, extra):
-        makeflags_string = ' '.join(["%s='%s'" % i for i in makeflags.iteritems()])
-
         cmds_binary_indep = []
-        cmds_binary_indep.append(("$(MAKE) -f debian/rules.real binary-indep %s" % makeflags_string,))
+        cmds_binary_indep.append(("$(MAKE) -f debian/rules.real binary-indep %s" % makeflags,))
         makefile.append(("binary-indep:", cmds_binary_indep))
 
-    def do_main_packages(self, packages):
+    def do_main_packages(self, packages, extra):
         pass
 
     def do_extra(self, packages, makefile):
@@ -115,8 +122,6 @@ class gencontrol(object):
         for subarch in config_entry['subarches']:
             self.do_subarch(packages, makefile, arch, subarch, vars.copy(), makeflags.copy(), extra)
 
-        self.do_arch_packages_post(packages, makefile, arch, vars, makeflags, extra)
-
     def do_arch_setup(self, vars, makeflags, arch, extra):
         pass
 
@@ -128,9 +133,6 @@ class gencontrol(object):
     def do_arch_packages(self, packages, makefile, arch, vars, makeflags, extra):
         for i in self.makefile_targets:
             makefile.append("%s-%s-real:" % (i, arch))
-
-    def do_arch_packages_post(self, packages, makefile, arch, vars, makeflags, extra):
-        pass
 
     def do_subarch(self, packages, makefile, arch, subarch, vars, makeflags, extra):
         config_entry = self.config['base', arch, subarch]
@@ -160,7 +162,7 @@ class gencontrol(object):
             makefile.append("%s-%s-%s-real:" % (i, arch, subarch))
 
     def do_flavour(self, packages, makefile, arch, subarch, flavour, vars, makeflags, extra):
-        config_entry = self.config['base', arch, subarch, flavour]
+        config_entry = self.config.merge('base', arch, subarch, flavour)
         vars.update(config_entry)
 
         if not vars.has_key('class'):
@@ -178,7 +180,6 @@ class gencontrol(object):
 
     def do_flavour_setup(self, vars, makeflags, arch, subarch, flavour, extra):
         for i in (
-            ('compiler', 'COMPILER'),
             ('kernel-arch', 'KERNEL_ARCH'),
             ('localversion', 'LOCALVERSION'),
         ):  
@@ -235,13 +236,13 @@ class gencontrol(object):
             entries.append(self.process_package(i, vars))
         return entries
 
-    def process_version(self, version):
-        self.version = version
-        self.vars = {
-            'upstreamversion': version['upstream'],
-            'version': version['version'],
-            'source_upstream': version['source_upstream'],
-            'major': version['major'],
+    def process_version_linux(self, version, abiname):
+        return {
+            'upstreamversion': version['linux']['upstream'],
+            'version': version['linux']['version'],
+            'source_upstream': version['linux']['source_upstream'],
+            'major': version['linux']['major'],
+            'abiname': abiname,
         }
 
     def substitute(self, s, vars):
@@ -251,7 +252,7 @@ class gencontrol(object):
             return s
         def subst(match):
             return vars[match.group(1)]
-        return re.sub(r'@([a-z_]+)@', subst, s)
+        return re.sub(r'@([-_a-z]+)@', subst, s)
 
     def write_control(self, list):
         self.write_rfc822(file("debian/control", 'w'), list)

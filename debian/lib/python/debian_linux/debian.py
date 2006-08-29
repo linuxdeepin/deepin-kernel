@@ -47,6 +47,25 @@ def read_changelog(dir = ''):
     return entries
 
 def parse_version(version):
+    ret = {
+        'complete': version,
+        'upstream': version,
+        'debian': None,
+        'linux': None,
+    }
+    try:
+        i = len(version) - version[::-1].index('-')
+    except ValueError:
+        return ret
+    ret['upstream'] = version[:i-1]
+    ret['debian'] = version[i:]
+    try:
+        ret['linux'] = parse_version_linux(version)
+    except ValueError:
+        pass
+    return ret
+
+def parse_version_linux(version):
     version_re = ur"""
 ^
 (?P<source>

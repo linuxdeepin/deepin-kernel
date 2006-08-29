@@ -13,18 +13,14 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
     def do_main_setup(self, vars, makeflags, extra):
         super(gencontrol, self).do_main_setup(vars, makeflags, extra)
         vars.update(self.config['image',])
-        makeflags['REVISIONS'] = ' '.join([i['Version']['debian'] for i in self.changelog[::-1]])
+        makeflags.update({
+            'SOURCEVERSION': self.version['linux']['source'],
+        })
 
     def do_main_packages(self, packages, extra):
-        vars = self.vars
-
-        main = self.templates["control.main"]
-        packages.extend(self.process_packages(main, vars))
-
-        tree = self.templates["control.tree"]
-        packages.append(self.process_real_tree(tree[0], vars))
-
-        packages.extend(self.process_packages(self.templates["control.support"], vars))
+        packages.extend(self.process_packages(self.templates["control.main"], self.vars))
+        packages.append(self.process_real_tree(self.templates["control.tree"][0], self.vars))
+        packages.extend(self.process_packages(self.templates["control.support"], self.vars))
 
     def do_arch_setup(self, vars, makeflags, arch, extra):
         vars.update(self.config.get(('image', arch), {}))
@@ -44,12 +40,10 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
                 package['Architecture'] = [arch]
                 packages.append(package)
 
-        makeflags_string = ' '.join(["%s='%s'" % i for i in makeflags.iteritems()])
-
         cmds_binary_arch = []
-        cmds_binary_arch.append(("$(MAKE) -f debian/rules.real binary-arch-arch %s" % makeflags_string))
+        cmds_binary_arch.append(("$(MAKE) -f debian/rules.real binary-arch-arch %s" % makeflags))
         cmds_source = []
-        cmds_source.append(("$(MAKE) -f debian/rules.real source-arch %s" % makeflags_string,))
+        cmds_source.append(("$(MAKE) -f debian/rules.real source-arch %s" % makeflags,))
         makefile.append(("binary-arch-%s-real:" % arch, cmds_binary_arch))
         makefile.append(("build-%s-real:" % arch))
         makefile.append(("setup-%s-real:" % arch))
@@ -77,12 +71,10 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
             package_headers['Architecture'] = [arch]
             packages.append(package_headers)
 
-        makeflags_string = ' '.join(["%s='%s'" % i for i in makeflags.iteritems()])
-
         cmds_binary_arch = []
-        cmds_binary_arch.append(("$(MAKE) -f debian/rules.real binary-arch-subarch %s" % makeflags_string,))
+        cmds_binary_arch.append(("$(MAKE) -f debian/rules.real binary-arch-subarch %s" % makeflags,))
         cmds_source = []
-        cmds_source.append(("$(MAKE) -f debian/rules.real source-subarch %s" % makeflags_string,))
+        cmds_source.append(("$(MAKE) -f debian/rules.real source-subarch %s" % makeflags,))
         makefile.append(("binary-arch-%s-%s-real:" % (arch, subarch), cmds_binary_arch))
         makefile.append("build-%s-%s-real:" % (arch, subarch))
         makefile.append(("setup-%s-%s-real:" % (arch, subarch)))
@@ -109,8 +101,6 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         image_type_modulesinline = self.templates["control.image.type-modulesinline"]
         image_type_standalone = self.templates["control.image.type-standalone"]
         headers = self.templates["control.headers"]
-        image_latest = self.templates["control.image.latest"]
-        headers_latest = self.templates["control.headers.latest"]
 
         config_entry_base = self.config.merge('base', arch, subarch, flavour)
         config_entry_relations = self.config.merge('relations', arch, subarch, flavour)
@@ -130,29 +120,31 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
             commands = [config_entry_commands_initramfs[i] for i in generators if config_entry_commands_initramfs.has_key(i)]
             makeflags['INITRD_CMD'] = ' '.join(commands)
             l = package_relation_group()
-            l.extend(generators + ['initramfs-fallback'])
+            l.extend(generators)
             image_depends.append(l)
 
-        packages_own = []
         packages_dummy = []
+        packages_own = []
 
         if vars['type'] == 'plain-s390-tape':
             image = image_type_standalone
         elif vars['type'] == 'plain-xen':
             image = image_type_modulesextra
+            config_entry_xen = self.config.merge('xen', arch, subarch, flavour)
+            for i, j in config_entry_xen.iteritems():
+                vars['xen-%s' % i] = j
+            packages_dummy.extend(self.process_packages(self.templates['control.xen-linux-system'], vars))
         else:
             image = image_type_modulesinline
 
         packages_own.append(self.process_real_image(image[0], {'depends': image_depends}, config_entry_relations, vars))
         packages_own.extend(self.process_packages(image[1:], vars))
-        packages_dummy.extend(self.process_packages(image_latest, vars))
 
         if image in (image_type_modulesextra, image_type_modulesinline):
             makeflags['MODULES'] = True
             package_headers = self.process_package(headers[0], vars)
             package_headers['Depends'].extend(relations_compiler)
             packages_own.append(package_headers)
-            packages_dummy.append(self.process_package(headers_latest[0], vars))
             extra['headers_arch_depends'].append('%s (= ${Source-Version})' % packages_own[-1]['Package'])
 
         for package in packages_own + packages_dummy:
@@ -164,27 +156,47 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
                 package['Architecture'] = [arch]
                 packages.append(package)
 
-        makeflags_string = ' '.join(["%s='%s'" % i for i in makeflags.iteritems()])
+        if vars['type'] == 'plain-xen':
+            for i in ('postinst', 'postrm', 'prerm'):
+                j = self.substitute(self.templates["image.xen.%s" % i], vars)
+                file("debian/%s.%s" % (packages_own[0]['Package'], i), 'w').write(j)
 
         cmds_binary_arch = []
-        cmds_binary_arch.append(("$(MAKE) -f debian/rules.real binary-arch-flavour %s" % makeflags_string,))
-        cmds_binary_arch.append(("$(MAKE) -f debian/rules.real install-dummy DH_OPTIONS='%s' %s" % (' '.join(["-p%s" % i['Package'] for i in packages_dummy]), makeflags_string),))
+        cmds_binary_arch.append(("$(MAKE) -f debian/rules.real binary-arch-flavour %s" % makeflags,))
+        if packages_dummy:
+            cmds_binary_arch.append(("$(MAKE) -f debian/rules.real install-dummy DH_OPTIONS='%s' %s" % (' '.join(["-p%s" % i['Package'] for i in packages_dummy]), makeflags),))
         cmds_build = []
-        cmds_build.append(("$(MAKE) -f debian/rules.real build %s" % makeflags_string,))
+        cmds_build.append(("$(MAKE) -f debian/rules.real build %s" % makeflags,))
         cmds_setup = []
-        cmds_setup.append(("$(MAKE) -f debian/rules.real setup-flavour %s" % makeflags_string,))
+        cmds_setup.append(("$(MAKE) -f debian/rules.real setup-flavour %s" % makeflags,))
         makefile.append(("binary-arch-%s-%s-%s-real:" % (arch, subarch, flavour), cmds_binary_arch))
         makefile.append(("build-%s-%s-%s-real:" % (arch, subarch, flavour), cmds_build))
         makefile.append(("setup-%s-%s-%s-real:" % (arch, subarch, flavour), cmds_setup))
         makefile.append(("source-%s-%s-%s-real:" % (arch, subarch, flavour)))
 
+    def do_extra(self, packages, makefile):
+        apply = self.templates['patch.apply']
+        unpatch = self.templates['patch.unpatch']
+
+        vars = {
+            'home': '/usr/src/kernel-patches/all/%s' % self.version['linux']['upstream'],
+            'revisions': ' '.join([i['Version']['debian'] for i in self.changelog[::-1]]),
+        }
+        vars.update(self.version['linux'])
+
+        apply = self.substitute(apply, vars)
+        unpatch = self.substitute(unpatch, vars)
+
+        file('debian/bin/patch-apply', 'w').write(apply)
+        file('debian/bin/patch-unpatch', 'w').write(unpatch)
+
     def process_changelog(self):
-        version = self.changelog[0]['Version']
-        self.process_version(version)
-        if version['modifier'] is not None:
-            self.abiname = self.vars['abiname'] = ''
+        self.version = self.changelog[0]['Version']
+        if self.version['linux']['modifier'] is not None:
+            self.abiname = ''
         else:
-            self.abiname = self.vars['abiname'] = '-%s' % self.config['abi',]['abiname']
+            self.abiname = '-%s' % self.config['abi',]['abiname']
+        self.vars = self.process_version_linux(self.version, self.abiname)
 
     def process_real_image(self, in_entry, relations, config, vars):
         entry = self.process_package(in_entry, vars)
@@ -197,22 +209,23 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
             t = relations.get(field.lower(), [])
             value.extend(t)
             value.config(config)
-            entry[field] = value
+            if value:
+                entry[field] = value
         return entry
 
     def process_real_tree(self, in_entry, vars):
         entry = self.process_package(in_entry, vars)
-        tmp = self.changelog[0]['Version']['upstream']
+        tmp = self.changelog[0]['Version']['linux']['upstream']
         versions = []
         for i in self.changelog:
-            if i['Version']['upstream'] != tmp:
+            if i['Version']['linux']['upstream'] != tmp:
                 break
-            versions.insert(0, i['Version'])
+            versions.insert(0, i['Version']['linux'])
         for i in (('Depends', 'Provides')):
             value = package_relation_list()
             value.extend(entry.get(i, []))
             if i == 'Depends':
-                value.append("linux-patch-debian-%(version)s (= %(source)s)" % self.changelog[0]['Version'])
+                value.append("linux-patch-debian-%(version)s (= %(source)s)" % self.changelog[0]['Version']['linux'])
                 value.append(' | '.join(["linux-source-%(version)s (= %(source)s)" % v for v in versions]))
             elif i == 'Provides':
                 value.extend(["linux-tree-%(source)s" % v for v in versions])
