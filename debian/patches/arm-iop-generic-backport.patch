@@ -1,0 +1,222 @@
+# Backport of a number of generic functions which subsequent patches use
+# Upstream status: will go into 2.6.19
+
+diff -urN a/arch/arm/mach-iop3xx/Makefile b/arch/arm/mach-iop3xx/Makefile
+--- a/arch/arm/mach-iop3xx/Makefile	2006-08-03 11:39:01.664742750 +0000
++++ b/arch/arm/mach-iop3xx/Makefile	2006-08-07 17:33:38.237095500 +0000
+@@ -10,7 +10,7 @@
+ obj-n			:=
+ obj-			:=
+ 
+-obj-$(CONFIG_ARCH_IOP321)  += iop321-setup.o iop321-irq.o iop321-pci.o iop321-time.o
++obj-$(CONFIG_ARCH_IOP321)  += iop321-setup.o iop321-irq.o iop321-pci.o iop321-time.o iop321-gpio.o
+ 
+ obj-$(CONFIG_ARCH_IOP331)  += iop331-setup.o iop331-irq.o iop331-pci.o iop331-time.o
+ 
+diff -urN a/arch/arm/mach-iop3xx/iop321-gpio.c b/arch/arm/mach-iop3xx/iop321-gpio.c
+--- a/arch/arm/mach-iop3xx/iop321-gpio.c	1970-01-01 00:00:00.000000000 +0000
++++ b/arch/arm/mach-iop3xx/iop321-gpio.c	2006-08-07 17:33:38.237095500 +0000
+@@ -0,0 +1,44 @@
++/*
++ * arch/arm/plat-iop/gpio.c
++ * GPIO handling for Intel IOP3xx processors.
++ *
++ * Copyright (C) 2006 Lennert Buytenhek <buytenh@wantstofly.org>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or (at
++ * your option) any later version.
++ */
++
++#include <linux/device.h>
++#include <asm/arch/iop321.h>
++
++void gpio_line_config(int line, int direction)
++{
++	unsigned long flags;
++
++	if (direction == GPIO_IN) {
++		*IOP321_GPOE |= 1 << line;
++	} else if (direction == GPIO_OUT) {
++		*IOP321_GPOE &= ~(1 << line);
++	}
++}
++EXPORT_SYMBOL(gpio_line_config);
++
++int gpio_line_get(int line)
++{
++	return !!(*IOP321_GPID & (1 << line));
++}
++EXPORT_SYMBOL(gpio_line_get);
++
++void gpio_line_set(int line, int value)
++{
++	unsigned long flags;
++
++	if (value == GPIO_LOW) {
++		*IOP321_GPOD &= ~(1 << line);
++	} else if (value == GPIO_HIGH) {
++		*IOP321_GPOD |= 1 << line;
++	}
++}
++EXPORT_SYMBOL(gpio_line_set);
+diff -urN a/arch/arm/mach-iop3xx/iop321-setup.c b/arch/arm/mach-iop3xx/iop321-setup.c
+--- a/arch/arm/mach-iop3xx/iop321-setup.c	2006-08-03 11:39:01.664742750 +0000
++++ b/arch/arm/mach-iop3xx/iop321-setup.c	2006-08-07 17:33:38.237095500 +0000
+@@ -75,7 +75,7 @@
+ 	}
+ };
+ 
+-static struct resource iop32x_i2c_0_resources[] = {
++struct resource iop32x_i2c_0_resources[] = {
+ 	[0] = {
+ 		.start = 0xfffff680,
+ 		.end = 0xfffff698,
+@@ -88,7 +88,7 @@
+ 	}
+ };
+ 
+-static struct resource iop32x_i2c_1_resources[] = {
++struct resource iop32x_i2c_1_resources[] = {
+ 	[0] = {
+ 		.start = 0xfffff6a0,
+ 		.end = 0xfffff6b8,
+@@ -101,14 +101,14 @@
+ 	}
+ };
+ 
+-static struct platform_device iop32x_i2c_0_controller = {
++struct platform_device iop32x_i2c_0_controller = {
+ 	.name = "IOP3xx-I2C",
+ 	.id = 0,
+ 	.num_resources = 2,
+ 	.resource = iop32x_i2c_0_resources
+ };
+ 
+-static struct platform_device iop32x_i2c_1_controller = {
++struct platform_device iop32x_i2c_1_controller = {
+ 	.name = "IOP3xx-I2C",
+ 	.id = 1,
+ 	.num_resources = 2,
+diff -urN a/arch/arm/mach-iop3xx/iop321-time.c b/arch/arm/mach-iop3xx/iop321-time.c
+--- a/arch/arm/mach-iop3xx/iop321-time.c	2006-08-03 11:39:01.664742750 +0000
++++ b/arch/arm/mach-iop3xx/iop321-time.c	2006-08-07 17:33:50.349852500 +0000
+@@ -28,6 +28,19 @@
+ 
+ #define IOP321_TIME_SYNC 0
+ 
++static unsigned long ticks_per_jiffy;
++static unsigned long ticks_per_usec;
++static unsigned long next_jiffy_time;
++
++unsigned long iop3xx_gettimeoffset(void)
++{
++	unsigned long offset;
++
++	offset = next_jiffy_time - *IOP321_TU_TCR1;
++
++	return offset / ticks_per_usec;
++}
++
+ static inline unsigned long get_elapsed(void)
+ {
+ 	return LATCH - *IOP321_TU_TCR0;
+@@ -65,6 +78,24 @@
+ }
+ 
+ static irqreturn_t
++iop3xx_timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
++{
++	write_seqlock(&xtime_lock);
++
++	asm volatile("mcr p6, 0, %0, c6, c1, 0" : : "r" (1));
++
++	while ((signed long)(next_jiffy_time - *IOP321_TU_TCR1)
++							>= ticks_per_jiffy) {
++		timer_tick(regs);
++		next_jiffy_time -= ticks_per_jiffy;
++	}
++
++	write_sequnlock(&xtime_lock);
++
++	return IRQ_HANDLED;
++}
++
++static irqreturn_t
+ iop321_timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+ {
+ 	u32 tisr;
+@@ -82,12 +113,41 @@
+ 	return IRQ_HANDLED;
+ }
+ 
++static struct irqaction iop3xx_timer_irq = {
++	.name		= "IOP3XX Timer Tick",
++	.handler	= iop3xx_timer_interrupt,
++	.flags		= IRQF_DISABLED | IRQF_TIMER,
++};
++
+ static struct irqaction iop321_timer_irq = {
+ 	.name		= "IOP321 Timer Tick",
+ 	.handler	= iop321_timer_interrupt,
+ 	.flags		= IRQF_DISABLED | IRQF_TIMER,
+ };
+ 
++void __init iop3xx_init_time(unsigned long tick_rate)
++{
++	u32 timer_ctl;
++
++	ticks_per_jiffy = (tick_rate + HZ/2) / HZ;
++	ticks_per_usec = tick_rate / 1000000;
++	next_jiffy_time = 0xffffffff;
++
++	timer_ctl = IOP321_TMR_EN | IOP321_TMR_PRIVILEGED | IOP321_TMR_RELOAD |
++			IOP321_TMR_RATIO_1_1;
++
++	/*
++	* We use timer 0 for our timer interrupt, and timer 1 as
++	* monotonic counter for tracking missed jiffies.
++	*/
++	asm volatile("mcr p6, 0, %0, c4, c1, 0" : : "r" (ticks_per_jiffy - 1));
++	asm volatile("mcr p6, 0, %0, c0, c1, 0" : : "r" (timer_ctl));
++	asm volatile("mcr p6, 0, %0, c5, c1, 0" : : "r" (0xffffffff));
++	asm volatile("mcr p6, 0, %0, c1, c1, 0" : : "r" (timer_ctl));
++
++	setup_irq(IRQ_IOP321_TIMER0, &iop3xx_timer_irq);
++}
++
+ static void __init iop321_timer_init(void)
+ {
+ 	u32 timer_ctl;
+diff -urN a/include/asm-arm/arch-iop3xx/iop321.h b/include/asm-arm/arch-iop3xx/iop321.h
+--- a/include/asm-arm/arch-iop3xx/iop321.h	2006-08-03 11:39:08.109145500 +0000
++++ b/include/asm-arm/arch-iop3xx/iop321.h	2006-08-07 17:33:38.241095750 +0000
+@@ -232,6 +232,12 @@
+ #define IOP321_GPID       (volatile u32 *)IOP321_REG_ADDR(0x000007C8)
+ #define IOP321_GPOD       (volatile u32 *)IOP321_REG_ADDR(0x000007CC)
+ 
++#define GPIO_IN			0
++#define GPIO_OUT		1
++#define GPIO_LOW		0
++#define GPIO_HIGH		1
++#define IOP3XX_GPIO_LINE(x)	(x)
++
+ /* Interrupt Controller */
+ #define IOP321_INTCTL     (volatile u32 *)IOP321_REG_ADDR(0x000007D0)
+ #define IOP321_INTSTR     (volatile u32 *)IOP321_REG_ADDR(0x000007D4)
+@@ -340,6 +346,13 @@
+ extern void iop321_map_io(void);
+ extern void iop321_init_irq(void);
+ extern void iop321_time_init(void);
++extern unsigned long iop3xx_gettimeoffset(void);
++extern void iop3xx_init_time(unsigned long);
++extern struct platform_device iop32x_i2c_0_controller;
++extern struct platform_device iop32x_i2c_1_controller;
++extern void gpio_line_config(int line, int direction);
++extern int  gpio_line_get(int line);
++extern void gpio_line_set(int line, int value);
+ #endif
+ 
+ #endif // _IOP321_HW_H_
+
