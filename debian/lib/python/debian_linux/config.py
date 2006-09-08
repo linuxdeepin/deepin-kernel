@@ -65,6 +65,7 @@ class config_reader_arch(config_reader):
     schema = {
         'arches': schema_item_list(),
         'available': schema_item_boolean(),
+        'configs': schema_item_list(),
         'flavours': schema_item_list(),
         'initramfs': schema_item_boolean(),
         'initramfs-generators': schema_item_list(),
@@ -159,7 +160,7 @@ class config_reader_arch(config_reader):
             if real[-1] in flavours:
                 real[0:0] = ['base', arch, subarch]
             else:
-                real[0:] = [real.pop(), arch, subarch]
+                real[0:0] = [real.pop(), arch, subarch]
             real = tuple(real)
             s = self.get(real, {})
             s.update(config[section])
