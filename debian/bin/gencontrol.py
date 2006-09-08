@@ -187,8 +187,8 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         apply = self.substitute(apply, vars)
         unpatch = self.substitute(unpatch, vars)
 
-        file('debian/bin/patch-apply', 'w').write(apply)
-        file('debian/bin/patch-unpatch', 'w').write(unpatch)
+        file('debian/bin/patch.apply', 'w').write(apply)
+        file('debian/bin/patch.unpatch', 'w').write(unpatch)
 
     def process_changelog(self):
         self.version = self.changelog[0]['Version']
