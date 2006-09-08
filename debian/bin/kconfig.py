@@ -33,15 +33,12 @@ class checker(object):
 
     def _get_config(self, config, default, *entry_name):
         entry_real = ('image',) + entry_name
-        print entry_real
         entry = config.get(entry_real, None)
         if entry is None:
             return default
-        print entry
         configs = entry.get('configs', None)
         if configs is None:
             return default
-        print configs
         return configs
 
 if __name__ == '__main__':
