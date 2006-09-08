@@ -1,7 +1,6 @@
 PROGS = \
 	docproc \
-	fixdep \
-	split-include
+	fixdep
 
 OUTDIR = basic
 VPATH = $(top_srcdir)/scripts/basic
