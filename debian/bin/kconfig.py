@@ -1,13 +1,24 @@
 #!/usr/bin/env python2.4
 
-import sys
+import optparse, os.path, sys
 from debian_linux.abi import *
 from debian_linux.config import *
 from debian_linux.kconfig import *
 
 class checker(object):
-    def __init__(self, arch, subarch, flavour):
-        config = config_reader_arch(["debian/arch"])
+    parser = optparse.OptionParser()
+    parser.add_option('-b', '--base', dest = 'base', default = "debian/arch")
+    parser.add_option('-o', '--output', dest = 'output')
+
+    def __init__(self):
+        options, args = self.parser.parse_args()
+
+        self.base = options.base
+        self.output = options.output
+
+        arch, subarch, flavour = args
+
+        config = config_reader_arch([self.base])
 
         self.config = self._get_config(config, ["config"])
         self.config_arch = self._get_config(config, ["%s/config" % arch], arch)
@@ -18,18 +29,21 @@ class checker(object):
             self.config_subarch = self._get_config(config, ["%s/%s/config" % (arch, subarch)], arch, subarch)
             self.config_flavour = self._get_config(config, ["%s/%s/config.%s" % (arch, subarch, flavour)], arch, subarch, flavour)
 
-    def __call__(self, out):
+    def __call__(self):
         config = []
         config.extend(self.config)
         config.extend(self.config_arch)
         config.extend(self.config_subarch)
         config.extend(self.config_flavour)
+        config = [os.path.join(self.base, c) for c in config]
 
-        kconfig = kconfigfile()
-        for c in config:
-            kconfig.read(file("debian/arch/%s" % c))
-
-        out.write(str(kconfig))
+        if self.output:
+            kconfig = kconfigfile()
+            for c in config:
+                kconfig.read(file(c))
+            file(self.output, "w").write(str(kconfig))
+        else:
+            print '\n'.join(config)
 
     def _get_config(self, config, default, *entry_name):
         entry_real = ('image',) + entry_name
@@ -42,4 +56,4 @@ class checker(object):
         return configs
 
 if __name__ == '__main__':
-    sys.exit(checker(*sys.argv[1:])(sys.stdout))
+    sys.exit(checker()())
