@@ -131,9 +131,12 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         elif vars['type'] == 'plain-xen':
             image = image_type_modulesextra
             config_entry_xen = self.config.merge('xen', arch, subarch, flavour)
-            for i, j in config_entry_xen.iteritems():
-                vars['xen-%s' % i] = j
-            packages_dummy.extend(self.process_packages(self.templates['control.xen-linux-system'], vars))
+            p = self.process_packages(self.templates['control.xen-linux-system'], vars)
+            l = package_relation_group()
+            for version in config_entry_xen['versions']:
+                l.append("xen-hypervisor-%s-%s" % (version, config_entry_xen['flavour']))
+            p[0]['Depends'].append(l)
+            packages_dummy.extend(p)
         else:
             image = image_type_modulesinline
 
