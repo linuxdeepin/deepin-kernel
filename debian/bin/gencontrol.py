@@ -135,6 +135,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
             l = package_relation_group()
             for version in config_entry_xen['versions']:
                 l.append("xen-hypervisor-%s-%s" % (version, config_entry_xen['flavour']))
+            makeflags['XEN_VERSIONS'] = ' '.join(config_entry_xen['versions'])
             p[0]['Depends'].append(l)
             packages_dummy.extend(p)
         else:
