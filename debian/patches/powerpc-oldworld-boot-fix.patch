@@ -1,40 +1,54 @@
-#
-# Patch author: Christian Aichinger <Greek0@gmx.net>
+# Patch author: Benjamin Herrenschmidt <benh@kernel.crashing.org>
 # Description: Fix oldworld initrd loading problems.
-#  The kernel somehow loses the information where the initrd image is
-#  placed in memory. The correct data is there in
-#  arch/powerpc/kernel/prom_init.c:prom_check_initrd(), but in
-#  init/initramfs.c:populate_rootfs() it's wrong, initrd_{start,end}
-#  are both 0.
-#  arch/powerpc/kernel/prom_init.c:prom_check_initrd() is broken. The
-#  relevant part of the code is:
+#  It looks like older OF "setprop" is bogus and isn't actually copying the
+#  data but just taking a pointer. The LongTrail workaround also has that
+#  problem as "property" will not copy the data. This fixes the workaround
+#  and applies it to Apple OF 1.0.5.
+# Signed-off-by: Benjamin Herrenschmidt <benh@kernel.crashing.org>
 # Closes:
 #  375035: Kernel 2.6.16 attempts to access root device before running initramfs init
 #  366620: initramfs-tools: 2.6.16-1-powerpc fails to mount rootfs, 2.6.15-1-powerpc works
 #
 
---- a/arch/powerpc/kernel/prom_init.c	2006-09-15 18:33:50.000000000 +0200
-+++ b/arch/powerpc/kernel/prom_init.c	2006-09-15 18:33:44.000000000 +0200
-@@ -2141,17 +2141,17 @@
-        	struct prom_t *_prom = &RELOC(prom);
+Index: linux-tika/arch/powerpc/kernel/prom_init.c
+===================================================================
+--- linux-tika.orig/arch/powerpc/kernel/prom_init.c	2006-09-02 09:53:00.000000000 +1000
++++ linux-tika/arch/powerpc/kernel/prom_init.c	2006-09-18 20:55:26.000000000 +1000
+@@ -102,7 +102,7 @@
+ #endif
  
- 	if (r3 && r4 && r4 != 0xdeadbeef) {
--		unsigned long val;
-+		unsigned long *ptr;
+ #define OF_WA_CLAIM	1	/* do phys/virt claim separately, then map */
+-#define OF_WA_LONGTRAIL	2	/* work around longtrail bugs */
++#define OF_WA_SETPROP	2	/* work around setprop bugs */
  
- 		RELOC(prom_initrd_start) = is_kernel_addr(r3) ? __pa(r3) : r3;
- 		RELOC(prom_initrd_end) = RELOC(prom_initrd_start) + r4;
+ #define PROM_BUG() do {						\
+         prom_printf("kernel BUG at %s line 0x%x!\n",		\
+@@ -472,7 +472,7 @@
+ {
+ 	char cmd[256], *p;
  
--		val = RELOC(prom_initrd_start);
-+		ptr = &RELOC(prom_initrd_start);
- 		prom_setprop(_prom->chosen, "/chosen", "linux,initrd-start",
--			     &val, sizeof(val));
--		val = RELOC(prom_initrd_end);
-+			     ptr, sizeof(prom_initrd_start));
-+		ptr = &RELOC(prom_initrd_end);
- 		prom_setprop(_prom->chosen, "/chosen", "linux,initrd-end",
--			     &val, sizeof(val));
-+			     ptr, sizeof(prom_initrd_end));
+-	if (!(OF_WORKAROUNDS & OF_WA_LONGTRAIL))
++	if (!(OF_WORKAROUNDS & OF_WA_SETPROP))
+ 		return call_prom("setprop", 4, 1, node, ADDR(pname),
+ 				 (u32)(unsigned long) value, (u32) valuelen);
  
- 		reserve_mem(RELOC(prom_initrd_start),
- 			    RELOC(prom_initrd_end) - RELOC(prom_initrd_start));
+@@ -482,6 +482,7 @@
+ 	add_string(&p, nodename);
+ 	add_string(&p, tohex((u32)(unsigned long) value));
+ 	add_string(&p, tohex(valuelen));
++	add_string(&p, "encode-bytes");
+ 	add_string(&p, tohex(ADDR(pname)));
+ 	add_string(&p, tohex(strlen(RELOC(pname))));
+ 	add_string(&p, "property");
+@@ -1466,9 +1467,9 @@
+ 	version[sizeof(version) - 1] = 0;
+ 	/* XXX might need to add other versions here */
+ 	if (strcmp(version, "Open Firmware, 1.0.5") == 0)
+-		of_workarounds = OF_WA_CLAIM;
++		of_workarounds = OF_WA_CLAIM | OF_WA_SETPROP;
+ 	else if (strncmp(version, "FirmWorks,3.", 12) == 0) {
+-		of_workarounds = OF_WA_CLAIM | OF_WA_LONGTRAIL;
++		of_workarounds = OF_WA_CLAIM | OF_WA_SETPROP;
+ 		call_prom("interpret", 1, 1, "dev /memory 0 to allow-reclaim");
+ 	} else
+ 		return;
