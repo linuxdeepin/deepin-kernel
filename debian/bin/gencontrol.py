@@ -165,6 +165,25 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
                 j = self.substitute(self.templates["image.xen.%s" % i], vars)
                 file("debian/%s.%s" % (packages_own[0]['Package'], i), 'w').write(j)
 
+        def get_config(default, *entry_name):
+            entry_real = ('image',) + entry_name
+            entry = self.config.get(entry_real, None)
+            if entry is None:
+                return default
+            configs = entry.get('configs', None)
+            if configs is None:
+                return default
+            return configs
+
+        kconfig = ['config']
+        kconfig.extend(get_config(["%s/config" % arch], arch))
+        if subarch == 'none':
+            kconfig.extend(get_config(["%s/config.%s" % (arch, flavour)], arch, subarch, flavour))
+        else:
+            kconfig.extend(get_config(["%s/%s/config" % (arch, subarch)], arch, subarch))
+            kconfig.extend(get_config(["%s/%s/config.%s" % (arch, subarch, flavour)], arch, subarch, flavour))
+        makeflags['KCONFIG'] = ' '.join(kconfig)
+
         cmds_binary_arch = []
         cmds_binary_arch.append(("$(MAKE) -f debian/rules.real binary-arch-flavour %s" % makeflags,))
         if packages_dummy:
