@@ -71,6 +71,7 @@ class config_reader_arch(config_reader):
         'initramfs-generators': schema_item_list(),
         'modules': schema_item_boolean(),
         'subarches': schema_item_list(),
+        'versions': schema_item_list(),
     }
 
     def __init__(self, dirs = []):
