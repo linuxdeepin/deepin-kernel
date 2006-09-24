@@ -141,6 +141,9 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         else:
             image = image_type_modulesinline
 
+        if not vars.has_key('desc'):
+            vars['desc'] = None
+
         packages_own.append(self.process_real_image(image[0], {'depends': image_depends}, config_entry_relations, vars))
         packages_own.extend(self.process_packages(image[1:], vars))
 
@@ -223,8 +226,6 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
 
     def process_real_image(self, in_entry, relations, config, vars):
         entry = self.process_package(in_entry, vars)
-        if vars.has_key('desc'):
-            entry['Description'].long[1:1] = [vars['desc']]
         for field in 'Depends', 'Provides', 'Suggests', 'Recommends', 'Conflicts':
             value = entry.get(field, package_relation_list())
             t = vars.get(field.lower(), [])
