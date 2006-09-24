@@ -165,9 +165,6 @@ class gencontrol(object):
         config_entry = self.config.merge('base', arch, subarch, flavour)
         vars.update(config_entry)
 
-        if not vars.has_key('class'):
-            warnings.warn('No class entry in config for flavour %s, subarch %s, arch %s' % (flavour, subarch, arch), DeprecationWarning)
-            vars['class'] = '%s-class' % flavour
         if not vars.has_key('longclass'):
             vars['longclass'] = vars['class']
 
