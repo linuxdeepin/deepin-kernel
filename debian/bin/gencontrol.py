@@ -205,7 +205,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         unpatch = self.templates['patch.unpatch']
 
         vars = {
-            'home': '/usr/src/kernel-patches/all/%s' % self.version['linux']['upstream'],
+            'home': '/usr/src/kernel-patches/all/%s/debian' % self.version['linux']['upstream'],
             'revisions': ' '.join([i['Version']['debian'] for i in self.changelog[::-1]]),
         }
         vars.update(self.version['linux'])
