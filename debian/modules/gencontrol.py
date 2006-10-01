@@ -24,6 +24,13 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
             for arch in self.config['base',]['arches']],
         )
 
+    def do_flavour(self, packages, makefile, arch, subarch, flavour, vars, makeflags, extra):
+        config_entry = self.config.merge('base', arch, subarch, flavour)
+        if config_entry.get('modules', True) is False:
+            return
+
+        super(gencontrol, self).do_flavour(packages, makefile, arch, subarch, flavour, vars, makeflags, extra)
+
     def do_flavour_packages(self, packages, makefile, arch, subarch, flavour, vars, makeflags, extra):
         modules = self.templates["control.modules"]
         modules = self.process_packages(modules, vars)
@@ -36,8 +43,6 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
             else:
                 package['Architecture'] = [arch]
                 packages.append(package)
-
-        packages.extend(modules)
 
         makeflags_string = ' '.join(["%s='%s'" % i for i in makeflags.iteritems()])
 
