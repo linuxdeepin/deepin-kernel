@@ -117,9 +117,7 @@ class gencontrol(object):
         self.do_arch_setup(vars, makeflags, arch, extra)
         self.do_arch_makefile(makefile, arch, makeflags, extra)
         self.do_arch_packages(packages, makefile, arch, vars, makeflags, extra)
-
-        for subarch in config_entry['subarches']:
-            self.do_subarch(packages, makefile, arch, subarch, vars.copy(), makeflags.copy(), extra)
+        self.do_arch_recurse(packages, makefile, arch, vars, makeflags, extra)
 
     def do_arch_setup(self, vars, makeflags, arch, extra):
         pass
@@ -133,6 +131,10 @@ class gencontrol(object):
         for i in self.makefile_targets:
             makefile.append("%s-%s-real:" % (i, arch))
 
+    def do_arch_recurse(self, packages, makefile, arch, vars, makeflags, extra):
+        for subarch in self.config['base', arch]['subarches']:
+            self.do_subarch(packages, makefile, arch, subarch, vars.copy(), makeflags.copy(), extra)
+
     def do_subarch(self, packages, makefile, arch, subarch, vars, makeflags, extra):
         config_entry = self.config['base', arch, subarch]
         vars.update(config_entry)
@@ -144,9 +146,7 @@ class gencontrol(object):
         self.do_subarch_setup(vars, makeflags, arch, subarch, extra)
         self.do_subarch_makefile(makefile, arch, subarch, makeflags, extra)
         self.do_subarch_packages(packages, makefile, arch, subarch, vars, makeflags, extra)
-
-        for flavour in config_entry['flavours']:
-            self.do_flavour(packages, makefile, arch, subarch, flavour, vars.copy(), makeflags.copy(), extra)
+        self.do_subarch_recurse(packages, makefile, arch, subarch, vars, makeflags, extra)
 
     def do_subarch_setup(self, vars, makeflags, arch, subarch, extra):
         pass
@@ -159,6 +159,10 @@ class gencontrol(object):
     def do_subarch_packages(self, packages, makefile, arch, subarch, vars, makeflags, extra):
         for i in self.makefile_targets:
             makefile.append("%s-%s-%s-real:" % (i, arch, subarch))
+
+    def do_subarch_recurse(self, packages, makefile, arch, subarch, vars, makeflags, extra):
+        for flavour in self.config['base', arch, subarch]['flavours']:
+            self.do_flavour(packages, makefile, arch, subarch, flavour, vars.copy(), makeflags.copy(), extra)
 
     def do_flavour(self, packages, makefile, arch, subarch, flavour, vars, makeflags, extra):
         config_entry = self.config.merge('base', arch, subarch, flavour)
