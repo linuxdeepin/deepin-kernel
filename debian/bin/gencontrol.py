@@ -252,7 +252,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
                 value.append("linux-patch-debian-%(version)s (= %(source)s)" % self.changelog[0]['Version']['linux'])
                 value.append(' | '.join(["linux-source-%(version)s (= %(source)s)" % v for v in versions]))
             elif i == 'Provides':
-                value.extend(["linux-tree-%(source)s" % v for v in versions])
+                value.extend(["linux-tree-%s" % v['source'].replace('~', '-') for v in versions])
             entry[i] = value
         return entry
 
