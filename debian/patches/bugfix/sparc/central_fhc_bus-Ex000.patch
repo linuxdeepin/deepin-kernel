@@ -1,0 +1,196 @@
+From git-commits-head-owner@vger.kernel.org Thu Oct 26 20:34:25 2006
+Date: Thu, 26 Oct 2006 15:59:07 GMT
+Message-Id: <200610261559.k9QFx78p003484@hera.kernel.org>
+From: Linux Kernel Mailing List <linux-kernel@vger.kernel.org>
+To: git-commits-head@vger.kernel.org
+Subject: [SPARC64]: Fix central/FHC bus handling on Ex000 systems.
+
+commit 4130a4b206e7c628482aa12ec30949382c8cdc5e
+tree bae99205682ec6db943fc8271dddc980646254d8
+parent 291b58d663862c3d42d2e8092f8b0dd3f15a94f8
+author David S. Miller <davem@sunset.davemloft.net> 1161840666 -0700
+committer David S. Miller <davem@sunset.davemloft.net> 1161841155 -0700
+
+[SPARC64]: Fix central/FHC bus handling on Ex000 systems.
+
+1) probe_other_fhcs() wants to see only non-central FHC
+   busses, so skip FHCs that don't sit off the root
+
+2) Like SBUS, FHC can lack the appropriate address and
+   size cell count properties, so add an of_busses[]
+   entry and handlers for that.
+
+3) Central FHC irq translator probing was buggy.  We
+   were trying to use dp->child in irq_trans_init but
+   that linkage is not setup at this point.
+
+   So instead, pass in the parent of "dp" and look for
+   the child "fhc" with parent "central".
+
+Thanks to the tireless assistence of Ben Collins in tracking
+down these problems and testing out these fixes.
+
+Signed-off-by: David S. Miller <davem@davemloft.net>
+
+ arch/sparc64/kernel/central.c   |    4 ++++
+ arch/sparc64/kernel/of_device.c |   33 ++++++++++++++++++++++++---------
+ arch/sparc64/kernel/prom.c      |   30 +++++++++++++++---------------
+ 3 files changed, 43 insertions(+), 24 deletions(-)
+
+diff --git a/arch/sparc64/kernel/central.c b/arch/sparc64/kernel/central.c
+index b66336d..e724c54 100644
+--- a/arch/sparc64/kernel/central.c
++++ b/arch/sparc64/kernel/central.c
+@@ -126,6 +126,10 @@ static void probe_other_fhcs(void)
+ 		int board;
+ 		u32 tmp;
+ 
++		if (dp->parent &&
++		    dp->parent->parent != NULL)
++			continue;
++
+ 		fhc = (struct linux_fhc *)
+ 			central_alloc_bootmem(sizeof(struct linux_fhc));
+ 		if (fhc == NULL)
+diff --git a/arch/sparc64/kernel/of_device.c b/arch/sparc64/kernel/of_device.c
+index d3dfb2a..983ca5f 100644
+--- a/arch/sparc64/kernel/of_device.c
++++ b/arch/sparc64/kernel/of_device.c
+@@ -402,16 +402,22 @@ static void of_bus_sbus_count_cells(stru
+ 		*sizec = 1;
+ }
+ 
+-static int of_bus_sbus_map(u32 *addr, const u32 *range, int na, int ns, int pna)
+-{
+-	return of_bus_default_map(addr, range, na, ns, pna);
+-}
+-
+-static unsigned int of_bus_sbus_get_flags(u32 *addr)
++/*
++ * FHC/Central bus specific translator.
++ *
++ * This is just needed to hard-code the address and size cell
++ * counts.  'fhc' and 'central' nodes lack the #address-cells and
++ * #size-cells properties, and if you walk to the root on such
++ * Enterprise boxes all you'll get is a #size-cells of 2 which is
++ * not what we want to use.
++ */
++static int of_bus_fhc_match(struct device_node *np)
+ {
+-	return IORESOURCE_MEM;
++	return !strcmp(np->name, "fhc") ||
++		!strcmp(np->name, "central");
+ }
+ 
++#define of_bus_fhc_count_cells of_bus_sbus_count_cells
+ 
+ /*
+  * Array of bus specific translators
+@@ -433,8 +439,17 @@ static struct of_bus of_busses[] = {
+ 		.addr_prop_name = "reg",
+ 		.match = of_bus_sbus_match,
+ 		.count_cells = of_bus_sbus_count_cells,
+-		.map = of_bus_sbus_map,
+-		.get_flags = of_bus_sbus_get_flags,
++		.map = of_bus_default_map,
++		.get_flags = of_bus_default_get_flags,
++	},
++	/* FHC */
++	{
++		.name = "fhc",
++		.addr_prop_name = "reg",
++		.match = of_bus_fhc_match,
++		.count_cells = of_bus_fhc_count_cells,
++		.map = of_bus_default_map,
++		.get_flags = of_bus_default_get_flags,
+ 	},
+ 	/* Default */
+ 	{
+diff --git a/arch/sparc64/kernel/prom.c b/arch/sparc64/kernel/prom.c
+index e21cd6a..c60efb3 100644
+--- a/arch/sparc64/kernel/prom.c
++++ b/arch/sparc64/kernel/prom.c
+@@ -1079,23 +1079,22 @@ static void sun4v_vdev_irq_trans_init(st
+ 
+ static void irq_trans_init(struct device_node *dp)
+ {
+-	const char *model;
+ #ifdef CONFIG_PCI
++	const char *model;
+ 	int i;
+ #endif
+ 
++#ifdef CONFIG_PCI
+ 	model = of_get_property(dp, "model", NULL);
+ 	if (!model)
+ 		model = of_get_property(dp, "compatible", NULL);
+-	if (!model)
+-		return;
+-
+-#ifdef CONFIG_PCI
+-	for (i = 0; i < ARRAY_SIZE(pci_irq_trans_table); i++) {
+-		struct irq_trans *t = &pci_irq_trans_table[i];
++	if (model) {
++		for (i = 0; i < ARRAY_SIZE(pci_irq_trans_table); i++) {
++			struct irq_trans *t = &pci_irq_trans_table[i];
+ 
+-		if (!strcmp(model, t->name))
+-			return t->init(dp);
++			if (!strcmp(model, t->name))
++				return t->init(dp);
++		}
+ 	}
+ #endif
+ #ifdef CONFIG_SBUS
+@@ -1103,8 +1102,9 @@ static void irq_trans_init(struct device
+ 	    !strcmp(dp->name, "sbi"))
+ 		return sbus_irq_trans_init(dp);
+ #endif
+-	if (!strcmp(dp->name, "central"))
+-		return central_irq_trans_init(dp->child);
++	if (!strcmp(dp->name, "fhc") &&
++	    !strcmp(dp->parent->name, "central"))
++		return central_irq_trans_init(dp);
+ 	if (!strcmp(dp->name, "virtual-devices"))
+ 		return sun4v_vdev_irq_trans_init(dp);
+ }
+@@ -1516,7 +1516,7 @@ static char * __init get_one_property(ph
+ 	return buf;
+ }
+ 
+-static struct device_node * __init create_node(phandle node)
++static struct device_node * __init create_node(phandle node, struct device_node *parent)
+ {
+ 	struct device_node *dp;
+ 
+@@ -1525,6 +1525,7 @@ static struct device_node * __init creat
+ 
+ 	dp = prom_early_alloc(sizeof(*dp));
+ 	dp->unique_id = unique_id++;
++	dp->parent = parent;
+ 
+ 	kref_init(&dp->kref);
+ 
+@@ -1543,12 +1544,11 @@ static struct device_node * __init build
+ {
+ 	struct device_node *dp;
+ 
+-	dp = create_node(node);
++	dp = create_node(node, parent);
+ 	if (dp) {
+ 		*(*nextp) = dp;
+ 		*nextp = &dp->allnext;
+ 
+-		dp->parent = parent;
+ 		dp->path_component_name = build_path_component(dp);
+ 		dp->full_name = build_full_name(dp);
+ 
+@@ -1564,7 +1564,7 @@ void __init prom_build_devicetree(void)
+ {
+ 	struct device_node **nextp;
+ 
+-	allnodes = create_node(prom_root_node);
++	allnodes = create_node(prom_root_node, NULL);
+ 	allnodes->path_component_name = "";
+ 	allnodes->full_name = "/";
+ 
