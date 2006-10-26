@@ -1,0 +1,174 @@
+From git-commits-head-owner@vger.kernel.org Wed Oct 25 14:13:09 2006
+Date: Wed, 25 Oct 2006 05:59:05 GMT
+Message-Id: <200610250559.k9P5x5tk014073@hera.kernel.org>
+From: Linux Kernel Mailing List <linux-kernel@vger.kernel.org>
+To: git-commits-head@vger.kernel.org
+Subject: [NETFILTER]: Fix ip6_tables extension header bypass bug
+
+commit 6d381634d213580d40d431e7664dfb45f641b884
+tree a8680dd059e9a4e115d17e54d4a8dcea4d196a3e
+parent 51d8b1a65291a6956b79374b6adbbadc2263bcf6
+author Patrick McHardy <kaber@trash.net> 1161731710 -0700
+committer David S. Miller <davem@davemloft.net> 1161731710 -0700
+
+[NETFILTER]: Fix ip6_tables extension header bypass bug
+
+As reported by Mark Dowd <Mark_Dowd@McAfee.com>, ip6_tables is susceptible
+to a fragmentation attack causing false negatives on extension header matches.
+
+When extension headers occur in the non-first fragment after the fragment
+header (possibly with an incorrect nexthdr value in the fragment header)
+a rule looking for this extension header will never match.
+
+Drop fragments that are at offset 0 and don't contain the final protocol
+header regardless of the ruleset, since this should not happen normally.
+Since all extension headers are before the protocol header this makes sure
+an extension header is either not present or in the first fragment, where
+we can properly parse it.
+
+With help from Yasuyuki KOZAKAI <yasuyuki.kozakai@toshiba.co.jp>.
+Fixed reject in ip6t_hbh.c for stable. -maks
+
+Signed-off-by: Patrick McHardy <kaber@trash.net>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: maximilian attems <maks@sternwelten.at>
+
+ net/ipv6/netfilter/ip6_tables.c |   11 +++++++----
+ net/ipv6/netfilter/ip6t_ah.c    |    7 ++++++-
+ net/ipv6/netfilter/ip6t_frag.c  |    7 ++++++-
+ net/ipv6/netfilter/ip6t_hbh.c   |    7 ++++++-
+ net/ipv6/netfilter/ip6t_rt.c    |    7 ++++++-
+ 5 files changed, 31 insertions(+), 8 deletions(-)
+
+diff --git a/net/ipv6/netfilter/ip6_tables.c b/net/ipv6/netfilter/ip6_tables.c
+index f0328c7..53bf977 100644
+--- a/net/ipv6/netfilter/ip6_tables.c
++++ b/net/ipv6/netfilter/ip6_tables.c
+@@ -1440,6 +1440,9 @@ static void __exit ip6_tables_fini(void)
+  * If target header is found, its offset is set in *offset and return protocol
+  * number. Otherwise, return -1.
+  *
++ * If the first fragment doesn't contain the final protocol header or
++ * NEXTHDR_NONE it is considered invalid.
++ *
+  * Note that non-1st fragment is special case that "the protocol number
+  * of last header" is "next header" field in Fragment header. In this case,
+  * *offset is meaningless and fragment offset is stored in *fragoff if fragoff
+@@ -1463,12 +1466,12 @@ int ipv6_find_hdr(const struct sk_buff *
+ 		if ((!ipv6_ext_hdr(nexthdr)) || nexthdr == NEXTHDR_NONE) {
+ 			if (target < 0)
+ 				break;
+-			return -1;
++			return -ENOENT;
+ 		}
+ 
+ 		hp = skb_header_pointer(skb, start, sizeof(_hdr), &_hdr);
+ 		if (hp == NULL)
+-			return -1;
++			return -EBADMSG;
+ 		if (nexthdr == NEXTHDR_FRAGMENT) {
+ 			unsigned short _frag_off, *fp;
+ 			fp = skb_header_pointer(skb,
+@@ -1477,7 +1480,7 @@ int ipv6_find_hdr(const struct sk_buff *
+ 						sizeof(_frag_off),
+ 						&_frag_off);
+ 			if (fp == NULL)
+-				return -1;
++				return -EBADMSG;
+ 
+ 			_frag_off = ntohs(*fp) & ~0x7;
+ 			if (_frag_off) {
+@@ -1488,7 +1491,7 @@ int ipv6_find_hdr(const struct sk_buff *
+ 						*fragoff = _frag_off;
+ 					return hp->nexthdr;
+ 				}
+-				return -1;
++				return -ENOENT;
+ 			}
+ 			hdrlen = 8;
+ 		} else if (nexthdr == NEXTHDR_AUTH)
+diff --git a/net/ipv6/netfilter/ip6t_ah.c b/net/ipv6/netfilter/ip6t_ah.c
+index ec1b160..4648664 100644
+--- a/net/ipv6/netfilter/ip6t_ah.c
++++ b/net/ipv6/netfilter/ip6t_ah.c
+@@ -54,9 +54,14 @@ match(const struct sk_buff *skb,
+ 	const struct ip6t_ah *ahinfo = matchinfo;
+ 	unsigned int ptr;
+ 	unsigned int hdrlen = 0;
++	int err;
+ 
+-	if (ipv6_find_hdr(skb, &ptr, NEXTHDR_AUTH, NULL) < 0)
++	err = ipv6_find_hdr(skb, &ptr, NEXTHDR_AUTH, NULL);
++	if (err < 0) {
++		if (err != -ENOENT)
++			*hotdrop = 1;
+ 		return 0;
++	}
+ 
+ 	ah = skb_header_pointer(skb, ptr, sizeof(_ah), &_ah);
+ 	if (ah == NULL) {
+diff --git a/net/ipv6/netfilter/ip6t_frag.c b/net/ipv6/netfilter/ip6t_frag.c
+index 78d9c8b..cd22eaa 100644
+--- a/net/ipv6/netfilter/ip6t_frag.c
++++ b/net/ipv6/netfilter/ip6t_frag.c
+@@ -52,9 +52,14 @@ match(const struct sk_buff *skb,
+ 	struct frag_hdr _frag, *fh;
+ 	const struct ip6t_frag *fraginfo = matchinfo;
+ 	unsigned int ptr;
++	int err;
+ 
+-	if (ipv6_find_hdr(skb, &ptr, NEXTHDR_FRAGMENT, NULL) < 0)
++	err = ipv6_find_hdr(skb, &ptr, NEXTHDR_FRAGMENT, NULL);
++	if (err < 0) {
++		if (err != -ENOENT)
++			*hotdrop = 1;
+ 		return 0;
++	}
+ 
+ 	fh = skb_header_pointer(skb, ptr, sizeof(_frag), &_frag);
+ 	if (fh == NULL) {
+--- a/net/ipv6/netfilter/ip6t_hbh.c.orig	2006-10-26 22:11:31.000000000 +0200
++++ b/net/ipv6/netfilter/ip6t_hbh.c	2006-10-26 22:13:06.000000000 +0200
+@@ -72,11 +72,15 @@ match(const struct sk_buff *skb,
+ 	unsigned int optlen;
+ 
+ #if HOPBYHOP
+-	if (ipv6_find_hdr(skb, &ptr, NEXTHDR_HOP, NULL) < 0)
++	err = ipv6_find_hdr(skb, &ptr, NEXTHDR_HOP, NULL);
+ #else
+-	if (ipv6_find_hdr(skb, &ptr, NEXTHDR_DEST, NULL) < 0)
++	err = ipv6_find_hdr(skb, &ptr, NEXTHDR_DEST, NULL);
+ #endif
++	if (err < 0) {
++		if (err != -ENOENT)
++			*hotdrop = 1;
+ 		return 0;
++	}
+ 
+ 	oh = skb_header_pointer(skb, ptr, sizeof(_optsh), &_optsh);
+ 	if (oh == NULL) {
+diff --git a/net/ipv6/netfilter/ip6t_rt.c b/net/ipv6/netfilter/ip6t_rt.c
+index bcb2e16..54d7d14 100644
+--- a/net/ipv6/netfilter/ip6t_rt.c
++++ b/net/ipv6/netfilter/ip6t_rt.c
+@@ -58,9 +58,14 @@ match(const struct sk_buff *skb,
+ 	unsigned int hdrlen = 0;
+ 	unsigned int ret = 0;
+ 	struct in6_addr *ap, _addr;
++	int err;
+ 
+-	if (ipv6_find_hdr(skb, &ptr, NEXTHDR_ROUTING, NULL) < 0)
++	err = ipv6_find_hdr(skb, &ptr, NEXTHDR_ROUTING, NULL);
++	if (err < 0) {
++		if (err != -ENOENT)
++			*hotdrop = 1;
+ 		return 0;
++	}
+ 
+ 	rh = skb_header_pointer(skb, ptr, sizeof(_route), &_route);
+ 	if (rh == NULL) {
+-
+To unsubscribe from this list: send the line "unsubscribe git-commits-head" in
+the body of a message to majordomo@vger.kernel.org
+More majordomo info at  http://vger.kernel.org/majordomo-info.html
+
