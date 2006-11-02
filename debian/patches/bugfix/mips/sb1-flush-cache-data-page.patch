@@ -1,0 +1,67 @@
+# Add missing cache flush, fixes hang on boot from PIO-driven devices,
+# proposed patch at linux-mips.org.
+#
+# Signed-off-by: Thiemo Seufer <ths@networkno.de>
+
+diff --git a/arch/mips/mm/c-sb1.c b/arch/mips/mm/c-sb1.c
+index 16bad7c..acae51c 100644
+--- a/arch/mips/mm/c-sb1.c
++++ b/arch/mips/mm/c-sb1.c
+@@ -19,6 +19,7 @@
+  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+  */
+ #include <linux/init.h>
++#include <linux/hardirq.h>
+ 
+ #include <asm/asm.h>
+ #include <asm/bootinfo.h>
+@@ -233,6 +234,25 @@ void sb1_flush_cache_page(struct vm_area
+ 	__attribute__((alias("local_sb1_flush_cache_page")));
+ #endif
+ 
++#ifdef CONFIG_SMP
++static void sb1_flush_cache_data_page_ipi(void *info)
++{
++	unsigned long start = (unsigned long)info;
++
++	__sb1_writeback_inv_dcache_range(start, start + PAGE_SIZE);
++}
++
++static void sb1_flush_cache_data_page(unsigned long addr)
++{
++	if (in_atomic())
++		__sb1_writeback_inv_dcache_range(addr, addr + PAGE_SIZE);
++	else
++		on_each_cpu(sb1_flush_cache_data_page_ipi, (void *) addr, 1, 1);
++}
++#else
++void sb1_flush_cache_data_page(unsigned long)
++	__attribute__((alias("local_sb1_flush_cache_data_page")));
++#endif
+ 
+ /*
+  * Invalidate all caches on this CPU
+@@ -504,7 +524,6 @@ static __init void probe_cache_sizes(voi
+ void sb1_cache_init(void)
+ {
+ 	extern char except_vec2_sb1;
+-	extern char handle_vec2_sb1;
+ 
+ 	/* Special cache error handler for SB1 */
+ 	set_uncached_handler (0x100, &except_vec2_sb1, 0x80);
+@@ -534,7 +553,7 @@ #endif
+ 
+ 	flush_cache_sigtramp = sb1_flush_cache_sigtramp;
+ 	local_flush_data_cache_page = (void *) sb1_nop;
+-	flush_data_cache_page = (void *) sb1_nop;
++	flush_data_cache_page = sb1_flush_cache_data_page;
+ 
+ 	/* Full flush */
+ 	__flush_cache_all = sb1___flush_cache_all;
+@@ -558,5 +577,5 @@ #endif
+ 	:
+ 	: "memory");
+ 
+-	flush_cache_all();
++	local_sb1___flush_cache_all();
+ }

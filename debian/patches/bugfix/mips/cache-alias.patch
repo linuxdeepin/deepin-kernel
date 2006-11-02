@@ -1,0 +1,675 @@
+# Fix cache alias handling for mips (see #387498), from linux-mips.org
+# 2.6.18-stable, also in kernel.org mainline.
+
+
+diff --git a/arch/mips/mm/c-r3k.c b/arch/mips/mm/c-r3k.c
+index bb041a2..e1f35ef 100644
+--- a/arch/mips/mm/c-r3k.c
++++ b/arch/mips/mm/c-r3k.c
+@@ -335,7 +335,7 @@ void __init r3k_cache_init(void)
+ 	flush_cache_mm = r3k_flush_cache_mm;
+ 	flush_cache_range = r3k_flush_cache_range;
+ 	flush_cache_page = r3k_flush_cache_page;
+-	flush_icache_page = r3k_flush_icache_page;
++	__flush_icache_page = r3k_flush_icache_page;
+ 	flush_icache_range = r3k_flush_icache_range;
+ 
+ 	flush_cache_sigtramp = r3k_flush_cache_sigtramp;
+diff --git a/arch/mips/mm/c-r4k.c b/arch/mips/mm/c-r4k.c
+index 069803f..2d729f6 100644
+--- a/arch/mips/mm/c-r4k.c
++++ b/arch/mips/mm/c-r4k.c
+@@ -475,7 +475,7 @@ static inline void local_r4k_flush_cache
+ 		}
+ 	}
+ 	if (exec) {
+-		if (cpu_has_vtag_icache) {
++		if (cpu_has_vtag_icache && mm == current->active_mm) {
+ 			int cpu = smp_processor_id();
+ 
+ 			if (cpu_context(cpu, mm) != 0)
+@@ -599,7 +599,7 @@ static inline void local_r4k_flush_icach
+ 	 * We're not sure of the virtual address(es) involved here, so
+ 	 * we have to flush the entire I-cache.
+ 	 */
+-	if (cpu_has_vtag_icache) {
++	if (cpu_has_vtag_icache && vma->vm_mm == current->active_mm) {
+ 		int cpu = smp_processor_id();
+ 
+ 		if (cpu_context(cpu, vma->vm_mm) != 0)
+@@ -1291,7 +1291,7 @@ void __init r4k_cache_init(void)
+ 	__flush_cache_all	= r4k___flush_cache_all;
+ 	flush_cache_mm		= r4k_flush_cache_mm;
+ 	flush_cache_page	= r4k_flush_cache_page;
+-	flush_icache_page	= r4k_flush_icache_page;
++	__flush_icache_page	= r4k_flush_icache_page;
+ 	flush_cache_range	= r4k_flush_cache_range;
+ 
+ 	flush_cache_sigtramp	= r4k_flush_cache_sigtramp;
+diff --git a/arch/mips/mm/c-sb1.c b/arch/mips/mm/c-sb1.c
+index 2d71efb..16bad7c 100644
+--- a/arch/mips/mm/c-sb1.c
++++ b/arch/mips/mm/c-sb1.c
+@@ -155,6 +155,26 @@ static inline void __sb1_flush_icache_al
+ }
+ 
+ /*
++ * Invalidate a range of the icache.  The addresses are virtual, and
++ * the cache is virtually indexed and tagged.  However, we don't
++ * necessarily have the right ASID context, so use index ops instead
++ * of hit ops.
++ */
++static inline void __sb1_flush_icache_range(unsigned long start,
++	unsigned long end)
++{
++	start &= ~(icache_line_size - 1);
++	end = (end + icache_line_size - 1) & ~(icache_line_size - 1);
++
++	while (start != end) {
++		cache_set_op(Index_Invalidate_I, start & icache_index_mask);
++		start += icache_line_size;
++	}
++	mispredict();
++	sync();
++}
++
++/*
+  * Flush the icache for a given physical page.  Need to writeback the
+  * dcache first, then invalidate the icache.  If the page isn't
+  * executable, nothing is required.
+@@ -173,8 +193,11 @@ #endif
+ 	/*
+ 	 * Bumping the ASID is probably cheaper than the flush ...
+ 	 */
+-	if (cpu_context(cpu, vma->vm_mm) != 0)
+-		drop_mmu_context(vma->vm_mm, cpu);
++	if (vma->vm_mm == current->active_mm) {
++		if (cpu_context(cpu, vma->vm_mm) != 0)
++			drop_mmu_context(vma->vm_mm, cpu);
++	} else
++		__sb1_flush_icache_range(addr, addr + PAGE_SIZE);
+ }
+ 
+ #ifdef CONFIG_SMP
+@@ -210,26 +233,6 @@ void sb1_flush_cache_page(struct vm_area
+ 	__attribute__((alias("local_sb1_flush_cache_page")));
+ #endif
+ 
+-/*
+- * Invalidate a range of the icache.  The addresses are virtual, and
+- * the cache is virtually indexed and tagged.  However, we don't
+- * necessarily have the right ASID context, so use index ops instead
+- * of hit ops.
+- */
+-static inline void __sb1_flush_icache_range(unsigned long start,
+-	unsigned long end)
+-{
+-	start &= ~(icache_line_size - 1);
+-	end = (end + icache_line_size - 1) & ~(icache_line_size - 1);
+-
+-	while (start != end) {
+-		cache_set_op(Index_Invalidate_I, start & icache_index_mask);
+-		start += icache_line_size;
+-	}
+-	mispredict();
+-	sync();
+-}
+-
+ 
+ /*
+  * Invalidate all caches on this CPU
+@@ -326,9 +329,12 @@ #endif
+ 	 * If there's a context, bump the ASID (cheaper than a flush,
+ 	 * since we don't know VAs!)
+ 	 */
+-	if (cpu_context(cpu, vma->vm_mm) != 0) {
+-		drop_mmu_context(vma->vm_mm, cpu);
+-	}
++	if (vma->vm_mm == current->active_mm) {
++		if (cpu_context(cpu, vma->vm_mm) != 0)
++			drop_mmu_context(vma->vm_mm, cpu);
++	} else
++		__sb1_flush_icache_range(start, start + PAGE_SIZE);
++
+ }
+ 
+ #ifdef CONFIG_SMP
+@@ -520,7 +526,7 @@ #endif
+ 
+ 	/* These routines are for Icache coherence with the Dcache */
+ 	flush_icache_range = sb1_flush_icache_range;
+-	flush_icache_page = sb1_flush_icache_page;
++	__flush_icache_page = sb1_flush_icache_page;
+ 	flush_icache_all = __sb1_flush_icache_all; /* local only */
+ 
+ 	/* This implies an Icache flush too, so can't be nop'ed */
+diff --git a/arch/mips/mm/cache.c b/arch/mips/mm/cache.c
+index ddd3a2d..40c8b02 100644
+--- a/arch/mips/mm/cache.c
++++ b/arch/mips/mm/cache.c
+@@ -25,7 +25,7 @@ void (*flush_cache_range)(struct vm_area
+ void (*flush_cache_page)(struct vm_area_struct *vma, unsigned long page,
+ 	unsigned long pfn);
+ void (*flush_icache_range)(unsigned long start, unsigned long end);
+-void (*flush_icache_page)(struct vm_area_struct *vma, struct page *page);
++void (*__flush_icache_page)(struct vm_area_struct *vma, struct page *page);
+ 
+ /* MIPS specific cache operations */
+ void (*flush_cache_sigtramp)(unsigned long addr);
+@@ -70,6 +70,8 @@ void __flush_dcache_page(struct page *pa
+ 	struct address_space *mapping = page_mapping(page);
+ 	unsigned long addr;
+ 
++	if (PageHighMem(page))
++		return;
+ 	if (mapping && !mapping_mapped(mapping)) {
+ 		SetPageDcacheDirty(page);
+ 		return;
+@@ -91,16 +93,16 @@ void __update_cache(struct vm_area_struc
+ {
+ 	struct page *page;
+ 	unsigned long pfn, addr;
++	int exec = (vma->vm_flags & VM_EXEC) && !cpu_has_ic_fills_f_dc;
+ 
+ 	pfn = pte_pfn(pte);
+-	if (pfn_valid(pfn) && (page = pfn_to_page(pfn), page_mapping(page)) &&
+-	    Page_dcache_dirty(page)) {
+-		if (pages_do_alias((unsigned long)page_address(page),
+-		                   address & PAGE_MASK)) {
+-			addr = (unsigned long) page_address(page);
++	if (unlikely(!pfn_valid(pfn)))
++		return;
++	page = pfn_to_page(pfn);
++	if (page_mapping(page) && Page_dcache_dirty(page)) {
++		addr = (unsigned long) page_address(page);
++		if (exec || pages_do_alias(addr, address & PAGE_MASK))
+ 			flush_data_cache_page(addr);
+-		}
+-
+ 		ClearPageDcacheDirty(page);
+ 	}
+ }
+diff --git a/arch/mips/mm/fault.c b/arch/mips/mm/fault.c
+index e3a6172..a4f8c45 100644
+--- a/arch/mips/mm/fault.c
++++ b/arch/mips/mm/fault.c
+@@ -89,7 +89,7 @@ good_area:
+ 		if (!(vma->vm_flags & VM_WRITE))
+ 			goto bad_area;
+ 	} else {
+-		if (!(vma->vm_flags & (VM_READ | VM_EXEC)))
++		if (!(vma->vm_flags & (VM_READ | VM_WRITE | VM_EXEC)))
+ 			goto bad_area;
+ 	}
+ 
+diff --git a/arch/mips/mm/init.c b/arch/mips/mm/init.c
+index c52497b..a681f57 100644
+--- a/arch/mips/mm/init.c
++++ b/arch/mips/mm/init.c
+@@ -30,11 +30,39 @@ #include <asm/bootinfo.h>
+ #include <asm/cachectl.h>
+ #include <asm/cpu.h>
+ #include <asm/dma.h>
++#include <asm/kmap_types.h>
+ #include <asm/mmu_context.h>
+ #include <asm/sections.h>
+ #include <asm/pgtable.h>
+ #include <asm/pgalloc.h>
+ #include <asm/tlb.h>
++#include <asm/fixmap.h>
++
++/* CP0 hazard avoidance. */
++#define BARRIER __asm__ __volatile__(".set noreorder\n\t" \
++				     "nop; nop; nop; nop; nop; nop;\n\t" \
++				     ".set reorder\n\t")
++
++/* Atomicity and interruptability */
++#ifdef CONFIG_MIPS_MT_SMTC
++
++#include <asm/mipsmtregs.h>
++
++#define ENTER_CRITICAL(flags) \
++	{ \
++	unsigned int mvpflags; \
++	local_irq_save(flags);\
++	mvpflags = dvpe()
++#define EXIT_CRITICAL(flags) \
++	evpe(mvpflags); \
++	local_irq_restore(flags); \
++	}
++#else
++
++#define ENTER_CRITICAL(flags) local_irq_save(flags)
++#define EXIT_CRITICAL(flags) local_irq_restore(flags)
++
++#endif /* CONFIG_MIPS_MT_SMTC */
+ 
+ DEFINE_PER_CPU(struct mmu_gather, mmu_gathers);
+ 
+@@ -80,13 +108,184 @@ unsigned long setup_zero_pages(void)
+ 	return 1UL << order;
+ }
+ 
+-#ifdef CONFIG_HIGHMEM
+-pte_t *kmap_pte;
+-pgprot_t kmap_prot;
++/*
++ * These are almost like kmap_atomic / kunmap_atmic except they take an
++ * additional address argument as the hint.
++ */
+ 
+ #define kmap_get_fixmap_pte(vaddr)					\
+ 	pte_offset_kernel(pmd_offset(pud_offset(pgd_offset_k(vaddr), (vaddr)), (vaddr)), (vaddr))
+ 
++#ifdef CONFIG_MIPS_MT_SMTC
++static pte_t *kmap_coherent_pte;
++static void __init kmap_coherent_init(void)
++{
++	unsigned long vaddr;
++
++	/* cache the first coherent kmap pte */
++	vaddr = __fix_to_virt(FIX_CMAP_BEGIN);
++	kmap_coherent_pte = kmap_get_fixmap_pte(vaddr);
++}
++#else
++static inline void kmap_coherent_init(void) {}
++#endif
++
++static inline void *kmap_coherent(struct page *page, unsigned long addr)
++{
++	enum fixed_addresses idx;
++	unsigned long vaddr, flags, entrylo;
++	unsigned long old_ctx;
++	pte_t pte;
++	int tlbidx;
++
++	inc_preempt_count();
++	idx = (addr >> PAGE_SHIFT) & (FIX_N_COLOURS - 1);
++#ifdef CONFIG_MIPS_MT_SMTC
++	idx += FIX_N_COLOURS * smp_processor_id();
++#endif
++	vaddr = __fix_to_virt(FIX_CMAP_END - idx);
++	pte = mk_pte(page, PAGE_KERNEL);
++#if defined(CONFIG_64BIT_PHYS_ADDR) && defined(CONFIG_CPU_MIPS32_R1)
++	entrylo = pte.pte_high;
++#else
++	entrylo = pte_val(pte) >> 6;
++#endif
++
++	ENTER_CRITICAL(flags);
++	old_ctx = read_c0_entryhi();
++	write_c0_entryhi(vaddr & (PAGE_MASK << 1));
++	write_c0_entrylo0(entrylo);
++	write_c0_entrylo1(entrylo);
++#ifdef CONFIG_MIPS_MT_SMTC
++	set_pte(kmap_coherent_pte - (FIX_CMAP_END - idx), pte);
++	/* preload TLB instead of local_flush_tlb_one() */
++	mtc0_tlbw_hazard();
++	tlb_probe();
++	BARRIER;
++	tlbidx = read_c0_index();
++	mtc0_tlbw_hazard();
++	if (tlbidx < 0)
++		tlb_write_random();
++	else
++		tlb_write_indexed();
++#else
++	tlbidx = read_c0_wired();
++	write_c0_wired(tlbidx + 1);
++	write_c0_index(tlbidx);
++	mtc0_tlbw_hazard();
++	tlb_write_indexed();
++#endif
++	tlbw_use_hazard();
++	write_c0_entryhi(old_ctx);
++	EXIT_CRITICAL(flags);
++
++	return (void*) vaddr;
++}
++
++#define UNIQUE_ENTRYHI(idx) (CKSEG0 + ((idx) << (PAGE_SHIFT + 1)))
++
++static inline void kunmap_coherent(struct page *page)
++{
++#ifndef CONFIG_MIPS_MT_SMTC
++	unsigned int wired;
++	unsigned long flags, old_ctx;
++
++	ENTER_CRITICAL(flags);
++	old_ctx = read_c0_entryhi();
++	wired = read_c0_wired() - 1;
++	write_c0_wired(wired);
++	write_c0_index(wired);
++	write_c0_entryhi(UNIQUE_ENTRYHI(wired));
++	write_c0_entrylo0(0);
++	write_c0_entrylo1(0);
++	mtc0_tlbw_hazard();
++	tlb_write_indexed();
++	tlbw_use_hazard();
++	write_c0_entryhi(old_ctx);
++	EXIT_CRITICAL(flags);
++#endif
++	dec_preempt_count();
++	preempt_check_resched();
++}
++
++void copy_user_highpage(struct page *to, struct page *from,
++	unsigned long vaddr, struct vm_area_struct *vma)
++{
++	void *vfrom, *vto;
++
++	vto = kmap_atomic(to, KM_USER1);
++	if (cpu_has_dc_aliases) {
++		vfrom = kmap_coherent(from, vaddr);
++		copy_page(vto, vfrom);
++		kunmap_coherent(from);
++	} else {
++		vfrom = kmap_atomic(from, KM_USER0);
++		copy_page(vto, vfrom);
++		kunmap_atomic(vfrom, KM_USER0);
++	}
++	if (((vma->vm_flags & VM_EXEC) && !cpu_has_ic_fills_f_dc) ||
++	    pages_do_alias((unsigned long)vto, vaddr & PAGE_MASK))
++		flush_data_cache_page((unsigned long)vto);
++	kunmap_atomic(vto, KM_USER1);
++	/* Make sure this page is cleared on other CPU's too before using it */
++	smp_wmb();
++}
++
++EXPORT_SYMBOL(copy_user_highpage);
++
++void copy_user_page(void *vto, void *vfrom, unsigned long vaddr,
++	struct page *to)
++{
++	if (cpu_has_dc_aliases) {
++		struct page *from = virt_to_page(vfrom);
++		vfrom = kmap_coherent(from, vaddr);
++		copy_page(vto, vfrom);
++		kunmap_coherent(from);
++	} else
++		copy_page(vto, vfrom);
++	if (!cpu_has_ic_fills_f_dc ||
++	    pages_do_alias((unsigned long)vto, vaddr & PAGE_MASK))
++		flush_data_cache_page((unsigned long)vto);
++}
++
++EXPORT_SYMBOL(copy_user_page);
++
++void copy_to_user_page(struct vm_area_struct *vma,
++	struct page *page, unsigned long vaddr, void *dst, const void *src,
++	unsigned long len)
++{
++	if (cpu_has_dc_aliases) {
++		void *vto = kmap_coherent(page, vaddr) + (vaddr & ~PAGE_MASK);
++		memcpy(vto, src, len);
++		kunmap_coherent(page);
++	} else
++		memcpy(dst, src, len);
++	if ((vma->vm_flags & VM_EXEC) && !cpu_has_ic_fills_f_dc)
++		flush_cache_page(vma, vaddr, page_to_pfn(page));
++}
++
++EXPORT_SYMBOL(copy_to_user_page);
++
++void copy_from_user_page(struct vm_area_struct *vma,
++	struct page *page, unsigned long vaddr, void *dst, const void *src,
++	unsigned long len)
++{
++	if (cpu_has_dc_aliases) {
++		void *vfrom =
++			kmap_coherent(page, vaddr) + (vaddr & ~PAGE_MASK);
++		memcpy(dst, vfrom, len);
++		kunmap_coherent(page);
++	} else
++		memcpy(dst, src, len);
++}
++
++EXPORT_SYMBOL(copy_from_user_page);
++
++
++#ifdef CONFIG_HIGHMEM
++pte_t *kmap_pte;
++pgprot_t kmap_prot;
++
+ static void __init kmap_init(void)
+ {
+ 	unsigned long kmap_vstart;
+@@ -97,11 +296,12 @@ static void __init kmap_init(void)
+ 
+ 	kmap_prot = PAGE_KERNEL;
+ }
++#endif /* CONFIG_HIGHMEM */
+ 
+-#ifdef CONFIG_32BIT
+ void __init fixrange_init(unsigned long start, unsigned long end,
+ 	pgd_t *pgd_base)
+ {
++#if defined(CONFIG_HIGHMEM) || defined(CONFIG_MIPS_MT_SMTC)
+ 	pgd_t *pgd;
+ 	pud_t *pud;
+ 	pmd_t *pmd;
+@@ -122,7 +322,7 @@ void __init fixrange_init(unsigned long 
+ 			for (; (k < PTRS_PER_PMD) && (vaddr != end); pmd++, k++) {
+ 				if (pmd_none(*pmd)) {
+ 					pte = (pte_t *) alloc_bootmem_low_pages(PAGE_SIZE);
+-					set_pmd(pmd, __pmd(pte));
++					set_pmd(pmd, __pmd((unsigned long)pte));
+ 					if (pte != pte_offset_kernel(pmd, 0))
+ 						BUG();
+ 				}
+@@ -132,9 +332,8 @@ void __init fixrange_init(unsigned long 
+ 		}
+ 		j = 0;
+ 	}
++#endif
+ }
+-#endif /* CONFIG_32BIT */
+-#endif /* CONFIG_HIGHMEM */
+ 
+ #ifndef CONFIG_NEED_MULTIPLE_NODES
+ extern void pagetable_init(void);
+@@ -175,6 +374,7 @@ #endif
+ #ifdef CONFIG_HIGHMEM
+ 	kmap_init();
+ #endif
++	kmap_coherent_init();
+ 
+ 	max_dma = virt_to_phys((char *)MAX_DMA_ADDRESS) >> PAGE_SHIFT;
+ 	low = max_low_pfn;
+diff --git a/arch/mips/mm/pgtable-32.c b/arch/mips/mm/pgtable-32.c
+index 4bdaa05..4a61e62 100644
+--- a/arch/mips/mm/pgtable-32.c
++++ b/arch/mips/mm/pgtable-32.c
+@@ -31,9 +31,10 @@ void pgd_init(unsigned long page)
+ 
+ void __init pagetable_init(void)
+ {
+-#ifdef CONFIG_HIGHMEM
+ 	unsigned long vaddr;
+-	pgd_t *pgd, *pgd_base;
++	pgd_t *pgd_base;
++#ifdef CONFIG_HIGHMEM
++	pgd_t *pgd;
+ 	pud_t *pud;
+ 	pmd_t *pmd;
+ 	pte_t *pte;
+@@ -44,7 +45,6 @@ #endif
+ 	pgd_init((unsigned long)swapper_pg_dir
+ 		 + sizeof(pgd_t) * USER_PTRS_PER_PGD);
+ 
+-#ifdef CONFIG_HIGHMEM
+ 	pgd_base = swapper_pg_dir;
+ 
+ 	/*
+@@ -53,6 +53,7 @@ #ifdef CONFIG_HIGHMEM
+ 	vaddr = __fix_to_virt(__end_of_fixed_addresses - 1) & PMD_MASK;
+ 	fixrange_init(vaddr, 0, pgd_base);
+ 
++#ifdef CONFIG_HIGHMEM
+ 	/*
+ 	 * Permanent kmaps:
+ 	 */
+diff --git a/arch/mips/mm/pgtable-64.c b/arch/mips/mm/pgtable-64.c
+index 44b5e97..8d600d3 100644
+--- a/arch/mips/mm/pgtable-64.c
++++ b/arch/mips/mm/pgtable-64.c
+@@ -8,6 +8,7 @@
+  */
+ #include <linux/init.h>
+ #include <linux/mm.h>
++#include <asm/fixmap.h>
+ #include <asm/pgtable.h>
+ 
+ void pgd_init(unsigned long page)
+@@ -52,7 +53,17 @@ void pmd_init(unsigned long addr, unsign
+ 
+ void __init pagetable_init(void)
+ {
++	unsigned long vaddr;
++	pgd_t *pgd_base;
++
+ 	/* Initialize the entire pgd.  */
+ 	pgd_init((unsigned long)swapper_pg_dir);
+ 	pmd_init((unsigned long)invalid_pmd_table, (unsigned long)invalid_pte_table);
++
++	pgd_base = swapper_pg_dir;
++	/*
++	 * Fixed mappings:
++	 */
++	vaddr = __fix_to_virt(__end_of_fixed_addresses - 1) & PMD_MASK;
++	fixrange_init(vaddr, 0, pgd_base);
+ }
+diff --git a/include/asm-mips/cacheflush.h b/include/asm-mips/cacheflush.h
+index 47bc8f6..d10517c 100644
+--- a/include/asm-mips/cacheflush.h
++++ b/include/asm-mips/cacheflush.h
+@@ -21,7 +21,6 @@ #include <asm/cpu-features.h>
+  *  - flush_cache_range(vma, start, end) flushes a range of pages
+  *  - flush_icache_range(start, end) flush a range of instructions
+  *  - flush_dcache_page(pg) flushes(wback&invalidates) a page for dcache
+- *  - flush_icache_page(vma, pg) flushes(invalidates) a page for icache
+  *
+  * MIPS specific flush operations:
+  *
+@@ -39,7 +38,7 @@ extern void __flush_dcache_page(struct p
+ 
+ static inline void flush_dcache_page(struct page *page)
+ {
+-	if (cpu_has_dc_aliases)
++	if (cpu_has_dc_aliases || !cpu_has_ic_fills_f_dc)
+ 		__flush_dcache_page(page);
+ 
+ }
+@@ -47,30 +46,24 @@ static inline void flush_dcache_page(str
+ #define flush_dcache_mmap_lock(mapping)		do { } while (0)
+ #define flush_dcache_mmap_unlock(mapping)	do { } while (0)
+ 
+-extern void (*flush_icache_page)(struct vm_area_struct *vma,
++extern void (*__flush_icache_page)(struct vm_area_struct *vma,
+ 	struct page *page);
++static inline void flush_icache_page(struct vm_area_struct *vma,
++	struct page *page)
++{
++}
++
+ extern void (*flush_icache_range)(unsigned long start, unsigned long end);
+ #define flush_cache_vmap(start, end)		flush_cache_all()
+ #define flush_cache_vunmap(start, end)		flush_cache_all()
+ 
+-static inline void copy_to_user_page(struct vm_area_struct *vma,
++extern void copy_to_user_page(struct vm_area_struct *vma,
+ 	struct page *page, unsigned long vaddr, void *dst, const void *src,
+-	unsigned long len)
+-{
+-	if (cpu_has_dc_aliases)
+-		flush_cache_page(vma, vaddr, page_to_pfn(page));
+-	memcpy(dst, src, len);
+-	flush_icache_page(vma, page);
+-}
++	unsigned long len);
+ 
+-static inline void copy_from_user_page(struct vm_area_struct *vma,
++extern void copy_from_user_page(struct vm_area_struct *vma,
+ 	struct page *page, unsigned long vaddr, void *dst, const void *src,
+-	unsigned long len)
+-{
+-	if (cpu_has_dc_aliases)
+-		flush_cache_page(vma, vaddr, page_to_pfn(page));
+-	memcpy(dst, src, len);
+-}
++	unsigned long len);
+ 
+ extern void (*flush_cache_sigtramp)(unsigned long addr);
+ extern void (*flush_icache_all)(void);
+diff --git a/include/asm-mips/fixmap.h b/include/asm-mips/fixmap.h
+index 6959bdb..02c8a13 100644
+--- a/include/asm-mips/fixmap.h
++++ b/include/asm-mips/fixmap.h
+@@ -45,8 +45,16 @@ #endif
+  * fix-mapped?
+  */
+ enum fixed_addresses {
++#define FIX_N_COLOURS 8
++	FIX_CMAP_BEGIN,
++#ifdef CONFIG_MIPS_MT_SMTC
++	FIX_CMAP_END = FIX_CMAP_BEGIN + (FIX_N_COLOURS * NR_CPUS),
++#else
++	FIX_CMAP_END = FIX_CMAP_BEGIN + FIX_N_COLOURS,
++#endif
+ #ifdef CONFIG_HIGHMEM
+-	FIX_KMAP_BEGIN,	/* reserved pte's for temporary kernel mappings */
++	/* reserved pte's for temporary kernel mappings */
++	FIX_KMAP_BEGIN = FIX_CMAP_END + 1,
+ 	FIX_KMAP_END = FIX_KMAP_BEGIN+(KM_TYPE_NR*NR_CPUS)-1,
+ #endif
+ 	__end_of_fixed_addresses
+diff --git a/include/asm-mips/page.h b/include/asm-mips/page.h
+index 219d359..67bea9e 100644
+--- a/include/asm-mips/page.h
++++ b/include/asm-mips/page.h
+@@ -53,19 +53,17 @@ static inline void clear_user_page(void 
+ 	extern void (*flush_data_cache_page)(unsigned long addr);
+ 
+ 	clear_page(addr);
+-	if (pages_do_alias((unsigned long) addr, vaddr))
++	if (pages_do_alias((unsigned long) addr, vaddr & PAGE_MASK))
+ 		flush_data_cache_page((unsigned long)addr);
+ }
+ 
+-static inline void copy_user_page(void *vto, void *vfrom, unsigned long vaddr,
+-	struct page *to)
+-{
+-	extern void (*flush_data_cache_page)(unsigned long addr);
++extern void copy_user_page(void *vto, void *vfrom, unsigned long vaddr,
++	struct page *to);
++struct vm_area_struct;
++extern void copy_user_highpage(struct page *to, struct page *from,
++	unsigned long vaddr, struct vm_area_struct *vma);
+ 
+-	copy_page(vto, vfrom);
+-	if (pages_do_alias((unsigned long)vto, vaddr))
+-		flush_data_cache_page((unsigned long)vto);
+-}
++#define __HAVE_ARCH_COPY_USER_HIGHPAGE
+ 
+ /*
+  * These are used to make use of C type-checking..
+@@ -74,15 +72,17 @@ #ifdef CONFIG_64BIT_PHYS_ADDR
+   #ifdef CONFIG_CPU_MIPS32
+     typedef struct { unsigned long pte_low, pte_high; } pte_t;
+     #define pte_val(x)    ((x).pte_low | ((unsigned long long)(x).pte_high << 32))
++    #define __pte(x)      ({ pte_t __pte = {(x), ((unsigned long long)(x)) >> 32}; __pte; })
+   #else
+      typedef struct { unsigned long long pte; } pte_t;
+      #define pte_val(x)	((x).pte)
++     #define __pte(x)	((pte_t) { (x) } )
+   #endif
+ #else
+ typedef struct { unsigned long pte; } pte_t;
+ #define pte_val(x)	((x).pte)
+-#endif
+ #define __pte(x)	((pte_t) { (x) } )
++#endif
+ 
+ /*
+  * For 3-level pagetables we defines these ourselves, for 2-level the
