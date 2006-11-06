@@ -16,14 +16,16 @@ class symbols(object):
             symbols_add[symbol] = {'module': new.symbols[symbol][0]}
 
         for symbol in symbols_ref.intersection(symbols_new):
-            module_ref, version_ref = self.symbols[symbol]
-            module_new, version_new = new.symbols[symbol]
+            module_ref, version_ref, export_ref = self.symbols[symbol]
+            module_new, version_new, export_new = new.symbols[symbol]
 
             ent = {}
             if module_ref != module_new:
                 ent['module'] = module_ref, module_new
             if version_ref != version_new:
                 ent['version'] = version_ref, version_new
+            if export_ref != export_new:
+                ent['export'] = export_ref, export_new
             if ent:
                 symbols_change[symbol] = ent
 

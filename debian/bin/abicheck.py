@@ -67,6 +67,8 @@ class checker(object):
                     info.append("module: %s -> %s" % change_info[symbol]['module'])
                 if change_info[symbol].has_key('version'):
                     info.append("version: %s -> %s" % change_info[symbol]['version'])
+                if change_info[symbol].has_key('export'):
+                    info.append("export: %s -> %s" % change_info[symbol]['export'])
                 out.write("%-48s %s\n" % (symbol, ", ".join(info)))
         if remove:
             out.write("\nRemoved symbols:\n")

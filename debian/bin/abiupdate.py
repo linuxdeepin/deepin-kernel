@@ -32,8 +32,8 @@ class main(object):
         changelog = changelog[0]
 
         self.source = changelog['Source']
-        self.version = changelog['Version']['version']
-        self.version_source = changelog['Version']['source']
+        self.version = changelog['Version']['linux']['version']
+        self.version_source = changelog['Version']['linux']['source']
 
         local_config = config_reader_arch(["debian/arch"])
 
