@@ -1,0 +1,184 @@
+From git-commits-head-owner@vger.kernel.org Wed Oct  4 17:36:47 2006
+Return-Path: <git-commits-head-owner@vger.kernel.org>
+Delivered-To: unknown
+Received: from baikonur.stro.at (213.239.196.228) by nancy with IMAP4-SSL; 04
+  Oct 2006 15:36:47 -0000
+X-Original-To: janitor@sternwelten.at
+Delivered-To: janitor@sternwelten.at
+Received: from vger.kernel.org (vger.kernel.org [209.132.176.167])
+	by baikonur.stro.at (Postfix) with ESMTP id 3DFD35C066
+	for <janitor@sternwelten.at>; Sun,  1 Oct 2006 10:01:38 +0200 (CEST)
+Received: (majordomo@vger.kernel.org) by vger.kernel.org via listexpand
+	id S932105AbWJAIBp (ORCPT <rfc822;janitor@sternwelten.at>);
+	Sun, 1 Oct 2006 04:01:45 -0400
+Received: (majordomo@vger.kernel.org) by vger.kernel.org id S932106AbWJAIBp
+	(ORCPT <rfc822;git-commits-head-outgoing>);
+	Sun, 1 Oct 2006 04:01:45 -0400
+Received: from hera.kernel.org ([140.211.167.34]:36786 "EHLO hera.kernel.org")
+	by vger.kernel.org with ESMTP id S932105AbWJAIB3 (ORCPT
+	<rfc822;git-commits-head@vger.kernel.org>);
+	Sun, 1 Oct 2006 04:01:29 -0400
+Received: from hera.kernel.org (IDENT:U2FsdGVkX1/qIwMDDPAqUjfbNz4+pldcJIqmPXsPjR0@localhost [127.0.0.1])
+	by hera.kernel.org (8.13.7/8.13.7) with ESMTP id k9181St4010065
+	(version=TLSv1/SSLv3 cipher=DHE-RSA-AES256-SHA bits=256 verify=NO)
+	for <git-commits-head@vger.kernel.org>; Sun, 1 Oct 2006 08:01:28 GMT
+Received: (from dwmw2@localhost)
+	by hera.kernel.org (8.13.7/8.13.1/Submit) id k9181Rot010064
+	for git-commits-head@vger.kernel.org; Sun, 1 Oct 2006 08:01:27 GMT
+Date: Sun, 1 Oct 2006 08:01:27 GMT
+Message-Id: <200610010801.k9181Rot010064@hera.kernel.org>
+From: Linux Kernel Mailing List <linux-kernel@vger.kernel.org>
+To: git-commits-head@vger.kernel.org
+Subject: [PATCH] reiserfs: fix is_reusable bitmap check to not traverse the bitmap info array
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+X-Git-Commit: e1fabd3ccf02901374bffa434e0af472749a5bd9
+X-Git-Parent: 8ef386092d7c2891bd7acefb2a87f878f7e9a0d6
+Sender: git-commits-head-owner@vger.kernel.org
+Precedence: bulk
+X-Mailing-List: git-commits-head@vger.kernel.org
+X-Virus-Scanned: by Amavis (ClamAV) at stro.at
+Status: RO
+Content-Length: 5049
+
+commit e1fabd3ccf02901374bffa434e0af472749a5bd9
+tree 66d618e98020422874a521142ca2da797c9930f3
+parent 8ef386092d7c2891bd7acefb2a87f878f7e9a0d6
+author Jeff Mahoney <jeffm@suse.com> 1159684120 -0700
+committer Linus Torvalds <torvalds@g5.osdl.org> 1159688367 -0700
+
+[PATCH] reiserfs: fix is_reusable bitmap check to not traverse the bitmap info array
+
+There is a check in is_reusable to determine if a particular block is a bitmap
+block.  It verifies this by going through the array of bitmap block buffer
+heads and comparing the block number to each one.
+
+Bitmap blocks are at defined locations on the disk in both old and current
+formats.  Simply checking against the known good values is enough.
+
+This is a trivial optimization for a non-production codepath, but this is the
+first in a series of patches that will ultimately remove the buffer heads from
+that array.
+
+Signed-off-by: Jeff Mahoney <jeffm@suse.com>
+Cc: <reiserfs-dev@namesys.com>
+Signed-off-by: Andrew Morton <akpm@osdl.org>
+Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+ fs/reiserfs/bitmap.c           |   40 +++++++++++++++++++++++++---------------
+ fs/reiserfs/super.c            |    2 ++
+ include/linux/reiserfs_fs_sb.h |    1 +
+ 3 files changed, 28 insertions(+), 15 deletions(-)
+
+diff --git a/fs/reiserfs/bitmap.c b/fs/reiserfs/bitmap.c
+index 4a7dbde..1022347 100644
+--- a/fs/reiserfs/bitmap.c
++++ b/fs/reiserfs/bitmap.c
+@@ -50,16 +50,15 @@ static inline void get_bit_address(struc
+ {
+ 	/* It is in the bitmap block number equal to the block
+ 	 * number divided by the number of bits in a block. */
+-	*bmap_nr = block / (s->s_blocksize << 3);
++	*bmap_nr = block >> (s->s_blocksize_bits + 3);
+ 	/* Within that bitmap block it is located at bit offset *offset. */
+ 	*offset = block & ((s->s_blocksize << 3) - 1);
+-	return;
+ }
+ 
+ #ifdef CONFIG_REISERFS_CHECK
+ int is_reusable(struct super_block *s, b_blocknr_t block, int bit_value)
+ {
+-	int i, j;
++	int bmap, offset;
+ 
+ 	if (block == 0 || block >= SB_BLOCK_COUNT(s)) {
+ 		reiserfs_warning(s,
+@@ -68,34 +67,45 @@ int is_reusable(struct super_block *s, b
+ 		return 0;
+ 	}
+ 
+-	/* it can't be one of the bitmap blocks */
+-	for (i = 0; i < SB_BMAP_NR(s); i++)
+-		if (block == SB_AP_BITMAP(s)[i].bh->b_blocknr) {
++	get_bit_address(s, block, &bmap, &offset);
++
++	/* Old format filesystem? Unlikely, but the bitmaps are all up front so
++	 * we need to account for it. */
++	if (unlikely(test_bit(REISERFS_OLD_FORMAT,
++			      &(REISERFS_SB(s)->s_properties)))) {
++		b_blocknr_t bmap1 = REISERFS_SB(s)->s_sbh->b_blocknr + 1;
++		if (block >= bmap1 && block <= bmap1 + SB_BMAP_NR(s)) {
++			reiserfs_warning(s, "vs: 4019: is_reusable: "
++					 "bitmap block %lu(%u) can't be freed or reused",
++					 block, SB_BMAP_NR(s));
++			return 0;
++		}
++	} else {
++		if (offset == 0) {
+ 			reiserfs_warning(s, "vs: 4020: is_reusable: "
+ 					 "bitmap block %lu(%u) can't be freed or reused",
+ 					 block, SB_BMAP_NR(s));
+ 			return 0;
+ 		}
++	}
+ 
+-	get_bit_address(s, block, &i, &j);
+-
+-	if (i >= SB_BMAP_NR(s)) {
++	if (bmap >= SB_BMAP_NR(s)) {
+ 		reiserfs_warning(s,
+ 				 "vs-4030: is_reusable: there is no so many bitmap blocks: "
+-				 "block=%lu, bitmap_nr=%d", block, i);
++				 "block=%lu, bitmap_nr=%d", block, bmap);
+ 		return 0;
+ 	}
+ 
+ 	if ((bit_value == 0 &&
+-	     reiserfs_test_le_bit(j, SB_AP_BITMAP(s)[i].bh->b_data)) ||
++	     reiserfs_test_le_bit(offset, SB_AP_BITMAP(s)[bmap].bh->b_data)) ||
+ 	    (bit_value == 1 &&
+-	     reiserfs_test_le_bit(j, SB_AP_BITMAP(s)[i].bh->b_data) == 0)) {
++	     reiserfs_test_le_bit(offset, SB_AP_BITMAP(s)[bmap].bh->b_data) == 0)) {
+ 		reiserfs_warning(s,
+ 				 "vs-4040: is_reusable: corresponding bit of block %lu does not "
+-				 "match required value (i==%d, j==%d) test_bit==%d",
+-				 block, i, j, reiserfs_test_le_bit(j,
++				 "match required value (bmap==%d, offset==%d) test_bit==%d",
++				 block, bmap, offset, reiserfs_test_le_bit(offset,
+ 								   SB_AP_BITMAP
+-								   (s)[i].bh->
++								   (s)[bmap].bh->
+ 								   b_data));
+ 
+ 		return 0;
+diff --git a/fs/reiserfs/super.c b/fs/reiserfs/super.c
+index 80fc3b3..db2c581 100644
+--- a/fs/reiserfs/super.c
++++ b/fs/reiserfs/super.c
+@@ -1818,6 +1818,8 @@ #endif
+ 	if (is_reiserfs_3_5(rs)
+ 	    || (is_reiserfs_jr(rs) && SB_VERSION(s) == REISERFS_VERSION_1))
+ 		set_bit(REISERFS_3_5, &(sbi->s_properties));
++	else if (old_format)
++		set_bit(REISERFS_OLD_FORMAT, &(sbi->s_properties));
+ 	else
+ 		set_bit(REISERFS_3_6, &(sbi->s_properties));
+ 
+diff --git a/include/linux/reiserfs_fs_sb.h b/include/linux/reiserfs_fs_sb.h
+index 31b4c0b..4f21ad3 100644
+--- a/include/linux/reiserfs_fs_sb.h
++++ b/include/linux/reiserfs_fs_sb.h
+@@ -414,6 +414,7 @@ #endif
+ /* Definitions of reiserfs on-disk properties: */
+ #define REISERFS_3_5 0
+ #define REISERFS_3_6 1
++#define REISERFS_OLD_FORMAT 2
+ 
+ enum reiserfs_mount_options {
+ /* Mount options */
+-
+To unsubscribe from this list: send the line "unsubscribe git-commits-head" in
+the body of a message to majordomo@vger.kernel.org
+More majordomo info at  http://vger.kernel.org/majordomo-info.html
+
