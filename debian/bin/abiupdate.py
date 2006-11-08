@@ -3,28 +3,40 @@
 import sys
 sys.path.append(sys.path[0] + "/../lib/python")
 
-import os, os.path
+import optparse, os, os.path
 from debian_linux.abi import *
 from debian_linux.config import *
 from debian_linux.debian import *
 
-url_base = "http://ftp.de.debian.org/debian/"
+default_url_base = "http://ftp.de.debian.org/debian/"
+default_url_base_incoming = "http://incoming.debian.org/"
+
+class url_debian_flat(object):
+    def __init__(self, base):
+        self.base = base
+
+    def __call__(self, source, filename):
+        return self.base + filename
+
+class url_debian_pool(object):
+    def __init__(self, base):
+        self.base = base
+
+    def __call__(self, source, filename):
+        return self.base + "pool/main/" + source[0] + "/" + source + "/" + filename
 
 class main(object):
     dir = None
-    override_arch = None
-    override_subarch = None
-    override_flavour = None
 
-    def __init__(self):
+    def __init__(self, url, url_config = None, arch = None, subarch = None, flavour = None):
         self.log = sys.stdout.write
 
-        if len(sys.argv) > 1:
-            self.override_arch = sys.argv[1]
-        if len(sys.argv) > 2:
-            self.override_subarch = sys.argv[2]
-        if len(sys.argv) > 3:
-            self.override_flavour = sys.argv[3]
+        self.url = self.url_config = url
+        if url_config is not None:
+            self.url_config = url_config
+        self.override_arch = arch
+        self.override_subarch = subarch
+        self.override_flavour = flavour
 
         changelog = read_changelog()
         while changelog[0]['Distribution'] == 'UNRELEASED':
@@ -81,7 +93,7 @@ class main(object):
         else:
             prefix = subarch + '-' + flavour
         filename = "linux-headers-%s-%s_%s_%s.deb" % (self.version_abi, prefix, self.version_source, arch)
-        f = self.retrieve_package(filename)
+        f = self.retrieve_package(self.url, filename)
         d = self.extract_package(f)
         f1 = d + "/usr/src/linux-headers-%s-%s/Module.symvers" % (self.version_abi, prefix)
         s = symbols(f1)
@@ -90,18 +102,18 @@ class main(object):
 
     def get_config(self):
         filename = "linux-support-%s_%s_all.deb" % (self.version_abi, self.version_source)
-        f = self.retrieve_package(filename)
+        f = self.retrieve_package(self.url_config, filename)
         d = self.extract_package(f)
         dir = d + "/usr/src/linux-support-" + self.version_abi + "/arch"
         config = config_reader_arch([dir])
         self._rmtree(d)
         return config
 
-    def retrieve_package(self, filename):
+    def retrieve_package(self, url, filename):
         import urllib2
-        url = url_base + "pool/main/" + self.source[0] + "/" + self.source + "/" + filename
+        u = url(self.source, filename)
         filename_out = self.dir + "/" + filename
-        f_in = urllib2.urlopen(url)
+        f_in = urllib2.urlopen(u)
         f_out = file(filename_out, 'w')
         while 1:
             r = f_in.read()
@@ -152,4 +164,31 @@ class main(object):
             self.log("FAILED! (%s)\n" % str(e))
 
 if __name__ == '__main__':
-    main()()
+    options = optparse.OptionParser()
+    options.add_option("-i", "--incoming", action = "store_true", dest = "incoming")
+    options.add_option("--incoming-config", action = "store_true", dest = "incoming_config")
+    options.add_option("-u", "--url-base", dest = "url_base", default = default_url_base)
+    options.add_option("--url-base-incoming", dest = "url_base_incoming", default = default_url_base_incoming)
+
+    opts, args = options.parse_args()
+
+    kw = {}
+    if len(args) >= 1:
+        kw['arch'] =args[0]
+    if len(args) >= 2:
+        kw['subarch'] =args[1]
+    if len(args) >= 3:
+        kw['flavour'] =args[2]
+
+    url_base = url_debian_pool(opts.url_base)
+    url_base_incoming = url_debian_flat(opts.url_base_incoming)
+    if opts.incoming_config:
+        url = url_config = url_base_incoming
+    else:
+        url_config = url_base
+        if opts.incoming:
+            url = url_base_incoming
+        else:
+            url = url_base
+
+    main(url, url_config, **kw)()
