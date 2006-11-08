@@ -1,0 +1,71 @@
+From git-commits-head-owner@vger.kernel.org Tue Sep 26 20:23:26 2006
+Date: Tue, 26 Sep 2006 15:59:57 GMT
+Message-Id: <200609261559.k8QFxv7q003373@hera.kernel.org>
+From: Linux Kernel Mailing List <linux-kernel@vger.kernel.org>
+To: git-commits-head@vger.kernel.org
+Subject: [PATCH] mm: fixup do_wp_page()
+
+commit ee6a6457886a80415db209e87033b63f2b06558c
+tree 227351bf31ccc6153879cc900c5d6a822832b645
+parent e88dd6c11c5aef74d8b74a062767add53315533b
+author Peter Zijlstra <a.p.zijlstra@chello.nl> 1159252260 -0700
+committer Linus Torvalds <torvalds@g5.osdl.org> 1159285724 -0700
+
+[PATCH] mm: fixup do_wp_page()
+
+Wrt. the recent modifications in do_wp_page() Hugh Dickins pointed out:
+
+  "I now realize it's right to the first order (normal case) and to the
+   second order (ptrace poke), but not to the third order (ptrace poke
+   anon page here to be COWed - perhaps can't occur without intervening
+   mprotects)."
+
+This patch restores the old COW behaviour for anonymous pages.
+
+Signed-off-by: Peter Zijlstra <a.p.zijlstra@chello.nl>
+Acked-by: Hugh Dickins <hugh@veritas.com>
+Signed-off-by: Andrew Morton <akpm@osdl.org>
+Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+ mm/memory.c |   19 +++++++++++++------
+ 1 file changed, 13 insertions(+), 6 deletions(-)
+
+diff --git a/mm/memory.c b/mm/memory.c
+index dd7d7fc..6596253 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -1467,11 +1467,21 @@ static int do_wp_page(struct mm_struct *
+ 		goto gotten;
+ 
+ 	/*
+-	 * Only catch write-faults on shared writable pages, read-only
+-	 * shared pages can get COWed by get_user_pages(.write=1, .force=1).
++	 * Take out anonymous pages first, anonymous shared vmas are
++	 * not dirty accountable.
+ 	 */
+-	if (unlikely((vma->vm_flags & (VM_WRITE|VM_SHARED)) ==
++	if (PageAnon(old_page)) {
++		if (!TestSetPageLocked(old_page)) {
++			reuse = can_share_swap_page(old_page);
++			unlock_page(old_page);
++		}
++	} else if (unlikely((vma->vm_flags & (VM_WRITE|VM_SHARED)) ==
+ 					(VM_WRITE|VM_SHARED))) {
++		/*
++		 * Only catch write-faults on shared writable pages,
++		 * read-only shared pages can get COWed by
++		 * get_user_pages(.write=1, .force=1).
++		 */
+ 		if (vma->vm_ops && vma->vm_ops->page_mkwrite) {
+ 			/*
+ 			 * Notify the address space that the page is about to
+@@ -1503,9 +1513,6 @@ static int do_wp_page(struct mm_struct *
+ 		dirty_page = old_page;
+ 		get_page(dirty_page);
+ 		reuse = 1;
+-	} else if (PageAnon(old_page) && !TestSetPageLocked(old_page)) {
+-		reuse = can_share_swap_page(old_page);
+-		unlock_page(old_page);
+ 	}
+ 
+ 	if (reuse) {
