@@ -69,22 +69,17 @@ def parse_version_linux(version):
     version_re = ur"""
 ^
 (?P<source>
-    (?P<parent>
-        \d+\.\d+\.\d+\+
-    )?
-    (?P<upstream>
-        (?P<version>
-            (?P<major>\d+\.\d+)
-            \.
-            \d+
-        )
-        (?:
-            -
-            (?P<modifier>
-                .+?
-            )
-        )?
+    (?P<version>
+        (?P<major>\d+\.\d+)
+        \.
+        \d+
     )
+    (?:
+        ~
+        (?P<modifier>
+            .+?
+        )
+    )?
     -
     (?P<debian>[^-]+)
 )
@@ -94,10 +89,12 @@ $
     if match is None:
         raise ValueError
     ret = match.groupdict()
-    if ret['parent'] is not None:
-        ret['source_upstream'] = ret['parent'] + ret['upstream']
+    if ret['modifier'] is not None:
+        ret['upstream'] = '%s-%s' % (ret['version'], ret['modifier'])
+        ret['source_upstream'] = '%s~%s' % (ret['version'], ret['modifier'])
     else:
-        ret['source_upstream'] = ret['upstream']
+        ret['upstream'] = ret['version']
+        ret['source_upstream'] = ret['version']
     return ret
 
 class package_description(object):
