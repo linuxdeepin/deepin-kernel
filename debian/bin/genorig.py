@@ -17,7 +17,7 @@ class main(object):
         changelog = read_changelog()[0]
         source = changelog['Source']
         version = changelog['Version']['linux']['source_upstream']
-        self.orig = '%s-%s.orig' % (source, version)
+        self.orig = '%s-%s' % (source, version)
         self.orig_tar = '%s_%s.orig.tar.gz' % (source, version)
 
     def __call__(self):
