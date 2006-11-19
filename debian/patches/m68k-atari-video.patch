@@ -1,0 +1,3978 @@
+diff -urN linux-m68k/drivers/video/Kconfig linux-schmitz/drivers/video/Kconfig
+--- linux-m68k/drivers/video/Kconfig	2006-09-20 05:42:06.000000000 +0200
++++ linux-schmitz/drivers/video/Kconfig	2006-11-19 21:37:27.000000000 +0100
+@@ -404,7 +404,10 @@
+ 
+ config FB_ATARI
+ 	bool "Atari native chipset support"
+-	depends on (FB = y) && ATARI && BROKEN
++	depends on (FB = y) && ATARI
++	select FB_CFB_FILLRECT
++	select FB_CFB_COPYAREA
++	select FB_CFB_IMAGEBLIT
+ 	help
+ 	  This is the frame buffer device driver for the builtin graphics
+ 	  chipset found in Ataris.
+diff -urN linux-m68k/drivers/video/Makefile linux-schmitz/drivers/video/Makefile
+--- linux-m68k/drivers/video/Makefile	2006-09-20 05:42:06.000000000 +0200
++++ linux-schmitz/drivers/video/Makefile	2006-11-19 21:37:27.000000000 +0100
+@@ -64,7 +64,8 @@
+ obj-$(CONFIG_FB_LEO)              += leo.o sbuslib.o
+ obj-$(CONFIG_FB_SGIVW)            += sgivwfb.o
+ obj-$(CONFIG_FB_ACORN)            += acornfb.o
+-obj-$(CONFIG_FB_ATARI)            += atafb.o
++obj-$(CONFIG_FB_ATARI)            += atafb.o c2p.o atafb_mfb.o \
++						atafb_iplan2p2.o atafb_iplan2p4.o atafb_iplan2p8.o
+ obj-$(CONFIG_FB_MAC)              += macfb.o
+ obj-$(CONFIG_FB_HGA)              += hgafb.o
+ obj-$(CONFIG_FB_IGA)              += igafb.o
+diff -urN linux-m68k/drivers/video/atafb.c linux-schmitz/drivers/video/atafb.c
+--- linux-m68k/drivers/video/atafb.c	2006-09-20 05:42:06.000000000 +0200
++++ linux-schmitz/drivers/video/atafb.c	2006-11-19 21:37:27.000000000 +0100
+@@ -53,6 +53,7 @@
+ #include <linux/errno.h>
+ #include <linux/string.h>
+ #include <linux/mm.h>
++#include <linux/tty.h>
+ #include <linux/slab.h>
+ #include <linux/delay.h>
+ #include <linux/init.h>
+@@ -71,14 +72,11 @@
+ #include <linux/fb.h>
+ #include <asm/atarikb.h>
+ 
+-#include <video/fbcon.h>
+-#include <video/fbcon-cfb8.h>
+-#include <video/fbcon-cfb16.h>
+-#include <video/fbcon-iplan2p2.h>
+-#include <video/fbcon-iplan2p4.h>
+-#include <video/fbcon-iplan2p8.h>
+-#include <video/fbcon-mfb.h>
+-
++#include "c2p.h"	// FIXME: rewrite for iplan2p
++#include "atafb_mfb.h"
++#include "atafb_iplan2p2.h"
++#include "atafb_iplan2p4.h"
++#include "atafb_iplan2p8.h"
+ 
+ #define SWITCH_ACIA 0x01		/* modes for switch on OverScan */
+ #define SWITCH_SND6 0x40
+@@ -88,6 +86,27 @@
+ 
+ #define up(x, r) (((x) + (r) - 1) & ~((r)-1))
+ 
++	/*
++	 * Interface to the world
++	 */
++
++static int atafb_check_var(struct fb_var_screeninfo *var,
++			   struct fb_info *info);
++static int atafb_set_par(struct fb_info *info);
++static int atafb_setcolreg(unsigned regno, unsigned red, unsigned green,
++			   unsigned blue, unsigned transp,
++			   struct fb_info *info);
++static int atafb_blank(int blank, struct fb_info *info);
++static int atafb_pan_display(struct fb_var_screeninfo *var,
++			     struct fb_info *info);
++static void atafb_fillrect(struct fb_info *info,
++			   const struct fb_fillrect *rect);
++static void atafb_copyarea(struct fb_info *info,
++			   const struct fb_copyarea *region);
++static void atafb_imageblit(struct fb_info *info,
++			    const struct fb_image *image);
++static int atafb_ioctl(struct fb_info *info, unsigned int cmd, unsigned long arg);
++
+ 
+ static int default_par=0;	/* default resolution (0=none) */
+ 
+@@ -101,9 +120,15 @@
+ static int sttt_xres_virtual=640,sttt_yres_virtual=400;
+ static int ovsc_offset=0, ovsc_addlen=0;
+ 
++	/*
++	 * Hardware parameters for current mode
++	 */
++
+ static struct atafb_par {
+ 	void *screen_base;
+ 	int yres_virtual;
++	u_long next_line;
++	u_long next_plane;
+ #if defined ATAFB_TT || defined ATAFB_STE
+ 	union {
+ 		struct {
+@@ -136,6 +161,8 @@
+ 	} hw;
+ } current_par;
+ 
++struct fb_var_screeninfo current_var;
++
+ /* Don't calculate an own resolution, and thus don't change the one found when
+  * booting (currently used for the Falcon to keep settings for internal video
+  * hardware extensions (e.g. ScreenBlaster)  */
+@@ -164,7 +191,13 @@
+ #define VMO_PREMASK		0x0c
+ #endif
+ 
+-static struct fb_info fb_info;
++static struct fb_info fb_info = {
++    .fix = {
++        .id             = "Atari ",
++	.visual         = FB_VISUAL_PSEUDOCOLOR,
++	.accel          = FB_ACCEL_NONE
++    }
++};
+ 
+ static void *screen_base;	/* base address of screen */
+ static void *real_screen_base;	/* (only for Overscan) */
+@@ -175,8 +208,6 @@
+ 
+ static int mono_moni=0;
+ 
+-static struct display disp;
+-
+ 
+ #ifdef ATAFB_EXT
+ /* external video handling */
+@@ -250,6 +281,75 @@
+ extern int fontwidth_8x16;
+ extern unsigned char fontdata_8x16[];
+ 
++/* 
++ * struct fb_ops {
++ *	* open/release and usage marking 
++ *	struct module *owner;
++ *	int (*fb_open)(struct fb_info *info, int user);
++ *	int (*fb_release)(struct fb_info *info, int user);
++ *
++ *	* For framebuffers with strange non linear layouts or that do not
++ *	* work with normal memory mapped access
++ *	ssize_t (*fb_read)(struct file *file, char __user *buf, size_t count, loff_t *ppos);
++ *	ssize_t (*fb_write)(struct file *file, const char __user *buf, size_t count, loff_t *ppos);
++ *
++ *	* checks var and eventually tweaks it to something supported,
++ *	* DOES NOT MODIFY PAR *
++ *	int (*fb_check_var)(struct fb_var_screeninfo *var, struct fb_info *info);
++ *
++ *	* set the video mode according to info->var *
++ *	int (*fb_set_par)(struct fb_info *info);
++ *
++ *	* set color register *
++ *	int (*fb_setcolreg)(unsigned regno, unsigned red, unsigned green,
++ *			    unsigned blue, unsigned transp, struct fb_info *info);
++ *
++ *	* set color registers in batch *
++ *	int (*fb_setcmap)(struct fb_cmap *cmap, struct fb_info *info);
++ *
++ *	* blank display *
++ *	int (*fb_blank)(int blank, struct fb_info *info);
++ *
++ *	* pan display *
++ *	int (*fb_pan_display)(struct fb_var_screeninfo *var, struct fb_info *info);
++ *
++ *	*** The meat of the drawing engine ***
++ *	* Draws a rectangle *
++ *	void (*fb_fillrect) (struct fb_info *info, const struct fb_fillrect *rect);
++ *	* Copy data from area to another *
++ *	void (*fb_copyarea) (struct fb_info *info, const struct fb_copyarea *region);
++ *	* Draws a image to the display *
++ *	void (*fb_imageblit) (struct fb_info *info, const struct fb_image *image);
++ *
++ *	* Draws cursor *
++ *	int (*fb_cursor) (struct fb_info *info, struct fb_cursor *cursor);
++ *
++ *	* Rotates the display *
++ *	void (*fb_rotate)(struct fb_info *info, int angle);
++ *
++ *	* wait for blit idle, optional *
++ *	int (*fb_sync)(struct fb_info *info);
++ *
++ *	* perform fb specific ioctl (optional) *
++ *	int (*fb_ioctl)(struct fb_info *info, unsigned int cmd,
++ *			unsigned long arg);
++ *
++ *	* Handle 32bit compat ioctl (optional) *
++ *	int (*fb_compat_ioctl)(struct fb_info *info, unsigned cmd,
++ *			unsigned long arg);
++ *
++ *	* perform fb specific mmap *
++ *	int (*fb_mmap)(struct fb_info *info, struct vm_area_struct *vma);
++ *
++ *	* save current hardware state *
++ *	void (*fb_save_state)(struct fb_info *info);
++ *
++ *	* restore saved state *
++ *	void (*fb_restore_state)(struct fb_info *info);
++ * } ;
++ */
++
++
+ /* ++roman: This structure abstracts from the underlying hardware (ST(e),
+  * TT, or Falcon.
+  *
+@@ -263,6 +363,7 @@
+  *                    struct atafb_par *par )
+  *   This function should fill in the 'fix' structure based on the
+  *   values in the 'par' structure.
++ * !!! Obsolete, perhaps !!!
+  *   
+  * int (*decode_var)( struct fb_var_screeninfo *var,
+  *                    struct atafb_par *par )
+@@ -279,6 +380,7 @@
+  *   
+  * void (*get_par)( struct atafb_par *par )
+  *   Fill the hardware's 'par' structure.
++ *   !!! Used only by detect() !!!
+  *   
+  * void (*set_par)( struct atafb_par *par )
+  *   Set the hardware according to 'par'.
+@@ -417,6 +519,124 @@
+ 
+ static int num_atafb_predefined=ARRAY_SIZE(atafb_predefined);
+ 
++	/*
++	 * Tags used to indicate a specific Pixel Clock
++	 *
++	 * tag is the shift value to get the timings in 35 ns units
++	 */
++
++enum { TAG_SHRES, TAG_HIRES, TAG_LORES };
++
++
++static struct fb_videomode atafb_modedb[] __initdata = {
++
++    /*
++     *  Atari Video Modes
++     *
++     *  If you change these, make sure to update DEFMODE_* as well!
++     */
++
++    {
++	/* 640x200, 15 kHz, 60 Hz (NTSC) */
++	"ntsc", 60, 640, 200, TAG_HIRES, 106, 86, 44, 16, 76, 2,
++	FB_SYNC_BROADCAST, FB_VMODE_NONINTERLACED | FB_VMODE_YWRAP
++    }, {
++	/* 640x400, 15 kHz, 60 Hz interlaced (NTSC) */
++	"ntsc-lace", 60, 640, 400, TAG_HIRES, 106, 86, 88, 33, 76, 4,
++	FB_SYNC_BROADCAST, FB_VMODE_INTERLACED | FB_VMODE_YWRAP
++    }, {
++	/* 640x256, 15 kHz, 50 Hz (PAL) */
++	"pal", 50, 640, 256, TAG_HIRES, 106, 86, 40, 14, 76, 2,
++	FB_SYNC_BROADCAST, FB_VMODE_NONINTERLACED | FB_VMODE_YWRAP
++    }, {
++	/* 640x512, 15 kHz, 50 Hz interlaced (PAL) */
++	"pal-lace", 50, 640, 512, TAG_HIRES, 106, 86, 80, 29, 76, 4,
++	FB_SYNC_BROADCAST, FB_VMODE_INTERLACED | FB_VMODE_YWRAP
++    }, {
++	/* 640x480, 29 kHz, 57 Hz */
++	"multiscan", 57, 640, 480, TAG_SHRES, 96, 112, 29, 8, 72, 8,
++	0, FB_VMODE_NONINTERLACED | FB_VMODE_YWRAP
++    }, {
++	/* 640x960, 29 kHz, 57 Hz interlaced */
++	"multiscan-lace", 57, 640, 960, TAG_SHRES, 96, 112, 58, 16, 72, 16,
++	0, FB_VMODE_INTERLACED | FB_VMODE_YWRAP
++    }, {
++	/* 640x200, 15 kHz, 72 Hz */
++	"euro36", 72, 640, 200, TAG_HIRES, 92, 124, 6, 6, 52, 5,
++	0, FB_VMODE_NONINTERLACED | FB_VMODE_YWRAP
++    }, {
++	/* 640x400, 15 kHz, 72 Hz interlaced */
++	"euro36-lace", 72, 640, 400, TAG_HIRES, 92, 124, 12, 12, 52, 10,
++	0, FB_VMODE_INTERLACED | FB_VMODE_YWRAP
++    }, {
++	/* 640x400, 29 kHz, 68 Hz */
++	"euro72", 68, 640, 400, TAG_SHRES, 164, 92, 9, 9, 80, 8,
++	0, FB_VMODE_NONINTERLACED | FB_VMODE_YWRAP
++    }, {
++	/* 640x800, 29 kHz, 68 Hz interlaced */
++	"euro72-lace", 68, 640, 800, TAG_SHRES, 164, 92, 18, 18, 80, 16,
++	0, FB_VMODE_INTERLACED | FB_VMODE_YWRAP
++    }, {
++	/* 800x300, 23 kHz, 70 Hz */
++	"super72", 70, 800, 300, TAG_SHRES, 212, 140, 10, 11, 80, 7,
++	0, FB_VMODE_NONINTERLACED | FB_VMODE_YWRAP
++    }, {
++	/* 800x600, 23 kHz, 70 Hz interlaced */
++	"super72-lace", 70, 800, 600, TAG_SHRES, 212, 140, 20, 22, 80, 14,
++	0, FB_VMODE_INTERLACED | FB_VMODE_YWRAP
++    }, {
++	/* 640x200, 27 kHz, 57 Hz doublescan */
++	"dblntsc", 57, 640, 200, TAG_SHRES, 196, 124, 18, 17, 80, 4,
++	0, FB_VMODE_DOUBLE | FB_VMODE_YWRAP
++    }, {
++	/* 640x400, 27 kHz, 57 Hz */
++	"dblntsc-ff", 57, 640, 400, TAG_SHRES, 196, 124, 36, 35, 80, 7,
++	0, FB_VMODE_NONINTERLACED | FB_VMODE_YWRAP
++    }, {
++	/* 640x800, 27 kHz, 57 Hz interlaced */
++	"dblntsc-lace", 57, 640, 800, TAG_SHRES, 196, 124, 72, 70, 80, 14,
++	0, FB_VMODE_INTERLACED | FB_VMODE_YWRAP
++    }, {
++	/* 640x256, 27 kHz, 47 Hz doublescan */
++	"dblpal", 47, 640, 256, TAG_SHRES, 196, 124, 14, 13, 80, 4,
++	0, FB_VMODE_DOUBLE | FB_VMODE_YWRAP
++    }, {
++	/* 640x512, 27 kHz, 47 Hz */
++	"dblpal-ff", 47, 640, 512, TAG_SHRES, 196, 124, 28, 27, 80, 7,
++	0, FB_VMODE_NONINTERLACED | FB_VMODE_YWRAP
++    }, {
++	/* 640x1024, 27 kHz, 47 Hz interlaced */
++	"dblpal-lace", 47, 640, 1024, TAG_SHRES, 196, 124, 56, 54, 80, 14,
++	0, FB_VMODE_INTERLACED | FB_VMODE_YWRAP
++    },
++
++    /*
++     *  VGA Video Modes
++     */
++
++    {
++	/* 640x480, 31 kHz, 60 Hz (VGA) */
++	"vga", 60, 640, 480, TAG_SHRES, 64, 96, 30, 9, 112, 2,
++	0, FB_VMODE_NONINTERLACED | FB_VMODE_YWRAP
++    }, {
++	/* 640x400, 31 kHz, 70 Hz (VGA) */
++	"vga70", 70, 640, 400, TAG_SHRES, 64, 96, 35, 12, 112, 2,
++	FB_SYNC_VERT_HIGH_ACT | FB_SYNC_COMP_HIGH_ACT, FB_VMODE_NONINTERLACED | FB_VMODE_YWRAP
++    },
++
++};
++
++#define NUM_TOTAL_MODES  ARRAY_SIZE(atafb_modedb)
++
++static char *mode_option __initdata = NULL;
++
++ /* default modes */
++
++#define DEFMODE_TT	    2	/* "pal" for PAL OCS/ECS */
++#define DEFMODE_F30	    0	/* "ntsc" for NTSC OCS/ECS */
++#define DEFMODE_STE   	    3	/* "pal-lace" for flicker fixed PAL (A3000) */
++#define DEFMODE_EXT  	    1	/* "ntsc-lace" for flicker fixed NTSC (A3000) */
++
+ 
+ static int
+ get_video_mode(char *vname)
+@@ -1290,6 +1510,15 @@
+ 	par->screen_base = screen_base + var->yoffset * linelen;
+ 	par->hw.falcon.xoffset = 0;
+ 
++	// FIXME!!! sort of works, no crash
++	//par->next_line  = linelen;
++	//par->next_plane = yres_virtual * linelen;
++	par->next_line  = linelen;
++	par->next_plane = 2;
++	// crashes
++	//par->next_plane = linelen;
++	//par->next_line  = yres_virtual * linelen;
++
+ 	return 0;
+ }
+ 
+@@ -1372,6 +1601,8 @@
+ 	else {
+ 		var->red.offset=0;
+ 		var->red.length = hw->ste_mode ? 4 : 6;
++		if (var->red.length > var->bits_per_pixel)
++			var->red.length = var->bits_per_pixel;
+ 		var->red.msb_right=0;
+ 		var->grayscale=0;
+ 		var->blue=var->green=var->red;
+@@ -1583,10 +1814,12 @@
+ 
+ 
+ static int falcon_pan_display( struct fb_var_screeninfo *var,
+-							   struct atafb_par *par )
++			       struct fb_info *info )
+ {
++	struct atafb_par *par=(struct atafb_par *)info->par;
++
+ 	int xoffset;
+-	int bpp = fb_display[fb_info.currcon].var.bits_per_pixel;
++	int bpp = info->var.bits_per_pixel;
+ 
+ 	if (bpp == 1)
+ 		var->xoffset = up(var->xoffset, 32);
+@@ -1597,13 +1830,13 @@
+ 		var->xoffset = up(var->xoffset, 2);
+ 	}
+ 	par->hw.falcon.line_offset = bpp *
+-	       	(fb_display[fb_info.currcon].var.xres_virtual - fb_display[fb_info.currcon].var.xres) / 16;
++	       	(info->var.xres_virtual - info->var.xres) / 16;
+ 	if (par->hw.falcon.xoffset)
+ 		par->hw.falcon.line_offset -= bpp;
+ 	xoffset = var->xoffset - par->hw.falcon.xoffset;
+ 
+ 	par->screen_base = screen_base +
+-	        (var->yoffset * fb_display[fb_info.currcon].var.xres_virtual + xoffset) * bpp / 8;
++	        (var->yoffset * info->var.xres_virtual + xoffset) * bpp / 8;
+ 	if (fbhw->set_screen_base)
+ 		fbhw->set_screen_base (par->screen_base);
+ 	else
+@@ -2294,15 +2527,17 @@
+ 
+ 
+ static int pan_display( struct fb_var_screeninfo *var,
+-                        struct atafb_par *par )
++                        struct fb_info *info )
+ {
++	struct atafb_par *par=(struct atafb_par *)info->par;
++
+ 	if (!fbhw->set_screen_base ||
+ 		(!ATARIHW_PRESENT(EXTD_SHIFTER) && var->xoffset))
+ 		return -EINVAL;
+ 	var->xoffset = up(var->xoffset, 16);
+ 	par->screen_base = screen_base +
+-	        (var->yoffset * fb_display[fb_info.currcon].var.xres_virtual + var->xoffset)
+-	        * fb_display[fb_info.currcon].var.bits_per_pixel / 8;
++	        (var->yoffset * info->var.xres_virtual + var->xoffset)
++	        * info->var.bits_per_pixel / 8;
+ 	fbhw->set_screen_base (par->screen_base);
+ 	return 0;
+ }
+@@ -2344,7 +2579,7 @@
+ 
+ 
+ 
+-static void atafb_get_par( struct atafb_par *par )
++static void ata_get_par( struct atafb_par *par )
+ {
+ 	if (current_par_valid) {
+ 		*par=current_par;
+@@ -2354,7 +2589,7 @@
+ }
+ 
+ 
+-static void atafb_set_par( struct atafb_par *par )
++static void ata_set_par( struct atafb_par *par )
+ {
+ 	fbhw->set_par(par);
+ 	current_par=*par;
+@@ -2371,10 +2606,10 @@
+ /* used for hardware scrolling */
+ 
+ static int
+-fb_update_var(int con, struct fb_info *info)
++fb_update_var(struct fb_info *info)
+ {
+-	int off=fb_display[con].var.yoffset*fb_display[con].var.xres_virtual*
+-			fb_display[con].var.bits_per_pixel>>3;
++	int off=info->var.yoffset*info->var.xres_virtual*
++			info->var.bits_per_pixel>>3;
+ 
+ 	current_par.screen_base=screen_base + off;
+ 
+@@ -2392,106 +2627,82 @@
+ 		return err;
+ 	activate=var->activate;
+ 	if (((var->activate & FB_ACTIVATE_MASK) == FB_ACTIVATE_NOW) && isactive)
+-		atafb_set_par(&par);
++		ata_set_par(&par);
+ 	fbhw->encode_var(var, &par);
+ 	var->activate=activate;
+ 	return 0;
+ }
+ 
+ static int
+-atafb_get_fix(struct fb_fix_screeninfo *fix, int con, struct fb_info *info)
++atafb_get_fix(struct fb_fix_screeninfo *fix, struct fb_info *info)
+ {
+ 	struct atafb_par par;
+-	if (con == -1)
+-		atafb_get_par(&par);
+-	else {
+ 	  int err;
+-		if ((err=fbhw->decode_var(&fb_display[con].var,&par)))
++	// Get fix directly from hw (case con == -1 before) ?? 
++	if ((err=fbhw->decode_var(&info->var,&par)))
+ 		  return err;
+-	}
+ 	memset(fix, 0, sizeof(struct fb_fix_screeninfo));
+ 	return fbhw->encode_fix(fix, &par);
+ }
+ 	
+ static int
+-atafb_get_var(struct fb_var_screeninfo *var, int con, struct fb_info *info)
++atafb_get_var(struct fb_var_screeninfo *var, struct fb_info *info)
+ {
+ 	struct atafb_par par;
+-	if (con == -1) {
+-		atafb_get_par(&par);
++
++	ata_get_par(&par);
+ 		fbhw->encode_var(var, &par);
+-	}
+-	else
+-		*var=fb_display[con].var;
++
+ 	return 0;
+ }
+ 
++// No longer called by fbcon!
++// Still called by set_var internally
++
+ static void
+-atafb_set_disp(int con, struct fb_info *info)
++atafb_set_disp(struct fb_info *info)
+ {
+-	struct fb_fix_screeninfo fix;
+-	struct fb_var_screeninfo var;
+-	struct display *display;
++	atafb_get_var(&info->var, info);
++	atafb_get_fix(&info->fix, info);
+ 
+-	if (con >= 0)
+-		display = &fb_display[con];
+-	else
+-		display = &disp;	/* used during initialization */
++	info->screen_base = (void *)info->fix.smem_start;
+ 
+-	atafb_get_fix(&fix, con, info);
+-	atafb_get_var(&var, con, info);
+-	if (con == -1)
+-		con=0;
+-	info->screen_base = (void *)fix.smem_start;
+-	display->visual = fix.visual;
+-	display->type = fix.type;
+-	display->type_aux = fix.type_aux;
+-	display->ypanstep = fix.ypanstep;
+-	display->ywrapstep = fix.ywrapstep;
+-	display->line_length = fix.line_length;
+-	if (fix.visual != FB_VISUAL_PSEUDOCOLOR &&
+-		fix.visual != FB_VISUAL_DIRECTCOLOR)
+-		display->can_soft_blank = 0;
+-	else
+-		display->can_soft_blank = 1;
+-	display->inverse =
+-	    (fix.visual == FB_VISUAL_MONO01 ? !inverse : inverse);
+-	switch (fix.type) {
++	switch (info->fix.type) {
+ 	    case FB_TYPE_INTERLEAVED_PLANES:
+-		switch (var.bits_per_pixel) {
++		switch (info->var.bits_per_pixel) {
+ #ifdef FBCON_HAS_IPLAN2P2
+ 		    case 2:
+-			display->dispsw = &fbcon_iplan2p2;
++			// display->dispsw = &fbcon_iplan2p2;
+ 			break;
+ #endif
+ #ifdef FBCON_HAS_IPLAN2P4
+ 		    case 4:
+-			display->dispsw = &fbcon_iplan2p4;
++			// display->dispsw = &fbcon_iplan2p4;
+ 			break;
+ #endif
+ #ifdef FBCON_HAS_IPLAN2P8
+ 		    case 8:
+-			display->dispsw = &fbcon_iplan2p8;
++			// display->dispsw = &fbcon_iplan2p8;
+ 			break;
+ #endif
+ 		}
+ 		break;
+ 	    case FB_TYPE_PACKED_PIXELS:
+-		switch (var.bits_per_pixel) {
++		switch (info->var.bits_per_pixel) {
+ #ifdef FBCON_HAS_MFB
+ 		    case 1:
+-			display->dispsw = &fbcon_mfb;
++			// display->dispsw = &fbcon_mfb;
+ 			break;
+ #endif
+ #ifdef FBCON_HAS_CFB8
+ 		    case 8:
+-			display->dispsw = &fbcon_cfb8;
++			// display->dispsw = &fbcon_cfb8;
+ 			break;
+ #endif
+ #ifdef FBCON_HAS_CFB16
+ 		    case 16:
+-			display->dispsw = &fbcon_cfb16;
+-			display->dispsw_data = fbcon_cfb16_cmap;
++			// display->dispsw = &fbcon_cfb16;
++			// display->dispsw_data = fbcon_cfb16_cmap;
+ 			break;
+ #endif
+ 		}
+@@ -2504,71 +2715,881 @@
+ {
+ 	int err,oldxres,oldyres,oldbpp,oldxres_virtual,
+ 	    oldyres_virtual,oldyoffset;
+-	if ((err=do_fb_set_var(var, con==info->currcon)))
++	if ((err=do_fb_set_var(var, 1)))
+ 		return err;
+ 	if ((var->activate & FB_ACTIVATE_MASK) == FB_ACTIVATE_NOW) {
+-		oldxres=fb_display[con].var.xres;
+-		oldyres=fb_display[con].var.yres;
+-		oldxres_virtual=fb_display[con].var.xres_virtual;
+-		oldyres_virtual=fb_display[con].var.yres_virtual;
+-		oldbpp=fb_display[con].var.bits_per_pixel;
+-		oldyoffset=fb_display[con].var.yoffset;
+-		fb_display[con].var=*var;
++		oldxres=info->var.xres;
++		oldyres=info->var.yres;
++		oldxres_virtual=info->var.xres_virtual;
++		oldyres_virtual=info->var.yres_virtual;
++		oldbpp=info->var.bits_per_pixel;
++		oldyoffset=info->var.yoffset;
++		info->var=*var;
+ 		if (oldxres != var->xres || oldyres != var->yres 
+ 		    || oldxres_virtual != var->xres_virtual
+ 		    || oldyres_virtual != var->yres_virtual
+ 		    || oldbpp != var->bits_per_pixel
+ 		    || oldyoffset != var->yoffset) {
+-			atafb_set_disp(con, info);
+-			(*fb_info.changevar)(con);
+-			fb_alloc_cmap(&fb_display[con].cmap, 0, 0);
+-			do_install_cmap(con, info);
++			atafb_set_disp(info);
+ 		}
+ 	}
+ 	var->activate=0;
+ 	return 0;
+ }
+ 
+-
+-
+-static int
+-atafb_get_cmap(struct fb_cmap *cmap, int kspc, int con, struct fb_info *info)
++static int atafb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
++                           u_int transp, struct fb_info *info)
+ {
+-	if (con == info->currcon) /* current console ? */
+-		return fb_get_cmap(cmap, kspc, fbhw->getcolreg, info);
+-	else
+-		if (fb_display[con].cmap.len) /* non default colormap ? */
+-			fb_copy_cmap(&fb_display[con].cmap, cmap, kspc ? 0 : 2);
+-		else
+-			fb_copy_cmap(fb_default_cmap(1<<fb_display[con].var.bits_per_pixel),
+-				     cmap, kspc ? 0 : 2);
+-	return 0;
++        red >>= 8;
++	green >>= 8;
++	blue >>= 8;                        
++	return info->fbops->fb_setcolreg(regno, red, green, blue, transp, info);
+ }
+ 
+ static int
+-atafb_pan_display(struct fb_var_screeninfo *var, int con, struct fb_info *info)
++atafb_pan_display(struct fb_var_screeninfo *var, struct fb_info *info)
+ {
+ 	int xoffset = var->xoffset;
+ 	int yoffset = var->yoffset;
+ 	int err;
+ 
+-	if (   xoffset < 0 || xoffset + fb_display[con].var.xres > fb_display[con].var.xres_virtual
+-	    || yoffset < 0 || yoffset + fb_display[con].var.yres > fb_display[con].var.yres_virtual)
++        if (var->vmode & FB_VMODE_YWRAP) {
++		if (var->yoffset < 0 ||
++		    var->yoffset >= info->var.yres_virtual || var->xoffset)
+ 		return -EINVAL;
++	} else {                                           
++		if (var->xoffset+info->var.xres > info->var.xres_virtual ||
++		    var->yoffset+info->var.yres > info->var.yres_virtual)
++		return -EINVAL;
++	}
+ 
+-	if (con == info->currcon) {
+ 		if (fbhw->pan_display) {
+-			if ((err = fbhw->pan_display(var, &current_par)))
++		if ((err = fbhw->pan_display(var, info)))
+ 				return err;
+ 		}
+ 		else
+ 			return -EINVAL;
+-	}
+-	fb_display[con].var.xoffset = var->xoffset;
+-	fb_display[con].var.yoffset = var->yoffset;
++
++	info->var.xoffset = var->xoffset;
++	info->var.yoffset = var->yoffset;
++
++	if (var->vmode & FB_VMODE_YWRAP)
++        	info->var.vmode |= FB_VMODE_YWRAP;
++        else
++                info->var.vmode &= ~FB_VMODE_YWRAP;
++                
+ 	return 0;
+ }
+ 
++#if BITS_PER_LONG == 32
++#define BYTES_PER_LONG	4
++#define SHIFT_PER_LONG	5
++#elif BITS_PER_LONG == 64
++#define BYTES_PER_LONG	8
++#define SHIFT_PER_LONG	6
++#else
++#define Please update me
++#endif
++
++
++    /*
++     *  Compose two values, using a bitmask as decision value
++     *  This is equivalent to (a & mask) | (b & ~mask)
++     */
++
++static inline unsigned long comp(unsigned long a, unsigned long b,
++				 unsigned long mask)
++{
++	return ((a ^ b) & mask) ^ b;
++}
++
++
++static inline unsigned long xor(unsigned long a, unsigned long b,
++				unsigned long mask)
++{
++	return (a & mask) ^ b;
++}
++
++
++    /*
++     *  Unaligned forward bit copy using 32-bit or 64-bit memory accesses
++     */
++
++static void bitcpy(unsigned long *dst, int dst_idx, const unsigned long *src,
++		   int src_idx, u32 n)
++{
++	unsigned long first, last;
++	int shift = dst_idx-src_idx, left, right;
++	unsigned long d0, d1;
++	int m;
++
++	if (!n)
++		return;
++
++	shift = dst_idx-src_idx;
++	first = ~0UL >> dst_idx;
++	last = ~(~0UL >> ((dst_idx+n) % BITS_PER_LONG));
++
++	if (!shift) {
++		// Same alignment for source and dest
++
++		if (dst_idx+n <= BITS_PER_LONG) {
++			// Single word
++			if (last)
++				first &= last;
++			*dst = comp(*src, *dst, first);
++		} else {
++			// Multiple destination words
++			// Leading bits
++			if (first) {
++				*dst = comp(*src, *dst, first);
++				dst++;
++				src++;
++				n -= BITS_PER_LONG-dst_idx;
++			}
++
++			// Main chunk
++			n /= BITS_PER_LONG;
++			while (n >= 8) {
++				*dst++ = *src++;
++				*dst++ = *src++;
++				*dst++ = *src++;
++				*dst++ = *src++;
++				*dst++ = *src++;
++				*dst++ = *src++;
++				*dst++ = *src++;
++				*dst++ = *src++;
++				n -= 8;
++			}
++			while (n--)
++				*dst++ = *src++;
++
++			// Trailing bits
++			if (last)
++				*dst = comp(*src, *dst, last);
++		}
++	} else {
++		// Different alignment for source and dest
++
++		right = shift & (BITS_PER_LONG-1);
++		left = -shift & (BITS_PER_LONG-1);
++
++		if (dst_idx+n <= BITS_PER_LONG) {
++			// Single destination word
++			if (last)
++				first &= last;
++			if (shift > 0) {
++				// Single source word
++				*dst = comp(*src >> right, *dst, first);
++			} else if (src_idx+n <= BITS_PER_LONG) {
++				// Single source word
++				*dst = comp(*src << left, *dst, first);
++			} else {
++				// 2 source words
++				d0 = *src++;
++				d1 = *src;
++				*dst = comp(d0 << left | d1 >> right, *dst,
++					    first);
++			}
++		} else {
++			// Multiple destination words
++			d0 = *src++;
++			// Leading bits
++			if (shift > 0) {
++				// Single source word
++				*dst = comp(d0 >> right, *dst, first);
++				dst++;
++				n -= BITS_PER_LONG-dst_idx;
++			} else {
++				// 2 source words
++				d1 = *src++;
++				*dst = comp(d0 << left | d1 >> right, *dst,
++					    first);
++				d0 = d1;
++				dst++;
++				n -= BITS_PER_LONG-dst_idx;
++			}
++
++			// Main chunk
++			m = n % BITS_PER_LONG;
++			n /= BITS_PER_LONG;
++			while (n >= 4) {
++				d1 = *src++;
++				*dst++ = d0 << left | d1 >> right;
++				d0 = d1;
++				d1 = *src++;
++				*dst++ = d0 << left | d1 >> right;
++				d0 = d1;
++				d1 = *src++;
++				*dst++ = d0 << left | d1 >> right;
++				d0 = d1;
++				d1 = *src++;
++				*dst++ = d0 << left | d1 >> right;
++				d0 = d1;
++				n -= 4;
++			}
++			while (n--) {
++				d1 = *src++;
++				*dst++ = d0 << left | d1 >> right;
++				d0 = d1;
++			}
++
++			// Trailing bits
++			if (last) {
++				if (m <= right) {
++					// Single source word
++					*dst = comp(d0 << left, *dst, last);
++				} else {
++					// 2 source words
++					d1 = *src;
++					*dst = comp(d0 << left | d1 >> right,
++						    *dst, last);
++				}
++			}
++		}
++	}
++}
++
++
++    /*
++     *  Unaligned reverse bit copy using 32-bit or 64-bit memory accesses
++     */
++
++static void bitcpy_rev(unsigned long *dst, int dst_idx,
++		       const unsigned long *src, int src_idx, u32 n)
++{
++	unsigned long first, last;
++	int shift = dst_idx-src_idx, left, right;
++	unsigned long d0, d1;
++	int m;
++
++	if (!n)
++		return;
++
++	dst += (n-1)/BITS_PER_LONG;
++	src += (n-1)/BITS_PER_LONG;
++	if ((n-1) % BITS_PER_LONG) {
++		dst_idx += (n-1) % BITS_PER_LONG;
++		dst += dst_idx >> SHIFT_PER_LONG;
++		dst_idx &= BITS_PER_LONG-1;
++		src_idx += (n-1) % BITS_PER_LONG;
++		src += src_idx >> SHIFT_PER_LONG;
++		src_idx &= BITS_PER_LONG-1;
++	}
++
++	shift = dst_idx-src_idx;
++	first = ~0UL << (BITS_PER_LONG-1-dst_idx);
++	last = ~(~0UL << (BITS_PER_LONG-1-((dst_idx-n) % BITS_PER_LONG)));
++
++	if (!shift) {
++		// Same alignment for source and dest
++
++		if ((unsigned long)dst_idx+1 >= n) {
++			// Single word
++			if (last)
++				first &= last;
++			*dst = comp(*src, *dst, first);
++		} else {
++			// Multiple destination words
++			// Leading bits
++			if (first) {
++				*dst = comp(*src, *dst, first);
++				dst--;
++				src--;
++				n -= dst_idx+1;
++			}
++
++			// Main chunk
++			n /= BITS_PER_LONG;
++			while (n >= 8) {
++				*dst-- = *src--;
++				*dst-- = *src--;
++				*dst-- = *src--;
++				*dst-- = *src--;
++				*dst-- = *src--;
++				*dst-- = *src--;
++				*dst-- = *src--;
++				*dst-- = *src--;
++				n -= 8;
++			}
++			while (n--)
++				*dst-- = *src--;
++
++			// Trailing bits
++			if (last)
++				*dst = comp(*src, *dst, last);
++		}
++	} else {
++		// Different alignment for source and dest
++
++		right = shift & (BITS_PER_LONG-1);
++		left = -shift & (BITS_PER_LONG-1);
++
++		if ((unsigned long)dst_idx+1 >= n) {
++			// Single destination word
++			if (last)
++				first &= last;
++			if (shift < 0) {
++				// Single source word
++				*dst = comp(*src << left, *dst, first);
++			} else if (1+(unsigned long)src_idx >= n) {
++				// Single source word
++				*dst = comp(*src >> right, *dst, first);
++			} else {
++				// 2 source words
++				d0 = *src--;
++				d1 = *src;
++				*dst = comp(d0 >> right | d1 << left, *dst,
++					    first);
++			}
++		} else {
++			// Multiple destination words
++			d0 = *src--;
++			// Leading bits
++			if (shift < 0) {
++				// Single source word
++				*dst = comp(d0 << left, *dst, first);
++				dst--;
++				n -= dst_idx+1;
++			} else {
++				// 2 source words
++				d1 = *src--;
++				*dst = comp(d0 >> right | d1 << left, *dst,
++					    first);
++				d0 = d1;
++				dst--;
++				n -= dst_idx+1;
++			}
++
++			// Main chunk
++			m = n % BITS_PER_LONG;
++			n /= BITS_PER_LONG;
++			while (n >= 4) {
++				d1 = *src--;
++				*dst-- = d0 >> right | d1 << left;
++				d0 = d1;
++				d1 = *src--;
++				*dst-- = d0 >> right | d1 << left;
++				d0 = d1;
++				d1 = *src--;
++				*dst-- = d0 >> right | d1 << left;
++				d0 = d1;
++				d1 = *src--;
++				*dst-- = d0 >> right | d1 << left;
++				d0 = d1;
++				n -= 4;
++			}
++			while (n--) {
++				d1 = *src--;
++				*dst-- = d0 >> right | d1 << left;
++				d0 = d1;
++			}
++
++			// Trailing bits
++			if (last) {
++				if (m <= left) {
++					// Single source word
++					*dst = comp(d0 >> right, *dst, last);
++				} else {
++					// 2 source words
++					d1 = *src;
++					*dst = comp(d0 >> right | d1 << left,
++						    *dst, last);
++				}
++			}
++		}
++	}
++}
++
++
++    /*
++     *  Unaligned forward inverting bit copy using 32-bit or 64-bit memory
++     *  accesses
++     */
++
++static void bitcpy_not(unsigned long *dst, int dst_idx,
++		       const unsigned long *src, int src_idx, u32 n)
++{
++	unsigned long first, last;
++	int shift = dst_idx-src_idx, left, right;
++	unsigned long d0, d1;
++	int m;
++
++	if (!n)
++		return;
++
++	shift = dst_idx-src_idx;
++	first = ~0UL >> dst_idx;
++	last = ~(~0UL >> ((dst_idx+n) % BITS_PER_LONG));
++
++	if (!shift) {
++		// Same alignment for source and dest
++
++		if (dst_idx+n <= BITS_PER_LONG) {
++			// Single word
++			if (last)
++				first &= last;
++			*dst = comp(~*src, *dst, first);
++		} else {
++			// Multiple destination words
++			// Leading bits
++			if (first) {
++				*dst = comp(~*src, *dst, first);
++				dst++;
++				src++;
++				n -= BITS_PER_LONG-dst_idx;
++			}
++
++			// Main chunk
++			n /= BITS_PER_LONG;
++			while (n >= 8) {
++				*dst++ = ~*src++;
++				*dst++ = ~*src++;
++				*dst++ = ~*src++;
++				*dst++ = ~*src++;
++				*dst++ = ~*src++;
++				*dst++ = ~*src++;
++				*dst++ = ~*src++;
++				*dst++ = ~*src++;
++				n -= 8;
++			}
++			while (n--)
++				*dst++ = ~*src++;
++
++			// Trailing bits
++			if (last)
++				*dst = comp(~*src, *dst, last);
++		}
++	} else {
++		// Different alignment for source and dest
++
++		right = shift & (BITS_PER_LONG-1);
++		left = -shift & (BITS_PER_LONG-1);
++
++		if (dst_idx+n <= BITS_PER_LONG) {
++			// Single destination word
++			if (last)
++				first &= last;
++			if (shift > 0) {
++				// Single source word
++				*dst = comp(~*src >> right, *dst, first);
++			} else if (src_idx+n <= BITS_PER_LONG) {
++				// Single source word
++				*dst = comp(~*src << left, *dst, first);
++			} else {
++				// 2 source words
++				d0 = ~*src++;
++				d1 = ~*src;
++				*dst = comp(d0 << left | d1 >> right, *dst,
++					    first);
++			}
++		} else {
++			// Multiple destination words
++			d0 = ~*src++;
++			// Leading bits
++			if (shift > 0) {
++				// Single source word
++				*dst = comp(d0 >> right, *dst, first);
++				dst++;
++				n -= BITS_PER_LONG-dst_idx;
++			} else {
++				// 2 source words
++				d1 = ~*src++;
++				*dst = comp(d0 << left | d1 >> right, *dst,
++					    first);
++				d0 = d1;
++				dst++;
++				n -= BITS_PER_LONG-dst_idx;
++			}
++
++			// Main chunk
++			m = n % BITS_PER_LONG;
++			n /= BITS_PER_LONG;
++			while (n >= 4) {
++				d1 = ~*src++;
++				*dst++ = d0 << left | d1 >> right;
++				d0 = d1;
++				d1 = ~*src++;
++				*dst++ = d0 << left | d1 >> right;
++				d0 = d1;
++				d1 = ~*src++;
++				*dst++ = d0 << left | d1 >> right;
++				d0 = d1;
++				d1 = ~*src++;
++				*dst++ = d0 << left | d1 >> right;
++				d0 = d1;
++				n -= 4;
++			}
++			while (n--) {
++				d1 = ~*src++;
++				*dst++ = d0 << left | d1 >> right;
++				d0 = d1;
++			}
++
++			// Trailing bits
++			if (last) {
++				if (m <= right) {
++					// Single source word
++					*dst = comp(d0 << left, *dst, last);
++				} else {
++					// 2 source words
++					d1 = ~*src;
++					*dst = comp(d0 << left | d1 >> right,
++						    *dst, last);
++				}
++			}
++		}
++	}
++}
++
++
++    /*
++     *  Unaligned 32-bit pattern fill using 32/64-bit memory accesses
++     */
++
++static void bitfill32(unsigned long *dst, int dst_idx, u32 pat, u32 n)
++{
++	unsigned long val = pat;
++	unsigned long first, last;
++
++	if (!n)
++		return;
++
++#if BITS_PER_LONG == 64
++	val |= val << 32;
++#endif
++
++	first = ~0UL >> dst_idx;
++	last = ~(~0UL >> ((dst_idx+n) % BITS_PER_LONG));
++
++	if (dst_idx+n <= BITS_PER_LONG) {
++		// Single word
++		if (last)
++			first &= last;
++		*dst = comp(val, *dst, first);
++	} else {
++		// Multiple destination words
++		// Leading bits
++		if (first) {
++			*dst = comp(val, *dst, first);
++			dst++;
++			n -= BITS_PER_LONG-dst_idx;
++		}
++
++		// Main chunk
++		n /= BITS_PER_LONG;
++		while (n >= 8) {
++			*dst++ = val;
++			*dst++ = val;
++			*dst++ = val;
++			*dst++ = val;
++			*dst++ = val;
++			*dst++ = val;
++			*dst++ = val;
++			*dst++ = val;
++			n -= 8;
++		}
++		while (n--)
++			*dst++ = val;
++
++		// Trailing bits
++		if (last)
++			*dst = comp(val, *dst, last);
++	}
++}
++
++
++    /*
++     *  Unaligned 32-bit pattern xor using 32/64-bit memory accesses
++     */
++
++static void bitxor32(unsigned long *dst, int dst_idx, u32 pat, u32 n)
++{
++	unsigned long val = pat;
++	unsigned long first, last;
++
++	if (!n)
++		return;
++
++#if BITS_PER_LONG == 64
++	val |= val << 32;
++#endif
++
++	first = ~0UL >> dst_idx;
++	last = ~(~0UL >> ((dst_idx+n) % BITS_PER_LONG));
++
++	if (dst_idx+n <= BITS_PER_LONG) {
++		// Single word
++		if (last)
++			first &= last;
++		*dst = xor(val, *dst, first);
++	} else {
++		// Multiple destination words
++		// Leading bits
++		if (first) {
++			*dst = xor(val, *dst, first);
++			dst++;
++			n -= BITS_PER_LONG-dst_idx;
++		}
++
++		// Main chunk
++		n /= BITS_PER_LONG;
++		while (n >= 4) {
++			*dst++ ^= val;
++			*dst++ ^= val;
++			*dst++ ^= val;
++			*dst++ ^= val;
++			n -= 4;
++		}
++		while (n--)
++			*dst++ ^= val;
++
++		// Trailing bits
++		if (last)
++			*dst = xor(val, *dst, last);
++	}
++}
++
++static inline void fill_one_line(int bpp, unsigned long next_plane,
++				 unsigned long *dst, int dst_idx, u32 n,
++				 u32 color)
++{
++	while (1) {
++		dst += dst_idx >> SHIFT_PER_LONG;
++		dst_idx &= (BITS_PER_LONG-1);
++		bitfill32(dst, dst_idx, color & 1 ? ~0 : 0, n);
++		if (!--bpp)
++			break;
++		color >>= 1;
++		dst_idx += next_plane*8;
++	}
++}
++
++static inline void xor_one_line(int bpp, unsigned long next_plane,
++				unsigned long *dst, int dst_idx, u32 n,
++				u32 color)
++{
++	while (color) {
++		dst += dst_idx >> SHIFT_PER_LONG;
++		dst_idx &= (BITS_PER_LONG-1);
++		bitxor32(dst, dst_idx, color & 1 ? ~0 : 0, n);
++		if (!--bpp)
++			break;
++		color >>= 1;
++		dst_idx += next_plane*8;
++	}
++}
++
++
++static void atafb_fillrect(struct fb_info *info,
++			   const struct fb_fillrect *rect)
++{
++	struct atafb_par *par = (struct atafb_par *)info->par;
++	int dst_idx, x2, y2;
++	unsigned long *dst;
++	u32 width, height;
++
++	if (!rect->width || !rect->height)
++		return;
++
++	/*
++	 * We could use hardware clipping but on many cards you get around
++	 * hardware clipping by writing to framebuffer directly.
++	 * */
++	x2 = rect->dx + rect->width;
++	y2 = rect->dy + rect->height;
++	x2 = x2 < info->var.xres_virtual ? x2 : info->var.xres_virtual;
++	y2 = y2 < info->var.yres_virtual ? y2 : info->var.yres_virtual;
++	width = x2 - rect->dx;
++	height = y2 - rect->dy;
++
++	if (info->var.bits_per_pixel == 1)
++		atafb_mfb_fillrect(info, par->next_line, rect->color, 
++				rect->dy, rect->dx, height, width);
++	else if (info->var.bits_per_pixel == 2)
++		atafb_iplan2p2_fillrect(info, par->next_line, rect->color, 
++				rect->dy, rect->dx, height, width);
++	else if (info->var.bits_per_pixel == 4)
++		atafb_iplan2p4_fillrect(info, par->next_line, rect->color, 
++				rect->dy, rect->dx, height, width);
++	else 
++		atafb_iplan2p8_fillrect(info, par->next_line, rect->color, 
++				rect->dy, rect->dx, height, width);
++
++	return;
++}
++
++static inline void copy_one_line(int bpp, unsigned long next_plane,
++				 unsigned long *dst, int dst_idx,
++				 unsigned long *src, int src_idx, u32 n)
++{
++	while (1) {
++		dst += dst_idx >> SHIFT_PER_LONG;
++		dst_idx &= (BITS_PER_LONG-1);
++		src += src_idx >> SHIFT_PER_LONG;
++		src_idx &= (BITS_PER_LONG-1);
++		bitcpy(dst, dst_idx, src, src_idx, n);
++		if (!--bpp)
++			break;
++		dst_idx += next_plane*8;
++		src_idx += next_plane*8;
++	}
++}
++
++static inline void copy_one_line_rev(int bpp, unsigned long next_plane,
++				     unsigned long *dst, int dst_idx,
++				     unsigned long *src, int src_idx, u32 n)
++{
++	while (1) {
++		dst += dst_idx >> SHIFT_PER_LONG;
++		dst_idx &= (BITS_PER_LONG-1);
++		src += src_idx >> SHIFT_PER_LONG;
++		src_idx &= (BITS_PER_LONG-1);
++		bitcpy_rev(dst, dst_idx, src, src_idx, n);
++		if (!--bpp)
++			break;
++		dst_idx += next_plane*8;
++		src_idx += next_plane*8;
++	}
++}
++
++
++static void atafb_copyarea(struct fb_info *info,
++			   const struct fb_copyarea *area)
++{
++	struct atafb_par *par = (struct atafb_par *)info->par;
++	int x2, y2;
++	u32 dx, dy, sx, sy, width, height;
++	unsigned long *dst, *src;
++	int dst_idx, src_idx;
++	int rev_copy = 0;
++
++	/* clip the destination */
++	x2 = area->dx + area->width;
++	y2 = area->dy + area->height;
++	dx = area->dx > 0 ? area->dx : 0;
++	dy = area->dy > 0 ? area->dy : 0;
++	x2 = x2 < info->var.xres_virtual ? x2 : info->var.xres_virtual;
++	y2 = y2 < info->var.yres_virtual ? y2 : info->var.yres_virtual;
++	width = x2 - dx;
++	height = y2 - dy;
++
++	/* update sx,sy */
++	sx = area->sx + (dx - area->dx);
++	sy = area->sy + (dy - area->dy);
++
++	/* the source must be completely inside the virtual screen */
++	if (sx < 0 || sy < 0 || (sx + width) > info->var.xres_virtual ||
++	    (sy + height) > info->var.yres_virtual)
++		return;
++
++	if (dy > sy || (dy == sy && dx > sx)) {
++		dy += height;
++		sy += height;
++		rev_copy = 1;
++	}
++
++	if (info->var.bits_per_pixel == 1)
++		atafb_mfb_copyarea(info, par->next_line, sy, sx, dy, dx, height, width);
++	else if (info->var.bits_per_pixel == 2)
++		atafb_iplan2p2_copyarea(info, par->next_line, sy, sx, dy, dx, height, width);
++	else if (info->var.bits_per_pixel == 4)
++		atafb_iplan2p4_copyarea(info, par->next_line, sy, sx, dy, dx, height, width);
++	else
++		atafb_iplan2p8_copyarea(info, par->next_line, sy, sx, dy, dx, height, width);
++
++	return;
++}
++
++
++static inline void expand_one_line(int bpp, unsigned long next_plane,
++				   unsigned long *dst, int dst_idx, u32 n,
++				   const u8 *data, u32 bgcolor, u32 fgcolor)
++{
++    const unsigned long *src;
++    int src_idx;
++
++    while (1) {
++	dst += dst_idx >> SHIFT_PER_LONG;
++	dst_idx &= (BITS_PER_LONG-1);
++	if ((bgcolor ^ fgcolor) & 1) {
++	    src = (unsigned long *)((unsigned long)data & ~(BYTES_PER_LONG-1));
++	    src_idx = ((unsigned long)data & (BYTES_PER_LONG-1))*8;
++	    if (fgcolor & 1)
++		bitcpy(dst, dst_idx, src, src_idx, n);
++	    else
++		bitcpy_not(dst, dst_idx, src, src_idx, n);
++	    /* set or clear */
++	} else
++	    bitfill32(dst, dst_idx, fgcolor & 1 ? ~0 : 0, n);
++	if (!--bpp)
++	    break;
++	bgcolor >>= 1;
++	fgcolor >>= 1;
++	dst_idx += next_plane*8;
++    }
++}
++
++
++static void atafb_imageblit(struct fb_info *info, const struct fb_image *image)
++{
++	struct atafb_par *par = (struct atafb_par *)info->par;
++	int x2, y2;
++	unsigned long *dst;
++	int dst_idx;
++	const char *src;
++	u32 dx, dy, width, height, pitch;
++
++	/*
++	 * We could use hardware clipping but on many cards you get around
++	 * hardware clipping by writing to framebuffer directly like we are
++	 * doing here.
++	 */
++	x2 = image->dx + image->width;
++	y2 = image->dy + image->height;
++	dx = image->dx;
++	dy = image->dy;
++	x2 = x2 < info->var.xres_virtual ? x2 : info->var.xres_virtual;
++	y2 = y2 < info->var.yres_virtual ? y2 : info->var.yres_virtual;
++	width  = x2 - dx;
++	height = y2 - dy;
++
++	if (image->depth == 1) {
++		// used for font data
++		dst = (unsigned long *)
++			((unsigned long)info->screen_base & ~(BYTES_PER_LONG-1));
++		dst_idx = ((unsigned long)info->screen_base & (BYTES_PER_LONG-1))*8;
++		dst_idx += dy*par->next_line*8+dx;
++		src = image->data;
++		pitch = (image->width+7)/8;
++		while (height--) {
++
++		    if (info->var.bits_per_pixel == 1)
++			atafb_mfb_linefill(info, par->next_line, 
++					dy, dx, width, src, 
++					image->bg_color, image->fg_color);
++		    else if (info->var.bits_per_pixel == 2)
++			atafb_iplan2p2_linefill(info, par->next_line, 
++					dy, dx, width, src, 
++					image->bg_color, image->fg_color);
++		    else if (info->var.bits_per_pixel == 4)
++			atafb_iplan2p4_linefill(info, par->next_line, 
++					dy, dx, width, src, 
++					image->bg_color, image->fg_color);
++		    else
++			atafb_iplan2p8_linefill(info, par->next_line, 
++					dy, dx, width, src, 
++					image->bg_color, image->fg_color);
++			dy++;
++			src += pitch;
++		}
++	} else {
++		// only used for logo
++		c2p(info->screen_base, image->data, dx, dy, width, height,
++		    par->next_line, par->next_plane, image->width,
++		    info->var.bits_per_pixel);
++	}
++}
+ static int
+ atafb_ioctl(struct fb_info *info, unsigned int cmd, unsigned long arg)
+ {
+@@ -2585,7 +3606,7 @@
+ 		if (copy_from_user((void *)&current_par, (void *)arg,
+ 				   sizeof(struct atafb_par)))
+ 			return -EFAULT;
+-		atafb_set_par(&current_par);
++		ata_set_par(&current_par);
+ 		return 0;
+ #endif
+ 	}
+@@ -2614,22 +3635,65 @@
+ 		cmap.transp=NULL;
+ 		cmap.start=0;
+ 		cmap.len=16;
+-		fb_set_cmap(&cmap, 1, info);
++		fb_set_cmap(&cmap, info);
+ 	}
++#if 0
+ 	else
+-		do_install_cmap(info->currcon, info);
++		do_install_cmap(info);
++#endif
++	return 0;
++}
++
++	/*
++	 * New fbcon interface ... 
++	 */
++
++	 /* check var by decoding var into hw par, rounding if necessary, 
++	  * then encoding hw par back into new, validated var */
++static int atafb_check_var(struct fb_var_screeninfo *var,
++			   struct fb_info *info)
++{
++	int err;
++	struct atafb_par par;
++
++	/* Validate wanted screen parameters */
++	if ((err = fbhw->decode_var(var, &par)))
++		return err;
++
++	/* Encode (possibly rounded) screen parameters */
++	fbhw->encode_var(var, &par);
++	return 0;
++}
++
++	/* actually set hw par by decoding var, then setting hardware from 
++	 * hw par just decoded */
++static int atafb_set_par(struct fb_info *info)
++{
++	struct atafb_par *par = (struct atafb_par *)info->par;
++
++	/* Decode wanted screen parameters */
++	fbhw->decode_var(&info->var, par);
++	fbhw->encode_fix(&info->fix, par);
++
++	/* Set new videomode */
++	ata_set_par(par);
++
+ 	return 0;
+ }
+ 
++
++
++
+ static struct fb_ops atafb_ops = {
+ 	.owner =	THIS_MODULE,
+-	.fb_get_fix =	atafb_get_fix,
+-	.fb_get_var =	atafb_get_var,
+-	.fb_set_var =	atafb_set_var,
+-	.fb_get_cmap =	atafb_get_cmap,
+-	.fb_set_cmap =	gen_set_cmap,
+-	.fb_pan_display =atafb_pan_display,
++	.fb_check_var	= atafb_check_var,
++	.fb_set_par	= atafb_set_par,
++	.fb_setcolreg	= atafb_setcolreg,
+ 	.fb_blank =	atafb_blank,
++	.fb_pan_display	= atafb_pan_display,
++	.fb_fillrect	= atafb_fillrect,
++	.fb_copyarea	= atafb_copyarea,
++	.fb_imageblit	= atafb_imageblit,
+ 	.fb_ioctl =	atafb_ioctl,
+ };
+ 
+@@ -2674,17 +3738,19 @@
+ 		default_mem_req=min_mem;
+ }
+ 
++// Obsolete
+ static int
+ atafb_switch(int con, struct fb_info *info)
+ {
++#if 0
+ 	/* Do we have to save the colormap ? */
+-	if (fb_display[info->currcon].cmap.len)
+-		fb_get_cmap(&fb_display[info->currcon].cmap, 1, fbhw->getcolreg,
++	if (info->cmap.len)
++		fb_get_cmap(info->cmap, 1, fbhw->getcolreg,
+ 			    info);
+-	do_fb_set_var(&fb_display[con].var,1);
+-	info->currcon=con;
++#endif
++	do_fb_set_var(&info->var,1);
+ 	/* Install new colormap */
+-	do_install_cmap(con, info);
++	// do_install_cmap(info);
+ 	return 0;
+ }
+ 
+@@ -2692,40 +3758,59 @@
+ {
+ 	int pad;
+ 	int detected_mode;
++	unsigned int defmode;
+ 	unsigned long mem_req;
+ 
++#ifndef MODULE
++	char *option = NULL;
++
++	if (fb_get_options("atafb", &option)) {
++		return -ENODEV;
++	}
++	atafb_setup(option);
++#endif
++	printk("atafb_init: start\n");
++
+ 	if (!MACH_IS_ATARI)
+ 	        return -ENXIO;
+ 
+ 	do {
+ #ifdef ATAFB_EXT
+ 		if (external_addr) {
++			printk("atafb_init: initializing external hw\n");
+ 			fbhw = &ext_switch;
+ 			atafb_ops.fb_setcolreg = &ext_setcolreg;
++			defmode = DEFMODE_EXT;
+ 			break;
+ 		}
+ #endif
+ #ifdef ATAFB_TT
+ 		if (ATARIHW_PRESENT(TT_SHIFTER)) {
++			printk("atafb_init: initializing TT hw\n");
+ 			fbhw = &tt_switch;
+ 			atafb_ops.fb_setcolreg = &tt_setcolreg;
++			defmode = DEFMODE_TT;
+ 			break;
+ 		}
+ #endif
+ #ifdef ATAFB_FALCON
+ 		if (ATARIHW_PRESENT(VIDEL_SHIFTER)) {
++			printk("atafb_init: initializing Falcon hw\n");
+ 			fbhw = &falcon_switch;
+ 			atafb_ops.fb_setcolreg = &falcon_setcolreg;
+ 			request_irq(IRQ_AUTO_4, falcon_vbl_switcher, IRQ_TYPE_PRIO,
+ 			            "framebuffer/modeswitch", falcon_vbl_switcher);
++			defmode = DEFMODE_F30;
+ 			break;
+ 		}
+ #endif
+ #ifdef ATAFB_STE
+ 		if (ATARIHW_PRESENT(STND_SHIFTER) ||
+ 		    ATARIHW_PRESENT(EXTD_SHIFTER)) {
++			printk("atafb_init: initializing ST/E hw\n");
+ 			fbhw = &st_switch;
+ 			atafb_ops.fb_setcolreg = &stste_setcolreg;
++			defmode = DEFMODE_STE;
+ 			break;
+ 		}
+ 		fbhw = &st_switch;
+@@ -2770,6 +3855,8 @@
+ 			kernel_set_cachemode(screen_base, screen_len,
+ 					     IOMAP_WRITETHROUGH);
+ 		}
++		printk("atafb: screen_base %p real_screen_base %p screen_len %ld\n",
++			screen_base, real_screen_base, screen_len);
+ #ifdef ATAFB_EXT
+ 	}
+ 	else {
+@@ -2789,32 +3876,46 @@
+ 	}
+ #endif /* ATAFB_EXT */
+ 
+-	strcpy(fb_info.modename, "Atari Builtin ");
+-	fb_info.changevar = NULL;
++//	strcpy(fb_info.mode->name, "Atari Builtin ");
+ 	fb_info.fbops = &atafb_ops;
+-	fb_info.disp = &disp;
+-	fb_info.currcon = -1;
+-	fb_info.switch_con = &atafb_switch;
+-	fb_info.updatevar = &fb_update_var;
+-	fb_info.flags = FBINFO_FLAG_DEFAULT;
++	// try to set default (detected; requested) var
+ 	do_fb_set_var(&atafb_predefined[default_par-1], 1);
+-	strcat(fb_info.modename, fb_var_names[default_par-1][0]);
+-
+-	atafb_get_var(&disp.var, -1, &fb_info);
+-	atafb_set_disp(-1, &fb_info);
+-	do_install_cmap(0, &fb_info);
++	// reads hw state into current par, which may not be sane yet
++	ata_get_par(&current_par);
++	fb_info.par = &current_par;
++	// tries to read from HW which may not be initialized yet
++	// so set sane var first, then call atafb_set_par
++	atafb_get_var(&current_var, &fb_info);
++	fb_info.var = current_var;
++	fb_info.flags = FBINFO_FLAG_DEFAULT;
+ 
+-	if (register_framebuffer(&fb_info) < 0)
++	if (!fb_find_mode(&fb_info.var, &fb_info, mode_option, atafb_modedb,
++			  NUM_TOTAL_MODES, &atafb_modedb[defmode], 
++			  current_var.bits_per_pixel)) {
+ 		return -EINVAL;
++	}
++
++// 	strcat(fb_info.mode->name, fb_var_names[default_par-1][0]);
++
++	atafb_set_disp(&fb_info);
++
++	fb_alloc_cmap(&(fb_info.cmap), 1<<fb_info.var.bits_per_pixel, 0);
+ 
+ 	printk("Determined %dx%d, depth %d\n",
+-	       disp.var.xres, disp.var.yres, disp.var.bits_per_pixel);
+-	if ((disp.var.xres != disp.var.xres_virtual) ||
+-	    (disp.var.yres != disp.var.yres_virtual))
++	       fb_info.var.xres, fb_info.var.yres, fb_info.var.bits_per_pixel);
++	if ((current_var.xres != current_var.xres_virtual) ||
++	    (current_var.yres != current_var.yres_virtual))
+ 	   printk("   virtual %dx%d\n",
+-			  disp.var.xres_virtual, disp.var.yres_virtual);
+-	printk("fb%d: %s frame buffer device, using %dK of video memory\n",
+-	       fb_info.node, fb_info.modename, screen_len>>10);
++			  current_var.xres_virtual, current_var.yres_virtual);
++
++	if (register_framebuffer(&fb_info) < 0)
++		return -EINVAL;
++
++	// FIXME: mode needs setting!
++	//printk("fb%d: %s frame buffer device, using %dK of video memory\n",
++	//       fb_info.node, fb_info.mode->name, screen_len>>10);
++	printk("fb%d: frame buffer device, using %dK of video memory\n",
++	       fb_info.node, screen_len>>10);
+ 
+ 	/* TODO: This driver cannot be unloaded yet */
+ 	return 0;
+@@ -3038,19 +4139,16 @@
+     char *this_opt;
+     int temp;
+ 
+-    fb_info.fontname[0] = '\0';
+-
+     if (!options || !*options)
+ 		return 0;
+     
+     while ((this_opt = strsep(&options, ",")) != NULL) {	 
+ 	if (!*this_opt) continue;
+-	if ((temp=get_video_mode(this_opt)))
++	if ((temp=get_video_mode(this_opt))) {
+ 		default_par=temp;
+-	else if (! strcmp(this_opt, "inverse"))
++		mode_option = this_opt;
++	} else if (! strcmp(this_opt, "inverse"))
+ 		inverse=1;
+-	else if (!strncmp(this_opt, "font:", 5))
+-	   strcpy(fb_info.fontname, this_opt+5);
+ 	else if (! strncmp(this_opt, "hwscroll_",9)) {
+ 		hwscroll=simple_strtoul(this_opt+9, NULL, 10);
+ 		if (hwscroll < 0)
+@@ -3086,11 +4184,14 @@
+     return 0;
+ }
+ 
++module_init(atafb_init);
++
+ #ifdef MODULE
+ MODULE_LICENSE("GPL");
+ 
+-int init_module(void)
++int cleanup_module(void)
+ {
+-	return atafb_init();
++	unregister_framebuffer(&fb_info);
++	return atafb_deinit();
+ }
+ #endif /* MODULE */
+diff -urN linux-m68k/drivers/video/atafb_iplan2p2.c linux-schmitz/drivers/video/atafb_iplan2p2.c
+--- linux-m68k/drivers/video/atafb_iplan2p2.c	1970-01-01 01:00:00.000000000 +0100
++++ linux-schmitz/drivers/video/atafb_iplan2p2.c	2006-11-19 21:37:27.000000000 +0100
+@@ -0,0 +1,353 @@
++/*
++ *  linux/drivers/video/iplan2p2.c -- Low level frame buffer operations for
++ *				      interleaved bitplanes à la Atari (2
++ *				      planes, 2 bytes interleave)
++ *
++ *	Created 5 Apr 1997 by Geert Uytterhoeven
++ *
++ *  This file is subject to the terms and conditions of the GNU General Public
++ *  License.  See the file COPYING in the main directory of this archive for
++ *  more details.
++ */
++
++#include <linux/module.h>
++#include <linux/tty.h>
++#include <linux/console.h>
++#include <linux/string.h>
++#include <linux/fb.h>
++
++#include <asm/byteorder.h>
++
++#ifdef __mc68000__
++#include <asm/setup.h>
++#endif
++
++#include "console/fbcon.h"
++#include "atafb_utils.h"
++#include "atafb_iplan2p2.h"
++
++
++    /*
++     *  Interleaved bitplanes à la Atari (2 planes, 2 bytes interleave)
++     */
++
++/* Increment/decrement 2 plane addresses */
++
++#define	INC_2P(p)	do { if (!((long)(++(p)) & 1)) (p) += 2; } while(0)
++#define	DEC_2P(p)	do { if ((long)(--(p)) & 1) (p) -= 2; } while(0)
++
++    /*  Convert a standard 4 bit color to our 2 bit color assignment:
++     *  If at least two RGB channels are active, the low bit is turned on;
++     *  The intensity bit (b3) is shifted into b1.
++     */
++
++static const u8 color_2p[] = { 0, 0, 0, 1, 0, 1, 1, 1, 2, 2, 2, 3, 2, 3, 3, 3 };
++#define	COLOR_2P(c)	color_2p[c]
++
++/* Perform the m68k movepw operation.  */
++static inline void movepw(u8 *d, u16 val)
++{
++#if defined __mc68000__ && !defined CPU_M68060_ONLY
++    asm volatile ("movepw %1,%0@(0)" : : "a" (d), "d" (val));
++#else
++    d[0] = (val >> 16) & 0xff;
++    d[2] = val & 0xff;
++#endif
++}
++
++/* Sets the bytes in the visible column at d, height h, to the value
++ * val for a 2 plane screen. The bits of the color in 'color' are
++ * moved (8 times) to the respective bytes. This means:
++ *
++ * for(h times; d += bpr)
++ *   *d     = (color & 1) ? 0xff : 0;
++ *   *(d+2) = (color & 2) ? 0xff : 0;
++ */
++
++static __inline__ void memclear_2p_col(void *d, size_t h, u16 val, int bpr)
++{
++    u8 *dd = d;
++    do {
++	movepw(dd, val);
++	dd += bpr;
++    } while (--h);
++}
++
++/* Sets a 2 plane region from 'd', length 'count' bytes, to the color
++ * in val1. 'd' has to be an even address and count must be divisible
++ * by 8, because only whole words and all planes are accessed. I.e.:
++ *
++ * for(count/4 times)
++ *   *d     = *(d+1) = (color & 1) ? 0xff : 0;
++ *   *(d+2) = *(d+3) = (color & 2) ? 0xff : 0;
++ */
++
++static __inline__ void memset_even_2p(void *d, size_t count, u32 val)
++{
++    u32 *dd = d;
++
++    count /= 4;
++    while (count--)
++	*dd++ = val;
++}
++
++/* Copies a 2 plane column from 's', height 'h', to 'd'. */
++
++static __inline__ void memmove_2p_col (void *d, void *s, int h, int bpr)
++{
++    u8 *dd = d, *ss = s;
++
++    while (h--) {
++	dd[0] = ss[0];
++	dd[2] = ss[2];
++	dd += bpr;
++	ss += bpr;
++    }
++}
++
++
++/* This expands a 2 bit color into a short for movepw (2 plane) operations. */
++
++static const u16 two2byte[] = {
++    0x0000, 0xff00, 0x00ff, 0xffff
++};
++
++static __inline__ u16 expand2w(u8 c)
++{
++    return two2byte[c];
++}
++
++
++/* This expands a 2 bit color into one long for a movel operation
++ * (2 planes).
++ */
++
++static const u32 two2word[] = {
++#ifndef __LITTLE_ENDIAN
++    0x00000000, 0xffff0000, 0x0000ffff, 0xffffffff
++#else
++    0x00000000, 0x0000ffff, 0xffff0000, 0xffffffff
++#endif
++};
++
++static __inline__ u32 expand2l(u8 c)
++{
++    return two2word[c];
++}
++
++
++/* This duplicates a byte 2 times into a short. */
++
++static __inline__ u16 dup2w(u8 c)
++{
++    u16 rv;
++
++    rv = c;
++    rv |= c << 8;
++    return rv;
++}
++
++
++void atafb_iplan2p2_copyarea(struct fb_info *info, u_long next_line,
++                             int sy, int sx, int dy, int dx,
++			     int height, int width)
++{
++    /*  bmove() has to distinguish two major cases: If both, source and
++     *  destination, start at even addresses or both are at odd
++     *  addresses, just the first odd and last even column (if present)
++     *  require special treatment (memmove_col()). The rest between
++     *  then can be copied by normal operations, because all adjacent
++     *  bytes are affected and are to be stored in the same order.
++     *    The pathological case is when the move should go from an odd
++     *  address to an even or vice versa. Since the bytes in the plane
++     *  words must be assembled in new order, it seems wisest to make
++     *  all movements by memmove_col().
++     */
++
++     if (sx == 0 && dx == 0 && width * 2 == next_line) {
++	/*  Special (but often used) case: Moving whole lines can be
++	 *  done with memmove()
++	 */
++        fb_memmove((u8 *)info->screen_base + dy * next_line,
++                   (u8 *)info->screen_base + sy * next_line,
++                    next_line * height);
++     } else {
++	int rows, cols;
++	u8 *src;
++	u8 *dst;
++	int bytes = next_line;
++	int linesize;
++	u_int colsize;
++	u_int upwards = (dy < sy) || (dy == sy && dx < sx);
++
++        linesize = bytes;
++        colsize = height;
++	if ((sx & 1) == (dx & 1)) {
++	    /* odd->odd or even->even */
++
++	    if (upwards) {
++		src = (u8 *)info->screen_base + sy * linesize + (sx>>1)*4 + (sx & 1);
++		dst = (u8 *)info->screen_base + dy * linesize + (dx>>1)*4 + (dx & 1);
++		if (sx & 1) {
++		    memmove_2p_col(dst, src, colsize, bytes);
++		    src += 3;
++		    dst += 3;
++		    --width;
++		}
++		if (width > 1) {
++		    for(rows = colsize; rows > 0; --rows) {
++			fb_memmove (dst, src, (width >> 1) * 4);
++			src += bytes;
++			dst += bytes;
++		    }
++		}
++
++		if (width & 1) {
++		    src -= colsize * bytes;
++		    dst -= colsize * bytes;
++		    memmove_2p_col(dst + (width>>1)*4, src + (width>>1)*4,
++		    colsize, bytes);
++		}
++	    } else {
++		if (!((sx+width-1) & 1)) {
++		    src = (u8 *)info->screen_base + sy * linesize + ((sx+width-1)>>1)*4;
++		    dst = (u8 *)info->screen_base + dy * linesize + ((dx+width-1)>>1)*4;
++		    memmove_2p_col(dst, src, colsize, bytes);
++		    --width;
++		}
++		src = (u8 *)info->screen_base + sy * linesize + (sx>>1)*4 + (sx & 1);
++		dst = (u8 *)info->screen_base + dy * linesize + (dx>>1)*4 + (dx & 1);
++		if (width > 1) {
++		    src += colsize * bytes + (sx & 1)*3;
++		    dst += colsize * bytes + (sx & 1)*3;
++		    for(rows = colsize; rows > 0; --rows) {
++			src -= bytes;
++			dst -= bytes;
++			fb_memmove (dst, src, (width>>1)*4);
++		    }
++		}
++		if (width & 1)
++		    memmove_2p_col(dst-3, src-3, colsize, bytes);
++	    }
++	} else {
++	/* odd->even or even->odd */
++
++	    if (upwards) {
++		src = (u8 *)info->screen_base + sy * linesize + (sx>>1)*4 + (sx & 1);
++		dst = (u8 *)info->screen_base + dy * linesize + (dx>>1)*4 + (dx & 1);
++		for(cols = width; cols > 0; --cols) {
++		    memmove_2p_col(dst, src, colsize, bytes);
++		    INC_2P(src);
++		    INC_2P(dst);
++		}
++	    } else {
++		sx += width-1;
++		dx += width-1;
++		src = (u8 *)info->screen_base + sy * linesize + (sx>>1)*4 + (sx & 1);
++		dst = (u8 *)info->screen_base + dy * linesize + (dx>>1)*4 + (dx & 1);
++		for(cols = width; cols > 0; --cols) {
++		    memmove_2p_col(dst, src, colsize, bytes);
++		    DEC_2P(src);
++		    DEC_2P(dst);
++		}
++	    }
++	}
++    }
++}
++
++void atafb_iplan2p2_fillrect(struct fb_info *info, u_long next_line, u32 color, 
++                             int sy, int sx, int height, int width)
++{
++    u32 offset;
++    u8 *start;
++    int rows;
++    int bytes = next_line;
++    int lines;
++    u32 size;
++    u32 cval;
++    u16 pcval;
++
++    cval = expand2l(color);
++
++    lines = height;
++
++    if (sx == 0 && width * 2 == bytes) {
++        offset = (sy * bytes);
++	size    = lines * bytes;
++	memset_even_2p((u8 *)info->screen_base + offset, size, cval);
++    } else {
++        offset = sy * bytes + (sx>>1)*4 + (sx & 1);
++	start = (u8 *) info->screen_base + offset;
++	pcval = expand2w(color);
++
++	/* Clears are split if the region starts at an odd column or
++	* end at an even column. These extra columns are spread
++	* across the interleaved planes. All in between can be
++	* cleared by normal fb_memclear_small(), because both bytes of
++	* the single plane words are affected.
++	*/
++
++	if (sx & 1) {
++	    memclear_2p_col(start, lines, pcval, bytes);
++	    start += 3;
++	    width--;
++	}
++	if (width & 1) {
++	    memclear_2p_col(start + (width>>1)*4, lines, pcval, bytes);
++	    width--;
++	}
++	if (width)
++	    for(rows = lines; rows-- ; start += bytes)
++		memset_even_2p(start, width*2, cval);
++	}
++}
++
++void atafb_iplan2p2_linefill(struct fb_info *info, u_long next_line,
++                             int dy, int dx, u32 width,
++                             const u8 *data, u32 bgcolor, u32 fgcolor)
++{
++    u8 *dest;
++    u8 *cdat;
++    int rows;
++    int bytes = next_line;
++    u16 eorx, fgx, bgx, fdx;
++
++    // source data
++    cdat = data;
++
++    // advance from odd to even (dx>>3) by 3: 0 1 4 5 .... 
++    // dest = (p->screen_base + yy * p->next_line + (xx>>1)*4 + (xx & 1));
++    dest = (u8*) info->screen_base + dy * bytes + (dx>>4)*4 + ((dx>>3)&1);
++
++    fgx = expand2w(fgcolor);
++    bgx = expand2w(bgcolor);
++    eorx = fgx ^ bgx;
++
++      for(rows = width/8; rows-- ;) {
++	fdx = dup2w(*cdat++);
++	movepw(dest, (fdx & eorx) ^ bgx);
++	INC_2P(dest);
++      }
++    
++}
++
++#ifdef MODULE
++MODULE_LICENSE("GPL");
++
++int init_module(void)
++{
++    return 0;
++}
++
++void cleanup_module(void)
++{}
++#endif /* MODULE */
++
++
++    /*
++     *  Visible symbols for modules
++     */
++
++EXPORT_SYMBOL(atafb_iplan2p2_copyarea);
++EXPORT_SYMBOL(atafb_iplan2p2_fillrect);
++EXPORT_SYMBOL(atafb_iplan2p2_linefill);
+diff -urN linux-m68k/drivers/video/atafb_iplan2p2.h linux-schmitz/drivers/video/atafb_iplan2p2.h
+--- linux-m68k/drivers/video/atafb_iplan2p2.h	1970-01-01 01:00:00.000000000 +0100
++++ linux-schmitz/drivers/video/atafb_iplan2p2.h	2006-11-19 21:37:27.000000000 +0100
+@@ -0,0 +1,27 @@
++/*
++ *  FBcon low-level driver for Atari interleaved bitplanes (8 planes) (iplan2p8)
++ */
++
++#ifndef _VIDEO_FBCON_IPLAN2P2_H
++#define _VIDEO_FBCON_IPLAN2P2_H
++
++#ifdef MODULE
++#if defined(CONFIG_FBCON_IPLAN2P2) || defined(CONFIG_FBCON_IPLAN2P2_MODULE)
++#define FBCON_HAS_IPLAN2P2
++#endif
++#else
++#if defined(CONFIG_FBCON_IPLAN2P2)
++#define FBCON_HAS_IPLAN2P2
++#endif
++#endif
++
++extern void atafb_iplan2p2_copyarea(struct fb_info *info, u_long next_line, int sy, int sx, int dy,
++				    int dx, int height, int width);
++extern void atafb_iplan2p2_fillrect(struct fb_info *info, u_long next_line, u32 color,
++				    int sy, int sx, int height, int width);
++extern void atafb_iplan2p2_linefill(struct fb_info *info, u_long next_line,
++                                    int dy, int dx, u32 width,
++                                    const u8 *data, u32 bgcolor, u32 fgcolor);
++
++
++#endif /* _VIDEO_FBCON_IPLAN2P8_H */
+diff -urN linux-m68k/drivers/video/atafb_iplan2p4.c linux-schmitz/drivers/video/atafb_iplan2p4.c
+--- linux-m68k/drivers/video/atafb_iplan2p4.c	1970-01-01 01:00:00.000000000 +0100
++++ linux-schmitz/drivers/video/atafb_iplan2p4.c	2006-11-19 21:37:27.000000000 +0100
+@@ -0,0 +1,361 @@
++/*
++ *  linux/drivers/video/iplan2p4.c -- Low level frame buffer operations for
++ *				      interleaved bitplanes à la Atari (8
++ *				      planes, 2 bytes interleave)
++ *
++ *	Created 5 Apr 1997 by Geert Uytterhoeven
++ *
++ *  This file is subject to the terms and conditions of the GNU General Public
++ *  License.  See the file COPYING in the main directory of this archive for
++ *  more details.
++ */
++
++#include <linux/module.h>
++#include <linux/tty.h>
++#include <linux/console.h>
++#include <linux/string.h>
++#include <linux/fb.h>
++
++#include <asm/byteorder.h>
++
++#ifdef __mc68000__
++#include <asm/setup.h>
++#endif
++
++#include "console/fbcon.h"
++#include "atafb_utils.h"
++#include "atafb_iplan2p4.h"
++
++
++    /*
++     *  Interleaved bitplanes à la Atari (4 planes, 2 bytes interleave)
++     */
++
++/* Increment/decrement 4 plane addresses */
++
++#define	INC_4P(p)	do { if (!((long)(++(p)) & 1)) (p) += 6; } while(0)
++#define	DEC_4P(p)	do { if ((long)(--(p)) & 1) (p) -= 6; } while(0)
++
++/* Perform the m68k movepl operation.  */
++static inline void movepl(u8 *d, u32 val)
++{
++#if defined __mc68000__ && !defined CPU_M68060_ONLY
++    asm volatile ("movepl %1,%0@(0)"
++		  : : "a" (d), "d" (val));
++#else
++    d[0] = (val >> 24) & 0xff;
++    d[2] = (val >> 16) & 0xff;
++    d[4] = (val >> 8) & 0xff;
++    d[6] = val & 0xff;
++#endif
++}
++
++/* Sets the bytes in the visible column at d, height h, to the value
++ * val for a 4 plane screen. The bits of the color in 'color' are
++ * moved (8 times) to the respective bytes. This means:
++ *
++ * for(h times; d += bpr)
++ *   *d     = (color & 1) ? 0xff : 0;
++ *   *(d+2) = (color & 2) ? 0xff : 0;
++ *   *(d+4) = (color & 4) ? 0xff : 0;
++ *   *(d+6) = (color & 8) ? 0xff : 0;
++ */
++
++static __inline__ void memclear_4p_col(void *d, size_t h, u32 val, int bpr)
++{
++    u8 *dd = d;
++    do {
++	movepl(dd, val);
++	dd += bpr;
++    } while (--h);
++}
++
++/* Sets a 4 plane region from 'd', length 'count' bytes, to the color
++ * in val1/val2. 'd' has to be an even address and count must be divisible
++ * by 8, because only whole words and all planes are accessed. I.e.:
++ *
++ * for(count/8 times)
++ *   *d     = *(d+1) = (color & 1) ? 0xff : 0;
++ *   *(d+2) = *(d+3) = (color & 2) ? 0xff : 0;
++ *   *(d+4) = *(d+5) = (color & 4) ? 0xff : 0;
++ *   *(d+6) = *(d+7) = (color & 8) ? 0xff : 0;
++ */
++
++static __inline__ void memset_even_4p(void *d, size_t count, u32 val1,
++                                      u32 val2)
++{
++    u32 *dd = d;
++
++    count /= 8;
++    while (count--) {
++	*dd++ = val1;
++	*dd++ = val2;
++    }
++}
++
++/* Copies a 4 plane column from 's', height 'h', to 'd'. */
++
++static __inline__ void memmove_4p_col (void *d, void *s, int h, int bpr)
++{
++    u8 *dd = d, *ss = s;
++
++    while (h--) {
++	dd[0] = ss[0];
++	dd[2] = ss[2];
++	dd[4] = ss[4];
++	dd[6] = ss[6];
++	dd += bpr;
++	ss += bpr;
++    }
++}
++
++
++/* This expands a 4 bit color into a long for movepl (4 plane) operations. */
++
++static const u32 four2byte[] = {
++    0x00000000, 0xff000000, 0x00ff0000, 0xffff0000,
++    0x0000ff00, 0xff00ff00, 0x00ffff00, 0xffffff00,
++    0x000000ff, 0xff0000ff, 0x00ff00ff, 0xffff00ff,
++    0x0000ffff, 0xff00ffff, 0x00ffffff, 0xffffffff
++};
++
++static __inline__ u32 expand4l(u8 c)
++{
++    return four2byte[c];
++}
++
++
++/* This expands a 4 bit color into two longs for two movel operations
++ * (4 planes).
++ */
++static const u32 two2word[] = {
++#ifndef __LITTLE_ENDIAN
++    0x00000000, 0xffff0000, 0x0000ffff, 0xffffffff,
++#else
++    0x00000000, 0x0000ffff, 0xffff0000, 0xffffffff,
++#endif
++};
++
++static __inline__ void expand4dl(u8 c, u32 *ret1, u32 *ret2)
++{
++    *ret1 = two2word[c & 3];
++    *ret2 = two2word[c >> 2];
++}
++
++
++/* This duplicates a byte 4 times into a long. */
++
++static __inline__ u32 dup4l(u8 c)
++{
++    u32 rv;
++
++    rv = c;
++    rv |= rv << 8;
++    rv |= rv << 16;
++    return rv;
++}
++
++
++void atafb_iplan2p4_copyarea(struct fb_info *info, u_long next_line,
++                             int sy, int sx, int dy, int dx,
++			     int height, int width)
++{
++    /*  bmove() has to distinguish two major cases: If both, source and
++     *  destination, start at even addresses or both are at odd
++     *  addresses, just the first odd and last even column (if present)
++     *  require special treatment (memmove_col()). The rest between
++     *  then can be copied by normal operations, because all adjacent
++     *  bytes are affected and are to be stored in the same order.
++     *    The pathological case is when the move should go from an odd
++     *  address to an even or vice versa. Since the bytes in the plane
++     *  words must be assembled in new order, it seems wisest to make
++     *  all movements by memmove_col().
++     */
++
++     if (sx == 0 && dx == 0 && width * 4 == next_line) {
++	/*  Special (but often used) case: Moving whole lines can be
++	 *  done with memmove()
++	 */
++        fb_memmove((u8 *)info->screen_base + dy * next_line,
++                   (u8 *)info->screen_base + sy * next_line,
++                    next_line * height);
++     } else {
++	int rows, cols;
++	u8 *src;
++	u8 *dst;
++	int bytes = next_line;
++	int linesize;
++	u_int colsize;
++	u_int upwards = (dy < sy) || (dy == sy && dx < sx);
++
++        linesize = bytes;
++        colsize = height;
++	if ((sx & 1) == (dx & 1)) {
++	    /* odd->odd or even->even */
++
++	    if (upwards) {
++		src = (u8 *)info->screen_base + sy * linesize + (sx>>1)*8 + (sx & 1);
++		dst = (u8 *)info->screen_base + dy * linesize + (dx>>1)*8 + (dx & 1);
++		if (sx & 1) {
++		    memmove_4p_col(dst, src, colsize, bytes);
++		    src += 7;
++		    dst += 7;
++		    --width;
++		}
++		if (width > 1) {
++		    for(rows = colsize; rows > 0; --rows) {
++			fast_memmove (dst, src, (width >> 1) * 8);
++			src += bytes;
++			dst += bytes;
++		    }
++		}
++
++		if (width & 1) {
++		    src -= colsize * bytes;
++		    dst -= colsize * bytes;
++		    memmove_4p_col(dst + (width>>1)*8, src + (width>>1)*8,
++		    colsize, bytes);
++		}
++	    } else {
++		if (!((sx+width-1) & 1)) {
++		    src = (u8 *)info->screen_base + sy * linesize + ((sx+width-1)>>1)*8;
++		    dst = (u8 *)info->screen_base + dy * linesize + ((dx+width-1)>>1)*8;
++		    memmove_4p_col(dst, src, colsize, bytes);
++		    --width;
++		}
++		src = (u8 *)info->screen_base + sy * linesize + (sx>>1)*8 + (sx & 1);
++		dst = (u8 *)info->screen_base + dy * linesize + (dx>>1)*8 + (dx & 1);
++		if (width > 1) {
++		    src += colsize * bytes + (sx & 1)*7;
++		    dst += colsize * bytes + (sx & 1)*7;
++		    for(rows = colsize; rows > 0; --rows) {
++			src -= bytes;
++			dst -= bytes;
++			fb_memmove (dst, src, (width>>1)*8);
++		    }
++		}
++		if (width & 1)
++		    memmove_4p_col(dst-7, src-7, colsize, bytes);
++	    }
++	} else {
++	/* odd->even or even->odd */
++
++	    if (upwards) {
++		src = (u8 *)info->screen_base + sy * linesize + (sx>>1)*8 + (sx & 1);
++		dst = (u8 *)info->screen_base + dy * linesize + (dx>>1)*8 + (dx & 1);
++		for(cols = width; cols > 0; --cols) {
++		    memmove_4p_col(dst, src, colsize, bytes);
++		    INC_4P(src);
++		    INC_4P(dst);
++		}
++	    } else {
++		sx += width-1;
++		dx += width-1;
++		src = (u8 *)info->screen_base + sy * linesize + (sx>>1)*8 + (sx & 1);
++		dst = (u8 *)info->screen_base + dy * linesize + (dx>>1)*8 + (dx & 1);
++		for(cols = width; cols > 0; --cols) {
++		    memmove_4p_col(dst, src, colsize, bytes);
++		    DEC_4P(src);
++		    DEC_4P(dst);
++		}
++	    }
++	}
++    }
++}
++
++void atafb_iplan2p4_fillrect(struct fb_info *info, u_long next_line, u32 color, 
++                             int sy, int sx, int height, int width)
++{
++    u32 offset;
++    u8 *start;
++    int rows;
++    int bytes = next_line;
++    int lines;
++    u32 size;
++    u32 cval1, cval2, pcval;
++
++    expand4dl(color, &cval1, &cval2);
++
++    lines = height;
++
++    if (sx == 0 && width * 4 == bytes) {
++        offset = (sy * bytes);
++	size    = lines * bytes;
++	memset_even_4p((u8 *)info->screen_base + offset, size, cval1, cval2);
++    } else {
++        offset = sy * bytes + (sx>>1)*8 + (sx & 1);
++	start = (u8 *) info->screen_base + offset;
++	pcval = expand4l(color);
++
++	/* Clears are split if the region starts at an odd column or
++	* end at an even column. These extra columns are spread
++	* across the interleaved planes. All in between can be
++	* cleared by normal fb_memclear_small(), because both bytes of
++	* the single plane words are affected.
++	*/
++
++	if (sx & 1) {
++	    memclear_4p_col(start, lines, pcval, bytes);
++	    start += 7;
++	    width--;
++	}
++	if (width & 1) {
++	    memclear_4p_col(start + (width>>1)*8, lines, pcval, bytes);
++	    width--;
++	}
++	if (width)
++	    for(rows = lines; rows-- ; start += bytes)
++		memset_even_4p(start, width*4, cval1, cval2);
++	}
++}
++
++void atafb_iplan2p4_linefill(struct fb_info *info, u_long next_line,
++                             int dy, int dx, u32 width,
++                             const u8 *data, u32 bgcolor, u32 fgcolor)
++{
++    u8 *dest;
++    u8 *cdat;
++    int rows;
++    int bytes = next_line;
++    u32 eorx, fgx, bgx, fdx;
++
++    // source data
++    cdat = data;
++
++    // advance from odd to even dx by 7: 0 1 8 9 ...
++    // dest = (p->screen_base + yy * bytes + (xx>>1)*8 + (xx & 1));
++
++    dest = (u8*) info->screen_base + dy * bytes + (dx>>4)*8 + ((dx>>3)&1);
++
++    fgx = expand4l(fgcolor);
++    bgx = expand4l(bgcolor);
++    eorx = fgx ^ bgx;
++
++      for(rows = width/8; rows-- ;) {
++	fdx = dup4l(*cdat++);
++	movepl(dest, (fdx & eorx) ^ bgx);
++	INC_4P(dest);
++      }
++    
++}
++
++#ifdef MODULE
++MODULE_LICENSE("GPL");
++
++int init_module(void)
++{
++    return 0;
++}
++
++void cleanup_module(void)
++{}
++#endif /* MODULE */
++
++
++    /*
++     *  Visible symbols for modules
++     */
++
++EXPORT_SYMBOL(atafb_iplan2p4_copyarea);
++EXPORT_SYMBOL(atafb_iplan2p4_fillrect);
++EXPORT_SYMBOL(atafb_iplan2p4_linefill);
+diff -urN linux-m68k/drivers/video/atafb_iplan2p4.h linux-schmitz/drivers/video/atafb_iplan2p4.h
+--- linux-m68k/drivers/video/atafb_iplan2p4.h	1970-01-01 01:00:00.000000000 +0100
++++ linux-schmitz/drivers/video/atafb_iplan2p4.h	2006-11-19 21:37:27.000000000 +0100
+@@ -0,0 +1,27 @@
++/*
++ *  FBcon low-level driver for Atari interleaved bitplanes (8 planes) (iplan2p8)
++ */
++
++#ifndef _VIDEO_FBCON_IPLAN2P4_H
++#define _VIDEO_FBCON_IPLAN2P4_H
++
++#ifdef MODULE
++#if defined(CONFIG_FBCON_IPLAN2P4) || defined(CONFIG_FBCON_IPLAN2P4_MODULE)
++#define FBCON_HAS_IPLAN2P4
++#endif
++#else
++#if defined(CONFIG_FBCON_IPLAN2P4)
++#define FBCON_HAS_IPLAN2P4
++#endif
++#endif
++
++extern void atafb_iplan2p4_copyarea(struct fb_info *info, u_long next_line, int sy, int sx, int dy,
++				    int dx, int height, int width);
++extern void atafb_iplan2p4_fillrect(struct fb_info *info, u_long next_line, u32 color,
++				    int sy, int sx, int height, int width);
++extern void atafb_iplan2p4_linefill(struct fb_info *info, u_long next_line,
++                                    int dy, int dx, u32 width,
++                                    const u8 *data, u32 bgcolor, u32 fgcolor);
++
++
++#endif /* _VIDEO_FBCON_IPLAN2P4_H */
+diff -urN linux-m68k/drivers/video/atafb_iplan2p8.c linux-schmitz/drivers/video/atafb_iplan2p8.c
+--- linux-m68k/drivers/video/atafb_iplan2p8.c	1970-01-01 01:00:00.000000000 +0100
++++ linux-schmitz/drivers/video/atafb_iplan2p8.c	2006-11-19 21:37:27.000000000 +0100
+@@ -0,0 +1,396 @@
++/*
++ *  linux/drivers/video/iplan2p8.c -- Low level frame buffer operations for
++ *				      interleaved bitplanes à la Atari (8
++ *				      planes, 2 bytes interleave)
++ *
++ *	Created 5 Apr 1997 by Geert Uytterhoeven
++ *
++ *  This file is subject to the terms and conditions of the GNU General Public
++ *  License.  See the file COPYING in the main directory of this archive for
++ *  more details.
++ */
++
++#include <linux/module.h>
++#include <linux/tty.h>
++#include <linux/console.h>
++#include <linux/string.h>
++#include <linux/fb.h>
++
++#include <asm/byteorder.h>
++
++#ifdef __mc68000__
++#include <asm/setup.h>
++#endif
++
++#include "console/fbcon.h"
++#include "atafb_utils.h"
++#include "atafb_iplan2p8.h"
++
++
++    /*
++     *  Interleaved bitplanes à la Atari (8 planes, 2 bytes interleave)
++     *
++     *  In 8 plane mode, 256 colors would be possible, but only the first
++     *  16 are used by the console code (the upper 4 bits are
++     *  background/unused). For that, the following functions mask off the
++     *  higher 4 bits of each color.
++     */
++
++/* Increment/decrement 8 plane addresses */
++
++#define	INC_8P(p)	do { if (!((long)(++(p)) & 1)) (p) += 14; } while(0)
++#define	DEC_8P(p)	do { if ((long)(--(p)) & 1) (p) -= 12; } while(0)
++
++/* Perform the m68k movepl operation extended to 64 bits.  */
++static inline void movepl2(u8 *d, u32 val1, u32 val2)
++{
++#if defined __mc68000__ && !defined CPU_M68060_ONLY
++    asm volatile ("movepl %1,%0@(0); movepl %2,%0@(8)"
++		  : : "a" (d), "d" (val1), "d" (val2));
++#else
++    d[0] = (val1 >> 24) & 0xff;
++    d[2] = (val1 >> 16) & 0xff;
++    d[4] = (val1 >> 8) & 0xff;
++    d[6] = val1 & 0xff;
++    d[8] = (val2 >> 24) & 0xff;
++    d[10] = (val2 >> 16) & 0xff;
++    d[12] = (val2 >> 8) & 0xff;
++    d[14] = val2 & 0xff;
++#endif
++}
++
++/* Sets the bytes in the visible column at d, height h, to the value
++ * val1,val2 for a 8 plane screen. The bits of the color in 'color' are
++ * moved (8 times) to the respective bytes. This means:
++ *
++ * for(h times; d += bpr)
++ *   *d      = (color & 1) ? 0xff : 0;
++ *   *(d+2)  = (color & 2) ? 0xff : 0;
++ *   *(d+4)  = (color & 4) ? 0xff : 0;
++ *   *(d+6)  = (color & 8) ? 0xff : 0;
++ *   *(d+8)  = (color & 16) ? 0xff : 0;
++ *   *(d+10) = (color & 32) ? 0xff : 0;
++ *   *(d+12) = (color & 64) ? 0xff : 0;
++ *   *(d+14) = (color & 128) ? 0xff : 0;
++ */
++
++static __inline__ void memclear_8p_col(void *d, size_t h, u32 val1,
++                                       u32 val2, int bpr)
++{
++    u8 *dd = d;
++    do {
++	movepl2(dd, val1, val2);
++	dd += bpr;
++    } while (--h);
++}
++
++/* Sets a 8 plane region from 'd', length 'count' bytes, to the color
++ * val1..val4. 'd' has to be an even address and count must be divisible
++ * by 16, because only whole words and all planes are accessed. I.e.:
++ *
++ * for(count/16 times)
++ *   *d      = *(d+1)  = (color & 1) ? 0xff : 0;
++ *   *(d+2)  = *(d+3)  = (color & 2) ? 0xff : 0;
++ *   *(d+4)  = *(d+5)  = (color & 4) ? 0xff : 0;
++ *   *(d+6)  = *(d+7)  = (color & 8) ? 0xff : 0;
++ *   *(d+8)  = *(d+9)  = (color & 16) ? 0xff : 0;
++ *   *(d+10) = *(d+11) = (color & 32) ? 0xff : 0;
++ *   *(d+12) = *(d+13) = (color & 64) ? 0xff : 0;
++ *   *(d+14) = *(d+15) = (color & 128) ? 0xff : 0;
++ */
++
++static __inline__ void memset_even_8p(void *d, size_t count, u32 val1,
++                                      u32 val2, u32 val3, u32 val4)
++{
++    u32 *dd = d;
++
++    count /= 16;
++    while (count--) {
++	*dd++ = val1;
++	*dd++ = val2;
++	*dd++ = val3;
++	*dd++ = val4;
++    }
++}
++
++/* Copies a 8 plane column from 's', height 'h', to 'd'. */
++
++static __inline__ void memmove_8p_col (void *d, void *s, int h, int bpr)
++{
++    u8 *dd = d, *ss = s;
++
++    while (h--) {
++	dd[0] = ss[0];
++	dd[2] = ss[2];
++	dd[4] = ss[4];
++	dd[6] = ss[6];
++	dd[8] = ss[8];
++	dd[10] = ss[10];
++	dd[12] = ss[12];
++	dd[14] = ss[14];
++	dd += bpr;
++	ss += bpr;
++    }
++}
++
++
++/* This expands a 8 bit color into two longs for two movepl (8 plane)
++ * operations.
++ */
++
++static const u32 four2long[] =
++{
++    0x00000000, 0xff000000, 0x00ff0000, 0xffff0000,
++    0x0000ff00, 0xff00ff00, 0x00ffff00, 0xffffff00,
++    0x000000ff, 0xff0000ff, 0x00ff00ff, 0xffff00ff,
++    0x0000ffff, 0xff00ffff, 0x00ffffff, 0xffffffff,
++};
++
++static __inline__ void expand8dl(u8 c, u32 *ret1, u32 *ret2)
++{
++    *ret1 = four2long[c & 15];
++    *ret2 = four2long[c >> 4];
++}
++
++
++/* This expands a 8 bit color into four longs for four movel operations
++ * (8 planes).
++ */
++
++static const u32 two2word[] =
++{
++#ifndef __LITTLE_ENDIAN
++    0x00000000, 0xffff0000, 0x0000ffff, 0xffffffff
++#else
++    0x00000000, 0x0000ffff, 0xffff0000, 0xffffffff
++#endif
++};
++
++static inline void expand8ql(u8 c, u32 *rv1, u32 *rv2, u32 *rv3, u32 *rv4)
++{
++    *rv1 = two2word[c & 4];
++    *rv2 = two2word[(c >> 2) & 4];
++    *rv3 = two2word[(c >> 4) & 4];
++    *rv4 = two2word[c >> 6];
++}
++
++
++/* This duplicates a byte 4 times into a long. */
++
++static __inline__ u32 dup4l(u8 c)
++{
++    u32 rv;
++
++    rv = c;
++    rv |= rv << 8;
++    rv |= rv << 16;
++    return rv;
++}
++
++
++void atafb_iplan2p8_copyarea(struct fb_info *info, u_long next_line,
++                             int sy, int sx, int dy, int dx,
++			     int height, int width)
++{
++    /*  bmove() has to distinguish two major cases: If both, source and
++     *  destination, start at even addresses or both are at odd
++     *  addresses, just the first odd and last even column (if present)
++     *  require special treatment (memmove_col()). The rest between
++     *  then can be copied by normal operations, because all adjacent
++     *  bytes are affected and are to be stored in the same order.
++     *    The pathological case is when the move should go from an odd
++     *  address to an even or vice versa. Since the bytes in the plane
++     *  words must be assembled in new order, it seems wisest to make
++     *  all movements by memmove_col().
++     */
++
++     printk("copyarea: dx %d dy %d sx %d sy %d\n", dx, dy, sy, sy);
++
++     if (sx == 0 && dx == 0 && width * 8 == next_line) {
++	/*  Special (but often used) case: Moving whole lines can be
++	 *  done with memmove()
++	 */
++	fast_memmove((u8 *)info->screen_base + dy * next_line,
++                     (u8 *)info->screen_base + sy * next_line,
++                      next_line * height);
++     } else {
++	int rows, cols;
++	u8 *src;
++	u8 *dst;
++	int bytes = next_line;
++	int linesize;
++	u_int colsize;
++	u_int upwards = (dy < sy) || (dy == sy && dx < sx);
++
++        linesize = bytes;
++        colsize = height;
++	if ((sx & 1) == (dx & 1)) {
++	    /* odd->odd or even->even */
++
++	    if (upwards) {
++		src = (u8 *)info->screen_base + sy * linesize + (sx>>1)*16 + (sx & 1);
++		dst = (u8 *)info->screen_base + dy * linesize + (dx>>1)*16 + (dx & 1);
++		if (sx & 1) {
++		    memmove_8p_col(dst, src, colsize, bytes);
++		    src += 15;
++		    dst += 15;
++		    --width;
++		}
++		if (width > 1) {
++		    for(rows = colsize; rows > 0; --rows) {
++			fast_memmove (dst, src, (width >> 1) * 16);
++			src += bytes;
++			dst += bytes;
++		    }
++		}
++
++		if (width & 1) {
++		    src -= colsize * bytes;
++		    dst -= colsize * bytes;
++		    memmove_8p_col(dst + (width>>1)*16, src + (width>>1)*16,
++		    colsize, bytes);
++		}
++	    } else {
++		if (!((sx+width-1) & 1)) {
++		    src = (u8 *)info->screen_base + sy * linesize + ((sx+width-1)>>1)*16;
++		    dst = (u8 *)info->screen_base + dy * linesize + ((dx+width-1)>>1)*16;
++		    memmove_8p_col(dst, src, colsize, bytes);
++		    --width;
++		}
++		src = (u8 *)info->screen_base + sy * linesize + (sx>>1)*16 + (sx & 1);
++		dst = (u8 *)info->screen_base + dy * linesize + (dx>>1)*16 + (dx & 1);
++		if (width > 1) {
++		    src += colsize * bytes + (sx & 1)*15;
++		    dst += colsize * bytes + (sx & 1)*15;
++		    for(rows = colsize; rows > 0; --rows) {
++			src -= bytes;
++			dst -= bytes;
++			fast_memmove (dst, src, (width>>1)*16);
++		    }
++		}
++		if (width & 1)
++		    memmove_8p_col(dst-15, src-15, colsize, bytes);
++	    }
++	} else {
++	/* odd->even or even->odd */
++
++	    if (upwards) {
++		src = (u8 *)info->screen_base + sy * linesize + (sx>>1)*16 + (sx & 1);
++		dst = (u8 *)info->screen_base + dy * linesize + (dx>>1)*16 + (dx & 1);
++		for(cols = width; cols > 0; --cols) {
++		    memmove_8p_col(dst, src, colsize, bytes);
++		    INC_8P(src);
++		    INC_8P(dst);
++		}
++	    } else {
++		sx += width-1;
++		dx += width-1;
++		src = (u8 *)info->screen_base + sy * linesize + (sx>>1)*16 + (sx & 1);
++		dst = (u8 *)info->screen_base + dy * linesize + (dx>>1)*16 + (dx & 1);
++		for(cols = width; cols > 0; --cols) {
++		    memmove_8p_col(dst, src, colsize, bytes);
++		    DEC_8P(src);
++		    DEC_8P(dst);
++		}
++	    }
++	}
++    }
++}
++
++void atafb_iplan2p8_fillrect(struct fb_info *info, u_long next_line, u32 color, 
++                             int sy, int sx, int height, int width)
++{
++    u32 offset;
++    u8 *start;
++    int rows;
++    int bytes = next_line;
++    int lines;
++    u32 size;
++    u32 cval1, cval2, cval3, cval4, pcval1, pcval2;
++
++    expand8ql(color, &cval1, &cval2, &cval3, &cval4);
++
++    lines = height;
++
++    if (sx == 0 && width * 8 == bytes) {
++        offset = (sy * bytes);
++	size    = lines * bytes;
++	memset_even_8p((u8 *)info->screen_base + offset, size, cval1, cval2, cval3, cval4);
++    } else {
++        offset = sy * bytes + (sx>>1)*2 + (sx & 1);
++	start = (u8 *) info->screen_base + offset;
++	expand8dl(color, &pcval1, &pcval2);
++
++	/* Clears are split if the region starts at an odd column or
++	* end at an even column. These extra columns are spread
++	* across the interleaved planes. All in between can be
++	* cleared by normal fb_memclear_small(), because both bytes of
++	* the single plane words are affected.
++	*/
++
++	if (sx & 1) {
++	    memclear_8p_col(start, lines, pcval1, pcval2, bytes);
++	    start += 7;
++	    width--;
++	}
++	if (width & 1) {
++	    memclear_8p_col(start + (width>>1)*2, lines, pcval1,
++	    pcval2, bytes);
++	    width--;
++	}
++	if (width)
++	    for(rows = lines; rows-- ; start += bytes)
++		memset_even_8p(start, width, cval1, cval2, cval3, cval4);
++	}
++}
++
++void atafb_iplan2p8_linefill(struct fb_info *info, u_long next_line,
++                             int dy, int dx, u32 width,
++                             const u8 *data, u32 bgcolor, u32 fgcolor)
++{
++    u8 *dest;
++    u8 *cdat;
++    int rows;
++    int bytes = next_line;
++    u32 eorx1, eorx2, fgx1, fgx2, bgx1, bgx2, fdx;
++
++    // source data
++    cdat = data;
++
++    // advance from odd to even (dx>>3) by 16
++    // dest = (p->screen_base + yy * bytes + (xx>>1)*16 + (xx & 1));
++
++
++    dest = (u8*) info->screen_base + dy * bytes + (dx>>4)*16 + ((dx>>3)&1);
++
++    expand8dl(fgcolor, &fgx1, &fgx2);
++    expand8dl(bgcolor, &bgx1, &bgx2);
++    eorx1 = fgx1 ^ bgx1; eorx2  = fgx2 ^ bgx2;
++
++      for(rows = width/8; rows-- ;) {
++	fdx = dup4l(*cdat++);
++	movepl2(dest, (fdx & eorx1) ^ bgx1, (fdx & eorx2) ^ bgx2);
++	INC_8P(dest);
++      }
++}
++
++#ifdef MODULE
++MODULE_LICENSE("GPL");
++
++int init_module(void)
++{
++    return 0;
++}
++
++void cleanup_module(void)
++{}
++#endif /* MODULE */
++
++
++    /*
++     *  Visible symbols for modules
++     */
++
++EXPORT_SYMBOL(atafb_iplan2p8_copyarea);
++EXPORT_SYMBOL(atafb_iplan2p8_fillrect);
++EXPORT_SYMBOL(atafb_iplan2p8_linefill);
+diff -urN linux-m68k/drivers/video/atafb_iplan2p8.h linux-schmitz/drivers/video/atafb_iplan2p8.h
+--- linux-m68k/drivers/video/atafb_iplan2p8.h	1970-01-01 01:00:00.000000000 +0100
++++ linux-schmitz/drivers/video/atafb_iplan2p8.h	2006-11-19 21:37:27.000000000 +0100
+@@ -0,0 +1,27 @@
++/*
++ *  FBcon low-level driver for Atari interleaved bitplanes (8 planes) (iplan2p8)
++ */
++
++#ifndef _VIDEO_FBCON_IPLAN2P8_H
++#define _VIDEO_FBCON_IPLAN2P8_H
++
++#ifdef MODULE
++#if defined(CONFIG_FBCON_IPLAN2P8) || defined(CONFIG_FBCON_IPLAN2P8_MODULE)
++#define FBCON_HAS_IPLAN2P8
++#endif
++#else
++#if defined(CONFIG_FBCON_IPLAN2P8)
++#define FBCON_HAS_IPLAN2P8
++#endif
++#endif
++
++extern void atafb_iplan2p8_copyarea(struct fb_info *info, u_long next_line, int sy, int sx, int dy,
++				    int dx, int height, int width);
++extern void atafb_iplan2p8_fillrect(struct fb_info *info, u_long next_line, u32 color,
++				    int sy, int sx, int height, int width);
++extern void atafb_iplan2p8_linefill(struct fb_info *info, u_long next_line,
++                                    int dy, int dx, u32 width,
++                                    const u8 *data, u32 bgcolor, u32 fgcolor);
++
++
++#endif /* _VIDEO_FBCON_IPLAN2P8_H */
+diff -urN linux-m68k/drivers/video/atafb_mfb.c linux-schmitz/drivers/video/atafb_mfb.c
+--- linux-m68k/drivers/video/atafb_mfb.c	1970-01-01 01:00:00.000000000 +0100
++++ linux-schmitz/drivers/video/atafb_mfb.c	2006-11-19 21:37:27.000000000 +0100
+@@ -0,0 +1,115 @@
++/*
++ *  linux/drivers/video/mfb.c -- Low level frame buffer operations for
++ *				 monochrome
++ *
++ *	Created 5 Apr 1997 by Geert Uytterhoeven
++ *
++ *  This file is subject to the terms and conditions of the GNU General Public
++ *  License.  See the file COPYING in the main directory of this archive for
++ *  more details.
++ */
++
++#include <linux/module.h>
++#include <linux/tty.h>
++#include <linux/console.h>
++#include <linux/string.h>
++#include <linux/fb.h>
++
++#include "console/fbcon.h"
++#include "atafb_utils.h"
++#include "atafb_mfb.h"
++
++
++    /*
++     *  Monochrome
++     */
++
++void atafb_mfb_copyarea(struct fb_info *info, u_long next_line, 
++                        int sy, int sx, int dy, int dx,
++                        int height, int width)
++{
++    u8 *src, *dest;
++    u_int rows;
++
++    if (sx == 0 && dx == 0 && width == next_line) {
++	src = (u8 *)info->screen_base+sy*(width>>3);
++	dest = (u8 *)info->screen_base+dy*(width>>3);
++	fb_memmove(dest, src, height*(width>>3));
++    } else if (dy <= sy) {
++	src = (u8 *)info->screen_base+sy*next_line+(sx>>3);
++	dest = (u8 *)info->screen_base+dy*next_line+(dx>>3);
++	for (rows = height; rows--;) {
++	    fb_memmove(dest, src, (width>>3));
++	    src += next_line;
++	    dest += next_line;
++	}
++    } else {
++	src = (u8 *)info->screen_base+((sy+height)-1)*next_line+(sx>>3);
++	dest = (u8 *)info->screen_base+((dy+height)-1)*next_line+(dx>>3);
++	for (rows = height; rows--;) {
++	    fb_memmove(dest, src, (width>>3));
++	    src -= next_line;
++	    dest -= next_line;
++	}
++    }
++}
++
++void atafb_mfb_fillrect(struct fb_info *info, u_long next_line, u32 color, 
++                        int sy, int sx,
++                        int height, int width)
++{
++    u8 *dest;
++    u_int rows;
++
++    dest = (u8 *)info->screen_base+sy*next_line+(sx>>3);
++
++    if (sx == 0 && width == next_line) {
++	if (color)
++	    fb_memset255(dest, height*(width>>3));
++	else
++	    fb_memclear(dest, height*(width>>3));
++    } else
++	for (rows = height; rows--; dest += next_line)
++	    if (color)
++		fb_memset255(dest, (width>>3));
++	    else
++		fb_memclear_small(dest, (width>>3));
++}
++
++void atafb_mfb_linefill(struct fb_info *info, u_long next_line,
++                        int dy, int dx, u32 width,
++                        const u8 *data, u32 bgcolor, u32 fgcolor)
++{
++    u8 *dest, *cdat;
++    u_int rows;
++    u8 d;
++
++    dest = (u8*) info->screen_base+dy*next_line+(dx>>3) + (dx & 1);
++    cdat = data;
++
++    for (rows = width/8; rows--; /* check margins */ ) {
++        // use fast_memmove or fb_memmove
++	*dest++ = *cdat++;
++    }
++}
++
++#ifdef MODULE
++MODULE_LICENSE("GPL");
++
++int init_module(void)
++{
++    return 0;
++}
++
++void cleanup_module(void)
++{}
++#endif /* MODULE */
++
++
++    /*
++     *  Visible symbols for modules
++     */
++
++EXPORT_SYMBOL(atafb_mfb_copyarea);
++EXPORT_SYMBOL(atafb_mfb_fillrect);
++EXPORT_SYMBOL(atafb_mfb_linefill);
+diff -urN linux-m68k/drivers/video/atafb_mfb.h linux-schmitz/drivers/video/atafb_mfb.h
+--- linux-m68k/drivers/video/atafb_mfb.h	1970-01-01 01:00:00.000000000 +0100
++++ linux-schmitz/drivers/video/atafb_mfb.h	2006-11-19 21:37:27.000000000 +0100
+@@ -0,0 +1,26 @@
++/*
++ *  FBcon low-level driver for Monochrome (mfb)
++ */
++
++#ifndef _VIDEO_FBCON_MFB_H
++#define _VIDEO_FBCON_MFB_H
++
++#ifdef MODULE
++#if defined(CONFIG_FBCON_MFB) || defined(CONFIG_FBCON_MFB_MODULE)
++#define FBCON_HAS_MFB
++#endif
++#else
++#if defined(CONFIG_FBCON_MFB)
++#define FBCON_HAS_MFB
++#endif
++#endif
++
++extern void atafb_mfb_copyarea(struct fb_info *info, u_long next_line, int sy, int sx, int dy,
++			       int dx, int height, int width);
++extern void atafb_mfb_fillrect(struct fb_info *info, u_long next_line, u32 color,
++			       int sy, int sx, int height, int width);
++extern void atafb_mfb_linefill(struct fb_info *info, u_long next_line,
++                               int dy, int dx, u32 width,
++                               const u8 *data, u32 bgcolor, u32 fgcolor);
++
++#endif /* _VIDEO_FBCON_MFB_H */
+diff -urN linux-m68k/drivers/video/atafb_utils.h linux-schmitz/drivers/video/atafb_utils.h
+--- linux-m68k/drivers/video/atafb_utils.h	1970-01-01 01:00:00.000000000 +0100
++++ linux-schmitz/drivers/video/atafb_utils.h	2006-11-19 21:37:27.000000000 +0100
+@@ -0,0 +1,570 @@
++#ifndef _VIDEO_ATAFB_UTILS_H
++#define _VIDEO_ATAFB_UTILS_H
++
++/* ================================================================= */
++/*                      Utility Assembler Functions                  */
++/* ================================================================= */
++
++
++#if defined(__mc68000__)
++
++/* ====================================================================== */
++
++/* Those of a delicate disposition might like to skip the next couple of
++ * pages.
++ *
++ * These functions are drop in replacements for memmove and
++ * memset(_, 0, _). However their five instances add at least a kilobyte
++ * to the object file. You have been warned.
++ *
++ * Not a great fan of assembler for the sake of it, but I think
++ * that these routines are at least 10 times faster than their C
++ * equivalents for large blits, and that's important to the lowest level of
++ * a graphics driver. Question is whether some scheme with the blitter
++ * would be faster. I suspect not for simple text system - not much
++ * asynchrony.
++ *
++ * Code is very simple, just gruesome expansion. Basic strategy is to
++ * increase data moved/cleared at each step to 16 bytes to reduce
++ * instruction per data move overhead. movem might be faster still
++ * For more than 15 bytes, we try to align the write direction on a
++ * longword boundary to get maximum speed. This is even more gruesome.
++ * Unaligned read/write used requires 68020+ - think this is a problem?
++ *
++ * Sorry!
++ */
++
++
++/* ++roman: I've optimized Robert's original versions in some minor
++ * aspects, e.g. moveq instead of movel, let gcc choose the registers,
++ * use movem in some places...
++ * For other modes than 1 plane, lots of more such assembler functions
++ * were needed (e.g. the ones using movep or expanding color values).
++ */
++
++/* ++andreas: more optimizations:
++   subl #65536,d0 replaced by clrw d0; subql #1,d0 for dbcc
++   addal is faster than addaw
++   movep is rather expensive compared to ordinary move's
++   some functions rewritten in C for clarity, no speed loss */
++
++static __inline__ void *fb_memclear_small(void *s, size_t count)
++{
++   if (!count)
++      return(0);
++
++   __asm__ __volatile__(
++         "lsrl   #1,%1 ; jcc 1f ; moveb %2,%0@-\n\t"
++      "1: lsrl   #1,%1 ; jcc 1f ; movew %2,%0@-\n\t"
++      "1: lsrl   #1,%1 ; jcc 1f ; movel %2,%0@-\n\t"
++      "1: lsrl   #1,%1 ; jcc 1f ; movel %2,%0@- ; movel %2,%0@-\n\t"
++      "1:"
++         : "=a" (s), "=d" (count)
++         : "d" (0), "0" ((char *)s+count), "1" (count)
++   );
++   __asm__ __volatile__(
++         "subql  #1,%1 ; jcs 3f\n\t"
++	 "movel %2,%%d4; movel %2,%%d5; movel %2,%%d6\n\t"
++      "2: moveml %2/%%d4/%%d5/%%d6,%0@-\n\t"
++         "dbra %1,2b\n\t"
++      "3:"
++         : "=a" (s), "=d" (count)
++         : "d" (0), "0" (s), "1" (count)
++	 : "d4", "d5", "d6"
++  );
++
++   return(0);
++}
++
++
++static __inline__ void *fb_memclear(void *s, size_t count)
++{
++   if (!count)
++      return(0);
++
++   if (count < 16) {
++      __asm__ __volatile__(
++            "lsrl   #1,%1 ; jcc 1f ; clrb %0@+\n\t"
++         "1: lsrl   #1,%1 ; jcc 1f ; clrw %0@+\n\t"
++         "1: lsrl   #1,%1 ; jcc 1f ; clrl %0@+\n\t"
++         "1: lsrl   #1,%1 ; jcc 1f ; clrl %0@+ ; clrl %0@+\n\t"
++         "1:"
++            : "=a" (s), "=d" (count)
++            : "0" (s), "1" (count)
++     );
++   } else {
++      long tmp;
++      __asm__ __volatile__(
++            "movel %1,%2\n\t"
++            "lsrl   #1,%2 ; jcc 1f ; clrb %0@+ ; subqw #1,%1\n\t"
++            "lsrl   #1,%2 ; jcs 2f\n\t"  /* %0 increased=>bit 2 switched*/
++            "clrw   %0@+  ; subqw  #2,%1 ; jra 2f\n\t"
++         "1: lsrl   #1,%2 ; jcc 2f\n\t"
++            "clrw   %0@+  ; subqw  #2,%1\n\t"
++         "2: movew %1,%2; lsrl #2,%1 ; jeq 6f\n\t"
++            "lsrl   #1,%1 ; jcc 3f ; clrl %0@+\n\t"
++         "3: lsrl   #1,%1 ; jcc 4f ; clrl %0@+ ; clrl %0@+\n\t"
++         "4: subql  #1,%1 ; jcs 6f\n\t"
++         "5: clrl %0@+; clrl %0@+ ; clrl %0@+ ; clrl %0@+\n\t"
++            "dbra %1,5b   ; clrw %1; subql #1,%1; jcc 5b\n\t"
++         "6: movew %2,%1; btst #1,%1 ; jeq 7f ; clrw %0@+\n\t"
++         "7:            ; btst #0,%1 ; jeq 8f ; clrb %0@+\n\t"
++         "8:"
++            : "=a" (s), "=d" (count), "=d" (tmp)
++            : "0" (s), "1" (count)
++     );
++   }
++
++   return(0);
++}
++
++
++static __inline__ void *fb_memset255(void *s, size_t count)
++{
++   if (!count)
++      return(0);
++
++   __asm__ __volatile__(
++         "lsrl   #1,%1 ; jcc 1f ; moveb %2,%0@-\n\t"
++      "1: lsrl   #1,%1 ; jcc 1f ; movew %2,%0@-\n\t"
++      "1: lsrl   #1,%1 ; jcc 1f ; movel %2,%0@-\n\t"
++      "1: lsrl   #1,%1 ; jcc 1f ; movel %2,%0@- ; movel %2,%0@-\n\t"
++      "1:"
++         : "=a" (s), "=d" (count)
++         : "d" (-1), "0" ((char *)s+count), "1" (count)
++   );
++   __asm__ __volatile__(
++         "subql  #1,%1 ; jcs 3f\n\t"
++	 "movel %2,%%d4; movel %2,%%d5; movel %2,%%d6\n\t"
++      "2: moveml %2/%%d4/%%d5/%%d6,%0@-\n\t"
++         "dbra %1,2b\n\t"
++      "3:"
++         : "=a" (s), "=d" (count)
++         : "d" (-1), "0" (s), "1" (count)
++	 : "d4", "d5", "d6"
++  );
++
++   return(0);
++}
++
++
++static __inline__ void *fb_memmove(void *d, const void *s, size_t count)
++{
++   if (d < s) {
++      if (count < 16) {
++         __asm__ __volatile__(
++               "lsrl   #1,%2 ; jcc 1f ; moveb %1@+,%0@+\n\t"
++            "1: lsrl   #1,%2 ; jcc 1f ; movew %1@+,%0@+\n\t"
++            "1: lsrl   #1,%2 ; jcc 1f ; movel %1@+,%0@+\n\t"
++            "1: lsrl   #1,%2 ; jcc 1f ; movel %1@+,%0@+ ; movel %1@+,%0@+\n\t"
++            "1:"
++               : "=a" (d), "=a" (s), "=d" (count)
++               : "0" (d), "1" (s), "2" (count)
++        );
++      } else {
++         long tmp;
++         __asm__ __volatile__(
++               "movel  %0,%3\n\t"
++               "lsrl   #1,%3 ; jcc 1f ; moveb %1@+,%0@+ ; subqw #1,%2\n\t"
++               "lsrl   #1,%3 ; jcs 2f\n\t"  /* %0 increased=>bit 2 switched*/
++               "movew  %1@+,%0@+  ; subqw  #2,%2 ; jra 2f\n\t"
++            "1: lsrl   #1,%3 ; jcc 2f\n\t"
++               "movew  %1@+,%0@+  ; subqw  #2,%2\n\t"
++            "2: movew  %2,%-; lsrl #2,%2 ; jeq 6f\n\t"
++               "lsrl   #1,%2 ; jcc 3f ; movel %1@+,%0@+\n\t"
++            "3: lsrl   #1,%2 ; jcc 4f ; movel %1@+,%0@+ ; movel %1@+,%0@+\n\t"
++            "4: subql  #1,%2 ; jcs 6f\n\t"
++            "5: movel  %1@+,%0@+;movel %1@+,%0@+\n\t"
++               "movel  %1@+,%0@+;movel %1@+,%0@+\n\t"
++               "dbra   %2,5b ; clrw %2; subql #1,%2; jcc 5b\n\t"
++            "6: movew  %+,%2; btst #1,%2 ; jeq 7f ; movew %1@+,%0@+\n\t"
++            "7:              ; btst #0,%2 ; jeq 8f ; moveb %1@+,%0@+\n\t"
++            "8:"
++               : "=a" (d), "=a" (s), "=d" (count), "=d" (tmp)
++               : "0" (d), "1" (s), "2" (count)
++        );
++      }
++   } else {
++      if (count < 16) {
++         __asm__ __volatile__(
++               "lsrl   #1,%2 ; jcc 1f ; moveb %1@-,%0@-\n\t"
++            "1: lsrl   #1,%2 ; jcc 1f ; movew %1@-,%0@-\n\t"
++            "1: lsrl   #1,%2 ; jcc 1f ; movel %1@-,%0@-\n\t"
++            "1: lsrl   #1,%2 ; jcc 1f ; movel %1@-,%0@- ; movel %1@-,%0@-\n\t"
++            "1:"
++               : "=a" (d), "=a" (s), "=d" (count)
++               : "0" ((char *) d + count), "1" ((char *) s + count), "2" (count)
++        );
++      } else {
++         long tmp;
++         __asm__ __volatile__(
++               "movel %0,%3\n\t"
++               "lsrl   #1,%3 ; jcc 1f ; moveb %1@-,%0@- ; subqw #1,%2\n\t"
++               "lsrl   #1,%3 ; jcs 2f\n\t"  /* %0 increased=>bit 2 switched*/
++               "movew  %1@-,%0@-  ; subqw  #2,%2 ; jra 2f\n\t"
++            "1: lsrl   #1,%3 ; jcc 2f\n\t"
++               "movew  %1@-,%0@-  ; subqw  #2,%2\n\t"
++            "2: movew %2,%-; lsrl #2,%2 ; jeq 6f\n\t"
++               "lsrl   #1,%2 ; jcc 3f ; movel %1@-,%0@-\n\t"
++            "3: lsrl   #1,%2 ; jcc 4f ; movel %1@-,%0@- ; movel %1@-,%0@-\n\t"
++            "4: subql  #1,%2 ; jcs 6f\n\t"
++            "5: movel %1@-,%0@-;movel %1@-,%0@-\n\t"
++               "movel %1@-,%0@-;movel %1@-,%0@-\n\t"
++               "dbra %2,5b ; clrw %2; subql #1,%2; jcc 5b\n\t"
++            "6: movew %+,%2; btst #1,%2 ; jeq 7f ; movew %1@-,%0@-\n\t"
++            "7:              ; btst #0,%2 ; jeq 8f ; moveb %1@-,%0@-\n\t"
++            "8:"
++               : "=a" (d), "=a" (s), "=d" (count), "=d" (tmp)
++               : "0" ((char *) d + count), "1" ((char *) s + count), "2" (count)
++        );
++      }
++   }
++
++   return(0);
++}
++
++
++/* ++andreas: Simple and fast version of memmove, assumes size is
++   divisible by 16, suitable for moving the whole screen bitplane */
++static __inline__ void fast_memmove(char *dst, const char *src, size_t size)
++{
++  if (!size)
++    return;
++  if (dst < src)
++    __asm__ __volatile__
++      ("1:"
++       "  moveml %0@+,%/d0/%/d1/%/a0/%/a1\n"
++       "  moveml %/d0/%/d1/%/a0/%/a1,%1@\n"
++       "  addql #8,%1; addql #8,%1\n"
++       "  dbra %2,1b\n"
++       "  clrw %2; subql #1,%2\n"
++       "  jcc 1b"
++       : "=a" (src), "=a" (dst), "=d" (size)
++       : "0" (src), "1" (dst), "2" (size / 16 - 1)
++       : "d0", "d1", "a0", "a1", "memory");
++  else
++    __asm__ __volatile__
++      ("1:"
++       "  subql #8,%0; subql #8,%0\n"
++       "  moveml %0@,%/d0/%/d1/%/a0/%/a1\n"
++       "  moveml %/d0/%/d1/%/a0/%/a1,%1@-\n"
++       "  dbra %2,1b\n"
++       "  clrw %2; subql #1,%2\n"
++       "  jcc 1b"
++       : "=a" (src), "=a" (dst), "=d" (size)
++       : "0" (src + size), "1" (dst + size), "2" (size / 16 - 1)
++       : "d0", "d1", "a0", "a1", "memory");
++}
++
++#elif defined(CONFIG_SUN4)
++
++/* You may think that I'm crazy and that I should use generic
++   routines.  No, I'm not: sun4's framebuffer crashes if we std
++   into it, so we cannot use memset.  */
++
++static __inline__ void *sun4_memset(void *s, char val, size_t count)
++{
++    int i;
++    for(i=0; i<count;i++)
++        ((char *) s) [i] = val;
++    return s;
++}
++
++static __inline__ void *fb_memset255(void *s, size_t count)
++{
++    return sun4_memset(s, 255, count);
++}
++
++static __inline__ void *fb_memclear(void *s, size_t count)
++{
++    return sun4_memset(s, 0, count);
++}
++
++static __inline__ void *fb_memclear_small(void *s, size_t count)
++{
++    return sun4_memset(s, 0, count);
++}
++
++/* To be honest, this is slow_memmove :). But sun4 is crappy, so what we can do. */
++static __inline__ void fast_memmove(void *d, const void *s, size_t count)
++{
++    int i;
++    if (d<s) {
++	for (i=0; i<count; i++)
++	    ((char *) d)[i] = ((char *) s)[i];
++    } else
++	for (i=0; i<count; i++)
++	    ((char *) d)[count-i-1] = ((char *) s)[count-i-1];
++}
++
++static __inline__ void *fb_memmove(char *dst, const char *src, size_t size)
++{
++    fast_memmove(dst, src, size);
++    return dst;
++}
++
++#else
++
++static __inline__ void *fb_memclear_small(void *s, size_t count)
++{
++    char *xs = (char *) s;
++
++    while (count--)
++	fb_writeb(0, xs++);
++
++    return s;
++}
++
++static __inline__ void *fb_memclear(void *s, size_t count)
++{
++    unsigned long xs = (unsigned long) s;
++
++    if (count < 8)
++	goto rest;
++
++    if (xs & 1) {
++	fb_writeb(0, xs++);
++	count--;
++    }
++    if (xs & 2) {
++	fb_writew(0, xs);
++	xs += 2;
++	count -= 2;
++    }
++    while (count > 3) {
++	fb_writel(0, xs);
++	xs += 4;
++	count -= 4;
++    }
++rest:
++    while (count--)
++	fb_writeb(0, xs++);
++
++    return s;
++}
++
++static __inline__ void *fb_memset255(void *s, size_t count)
++{
++    unsigned long xs = (unsigned long) s;
++
++    if (count < 8)
++	goto rest;
++
++    if (xs & 1) {
++	fb_writeb(0xff, xs++);
++	count--;
++    }
++    if (xs & 2) {
++	fb_writew(0xffff, xs);
++	xs += 2;
++	count -= 2;
++    }
++    while (count > 3) {
++	fb_writel(0xffffffff, xs);
++	xs += 4;
++	count -= 4;
++    }
++rest:
++    while (count--)
++	fb_writeb(0xff, xs++);
++
++    return s;
++}
++
++#if defined(__i386__)
++
++static __inline__ void fast_memmove(void *d, const void *s, size_t count)
++{
++  int d0, d1, d2, d3;
++    if (d < s) {
++__asm__ __volatile__ (
++	"cld\n\t"
++	"shrl $1,%%ecx\n\t"
++	"jnc 1f\n\t"
++	"movsb\n"
++	"1:\tshrl $1,%%ecx\n\t"
++	"jnc 2f\n\t"
++	"movsw\n"
++	"2:\trep\n\t"
++	"movsl"
++	: "=&c" (d0), "=&D" (d1), "=&S" (d2)
++	:"0"(count),"1"((long)d),"2"((long)s)
++	:"memory");
++    } else {
++__asm__ __volatile__ (
++	"std\n\t"
++	"shrl $1,%%ecx\n\t"
++	"jnc 1f\n\t"
++	"movb 3(%%esi),%%al\n\t"
++	"movb %%al,3(%%edi)\n\t"
++	"decl %%esi\n\t"
++	"decl %%edi\n"
++	"1:\tshrl $1,%%ecx\n\t"
++	"jnc 2f\n\t"
++	"movw 2(%%esi),%%ax\n\t"
++	"movw %%ax,2(%%edi)\n\t"
++	"decl %%esi\n\t"
++	"decl %%edi\n\t"
++	"decl %%esi\n\t"
++	"decl %%edi\n"
++	"2:\trep\n\t"
++	"movsl\n\t"
++	"cld"
++	: "=&c" (d0), "=&D" (d1), "=&S" (d2), "=&a" (d3)
++	:"0"(count),"1"(count-4+(long)d),"2"(count-4+(long)s)
++	:"memory");
++    }
++}
++
++static __inline__ void *fb_memmove(char *dst, const char *src, size_t size)
++{
++    fast_memmove(dst, src, size);
++    return dst;
++}
++
++#else /* !__i386__ */
++
++    /*
++     *  Anyone who'd like to write asm functions for other CPUs?
++     *   (Why are these functions better than those from include/asm/string.h?)
++     */
++
++static __inline__ void *fb_memmove(void *d, const void *s, size_t count)
++{
++    unsigned long dst, src;
++
++    if (d < s) {
++	dst = (unsigned long) d;
++	src = (unsigned long) s;
++
++	if ((count < 8) || ((dst ^ src) & 3))
++	    goto restup;
++
++	if (dst & 1) {
++	    fb_writeb(fb_readb(src++), dst++);
++	    count--;
++	}
++	if (dst & 2) {
++	    fb_writew(fb_readw(src), dst);
++	    src += 2;
++	    dst += 2;
++	    count -= 2;
++	}
++	while (count > 3) {
++	    fb_writel(fb_readl(src), dst);
++	    src += 4;
++	    dst += 4;
++	    count -= 4;
++	}
++
++    restup:
++	while (count--)
++	    fb_writeb(fb_readb(src++), dst++);
++    } else {
++	dst = (unsigned long) d + count;
++	src = (unsigned long) s + count;
++
++	if ((count < 8) || ((dst ^ src) & 3))
++	    goto restdown;
++
++	if (dst & 1) {
++	    src--;
++	    dst--;
++	    count--;
++	    fb_writeb(fb_readb(src), dst);
++	}
++	if (dst & 2) {
++	    src -= 2;
++	    dst -= 2;
++	    count -= 2;
++	    fb_writew(fb_readw(src), dst);
++	}
++	while (count > 3) {
++	    src -= 4;
++	    dst -= 4;
++	    count -= 4;
++	    fb_writel(fb_readl(src), dst);
++	}
++
++    restdown:
++	while (count--) {
++	    src--;
++	    dst--;
++	    fb_writeb(fb_readb(src), dst);
++	}
++    }
++
++    return d;
++}
++
++static __inline__ void fast_memmove(char *d, const char *s, size_t count)
++{
++    unsigned long dst, src;
++
++    if (d < s) {
++	dst = (unsigned long) d;
++	src = (unsigned long) s;
++
++	if ((count < 8) || ((dst ^ src) & 3))
++	    goto restup;
++
++	if (dst & 1) {
++	    fb_writeb(fb_readb(src++), dst++);
++	    count--;
++	}
++	if (dst & 2) {
++	    fb_writew(fb_readw(src), dst);
++	    src += 2;
++	    dst += 2;
++	    count -= 2;
++	}
++	while (count > 3) {
++	    fb_writel(fb_readl(src), dst);
++	    src += 4;
++	    dst += 4;
++	    count -= 4;
++	}
++
++    restup:
++	while (count--)
++	    fb_writeb(fb_readb(src++), dst++);
++    } else {
++	dst = (unsigned long) d + count;
++	src = (unsigned long) s + count;
++
++	if ((count < 8) || ((dst ^ src) & 3))
++	    goto restdown;
++
++	if (dst & 1) {
++	    src--;
++	    dst--;
++	    count--;
++	    fb_writeb(fb_readb(src), dst);
++	}
++	if (dst & 2) {
++	    src -= 2;
++	    dst -= 2;
++	    count -= 2;
++	    fb_writew(fb_readw(src), dst);
++	}
++	while (count > 3) {
++	    src -= 4;
++	    dst -= 4;
++	    count -= 4;
++	    fb_writel(fb_readl(src), dst);
++	}
++
++    restdown:
++	while (count--) {
++	    src--;
++	    dst--;
++	    fb_writeb(fb_readb(src), dst);
++	}
++    }
++}
++
++#endif /* !__i386__ */
++
++#endif /* !__mc68000__ */
++
++#endif /* _VIDEO_ATAFB_UTILS_H */
+diff -urN linux-m68k/fs/fat/inode.c linux-schmitz/fs/fat/inode.c
+--- linux-m68k/fs/fat/inode.c	2006-11-19 21:35:33.000000000 +0100
++++ linux-schmitz/fs/fat/inode.c	2006-11-19 21:37:27.000000000 +0100
+@@ -11,7 +11,6 @@
+  */
+ 
+ #include <linux/module.h>
+-#include <linux/config.h>
+ #include <linux/init.h>
+ #include <linux/time.h>
+ #include <linux/slab.h>
+@@ -1358,8 +1357,8 @@
+ 	total_clusters = (total_sectors - sbi->data_start) / sbi->sec_per_clus;
+ 
+ 	if (!sbi->options.atari) {
+-		if (sbi->fat_bits != 32)
+-			sbi->fat_bits = (total_clusters > MAX_FAT12) ? 16 : 12;
++	if (sbi->fat_bits != 32)
++		sbi->fat_bits = (total_clusters > MAX_FAT12) ? 16 : 12;
+ 	} else {
+ 		int sectors;
+ 		/* Atari GEMDOS partitions always have 16-bit fat */
+diff -urN linux-m68k/include/asm-m68k/atarikb.h linux-schmitz/include/asm-m68k/atarikb.h
+--- linux-m68k/include/asm-m68k/atarikb.h	2006-09-20 05:42:06.000000000 +0200
++++ linux-schmitz/include/asm-m68k/atarikb.h	2006-11-19 21:37:27.000000000 +0100
+@@ -36,5 +36,11 @@
+ extern void (*atari_MIDI_interrupt_hook) (void);
+ /* Hook for mouse driver */
+ extern void (*atari_mouse_interrupt_hook) (char *);
++/* Hook for keyboard inputdev  driver */
++extern void (*atari_input_keyboard_interrupt_hook) (unsigned char, char);
++/* Hook for mouse inputdev  driver */
++extern void (*atari_input_mouse_interrupt_hook) (char *);
++
++extern struct pt_regs *atakbd_pt_regs;
+ 
+ #endif /* _LINUX_ATARIKB_H */
+diff -urN linux-m68k/include/asm-m68k/ide.h linux-schmitz/include/asm-m68k/ide.h
+--- linux-m68k/include/asm-m68k/ide.h	2006-09-20 05:42:06.000000000 +0200
++++ linux-schmitz/include/asm-m68k/ide.h	2006-11-19 21:37:27.000000000 +0100
+@@ -108,13 +108,19 @@
+ #ifdef CONFIG_BLK_DEV_FALCON_IDE
+ #define IDE_ARCH_LOCK
+ 
++/* MSch 20061021: even without avoiding registering the IDE interrupt on top 
++ * of stdma_irq, I still get locking bug warnings suggesting mutiple instances 
++ * of ide_do_request are running. The warning is printed now only if the status 
++ * of falconide_intr_lock and stdma_islocked() conflict! */
++
+ extern int falconide_intr_lock;
+ 
+ static __inline__ void ide_release_lock (void)
+ {
+ 	if (MACH_IS_ATARI) {
+-		if (falconide_intr_lock == 0) {
++		if (falconide_intr_lock == 0 && stdma_islocked()) {
+ 			printk("ide_release_lock: bug\n");
++			stdma_debug();
+ 			return;
+ 		}
+ 		falconide_intr_lock = 0;
+diff -urN linux-m68k/include/asm-m68k/io.h linux-schmitz/include/asm-m68k/io.h
+--- linux-m68k/include/asm-m68k/io.h	2006-11-19 21:35:33.000000000 +0100
++++ linux-schmitz/include/asm-m68k/io.h	2006-11-19 21:37:27.000000000 +0100
+@@ -82,9 +82,22 @@
+ #endif
+ #endif /* AMIGA_PCMCIA */
+ 
++#ifdef CONFIG_ATARI_ROM_ISA
+ 
++#define enec_isa_read_base  0xfffa0000
++#define enec_isa_write_base 0xfffb0000
+ 
+-#ifdef CONFIG_ISA
++#define ENEC_ISA_IO_B(ioaddr) (enec_isa_read_base+((((unsigned long)(ioaddr))&0x1F)<<9))
++#define ENEC_ISA_IO_W(ioaddr) (enec_isa_read_base+((((unsigned long)(ioaddr))&0x1F)<<9))
++#define ENEC_ISA_MEM_B(madr)  (enec_isa_read_base+((((unsigned long)(madr))&0x1F)<<9))
++#define ENEC_ISA_MEM_W(madr)  (enec_isa_read_base+((((unsigned long)(madr))&0x1F)<<9))
++
++#define MULTI_ISA 0
++#endif /* ATARI */
++
++
++
++#if defined(CONFIG_ISA) || defined(CONFIG_ATARI_ROM_ISA)
+ 
+ #if MULTI_ISA == 0
+ #undef MULTI_ISA
+@@ -93,6 +106,7 @@
+ #define Q40_ISA (1)
+ #define GG2_ISA (2)
+ #define AG_ISA  (3)
++#define ENEC_ISA (4)
+ 
+ #if defined(CONFIG_Q40) && !defined(MULTI_ISA)
+ #define ISA_TYPE Q40_ISA
+@@ -106,6 +120,10 @@
+ #define ISA_TYPE GG2_ISA
+ #define ISA_SEX  0
+ #endif
++#if defined(CONFIG_ATARI_ROM_ISA) && !defined(MULTI_ISA)
++#define ISA_TYPE ENEC_ISA
++#define ISA_SEX  0
++#endif
+ 
+ #ifdef MULTI_ISA
+ extern int isa_type;
+@@ -133,6 +151,9 @@
+ #ifdef CONFIG_AMIGA_PCMCIA
+     case AG_ISA: return (u8 __iomem *)AG_ISA_IO_B(addr);
+ #endif
++#ifdef CONFIG_ATARI_ROM_ISA
++    case ENEC_ISA: return (u8 __iomem *)ENEC_ISA_IO_B(addr);
++#endif
+     default: return NULL; /* avoid warnings, just in case */
+     }
+ }
+@@ -149,6 +170,9 @@
+ #ifdef CONFIG_AMIGA_PCMCIA
+     case AG_ISA: return (u16 __iomem *)AG_ISA_IO_W(addr);
+ #endif
++#ifdef CONFIG_ATARI_ROM_ISA
++    case ENEC_ISA: return (u16 __iomem *)ENEC_ISA_IO_W(addr);
++#endif
+     default: return NULL; /* avoid warnings, just in case */
+     }
+ }
+@@ -165,6 +189,9 @@
+ #ifdef CONFIG_AMIGA_PCMCIA
+     case AG_ISA: return (u8 __iomem *)addr;
+ #endif
++#ifdef CONFIG_ATARI_ROM_ISA
++    case ENEC_ISA: return (u8 __iomem *)ENEC_ISA_MEM_B(addr);
++#endif
+     default: return NULL; /* avoid warnings, just in case */
+     }
+ }
+@@ -181,6 +208,9 @@
+ #ifdef CONFIG_AMIGA_PCMCIA
+     case AG_ISA: return (u16 __iomem *)addr;
+ #endif
++#ifdef CONFIG_ATARI_ROM_ISA
++    case ENEC_ISA: return (u16 __iomem *)ENEC_ISA_MEM_W(addr);
++#endif
+     default: return NULL; /* avoid warnings, just in case */
+     }
+ }
+@@ -200,6 +230,19 @@
+ 	(ISA_SEX ? out_be16(isa_mtw((unsigned long)(p)),(val))	\
+ 		 : out_le16(isa_mtw((unsigned long)(p)),(val)))
+ 
++#if defined(CONFIG_ATARI_ROM_ISA)
++#define isa_rom_inb(port)      rom_in_8(isa_itb(port))
++#define isa_rom_inw(port)      (ISA_SEX ? rom_in_be16(isa_itw(port)) : rom_in_le16(isa_itw(port)))
++
++#define isa_rom_outb(val,port) rom_out_8(isa_itb(port),(val))
++#define isa_rom_outw(val,port) (ISA_SEX ? rom_out_be16(isa_itw(port),(val)) : rom_out_le16(isa_itw(port),(val)))
++
++#define isa_rom_writeb(val,p)  rom_out_8(isa_mtb((unsigned long)(p)),(val))
++#define isa_rom_writew(val,p)  \
++	(ISA_SEX ? rom_out_be16(isa_mtw((unsigned long)(p)),(val))	\
++		 : rom_out_le16(isa_mtw((unsigned long)(p)),(val)))
++#endif
++
+ static inline void isa_delay(void)
+ {
+   switch(ISA_TYPE)
+@@ -213,6 +256,9 @@
+ #ifdef CONFIG_AMIGA_PCMCIA
+     case AG_ISA: break;
+ #endif
++#ifdef CONFIG_ATARI_ROM_ISA
++    case ENEC_ISA: break;
++#endif
+     default: break; /* avoid warnings */
+     }
+ }
+@@ -234,10 +280,33 @@
+ #define isa_outsw(port, buf, nr)    \
+        (ISA_SEX ? raw_outsw(isa_itw(port), (u16 *)(buf), (nr)) :  \
+                   raw_outsw_swapw(isa_itw(port), (u16 *)(buf), (nr)))
++
++#if defined(CONFIG_ATARI_ROM_ISA)
++#define isa_rom_inb_p(p)      ({u8 v=isa_rom_inb(p);isa_delay();v;})
++#define isa_rom_inw_p(p)      ({u16 v=isa_rom_inw(p);isa_delay();v;})
++#define isa_rom_inl_p(p)      ({u32 v=isa_rom_inl(p);isa_delay();v;})
++#define isa_rom_outb_p(v,p)   ({isa_rom_outb((v),(p));isa_delay();})
++#define isa_rom_outw_p(v,p)   ({isa_rom_outw((v),(p));isa_delay();})
++#define isa_rom_outl_p(v,p)   ({isa_rom_outl((v),(p));isa_delay();})
++
++#define isa_rom_insb(port, buf, nr) raw_rom_insb(isa_itb(port), (u8 *)(buf), (nr))
++
++#define isa_rom_insw(port, buf, nr)     \
++       (ISA_SEX ? raw_rom_insw(isa_itw(port), (u16 *)(buf), (nr)) :    \
++                  raw_rom_insw_swapw(isa_itw(port), (u16 *)(buf), (nr)))
++
++#define isa_rom_outsb(port, buf, nr) raw_rom_outsb(isa_itb(port), (u8 *)(buf), (nr))
++
++#define isa_rom_outsw(port, buf, nr)    \
++       (ISA_SEX ? raw_rom_outsw(isa_itw(port), (u16 *)(buf), (nr)) :  \
++                  raw_rom_outsw_swapw(isa_itw(port), (u16 *)(buf), (nr)))
++
++#endif
++
+ #endif  /* CONFIG_ISA */
+ 
+ 
+-#if defined(CONFIG_ISA) && !defined(CONFIG_PCI)
++#if defined(CONFIG_ISA) && !defined(CONFIG_PCI) && !defined(CONFIG_ATARI_ROM_ISA)
+ #define inb     isa_inb
+ #define inb_p   isa_inb_p
+ #define outb    isa_outb
+@@ -306,7 +375,34 @@
+ #endif
+ #endif /* CONFIG_PCI */
+ 
+-#if !defined(CONFIG_ISA) && !defined(CONFIG_PCI) && defined(CONFIG_HP300)
++#if defined(CONFIG_ATARI_ROM_ISA)
++/*
++ * kernel with both ROM port ISA and IDE compiled in, those have
++ * conflicting defs for in/out. Simply consider port < 1024
++ * ROM port ISA and everything else regular ISA for IDE. read,write not defined
++ * in this case
++ */
++#define inb(port) ((port)<1024 ? isa_rom_inb(port) : in_8(port))
++#define inb_p(port) ((port)<1024 ? isa_rom_inb_p(port) : in_8(port))
++#define inw(port) ((port)<1024 ? isa_rom_inw(port) : in_le16(port))
++#define inw_p(port) ((port)<1024 ? isa_rom_inw_p(port) : in_le16(port))
++#define inl(port) ((port)<1024 ? isa_rom_inl(port) : in_le32(port))
++#define inl_p(port) ((port)<1024 ? isa_rom_inl_p(port) : in_le32(port))
++
++#define outb(val,port) ((port)<1024 ? isa_rom_outb((val),(port)) : out_8((port),(val)))
++#define outb_p(val,port) ((port)<1024 ? isa_rom_outb_p((val),(port)) : out_8((port),(val)))
++#define outw(val,port) ((port)<1024 ? isa_rom_outw((val),(port)) : out_le16((port),(val)))
++#define outw_p(val,port) ((port)<1024 ? isa_rom_outw_p((val),(port)) : out_le16((port),(val)))
++#define outl(val,port) ((port)<1024 ? isa_rom_outl((val),(port)) : out_le32((port),(val)))
++#define outl_p(val,port) ((port)<1024 ? isa_rom_outl_p((val),(port)) : out_le32((port),(val)))
++
++#define insb    isa_rom_insb
++#define insw    isa_rom_insw
++#define outsb   isa_rom_outsb
++#define outsw   isa_rom_outsw
++#endif
++
++#if !defined(CONFIG_ISA) && !defined(CONFIG_PCI) && !defined(CONFIG_ATARI_ROM_ISA) && defined(CONFIG_HP300)
+ /*
+  * We need to define dummy functions otherwise drivers/serial/8250.c doesn't link
+  */
