@@ -255,6 +255,7 @@ class package(dict):
         ('Build-Depends', package_relation_list),
         ('Build-Depends-Indep', package_relation_list),
         ('Provides', package_relation_list),
+        ('Pre-Depends', package_relation_list),
         ('Depends', package_relation_list),
         ('Recommends', package_relation_list),
         ('Suggests', package_relation_list),
