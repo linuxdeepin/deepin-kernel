@@ -1,5 +1,5 @@
 #!/usr/bin/env python2.4
-import os, os.path, re, sys, textwrap, ConfigParser
+import os, sys
 sys.path.append("debian/lib/python")
 import debian_linux.gencontrol
 from debian_linux.debian import *
