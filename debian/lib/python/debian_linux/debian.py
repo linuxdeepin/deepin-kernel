@@ -125,22 +125,60 @@ class package_description(object):
             self.long.extend(str.split("\n.\n"))
 
 class package_relation(object):
-    __slots__ = "name", "version", "arches"
+    __slots__ = "name", "operator", "version", "arches"
 
-    _re = re.compile(r'^(\S+)(?: \(([^)]+)\))?(?: \[([^]]+)\])?$')
+    _re = re.compile(r'^(\S+)(?: \((<<|<=|=|!=|>=|>>)\s*([^)]+)\))?(?: \[([^]]+)\])?$')
+
+    class _operator(object):
+        OP_LT = 1
+        OP_LE = 2
+        OP_EQ = 3
+        OP_NE = 4
+        OP_GE = 5
+        OP_GT = 6
+
+        operators = {
+            '<<': OP_LT,
+            '<=': OP_LE,
+            '=':  OP_EQ,
+            '!=': OP_NE,
+            '>=': OP_GE,
+            '>>': OP_GT,
+        }
+        operators_neg = {
+            OP_LT: OP_GE,
+            OP_LE: OP_GT,
+            OP_EQ: OP_NE,
+            OP_NE: OP_EQ,
+            OP_GE: OP_LT,
+            OP_GT: OP_LE,
+        }
+        operators_text = dict([(b, a) for a, b in operators.iteritems()])
+
+        __slots__ = '_op',
+
+        def __init__(self, value):
+            self._op = self.operators[value]
+
+        def __neg__(self):
+            return self.__class__(self.operators_text[self.operators_neg[self._op]])
+
+        def __str__(self):
+            return self.operators_text[self._op]
 
     def __init__(self, value = None):
         if value is not None:
             self.parse(value)
         else:
             self.name = None
+            self.operator = None
             self.version = None
             self.arches = []
 
     def __str__(self):
         ret = [self.name]
-        if self.version is not None:
-            ret.extend([' (', self.version, ')'])
+        if self.operator is not None and self.version is not None:
+            ret.extend([' (', str(self.operator), ' ', self.version, ')'])
         if self.arches:
             ret.extend([' [', ' '.join(self.arches), ']'])
         return ''.join(ret)
@@ -159,9 +197,13 @@ class package_relation(object):
             raise RuntimeError, "Can't parse dependency %s" % value
         match = match.groups()
         self.name = match[0]
-        self.version = match[1]
-        if match[2] is not None:
-            self.arches = re.split('\s+', match[2])
+        if match[1] is not None:
+            self.operator = self._operator(match[1])
+        else:
+            self.operator = None
+        self.version = match[2]
+        if match[3] is not None:
+            self.arches = re.split('\s+', match[3])
         else:
             self.arches = []
 
