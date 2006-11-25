@@ -110,15 +110,24 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
                 item.arches = [arch]
         packages['source']['Build-Depends'].extend(relations_compiler_build_dep)
 
-        image_depends = package_relation_list()
+        image_relations = {
+            'conflicts': package_relation_list(),
+            'depends': package_relation_list(),
+        }
         if vars.get('initramfs', True):
             generators = vars['initramfs-generators']
             config_entry_commands_initramfs = self.config.merge('commands-image-initramfs-generators', arch, subarch, flavour)
             commands = [config_entry_commands_initramfs[i] for i in generators if config_entry_commands_initramfs.has_key(i)]
             makeflags['INITRD_CMD'] = ' '.join(commands)
-            l = package_relation_group()
-            l.extend(generators)
-            image_depends.append(l)
+            l_depends = package_relation_group()
+            for i in generators:
+                i = config_entry_relations.get(i, i)
+                l_depends.append(i)
+                a = package_relation(i)
+                if a.operator is not None:
+                    a.operator = -a.operator
+                    image_relations['conflicts'].append(package_relation_group([a]))
+            image_relations['depends'].append(l_depends)
 
         packages_dummy = []
         packages_own = []
@@ -145,7 +154,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         if not vars.has_key('desc'):
             vars['desc'] = None
 
-        packages_own.append(self.process_real_image(image[0], {'depends': image_depends}, config_entry_relations, vars))
+        packages_own.append(self.process_real_image(image[0], image_relations, config_entry_relations, vars))
         packages_own.extend(self.process_packages(image[1:], vars))
 
         if build_modules:
