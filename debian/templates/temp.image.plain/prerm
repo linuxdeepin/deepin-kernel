@@ -1,0 +1,361 @@
+#! /usr/bin/perl
+#                              -*- Mode: Perl -*- 
+# image.prerm --- 
+# Author           : root ( root@melkor.pilgrim.umass.edu ) 
+# Created On       : Fri May 17 03:28:59 1996
+# Created On Node  : melkor.pilgrim.umass.edu
+# Last Modified By : Manoj Srivastava
+# Last Modified On : Sat Aug  5 13:14:17 2006
+# Last Machine Used: glaurung.internal.golden-gryphon.com
+# Update Count     : 85
+# Status           : Unknown, Use with caution!
+# HISTORY          : 
+# Description      : 
+# 
+#
+#    $Id: image.prerm,v 1.22 2003/10/07 16:24:20 srivasta Exp $
+#
+# 
+#use strict;
+use Debconf::Client::ConfModule qw(:all);
+version('2.0');
+my $capb=capb("backup");
+
+$|=1;
+# Predefined values:
+my $version         = "=V";
+my $link_in_boot    = "=IB";	# Should be empty, mostly
+my $no_symlink      = "=S";	# Should be empty, mostly
+my $reverse_symlink = "=R";	# Should be empty, mostly
+my $do_symlinks     = "Yes";	# target machine defined
+my $do_boot_enable  = "Yes";	# target machine defined
+my $do_bootfloppy   = "Yes";	# target machine defined
+my $do_bootloader   = "Yes";	# target machine defined
+my $move_image      = '';       # target machine defined
+my $kimage          = "=K";	# Should be empty, mostly
+my $loader          = "=L";     # lilo, silo, quik, palo, vmelilo, or nettrom
+my $image_dir       = "=D";     # where the image is located
+my $clobber_modules = '';       # target machine defined
+my $mkimage         = "=M";        # command to generate the initrd image
+my $initrd          = "=I";     # initrd kernel
+my $use_hard_links  = '';       # hardlinks do not wirk across fs boundaries
+my $postinst_hook   = '';       #Normally we do not
+my $postrm_hook     = '';       #Normally we do not
+my $preinst_hook    = '';       #Normally we do not
+my $prerm_hook      = '';       #Normally we do not
+my $minimal_swap    = '';       # Do not swap symlinks
+my $ignore_depmod_err = '';	# normally we do not
+my $relink_build_link = 'YES';	# There is no harm in checking the link
+my $force_build_link = '';	# There is no harm in checking the link
+my $official_image    = "=OF";      # only true for official images
+my $arch              = "=A";  #  should be same as dpkg --print-installation-architecture
+my $kernel_arch       = "=B";
+my $ramdisk           = "=MK";  # List of tools to create initial ram fs.
+my $initrddep         = "=MD";  # List of dependencies for such tools
+my $package_name    = "=ST-image-$version";
+
+my $Loader          = "NoLOADER"; # 
+$Loader             = "LILO"     if $loader =~ /^lilo/io;
+$Loader             = "SILO"     if $loader =~ /^silo/io;
+$Loader             = "QUIK"     if $loader =~ /^quik/io;
+$Loader             = "yaboot"   if $loader =~ /^yaboot/io;
+$Loader             = "PALO"     if $loader =~ /^palo/io;
+$Loader             = "NETTROM"  if $loader =~ /^nettrom/io;
+$Loader             = "VMELILO"  if $loader =~ /^vmelilo/io;
+$Loader             = "ZIPL"     if $loader =~ /^zipl/io;
+$Loader             = "ELILO"    if $loader =~ /^elilo/io;
+
+
+# This should not point to /tmp, because of security risks.
+my $temp_file_name = "/var/log/$loader" . "_log.$$";
+
+#known variables
+my $image_dest      = "/";
+my $realimageloc    = "/$image_dir/";
+my $have_conffile   = "";
+my $CONF_LOC        = '/etc/kernel-img.conf';
+my $relative_links = '';
+my $silent_modules  = '';
+my $silent_loader   = '';
+my $warn_reboot     = 'Yes';     # Warn that we are installing a version of
+                                 # the kernel we are running
+
+# remove multiple leading slashes; make sure there is at least one.
+$realimageloc  =~ s|^/*|/|o;
+$realimageloc  =~ s|/+|/|o;
+
+my $DEBUG = 0;
+
+# Variables used
+my $image='';
+my $ret=0;
+my $seen='';
+my $answer='';
+my $running = '';
+my $WouldInvalidate = 0;
+
+if ($ARGV[0] && ($ARGV[0] =~ /remove/ || $ARGV[0] =~ /upgrade/)) {
+  if (-l "/usr/doc/=ST-image-$version") {
+    unlink "/usr/doc/=ST-image-$version";
+  }
+}
+
+# Ignore all invocations uxcept when called on to remove
+exit 0 unless ($ARGV[0] && $ARGV[0] =~ /remove/) ;
+
+# Paranoid check to make sure that the correct value is put in there
+if (! $kimage)                    { $kimage = "vmlinuz";} # Hmm. empty
+elsif ($kimage =~ m/^b?zImage$/o) { $kimage = "vmlinuz";} # these produce vmlinuz
+elsif ($kimage =~ m/^[iI]mage$/o) { my $nop = $kimage;  }
+elsif ($kimage =~ m/^vmlinux$/o)  { my $nop = $kimage;  }
+else                              { $kimage = "vmlinuz";} # Default
+
+if (-r "$CONF_LOC" && -f "$CONF_LOC"  ) {
+  if (open(CONF, "$CONF_LOC")) {
+    while (<CONF>) {
+      chomp;
+      s/\#.*$//g;
+      next if /^\s*$/;
+
+      $do_symlink      = "" if /do_symlinks\s*=\s*(no|false|0)\s*$/ig;
+      $no_symlink      = "" if /no_symlinks\s*=\s*(no|false|0)\s*$/ig;
+      $reverse_symlink = "" if /reverse_symlinks\s*=\s*(no|false|0)\s*$/ig;
+      $link_in_boot    = "" if /image_in_boot\s*=\s*(no|false|0)\s*$/ig;
+      $link_in_boot    = "" if /link_in_boot\s*=\s*(no|false|0)\s*$/ig;
+      $move_image      = "" if /move_image\s*=\s*(no|false|0)\s*$/ig;
+      $clobber_modules = '' if /clobber_modules\s*=\s*(no|false|0)\s*$/ig;
+      $do_boot_enable  = '' if /do_boot_enable\s*=\s*(no|false|0)\s*$/ig;
+      $do_bootfloppy   = '' if /do_bootfloppy\s*=\s*(no|false|0)\s*$/ig;
+      $relative_links  = '' if /relative_links \s*=\s*(no|false|0)\s*$/ig;
+      $do_bootloader   = '' if /do_bootloader\s*=\s*(no|false|0)\s*$/ig;
+      $do_initrd       = '' if /do_initrd\s*=\s*(no|false|0)\s*$/ig;
+      $use_hard_links  = '' if /use_hard_links\s*=\s*(no|false|0)\s*$/ig;
+      $silent_modules  = '' if /silent_modules\s*=\s*(no|false|0)\s*$/ig;
+      $silent_loader   = '' if /silent_loader\s*=\s*(no|false|0)\s*$/ig;
+      $warn_reboot     = '' if /warn_reboot\s*=\s*(no|false|0)\s*$/ig;
+      $minimal_swap    = '' if /minimal_swap\s*=\s*(no|false|0)\s*$/ig;
+      $ignore_depmod_err = '' if /ignore_depmod_err\s*=\s*(no|false|0)\s*$/ig;
+      $relink_build_link = '' if /relink_build_link\s*=\s*(no|false|0)\s*$/ig;
+      $force_build_link = '' if /force_build_link\s*=\s*(no|false|0)\s*$/ig;
+
+
+      $do_symlink      = "Yes" if /do_symlinks\s*=\s*(yes|true|1)\s*$/ig;
+      $no_symlink      = "Yes" if /no_symlinks\s*=\s*(yes|true|1)\s*$/ig;
+      $reverse_symlink = "Yes" if /reverse_symlinks\s*=\s*(yes|true|1)\s*$/ig;
+      $link_in_boot    = "Yes" if /image_in_boot\s*=\s*(yes|true|1)\s*$/ig;
+      $link_in_boot    = "Yes" if /link_in_boot\s*=\s*(yes|true|1)\s*$/ig;
+      $move_image      = "Yes" if /move_image\s*=\s*(yes|true|1)\s*$/ig;
+      $clobber_modules = "Yes" if /clobber_modules\s*=\s*(yes|true|1)\s*$/ig;
+      $do_boot_enable  = "Yes" if /do_boot_enable\s*=\s*(yes|true|1)\s*$/ig;
+      $do_bootfloppy   = "Yes" if /do_bootfloppy\s*=\s*(yes|true|1)\s*$/ig;
+      $do_bootloader   = "Yes" if /do_bootloader\s*=\s*(yes|true|1)\s*$/ig;
+      $relative_links  = "Yes" if /relative_links\s*=\s*(yes|true|1)\s*$/ig;
+      $do_initrd       = "Yes" if /do_initrd\s*=\s*(yes|true|1)\s*$/ig;
+      $use_hard_links  = "Yes" if /use_hard_links\s*=\s*(yes|true|1)\s*$/ig;
+      $silent_modules  = 'Yes' if /silent_modules\s*=\s*(yes|true|1)\s*$/ig;
+      $silent_loader   = 'Yes' if /silent_loader\s*=\s*(yes|true|1)\s*$/ig;
+      $warn_reboot     = 'Yes' if /warn_reboot\s*=\s*(yes|true|1)\s*$/ig;
+      $minimal_swap    = 'Yes' if /minimal_swap\s*=\s*(yes|true|1)\s*$/ig;
+      $ignore_depmod_err = 'Yes' if /ignore_depmod_err\s*=\s*(yes|true|1)\s*$/ig;
+      $relink_build_link = 'Yes' if /relink_build_link\s*=\s*(yes|true|1)\s*$/ig;
+      $force_build_link = 'Yes' if /force_build_link\s*=\s*(yes|true|1)\s*$/ig;
+
+      $image_dest      = "$1"  if /image_dest\s*=\s*(\S+)/ig;
+      $postinst_hook   = "$1"  if /postinst_hook\s*=\s*(\S+)/ig;
+      $postrm_hook     = "$1"  if /postrm_hook\s*=\s*(\S+)/ig;
+      $preinst_hook    = "$1"  if /preinst_hook\s*=\s*(\S+)/ig;
+      $prerm_hook      = "$1"  if /prerm_hook\s*=\s*(\S+)/ig;
+      $mkimage         = "$1"  if /mkimage\s*=\s*(.+)$/ig;
+      $ramdisk         = "$1"  if /ramdisk\s*=\s*(.+)$/ig;
+    }
+    close CONF;
+    $have_conffile = "Yes";
+  }
+}
+
+
+$ENV{KERNEL_ARCH}=$kernel_arch if $kernel_arch;
+
+#check to see if we are trying to remove a running kernel
+# if so we abort right now.
+chop($running=`uname -r`);
+if ($running eq $version) {
+  my $question = "${package_name}/prerm/removing-running-kernel-$version";
+
+  ($ret,$seen) = fset ("$question", 'seen', 'false');
+  die "Error setting debconf flags in $question: $seen" if $ret;
+
+  $ret = subst("$question", 'running', "$running");
+  die "Error setting debconf substitutions in $question: $seen" if $ret;
+
+  ($ret,$seen) = input('critical', "$question");
+  if ($ret && $ret != 30 ) {
+    die "Error setting debconf question $question: $seen";
+  }
+
+  ($ret,$seen) = go ();
+  if ($ret && $ret != 30 ) {
+    die "Error asking debconf question $question: $seen";
+  }
+
+  ($ret,$answer) = get("$question");
+  die "Error retreiving answer for $question: $answer" if $ret;
+
+  if ($answer =~ /^(y|t)/i) {
+    exit 1; #Operation not permitted
+  }
+  else {
+     print STDERR "Ok, proceeding with removing running kernel image.\n";
+  }
+}
+
+#Now, they have an alternate kernel which they are currently running
+
+# This is just us being nice to lilo users.
+
+chdir("/") or die "could not chdir to /:$!\n";
+
+if (-f "/etc/$loader.conf") { #I know, could be a link, but ..
+  open (LILO, "/etc/$loader.conf") || &success(); # this is not critical
+  while (<LILO>) {
+    chop;
+    s/\#.*//;			  # nix the comments
+    next unless /^\s*image\s*=\s(\S+)/o;
+    $image = $1;
+    if ($image && -e $image) {
+      while (defined($image) && -l $image) {
+	$image = readlink ($image);
+      }
+      if (defined($image) && -e $image) {
+	$WouldInvalidate |= $image =~ /$kimage-$version/;
+      }
+      else {
+	&success(); # invalid $loader.conf file
+      }
+    }
+    else {
+      &success(); # invalid $loader.conf file
+    }
+  }
+  close (LILO);
+  if ($WouldInvalidate) {
+    my $question = "${package_name}/prerm/would-invalidate-boot-loader-$version";
+
+    ($ret,$seen) = fset ("$question", 'seen', 'false');
+    die "Error setting debconf flags in $question: $seen" if $ret;
+
+    $ret = subst("$question", 'loader', "$loader");
+    die "Error setting debconf substitutions in $question: $seen" if $ret;
+
+    $ret = subst("$question", 'kimage', "$kimage");
+    die "Error setting debconf substitutions in $question: $seen" if $ret;
+
+    ($ret,$seen) = input('critical', "$question");
+    if ($ret && $ret != 30 ) {
+      die "Error setting debconf question $question: $seen";
+    }
+
+    ($ret,$seen) = go ();
+    if ($ret && $ret != 30 ) {
+      die "Error asking debconf question $question: $seen";
+    }
+
+    ($ret,$answer) = get("$question");
+    die "Error retreiving answer for $question: $answer" if $ret;
+
+    if ($answer =~ /^(y|t)/i) {
+      print STDERR "\nNot removing =ST-image-$version.\n";
+      exit 1; #Operation not permitted
+    }
+    else {
+      print STFERR "Ok, proceeding with removing running kernel image.\n";
+      &success();
+    }
+  }
+}
+
+
+# set the env var stem
+$ENV{'STEM'} = "=ST";
+
+sub exec_script {
+  my $type   = shift;
+  my $script = shift;
+  print STDERR "Running $type hook script $script.\n";
+  system ("$script $version $realimageloc$kimage-$version") &&
+    print STDERR "User $type hook script [$script] ";
+  if ($?) {
+    if ($? == -1) {
+      print STDERR "failed to execute: $!\n";
+    }
+    elsif ($? & 127) {
+      printf STDERR "died with signal %d, %s coredump\n",
+        ($? & 127),  ($? & 128) ? 'with' : 'without';
+    }
+    else {
+      printf STDERR "exited with value %d\n", $? >> 8;
+    }
+    exit $? >> 8;
+  }
+}
+sub run_hook {
+  my $type   = shift;
+  my $script = shift;
+  if ($script =~ m,^/,) {
+    # Full path provided for the hook script
+    if (-x "$script") {
+      &exec_script($type,$script);
+    }
+    else {
+      die "The provided $type hook script [$script] could not be run.\n";
+    }
+  }
+  else {
+    # Look for it in a safe path
+    for my $path ('/bin', '/sbin', '/usr/bin', '/usr/sbin') {
+      if (-x "$path/$script") {
+        &exec_script($type, "$path/$script");
+        return 0;
+      }
+    }
+    # No luck
+    print STDERR "Could not find $type hook script [$script].\n";
+    die "Looked in: '/bin', '/sbin', '/usr/bin', '/usr/sbin'\n";
+  }
+}
+
+
+## Run user hook script here, if any
+if (-x "$prerm_hook") {
+  &run_hook("prerm", $prerm_hook);
+}
+if (-d "/etc/kernel/prerm.d") {
+  print STDERR "Examining /etc/kernel/prerm.d.\n";
+  system ("run-parts --verbose --exit-on-error --arg=$version " . 
+          "--arg=$realimageloc$kimage-$version /etc/kernel/prerm.d") &&
+            die "Failed to process /etc/kernel/prerm.d";
+}
+if (-d "/etc/kernel/prerm.d/$version") {
+  print STDERR "Examining /etc/kernel/prerm.d/$version.\n";
+  system ("run-parts --verbose --exit-on-error --arg=$version" .
+          " --arg=$realimageloc$kimage-$version " .
+          "/etc/kernel/prerm.d/$version") &&
+            die "Failed to process /etc/kernel/prerm.d/$version";
+}
+
+sub success () {
+    -f "/lib/modules/$version/modules.dep"  && 
+      unlink "/lib/modules/$version/modules.dep";
+    exit 0;
+}
+
+
+
+&success();
+exit 0;
+__END__
+
+
+
+
+
