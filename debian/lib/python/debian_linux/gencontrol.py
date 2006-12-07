@@ -202,6 +202,7 @@ class gencontrol(object):
             for in_item in in_groups:
                 item = package_relation()
                 item.name = self.substitute(in_item.name, vars)
+                item.operator = in_item.operator
                 if in_item.version is not None:
                     item.version = self.substitute(in_item.version, vars)
                 item.arches = in_item.arches
