@@ -53,7 +53,8 @@ class checker(object):
                 info = []
                 if symbol in add_ignore:
                     info.append("ignored")
-                info.append("module: %s" % add_info[symbol]['module'])
+                for i in ('module', 'version', 'export'):
+                    info.append("%s: %s" % (i, add_info[symbol][i]))
                 out.write("%-48s %s\n" % (symbol, ", ".join(info)))
         if change:
             out.write("\nChanged symbols:\n")
@@ -63,12 +64,13 @@ class checker(object):
                 info = []
                 if symbol in change_ignore:
                     info.append("ignored")
-                if change_info[symbol].has_key('module'):
-                    info.append("module: %s -> %s" % change_info[symbol]['module'])
-                if change_info[symbol].has_key('version'):
-                    info.append("version: %s -> %s" % change_info[symbol]['version'])
-                if change_info[symbol].has_key('export'):
-                    info.append("export: %s -> %s" % change_info[symbol]['export'])
+                s = change_info[symbol]
+                changes = s['changes']
+                for i in ('module', 'version', 'export'):
+                    if changes.has_key(i):
+                        info.append("%s: %s -> %s" % (i, s['ref'][i], s['new'][i]))
+                    else:
+                        info.append("%s: %s" % (i, new[symbol][i]))
                 out.write("%-48s %s\n" % (symbol, ", ".join(info)))
         if remove:
             out.write("\nRemoved symbols:\n")
@@ -78,7 +80,8 @@ class checker(object):
                 info = []
                 if symbol in remove_ignore:
                     info.append("ignored")
-                info.append("module: %s" % remove_info[symbol]['module'])
+                for i in ('module', 'version', 'export'):
+                    info.append("%s: %s" % (i, add_info[symbol][i]))
                 out.write("%-48s %s\n" % (symbol, ", ".join(info)))
 
         return ret
