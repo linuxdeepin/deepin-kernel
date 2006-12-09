@@ -1,0 +1,99 @@
+diff --git a/include/linux/netfilter_ipv4.h b/include/linux/netfilter_ipv4.h
+index 5b63a23..ce02c98 100644
+--- a/include/linux/netfilter_ipv4.h
++++ b/include/linux/netfilter_ipv4.h
+@@ -77,7 +77,7 @@ enum nf_ip_hook_priorities {
+ #define SO_ORIGINAL_DST 80
+ 
+ #ifdef __KERNEL__
+-extern int ip_route_me_harder(struct sk_buff **pskb, unsigned addr_type);
++extern int ip_route_me_harder(struct sk_buff **pskb);
+ extern int ip_xfrm_me_harder(struct sk_buff **pskb);
+ extern unsigned int nf_ip_checksum(struct sk_buff *skb, unsigned int hook,
+ 				   unsigned int dataoff, u_int8_t protocol);
+diff --git a/net/ipv4/ipvs/ip_vs_core.c b/net/ipv4/ipvs/ip_vs_core.c
+index f594635..3f47ad8 100644
+--- a/net/ipv4/ipvs/ip_vs_core.c
++++ b/net/ipv4/ipvs/ip_vs_core.c
+@@ -813,16 +813,6 @@ ip_vs_out(unsigned int hooknum, struct sk_buff **pskb,
+ 	skb->nh.iph->saddr = cp->vaddr;
+ 	ip_send_check(skb->nh.iph);
+ 
+- 	/* For policy routing, packets originating from this
+- 	 * machine itself may be routed differently to packets
+- 	 * passing through.  We want this packet to be routed as
+- 	 * if it came from this machine itself.  So re-compute
+- 	 * the routing information.
+- 	 */
+- 	if (ip_route_me_harder(pskb, RTN_LOCAL) != 0)
+- 		goto drop;
+-	skb = *pskb;
+-
+ 	IP_VS_DBG_PKT(10, pp, skb, 0, "After SNAT");
+ 
+ 	ip_vs_out_stats(cp, skb);
+diff --git a/net/ipv4/netfilter.c b/net/ipv4/netfilter.c
+index 327ba37..6a9e34b 100644
+--- a/net/ipv4/netfilter.c
++++ b/net/ipv4/netfilter.c
+@@ -8,7 +8,7 @@
+ #include <net/ip.h>
+ 
+ /* route_me_harder function, used by iptable_nat, iptable_mangle + ip_queue */
+-int ip_route_me_harder(struct sk_buff **pskb, unsigned addr_type)
++int ip_route_me_harder(struct sk_buff **pskb)
+ {
+ 	struct iphdr *iph = (*pskb)->nh.iph;
+ 	struct rtable *rt;
+@@ -16,13 +16,10 @@ int ip_route_me_harder(struct sk_buff **pskb, unsigned addr_type)
+ 	struct dst_entry *odst;
+ 	unsigned int hh_len;
+ 
+-	if (addr_type == RTN_UNSPEC)
+-		addr_type = inet_addr_type(iph->saddr);
+-
+ 	/* some non-standard hacks like ipt_REJECT.c:send_reset() can cause
+ 	 * packets with foreign saddr to appear on the NF_IP_LOCAL_OUT hook.
+ 	 */
+-	if (addr_type == RTN_LOCAL) {
++	if (inet_addr_type(iph->saddr) == RTN_LOCAL) {
+ 		fl.nl_u.ip4_u.daddr = iph->daddr;
+ 		fl.nl_u.ip4_u.saddr = iph->saddr;
+ 		fl.nl_u.ip4_u.tos = RT_TOS(iph->tos);
+@@ -159,7 +156,7 @@ static int nf_ip_reroute(struct sk_buff **pskb, const struct nf_info *info)
+ 		if (!(iph->tos == rt_info->tos
+ 		      && iph->daddr == rt_info->daddr
+ 		      && iph->saddr == rt_info->saddr))
+-			return ip_route_me_harder(pskb, RTN_UNSPEC);
++			return ip_route_me_harder(pskb);
+ 	}
+ 	return 0;
+ }
+diff --git a/net/ipv4/netfilter/ip_nat_standalone.c b/net/ipv4/netfilter/ip_nat_standalone.c
+index c508544..6db485f 100644
+--- a/net/ipv4/netfilter/ip_nat_standalone.c
++++ b/net/ipv4/netfilter/ip_nat_standalone.c
+@@ -275,8 +275,7 @@ ip_nat_local_fn(unsigned int hooknum,
+ 		       ct->tuplehash[!dir].tuple.src.u.all
+ #endif
+ 		    )
+-			if (ip_route_me_harder(pskb, RTN_UNSPEC))
+-				ret = NF_DROP;
++			return ip_route_me_harder(pskb) == 0 ? ret : NF_DROP;
+ 	}
+ 	return ret;
+ }
+diff --git a/net/ipv4/netfilter/iptable_mangle.c b/net/ipv4/netfilter/iptable_mangle.c
+index f7b8906..4e7998b 100644
+--- a/net/ipv4/netfilter/iptable_mangle.c
++++ b/net/ipv4/netfilter/iptable_mangle.c
+@@ -157,8 +157,7 @@ ipt_local_hook(unsigned int hook,
+ 		|| (*pskb)->nfmark != nfmark
+ #endif
+ 		|| (*pskb)->nh.iph->tos != tos))
+-		if (ip_route_me_harder(pskb, RTN_UNSPEC))
+-			ret = NF_DROP;
++		return ip_route_me_harder(pskb) == 0 ? ret : NF_DROP;
+ 
+ 	return ret;
+ }
