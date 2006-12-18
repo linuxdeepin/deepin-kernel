@@ -1,0 +1,106 @@
+diff --git a/drivers/scsi/libata-core.c b/drivers/scsi/libata-core.c
+index 427b73a..3bc7f57 100644
+--- a/drivers/scsi/libata-core.c
++++ b/drivers/scsi/libata-core.c
+@@ -2271,11 +2271,14 @@ static inline void ata_tf_to_host(struct
+  *	Sleep until ATA Status register bit BSY clears,
+  *	or a timeout occurs.
+  *
+- *	LOCKING: None.
++ *	LOCKING:
++ *	Kernel thread context (may sleep).
++ *
++ *	RETURNS:
++ *	0 on success, -errno otherwise.
+  */
+-
+-unsigned int ata_busy_sleep (struct ata_port *ap,
+-			     unsigned long tmout_pat, unsigned long tmout)
++int ata_busy_sleep(struct ata_port *ap,
++		   unsigned long tmout_pat, unsigned long tmout)
+ {
+ 	unsigned long timer_start, timeout;
+ 	u8 status;
+@@ -2283,25 +2286,30 @@ unsigned int ata_busy_sleep (struct ata_
+ 	status = ata_busy_wait(ap, ATA_BUSY, 300);
+ 	timer_start = jiffies;
+ 	timeout = timer_start + tmout_pat;
+-	while ((status & ATA_BUSY) && (time_before(jiffies, timeout))) {
++	while (status != 0xff && (status & ATA_BUSY) &&
++	       time_before(jiffies, timeout)) {
+ 		msleep(50);
+ 		status = ata_busy_wait(ap, ATA_BUSY, 3);
+ 	}
+ 
+-	if (status & ATA_BUSY)
++	if (status != 0xff && (status & ATA_BUSY))
+ 		ata_port_printk(ap, KERN_WARNING,
+ 				"port is slow to respond, please be patient\n");
+ 
+ 	timeout = timer_start + tmout;
+-	while ((status & ATA_BUSY) && (time_before(jiffies, timeout))) {
++	while (status != 0xff && (status & ATA_BUSY) &&
++	       time_before(jiffies, timeout)) {
+ 		msleep(50);
+ 		status = ata_chk_status(ap);
+ 	}
+ 
++	if (status == 0xff)
++		return -ENODEV;
++
+ 	if (status & ATA_BUSY) {
+ 		ata_port_printk(ap, KERN_ERR, "port failed to respond "
+ 				"(%lu secs)\n", tmout / HZ);
+-		return 1;
++		return -EBUSY;
+ 	}
+ 
+ 	return 0;
+@@ -2392,10 +2400,8 @@ static unsigned int ata_bus_softreset(st
+ 	 * the bus shows 0xFF because the odd clown forgets the D7
+ 	 * pulldown resistor.
+ 	 */
+-	if (ata_check_status(ap) == 0xFF) {
+-		ata_port_printk(ap, KERN_ERR, "SRST failed (status 0xFF)\n");
+-		return AC_ERR_OTHER;
+-	}
++	if (ata_check_status(ap) == 0xFF)
++		return 0;
+ 
+ 	ata_bus_post_reset(ap, devmask);
+ 
+diff --git a/include/linux/libata.h b/include/linux/libata.h
+index 66c3100..eb7d90f 100644
+--- a/include/linux/libata.h
++++ b/include/linux/libata.h
+@@ -702,9 +702,8 @@ extern int ata_host_set_suspend(struct a
+ 				pm_message_t mesg);
+ extern void ata_host_set_resume(struct ata_host_set *host_set);
+ extern int ata_ratelimit(void);
+-extern unsigned int ata_busy_sleep(struct ata_port *ap,
+-				   unsigned long timeout_pat,
+-				   unsigned long timeout);
++extern int ata_busy_sleep(struct ata_port *ap,
++			  unsigned long timeout_pat, unsigned long timeout);
+ extern void ata_port_queue_task(struct ata_port *ap, void (*fn)(void *),
+ 				void *data, unsigned long delay);
+ extern u32 ata_wait_register(void __iomem *reg, u32 mask, u32 val,
+@@ -1019,7 +1018,7 @@ static inline u8 ata_busy_wait(struct at
+ 		udelay(10);
+ 		status = ata_chk_status(ap);
+ 		max--;
+-	} while ((status & bits) && (max > 0));
++	} while (status != 0xff && (status & bits) && (max > 0));
+ 
+ 	return status;
+ }
+@@ -1040,7 +1039,7 @@ static inline u8 ata_wait_idle(struct at
+ {
+ 	u8 status = ata_busy_wait(ap, ATA_BUSY | ATA_DRQ, 1000);
+ 
+-	if (status & (ATA_BUSY | ATA_DRQ)) {
++	if (status != 0xff && (status & (ATA_BUSY | ATA_DRQ))) {
+ 		unsigned long l = ap->ioaddr.status_addr;
+ 		if (ata_msg_warn(ap))
+ 			printk(KERN_WARNING "ATA: abnormal status 0x%X on port 0x%lX\n",
+
