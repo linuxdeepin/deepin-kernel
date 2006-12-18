@@ -1,0 +1,157 @@
+From: Patrick McHardy <kaber@trash.net>
+Date: Tue, 24 Oct 2006 23:15:10 +0000 (-0700)
+Subject: [NETFILTER]: Fix ip6_tables extension header bypass bug
+X-Git-Tag: v2.6.19-rc4
+X-Git-Url: http://www.kernel.org/git/?p=linux/kernel/git/torvalds/linux-2.6.git;a=commitdiff;h=6d381634d213580d40d431e7664dfb45f641b884
+
+[NETFILTER]: Fix ip6_tables extension header bypass bug
+
+As reported by Mark Dowd <Mark_Dowd@McAfee.com>, ip6_tables is susceptible
+to a fragmentation attack causing false negatives on extension header matches.
+
+When extension headers occur in the non-first fragment after the fragment
+header (possibly with an incorrect nexthdr value in the fragment header)
+a rule looking for this extension header will never match.
+
+Drop fragments that are at offset 0 and don't contain the final protocol
+header regardless of the ruleset, since this should not happen normally.
+Since all extension headers are before the protocol header this makes sure
+an extension header is either not present or in the first fragment, where
+we can properly parse it.
+
+With help from Yasuyuki KOZAKAI <yasuyuki.kozakai@toshiba.co.jp>.
+
+Signed-off-by: Patrick McHardy <kaber@trash.net>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+
+Backported to Debian's 2.6.18 by dann frazier <dannf@debian.org>
+
+---
+diff -urN linux-source-2.6.18.orig/net/ipv6/netfilter/ip6_tables.c linux-source-2.6.18/net/ipv6/netfilter/ip6_tables.c
+--- linux-source-2.6.18.orig/net/ipv6/netfilter/ip6_tables.c	2006-12-17 17:04:11.676261000 -0700
++++ linux-source-2.6.18/net/ipv6/netfilter/ip6_tables.c	2006-12-17 17:04:47.298488000 -0700
+@@ -1447,6 +1447,9 @@
+  * If target header is found, its offset is set in *offset and return protocol
+  * number. Otherwise, return -1.
+  *
++ * If the first fragment doesn't contain the final protocol header or
++ * NEXTHDR_NONE it is considered invalid.
++ *
+  * Note that non-1st fragment is special case that "the protocol number
+  * of last header" is "next header" field in Fragment header. In this case,
+  * *offset is meaningless and fragment offset is stored in *fragoff if fragoff
+@@ -1470,12 +1473,12 @@
+ 		if ((!ipv6_ext_hdr(nexthdr)) || nexthdr == NEXTHDR_NONE) {
+ 			if (target < 0)
+ 				break;
+-			return -1;
++			return -ENOENT;
+ 		}
+ 
+ 		hp = skb_header_pointer(skb, start, sizeof(_hdr), &_hdr);
+ 		if (hp == NULL)
+-			return -1;
++			return -EBADMSG;
+ 		if (nexthdr == NEXTHDR_FRAGMENT) {
+ 			unsigned short _frag_off, *fp;
+ 			fp = skb_header_pointer(skb,
+@@ -1484,7 +1487,7 @@
+ 						sizeof(_frag_off),
+ 						&_frag_off);
+ 			if (fp == NULL)
+-				return -1;
++				return -EBADMSG;
+ 
+ 			_frag_off = ntohs(*fp) & ~0x7;
+ 			if (_frag_off) {
+@@ -1495,7 +1498,7 @@
+ 						*fragoff = _frag_off;
+ 					return hp->nexthdr;
+ 				}
+-				return -1;
++				return -ENOENT;
+ 			}
+ 			hdrlen = 8;
+ 		} else if (nexthdr == NEXTHDR_AUTH)
+diff -urN linux-source-2.6.18.orig/net/ipv6/netfilter/ip6t_ah.c linux-source-2.6.18/net/ipv6/netfilter/ip6t_ah.c
+--- linux-source-2.6.18.orig/net/ipv6/netfilter/ip6t_ah.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/net/ipv6/netfilter/ip6t_ah.c	2006-12-17 17:04:47.302488250 -0700
+@@ -54,9 +54,14 @@
+ 	const struct ip6t_ah *ahinfo = matchinfo;
+ 	unsigned int ptr;
+ 	unsigned int hdrlen = 0;
++	int err;
+ 
+-	if (ipv6_find_hdr(skb, &ptr, NEXTHDR_AUTH, NULL) < 0)
++	err = ipv6_find_hdr(skb, &ptr, NEXTHDR_AUTH, NULL);
++	if (err < 0) {
++		if (err != -ENOENT)
++			*hotdrop = 1;
+ 		return 0;
++	}
+ 
+ 	ah = skb_header_pointer(skb, ptr, sizeof(_ah), &_ah);
+ 	if (ah == NULL) {
+diff -urN linux-source-2.6.18.orig/net/ipv6/netfilter/ip6t_frag.c linux-source-2.6.18/net/ipv6/netfilter/ip6t_frag.c
+--- linux-source-2.6.18.orig/net/ipv6/netfilter/ip6t_frag.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/net/ipv6/netfilter/ip6t_frag.c	2006-12-17 17:04:47.302488250 -0700
+@@ -52,9 +52,14 @@
+ 	struct frag_hdr _frag, *fh;
+ 	const struct ip6t_frag *fraginfo = matchinfo;
+ 	unsigned int ptr;
++	int err;
+ 
+-	if (ipv6_find_hdr(skb, &ptr, NEXTHDR_FRAGMENT, NULL) < 0)
++	err = ipv6_find_hdr(skb, &ptr, NEXTHDR_FRAGMENT, NULL);
++	if (err < 0) {
++		if (err != -ENOENT)
++			*hotdrop = 1;
+ 		return 0;
++	}
+ 
+ 	fh = skb_header_pointer(skb, ptr, sizeof(_frag), &_frag);
+ 	if (fh == NULL) {
+diff -urN linux-source-2.6.18.orig/net/ipv6/netfilter/ip6t_hbh.c linux-source-2.6.18/net/ipv6/netfilter/ip6t_hbh.c
+--- linux-source-2.6.18.orig/net/ipv6/netfilter/ip6t_hbh.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/net/ipv6/netfilter/ip6t_hbh.c	2006-12-17 17:12:20.758827500 -0700
+@@ -70,13 +70,18 @@
+ 	u8 _opttype, *tp = NULL;
+ 	u8 _optlen, *lp = NULL;
+ 	unsigned int optlen;
++	int err;
+ 
+ #if HOPBYHOP
+-	if (ipv6_find_hdr(skb, &ptr, NEXTHDR_HOP, NULL) < 0)
++	err = ipv6_find_hdr(skb, &ptr, NEXTHDR_HOP, NULL);
+ #else
+-	if (ipv6_find_hdr(skb, &ptr, NEXTHDR_DEST, NULL) < 0)
++	err = ipv6_find_hdr(skb, &ptr, NEXTHDR_DEST, NULL;
+ #endif
++	if (err < 0) {
++		if (err != -ENOENT)
++			*hotdrop = 1;
+ 		return 0;
++	}
+ 
+ 	oh = skb_header_pointer(skb, ptr, sizeof(_optsh), &_optsh);
+ 	if (oh == NULL) {
+diff -urN linux-source-2.6.18.orig/net/ipv6/netfilter/ip6t_rt.c linux-source-2.6.18/net/ipv6/netfilter/ip6t_rt.c
+--- linux-source-2.6.18.orig/net/ipv6/netfilter/ip6t_rt.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/net/ipv6/netfilter/ip6t_rt.c	2006-12-17 17:04:47.302488250 -0700
+@@ -58,9 +58,14 @@
+ 	unsigned int hdrlen = 0;
+ 	unsigned int ret = 0;
+ 	struct in6_addr *ap, _addr;
++	int err;
+ 
+-	if (ipv6_find_hdr(skb, &ptr, NEXTHDR_ROUTING, NULL) < 0)
++	err = ipv6_find_hdr(skb, &ptr, NEXTHDR_ROUTING, NULL);
++	if (err < 0) {
++		if (err != -ENOENT)
++			*hotdrop = 1;
+ 		return 0;
++	}
+ 
+ 	rh = skb_header_pointer(skb, ptr, sizeof(_route), &_route);
+ 	if (rh == NULL) {

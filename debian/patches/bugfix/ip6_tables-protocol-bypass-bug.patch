@@ -1,0 +1,60 @@
+From: Patrick McHardy <kaber@trash.net>
+Date: Tue, 24 Oct 2006 23:14:04 +0000 (-0700)
+Subject: [NETFILTER]: Fix ip6_tables protocol bypass bug
+X-Git-Tag: v2.6.19-rc4
+X-Git-Url: http://www.kernel.org/git/?p=linux/kernel/git/torvalds/linux-2.6.git;a=commitdiff;h=51d8b1a65291a6956b79374b6adbbadc2263bcf6
+
+[NETFILTER]: Fix ip6_tables protocol bypass bug
+
+As reported by Mark Dowd <Mark_Dowd@McAfee.com>, ip6_tables is susceptible
+to a fragmentation attack causing false negatives on protocol matches.
+
+When the protocol header doesn't follow the fragment header immediately,
+the fragment header contains the protocol number of the next extension
+header. When the extension header and the protocol header are sent in
+a second fragment a rule like "ip6tables .. -p udp -j DROP" will never
+match.
+
+Drop fragments that are at offset 0 and don't contain the final protocol
+header regardless of the ruleset, since this should not happen normally.
+
+With help from Yasuyuki KOZAKAI <yasuyuki.kozakai@toshiba.co.jp>.
+
+Signed-off-by: Patrick McHardy <kaber@trash.net>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+
+--- a/net/ipv6/netfilter/ip6_tables.c
++++ b/net/ipv6/netfilter/ip6_tables.c
+@@ -111,7 +111,7 @@ ip6_packet_match(const struct sk_buff *s
+ 		 const char *outdev,
+ 		 const struct ip6t_ip6 *ip6info,
+ 		 unsigned int *protoff,
+-		 int *fragoff)
++		 int *fragoff, int *hotdrop)
+ {
+ 	size_t i;
+ 	unsigned long ret;
+@@ -169,9 +169,11 @@ ip6_packet_match(const struct sk_buff *s
+ 		unsigned short _frag_off;
+ 
+ 		protohdr = ipv6_find_hdr(skb, protoff, -1, &_frag_off);
+-		if (protohdr < 0)
++		if (protohdr < 0) {
++			if (_frag_off == 0)
++				*hotdrop = 1;
+ 			return 0;
+-
++		}
+ 		*fragoff = _frag_off;
+ 
+ 		dprintf("Packet protocol %hi ?= %s%hi.\n",
+@@ -290,7 +292,7 @@ ip6t_do_table(struct sk_buff **pskb,
+ 		IP_NF_ASSERT(e);
+ 		IP_NF_ASSERT(back);
+ 		if (ip6_packet_match(*pskb, indev, outdev, &e->ipv6,
+-			&protoff, &offset)) {
++			&protoff, &offset, &hotdrop)) {
+ 			struct ip6t_entry_target *t;
+ 
+ 			if (IP6T_MATCH_ITERATE(e, do_match,
