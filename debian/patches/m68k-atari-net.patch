@@ -1,0 +1,102 @@
+diff -urNbBw -X diff-2.6.excl linux-2.6.18-debian-atari/drivers/net/atari_ethernec.c linux-2.6.18-m68k/drivers/net/atari_ethernec.c
+--- linux-2.6.18-debian-atari/drivers/net/atari_ethernec.c	2006-12-20 14:25:38.000000000 +0100
++++ linux-2.6.18-m68k/drivers/net/atari_ethernec.c	2006-11-20 13:22:06.000000000 +0100
+@@ -184,13 +184,13 @@
+ #  define DCR_VAL 0x4b
+ #elif defined(CONFIG_PLAT_OAKS32R)  || \
+    defined(CONFIG_TOSHIBA_RBTX4927) || defined(CONFIG_TOSHIBA_RBTX4938) || \
+-   defined(CONFIG_ATARI_ETHERNEC)
++   defined(CONFIG_ATARI_ETHERNEC) || defined(CONFIG_ATARI_ETHERNEC_MODULE)
+ #  define DCR_VAL 0x48		/* 8-bit mode */
+ #else
+ #  define DCR_VAL 0x49
+ #endif
+ 
+-#if defined(CONFIG_ATARI_ETHERNEC)
++#if defined(CONFIG_ATARI_ETHERNEC) || defined(CONFIG_ATARI_ETHERNEC_MODULE)
+ #  define ETHERNEC_RTL_8019_BASE 0x300
+ #  define ETHERNEC_RTL_8019_IRQ IRQ_MFP_TIMD
+ #endif
+@@ -389,7 +389,7 @@
+ 	sprintf(dev->name, "eth%d", unit);
+ 	netdev_boot_setup_check(dev);
+ 
+-#ifdef CONFIG_ATARI_ETHERNEC
++#if defined(CONFIG_ATARI_ETHERNEC)
+ 	dev->base_addr = ETHERNEC_RTL_8019_BASE;
+ 	dev->irq = ETHERNEC_RTL_8019_IRQ;
+ #endif
+diff -urNbBw -X diff-2.6.excl linux-2.6.18-debian-atari/drivers/net/mac89x0.c linux-2.6.18-m68k/drivers/net/mac89x0.c
+--- linux-2.6.18-debian-atari/drivers/net/mac89x0.c	2006-12-20 14:25:37.000000000 +0100
++++ linux-2.6.18-m68k/drivers/net/mac89x0.c	2006-11-22 10:56:38.000000000 +0100
+@@ -387,6 +387,7 @@
+ 	   ask the chip to start transmitting before the
+ 	   whole packet has been completely uploaded. */
+ 	local_irq_save(flags);
++	netif_stop_queue(dev);
+ 
+ 	/* initiate a transmit sequence */
+ 	writereg(dev, PP_TxCMD, lp->send_cmd);
+diff -urNbBw -X diff-2.6.excl linux-2.6.18-debian-atari/drivers/net/macmace.c linux-2.6.18-m68k/drivers/net/macmace.c
+--- linux-2.6.18-debian-atari/drivers/net/macmace.c	2006-09-20 05:42:06.000000000 +0200
++++ linux-2.6.18-m68k/drivers/net/macmace.c	2006-12-04 17:07:20.000000000 +0100
+@@ -592,10 +592,57 @@
+ 	return IRQ_HANDLED;
+ }
+ 
++/*
++ * A transmit timeout happened. We reset everything and restart the queue.
++ */
++
+ static void mace_tx_timeout(struct net_device *dev)
+ {
+-/*	struct mace_data *mp = (struct mace_data *) dev->priv; */
+-//	volatile struct mace *mb = mp->mace;
++	struct mace_data *mp = (struct mace_data *) dev->priv;
++	volatile struct mace *mb = mp->mace;
++	unsigned long flags;
++	u8 maccc, imr;
++
++	local_irq_save(flags);
++
++	// save state
++	maccc = mb->maccc;
++	imr   = mb->imr;
++
++	// stop card
++	mb->maccc = 0;		/* disable rx and tx	 */
++	mb->imr = 0xFF;		/* disable all irqs	 */
++	mace_dma_off(dev);
++
++	// reset card
++	mb->biucc = XMTSP_64;
++	mb->fifocc = XMTFW_16 | RCVFW_64 | XMTFWU | RCVFWU | XMTBRST | RCVBRST;
++	mb->xmtfc = AUTO_PAD_XMIT;
++	mb->plscc = PORTSEL_AUI;
++
++	/* Not sure what these do - perhaps reset the PSC ??? */
++
++	psc_write_word(PSC_ENETWR_CTL, 0x9000);
++	psc_write_word(PSC_ENETRD_CTL, 0x9000);
++	psc_write_word(PSC_ENETWR_CTL, 0x0400);
++	psc_write_word(PSC_ENETRD_CTL, 0x0400);
++
++	// reset both DMAs
++	mace_rxdma_reset(dev);
++	mace_txdma_reset(dev);
++	
++	// free skb's - not necessary, already done in mace_xmit_start
++	// ring buffer pointers reset in txdma_reset, so just log error
++	mp->stats.tx_errors++;
++
++	// re-kick upper level
++	netif_wake_queue(dev);
++
++	// re-enable card, using saved imr/maccc (where is this ever set?)
++	mb->maccc = maccc;
++	mb->imr   = imr;
++
++	local_irq_restore(flags);
+ }
+ 
+ /*
