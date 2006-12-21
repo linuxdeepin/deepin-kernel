@@ -1,0 +1,75 @@
+From: Linus Torvalds <torvalds@woody.osdl.org>
+Date: Sun, 17 Dec 2006 00:01:50 +0000 (-0800)
+Subject: Fix up mm/mincore.c error value cases
+X-Git-Url: http://www.kernel.org/git/?p=linux/kernel/git/torvalds/linux-2.6.git;a=commitdiff;h=4fb23e439ce09157d64b89a21061b9fc08f2b495
+
+Fix up mm/mincore.c error value cases
+
+Hugh Dickins correctly points out that mincore() is actually _supposed_
+to fail on an unmapped hole in the user address space, rather than
+return valid ("empty") information about the hole.  This just simplifies
+the problem further (I had been misled by our previous confusing and
+complicated way of doing mincore()).
+
+Also, in the unlikely situation that we can't allocate a temporary
+kernel buffer, we should actually return EAGAIN, not ENOMEM, to keep the
+"unmapped hole" and "allocation failure" error cases separate.
+
+Finally, add a comment about our stupid historical lack of support for
+anonymous mappings.  I'll fix that if somebody reminds me after 2.6.20
+is out.
+
+Acked-by: Hugh Dickins <hugh@veritas.com>
+Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+---
+
+--- a/mm/mincore.c
++++ b/mm/mincore.c
+@@ -49,29 +49,20 @@ static long do_mincore(unsigned long add
+ 	struct vm_area_struct *vma = find_vma(current->mm, addr);
+ 
+ 	/*
+-	 * find_vma() didn't find anything: the address
+-	 * is above everything we have mapped.
++	 * find_vma() didn't find anything above us, or we're
++	 * in an unmapped hole in the address space: ENOMEM.
+ 	 */
+-	if (!vma) {
+-		memset(vec, 0, pages);
+-		return pages;
+-	}
+-
+-	/*
+-	 * find_vma() found something, but we might be
+-	 * below it: check for that.
+-	 */
+-	if (addr < vma->vm_start) {
+-		unsigned long gap = (vma->vm_start - addr) >> PAGE_SHIFT;
+-		if (gap > pages)
+-			gap = pages;
+-		memset(vec, 0, gap);
+-		return gap;
+-	}
++	if (!vma || addr < vma->vm_start)
++		return -ENOMEM;
+ 
+ 	/*
+ 	 * Ok, got it. But check whether it's a segment we support
+ 	 * mincore() on. Right now, we don't do any anonymous mappings.
++	 *
++	 * FIXME: This is just stupid. And returning ENOMEM is 
++	 * stupid too. We should just look at the page tables. But
++	 * this is what we've traditionally done, so we'll just
++	 * continue doing it.
+ 	 */
+ 	if (!vma->vm_file)
+ 		return -ENOMEM;
+@@ -142,7 +133,7 @@ asmlinkage long sys_mincore(unsigned lon
+ 
+ 	tmp = (void *) __get_free_page(GFP_USER);
+ 	if (!tmp)
+-		return -ENOMEM;
++		return -EAGAIN;
+ 
+ 	retval = 0;
+ 	while (pages) {
