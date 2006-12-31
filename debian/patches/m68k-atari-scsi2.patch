@@ -1,0 +1,349 @@
+I've looked at the SCSI situation in more detail, and updated the Atari
+SCSI code to cope with the changes in 2.6 (scsi_error expect different
+return codes; queuecmnd called from softirq and cannot sleep). I get no
+more lockups, but writing to a ZIP drive corrupts data on the drive. May
+just be a broken ZIP drive, who knows. I need to try with a real SCSI
+disk...
+
+Christian, please apply this on top of my other 2.6.18 patch.
+
+
+diff -u source-m68k-none/drivers/scsi/atari_scsi.c source-m68k-msch/drivers/scsi/atari_scsi.c
+--- source-m68k-none/drivers/scsi/atari_scsi.c	2006-12-31 14:06:09.000000000 +0100
++++ source-m68k-msch/drivers/scsi/atari_scsi.c	2006-12-31 16:29:46.000000000 +0100
+@@ -67,12 +67,40 @@
+ 
+ #include <linux/module.h>
+ 
+-#define NDEBUG (0)
++#define NDEBUG_ARBITRATION     0x1
++#define NDEBUG_AUTOSENSE       0x2
++#define NDEBUG_DMA             0x4
++#define NDEBUG_HANDSHAKE       0x8
++#define NDEBUG_INFORMATION     0x10
++#define NDEBUG_INIT            0x20
++#define NDEBUG_INTR            0x40
++#define NDEBUG_LINKED          0x80
++#define NDEBUG_MAIN            0x100
++#define NDEBUG_NO_DATAOUT      0x200
++#define NDEBUG_NO_WRITE                0x400
++#define NDEBUG_PIO             0x800
++#define NDEBUG_PSEUDO_DMA      0x1000
++#define NDEBUG_QUEUES          0x2000
++#define NDEBUG_RESELECTION     0x4000
++#define NDEBUG_SELECTION       0x8000
++#define NDEBUG_USLEEP          0x10000
++#define NDEBUG_LAST_BYTE_SENT  0x20000
++#define NDEBUG_RESTART_SELECT  0x40000
++#define NDEBUG_EXTENDED                0x80000
++#define NDEBUG_C400_PREAD      0x100000
++#define NDEBUG_C400_PWRITE     0x200000
++#define NDEBUG_LISTS           0x400000
+ 
+ #define NDEBUG_ABORT	0x800000
+ #define NDEBUG_TAGS	0x1000000
+ #define NDEBUG_MERGING	0x2000000
+ 
++#define NDEBUG_ANY             0xFFFFFFFFUL
++
++#define NDEBUG (0)
++//#define NDEBUG (NDEBUG_MAIN)
++
++
+ #define AUTOSENSE
+ /* For the Atari version, use only polled IO or REAL_DMA */
+ #define	REAL_DMA
+@@ -506,6 +534,15 @@
+  * again (but others waiting longer more probably will win).
+  */
+ 
++/* MSch 20061228: in 2.6, the fairness wait appears to open a race with
++* the IDE driver's use of the lock, resulting in scheduling_in_interrupt
++* level BUG() messages.
++* The low level queuecmd function now appears to be called from soft
++* interrupt context (block queue task??) and cannot sleep on the lock
++* anymore once IDE has stolen the lock.
++* Can we return 'please retry later' to the block queue task or mid level??
++* MSch 20061229: the race persists regardless ... leave it off for now.
++*/
+ static void
+ falcon_release_lock_if_possible( struct NCR5380_hostdata * hostdata )
+ {
+@@ -529,7 +566,9 @@
+ 		}
+ 		falcon_got_lock = 0;
+ 		stdma_release();
++#if defined(FALCON_FAIRNESS_WAIT)
+ 		wake_up( &falcon_fairness_wait );
++#endif
+ 	}
+ 
+ 	local_irq_restore(flags);
+@@ -550,20 +589,38 @@
+  * Complicated, complicated.... Sigh...
+  */
+ 
+-static void falcon_get_lock( void )
++/* MSch 20061229: atari_queue_command gets called from softirq context quite
++ * heavily in the 2.6 kernel series. Since atari_queue_command might need to
++ * sleep in order to grab the ST-DMA lock, I have modified falcon_get_lock to
++ * immediately return with error status if called in softirq context with the
++ * lock not currently held by the SCSI driver, and the ST-DMA locked by some
++ * other driver. atari_queue_command then returns SCSI_MLQUEUE_HOST_BUSY and
++ * prevents further commands from issueing.
++ */
++
++static int falcon_get_lock( void )
+ {
+ 	unsigned long flags;
+ 
+-	if (IS_A_TT()) return;
++	if (IS_A_TT()) return 0;
+ 
+ 	local_irq_save(flags);
+ 
++#if defined (FALCON_FAIRNESS_WAIT)
+ 	while( !in_interrupt() && falcon_got_lock && stdma_others_waiting() )
+ 		sleep_on( &falcon_fairness_wait );
++#endif
+ 
+ 	while (!falcon_got_lock) {
+-		if (in_interrupt())
++		if (in_irq())
+ 			panic( "Falcon SCSI hasn't ST-DMA lock in interrupt" );
++               /* we may not sleep in soft interrupts neither, so bail out */
++               if (in_softirq() && stdma_islocked()) {
++                       printk(KERN_INFO "Falcon SCSI does not hold ST-DMA lock in softirq!\n" );
++                       local_irq_restore(flags);
++                       return 1;
++               }
++
+ 		if (!falcon_trying_lock) {
+ 			falcon_trying_lock = 1;
+ 			stdma_lock(scsi_falcon_intr, NULL);
+@@ -579,6 +636,8 @@
+ 	local_irq_restore(flags);
+ 	if (!falcon_got_lock)
+ 		panic("Falcon SCSI: someone stole the lock :-(\n");
++
++	return 0;
+ }
+ 
+ 
+@@ -826,6 +885,8 @@
+ 	struct NCR5380_hostdata *hostdata =
+ 		(struct NCR5380_hostdata *)cmd->device->host->hostdata;
+ 
++	printk( "scsi%d: resetting the SCSI bus!\n", (cmd)->device->host->host_no);
++	
+ 	/* For doing the reset, SCSI interrupts must be disabled first,
+ 	 * since the 5380 raises its IRQ line while _RST is active and we
+ 	 * can't disable interrupts completely, since we need the timer.
+@@ -855,8 +916,10 @@
+ 	else {
+ 		atari_turnon_irq( IRQ_MFP_FSCSI );
+ 	}
+-	if ((rv & SCSI_RESET_ACTION) == SCSI_RESET_SUCCESS)
++	if (rv == SUCCESS) {
+ 		falcon_release_lock_if_possible(hostdata);
++	}
++	printk( "scsi%d: bus reset done!\n", (cmd)->device->host->host_no);
+ 
+ 	return( rv );
+ }
+
+diff -u source-m68k-none/drivers/scsi/atari_NCR5380.c source-m68k-msch/drivers/scsi/atari_NCR5380.c
+--- source-m68k-none/drivers/scsi/atari_NCR5380.c	2006-12-31 14:06:09.000000000 +0100
++++ source-m68k-msch/drivers/scsi/atari_NCR5380.c	2006-12-31 16:39:34.000000000 +0100
+@@ -474,7 +474,8 @@
+ 	 virt_to_phys(page_address(cmd->SCp.buffer[1].page)+
+ 		      cmd->SCp.buffer[1].offset) == endaddr; ) {
+ 	MER_PRINTK("VTOP(%p) == %08lx -> merging\n",
+-		   cmd->SCp.buffer[1].address, endaddr);
++		   page_address(cmd->SCp.buffer[1].page)+cmd->SCp.buffer[1].offset,
++		   endaddr);
+ #if (NDEBUG & NDEBUG_MERGING)
+ 	++cnt;
+ #endif
+@@ -947,17 +948,6 @@
+ #endif
+ 
+     /* 
+-     * We use the host_scribble field as a pointer to the next command  
+-     * in a queue 
+-     */
+-
+-    NEXT(cmd) = NULL;
+-    cmd->scsi_done = done;
+-
+-    cmd->result = 0;
+-
+-
+-    /* 
+      * Insert the cmd into the issue queue. Note that REQUEST SENSE 
+      * commands are added to the head of the queue since any command will
+      * clear the contingent allegiance condition that exists and the 
+@@ -978,10 +968,32 @@
+      * alter queues and touch the lock.
+      */
+     if (!IS_A_TT()) {
++      int rv;
++      /* MSch: since we get called from softirq context here, and cannot
++       * sleep safely, the return status of falcon_get_lock is now used to
++       * figure out if we could successfully lock, or need to bail out.
++       * Signal the midlevel we're unable to queue the command in this case.
++       */
++
+ 	oldto = update_timeout(cmd, 0);
+-	falcon_get_lock();
+-	update_timeout(cmd, oldto);
++	rv = falcon_get_lock();
++	atari_scsi_update_timeout(cmd, oldto);
++	if (rv) {
++	  local_irq_restore(flags);
++	  return SCSI_MLQUEUE_HOST_BUSY;
++	}
+     }
++
++    /*
++     * We use the host_scribble field as a pointer to the next command
++     * in a queue
++     */
++
++    NEXT(cmd) = NULL;
++    cmd->scsi_done = done;
++
++    cmd->result = 0;
++
+     if (!(hostdata->issue_queue) || (cmd->cmnd[0] == REQUEST_SENSE)) {
+ 	LIST(cmd, hostdata->issue_queue);
+ 	NEXT(cmd) = hostdata->issue_queue;
+@@ -1005,10 +1017,13 @@
+      * If we're not in an interrupt, we can call NCR5380_main()
+      * unconditionally, because it cannot be already running.
+      */
+-    if (in_interrupt() || ((flags >> 8) & 7) >= 6)
++
++    /* MSch: in 2.6.19, we need to unconditionally use the task queue
++     * instead of directly starting main. Yet another side effect of
++     * the softirq business, I bet. */
++
+ 	queue_main();
+-    else
+-	NCR5380_main(NULL);
++
+     return 0;
+ }
+ 
+@@ -2630,7 +2645,7 @@
+  * 	host byte of the result field to, if zero DID_ABORTED is 
+  *	used.
+  *
+- * Returns : 0 - success, -1 on failure.
++ * Returns : SUCCESS - success, FAILED on failure.
+  *
+  * XXX - there is no way to abort the command that is currently 
+  * 	 connected, you have to wait for it to complete.  If this is 
+@@ -2700,11 +2715,12 @@
+ 	  local_irq_restore(flags);
+ 	  cmd->scsi_done(cmd);
+ 	  falcon_release_lock_if_possible( hostdata );
+-	  return SCSI_ABORT_SUCCESS;
++	  return SUCCESS;
+ 	} else {
++	  /* Why is this not restoring IRQs?? */
+ /*	  local_irq_restore(flags); */
+ 	  printk("scsi%d: abort of connected command failed!\n", HOSTNO);
+-	  return SCSI_ABORT_ERROR;
++	  return FAILED;
+ 	} 
+    }
+ #endif
+@@ -2728,7 +2744,7 @@
+ 	     * yet... */
+ 	    tmp->scsi_done(tmp);
+ 	    falcon_release_lock_if_possible( hostdata );
+-	    return SCSI_ABORT_SUCCESS;
++	    return SUCCESS;
+ 	}
+ 
+ /* 
+@@ -2745,7 +2761,7 @@
+     if (hostdata->connected) {
+ 	local_irq_restore(flags);
+ 	ABRT_PRINTK("scsi%d: abort failed, command connected.\n", HOSTNO);
+-        return SCSI_ABORT_SNOOZE;
++        return FAILED;
+     }
+ 
+ /*
+@@ -2807,7 +2823,7 @@
+ 		    local_irq_restore(flags);
+ 		    tmp->scsi_done(tmp);
+ 		    falcon_release_lock_if_possible( hostdata );
+-		    return SCSI_ABORT_SUCCESS;
++		    return SUCCESS;
+ 		}
+ 	}
+ 
+@@ -2831,7 +2847,7 @@
+  */
+     falcon_release_lock_if_possible( hostdata );
+ 
+-    return SCSI_ABORT_NOT_RUNNING;
++    return SUCCESS;
+ }
+ 
+ 
+@@ -2840,7 +2856,7 @@
+  * 
+  * Purpose : reset the SCSI bus.
+  *
+- * Returns : SCSI_RESET_WAKEUP
++ * Returns : SUCCESS
+  *
+  */ 
+ 
+@@ -2905,15 +2921,15 @@
+      */
+ 
+     if ((cmd = connected)) {
+-	ABRT_PRINTK("scsi%d: reset aborted a connected command\n", H_NO(cmd));
+-	cmd->result = (cmd->result & 0xffff) | (DID_RESET << 16);
+-	cmd->scsi_done( cmd );
++        ABRT_PRINTK("scsi%d: reset aborted a connected command, calling scsi_done() ...\n", H_NO(cmd));
++        cmd->result = (DID_RESET << 16);
++        cmd->scsi_done( cmd );
+     }
+ 
+     for (i = 0; (cmd = disconnected_queue); ++i) {
+ 	disconnected_queue = NEXT(cmd);
+ 	NEXT(cmd) = NULL;
+-	cmd->result = (cmd->result & 0xffff) | (DID_RESET << 16);
++	cmd->result = (DID_RESET << 16);
+ 	cmd->scsi_done( cmd );
+     }
+     if (i > 0)
+@@ -2930,7 +2946,7 @@
+      * the midlevel code that the reset was SUCCESSFUL, and there is no 
+      * need to 'wake up' the commands by a request_sense
+      */
+-    return SCSI_RESET_SUCCESS | SCSI_RESET_BUS_RESET;
++    return SUCCESS;
+ #else /* 1 */
+ 
+     /* MSch: new-style reset handling: let the mid-level do what it can */
+@@ -2978,7 +2994,9 @@
+     local_irq_restore(flags);
+ 
+     /* we did no complete reset of all commands, so a wakeup is required */
+-    return SCSI_RESET_WAKEUP | SCSI_RESET_BUS_RESET;
++    /* The new error handler code implicitly does this for us anyway */
++    return SUCCESS;
++
+ #endif /* 1 */
+ }
+ 
+Signed-Off-By: schmitz@debian.org
+
+        Michael

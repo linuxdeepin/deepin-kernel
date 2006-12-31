@@ -1,0 +1,87 @@
+
+Fix the flakiness in the CUDA ADB driver (keypresses getting wedged down 
+or ADB just going AWOL altogether). Stops lost VIA1 interrupts.
+
+Tested on Quadra 840av & 660av, LC630 and LC475. (This does not address 
+the problems with the other m68k Mac ADB drivers.)
+
+Signed-off-by: Finn Thain <fthain@telegraphics.com.au>
+ 
+ arch/m68k/mac/via.c          |    2 +-
+ drivers/macintosh/via-cuda.c |   26 +++++++++++++++++++++-----
+ 2 files changed, 22 insertions(+), 6 deletions(-)
+
+Index: linux-2.6.18/drivers/macintosh/via-cuda.c
+===================================================================
+--- linux-2.6.18.orig/drivers/macintosh/via-cuda.c	2006-12-26 13:48:02.000000000 +1100
++++ linux-2.6.18/drivers/macintosh/via-cuda.c	2006-12-26 14:11:43.000000000 +1100
+@@ -429,16 +429,19 @@ cuda_start(void)
+ void
+ cuda_poll(void)
+ {
+-    unsigned long flags;
+-
+     /* cuda_interrupt only takes a normal lock, we disable
+      * interrupts here to avoid re-entering and thus deadlocking.
+-     * An option would be to disable only the IRQ source with
+-     * disable_irq(), would that work on m68k ? --BenH
+      */
++#ifdef CONFIG_MAC
++    disable_irq(IRQ_MAC_ADB);
++    cuda_interrupt(0, NULL, NULL);
++    enable_irq(IRQ_MAC_ADB);
++#else
++    unsigned long flags;
+     local_irq_save(flags);
+     cuda_interrupt(0, NULL, NULL);
+     local_irq_restore(flags);
++#endif
+ }
+ 
+ static irqreturn_t
+@@ -453,13 +456,26 @@ cuda_interrupt(int irq, void *arg, struc
+     
+     spin_lock(&cuda_lock);
+ 
++#ifdef CONFIG_MAC
++    /* only do this when polling */
++    if (!arg) {
++        virq = in_8(&via[IFR]) & 0x7f;
++        if ((virq & SR_INT) == 0) {
++            spin_unlock(&cuda_lock);
++            return IRQ_NONE;
++        }
++        out_8(&via[IFR], SR_INT);
++    }
++#else
++    /* it would appear that powermacs don't use the other VIA interrupts */
+     virq = in_8(&via[IFR]) & 0x7f;
+     out_8(&via[IFR], virq);   
+     if ((virq & SR_INT) == 0) {
+         spin_unlock(&cuda_lock);
+ 	return IRQ_NONE;
+     }
+-    
++#endif
++
+     status = (~in_8(&via[B]) & (TIP|TREQ)) | (in_8(&via[ACR]) & SR_OUT);
+     /* printk("cuda_interrupt: state=%d status=%x\n", cuda_state, status); */
+     switch (cuda_state) {
+Index: linux-2.6.18/arch/m68k/mac/via.c
+===================================================================
+--- linux-2.6.18.orig/arch/m68k/mac/via.c	2006-12-26 13:48:02.000000000 +1100
++++ linux-2.6.18/arch/m68k/mac/via.c	2006-12-26 14:11:43.000000000 +1100
+@@ -431,8 +431,8 @@ irqreturn_t via1_irq(int irq, void *dev_
+ 	for (i = 0, irq_bit = 1 ; i < 7 ; i++, irq_bit <<= 1)
+ 		if (events & irq_bit) {
+ 			via1[vIER] = irq_bit;
+-			m68k_handle_int(VIA1_SOURCE_BASE + i, regs);
+ 			via1[vIFR] = irq_bit;
++			m68k_handle_int(VIA1_SOURCE_BASE + i, regs);
+ 			via1[vIER] = irq_bit | 0x80;
+ 		}
+ 
+-
+To unsubscribe from this list: send the line "unsubscribe linux-m68k" in
+the body of a message to majordomo@vger.kernel.org
+More majordomo info at  http://vger.kernel.org/majordomo-info.html

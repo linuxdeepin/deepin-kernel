@@ -1,0 +1,649 @@
+Fix a race condition in the transmit code, where the dma interrupt could
+update the free tx buffer count concurrently and wedge the tx queue.
+
+Fix the misuse of the rx frame status and rx frame length registers: no
+more "fifo overrun" errors caused by the OFLOW bit being tested in the
+frame length register, and no more missed packets due to incorrect length
+taken from status register.
+
+Fix a panic (skb_over_panic BUG) caused by allocating and then copying an
+incoming packet while the packet length register was changing.
+
+Cut-and-paste reset code from the powermac mace driver (mace.c), so the
+NIC functions when MacOS does not initialise it (important for anyone
+wanting to use the Emile boot loader).
+
+Cut-and-paste error counting and timeout recovery code from the powermac
+mace driver (mace.c).
+
+Fix a race condition in the PSC interrupt dispatch code where the
+interrupt flag was cleared after the handler ran (same bug that was fixed
+recently in the VIA2 interrupt dispatcher).
+
+Since I've run out of ways to make it fail, and since it performs well
+now, promote the driver from EXPERIMENTAL status. Tested on both quadra
+840av and 660av.
+
+Signed-off-by: Finn Thain <fthain@telegraphics.com.au>
+
+--- source-m68k-none/arch/m68k/mac/psc.c	2006-09-20 05:42:06.000000000 +0200
++++ source-m68k-finn/arch/m68k/mac/psc.c	2006-12-31 16:48:50.000000000 +0100
+@@ -149,8 +149,8 @@
+ 	for (i = 0, irq_bit = 1 ; i < 4 ; i++, irq_bit <<= 1) {
+ 	        if (events & irq_bit) {
+ 			psc_write_byte(pIER, irq_bit);
+-			m68k_handle_int(base_irq + i, regs);
+ 			psc_write_byte(pIFR, irq_bit);
++			m68k_handle_int(base_irq + i, regs);
+ 			psc_write_byte(pIER, irq_bit | 0x80);
+ 		}
+ 	}
+--- source-m68k-none/drivers/net/Kconfig	2006-12-31 16:45:54.000000000 +0100
++++ source-m68k-finn/drivers/net/Kconfig	2006-12-31 16:49:28.000000000 +0100
+@@ -335,8 +335,8 @@
+ 	  be called macsonic.
+ 
+ config MACMACE
+-	bool "Macintosh (AV) onboard MACE ethernet (EXPERIMENTAL)"
+-	depends on NET_ETHERNET && MAC && EXPERIMENTAL
++	bool "Macintosh (AV) onboard MACE ethernet"
++       	depends on NET_ETHERNET && MAC
+ 	select CRC32
+ 	help
+ 	  Support for the onboard AMD 79C940 MACE Ethernet controller used in
+--- source-m68k-none/drivers/net/macmace.c	2006-12-31 16:45:54.000000000 +0100
++++ source-m68k-finn/drivers/net/macmace.c	2006-12-31 17:12:38.000000000 +0100
+@@ -36,6 +36,9 @@
+ #define N_RX_PAGES	((N_RX_RING * 0x0800 + PAGE_SIZE - 1) / PAGE_SIZE)
+ #define TX_TIMEOUT	HZ
+ 
++/* Chip rev needs workaround on HW & multicast addr change */
++#define BROKEN_ADDRCHG_REV     0x0941
++
+ /* Bits in transmit DMA status */
+ #define TX_DMA_ERR	0x80
+ 
+@@ -54,15 +57,20 @@
+ 	struct net_device_stats stats;
+ 	int rx_slot, rx_tail;
+ 	int tx_slot, tx_sloti, tx_count;
++        int chipid;
+ };
+ 
+ struct mace_frame {
+-	u16	len;
+-	u16	status;
+-	u16	rntpc;
+-	u16	rcvcc;
+-	u32	pad1;
+-	u32	pad2;
++        u8      rcvcnt;
++        u8      pad1;
++        u8      rcvsts;
++        u8      pad2;
++        u8      rntpc;
++        u8      pad3;
++        u8      rcvcc;
++        u8      pad4;
++        u32     pad5;
++        u32     pad6;
+ 	u8	data[1];	
+ 	/* And frame continues.. */
+ };
+@@ -77,9 +85,11 @@
+ static struct net_device_stats *mace_stats(struct net_device *dev);
+ static void mace_set_multicast(struct net_device *dev);
+ static int mace_set_address(struct net_device *dev, void *addr);
++static void mace_reset(struct net_device *dev);
+ static irqreturn_t mace_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+ static irqreturn_t mace_dma_intr(int irq, void *dev_id, struct pt_regs *regs);
+ static void mace_tx_timeout(struct net_device *dev);
++static void __mace_set_address(struct net_device *dev, void *addr);
+ 
+ /* Bit-reverse one byte of an ethernet hardware address. */
+ 
+@@ -209,6 +219,8 @@
+ 	dev->irq = IRQ_MAC_MACE;
+ 	mp->dma_intr = IRQ_MAC_MACE_DMA;
+ 
++	mp->chipid = mp->mace->chipid_hi << 8 | mp->mace->chipid_lo;
++	
+ 	/*
+ 	 * The PROM contains 8 bytes which total 0xFF when XOR'd
+ 	 * together. Due to the usual peculiar apple brain damage
+@@ -256,15 +268,92 @@
+ }
+ 
+ /*
++ * Reset the chip.
++ */
++
++static void mace_reset(struct net_device *dev)
++{
++  struct mace_data *mp = (struct mace_data *) dev->priv;
++  volatile struct mace *mb = mp->mace;
++  int i;
++  
++  /* soft-reset the chip */
++  i = 200;
++       while (--i) {
++	 mb->biucc = SWRST;
++	 if (mb->biucc & SWRST) {
++	   udelay(10);
++	   continue;
++	 }
++	 break;
++       }
++       if (!i) {
++	 printk(KERN_ERR "macmace: cannot reset chip!\n");
++	 return;
++       }
++       
++       mb->maccc = 0;  /* turn off tx, rx */
++       mb->imr = 0xFF; /* disable all intrs for now */
++       i = mb->ir;
++       
++       mb->biucc = XMTSP_64;
++       mb->utr = RTRD;
++       mb->fifocc = XMTFW_16 | RCVFW_64 | XMTFWU | RCVFWU | XMTBRST | RCVBRST;
++       mb->xmtfc = AUTO_PAD_XMIT; /* auto-pad short frames */
++       mb->rcvfc = 0;
++       
++       /* load up the hardware address */
++       __mace_set_address(dev, dev->dev_addr);
++       
++       /* clear the multicast filter */
++       if (mp->chipid == BROKEN_ADDRCHG_REV)
++	 mb->iac = LOGADDR;
++       else {
++	 mb->iac = ADDRCHG | LOGADDR;
++	 while ((mb->iac & ADDRCHG) != 0)
++                       ;
++       }
++       for (i = 0; i < 8; ++i)
++	 mb->ladrf = 0;
++       
++       /* done changing address */
++       if (mp->chipid != BROKEN_ADDRCHG_REV)
++	 mb->iac = 0;
++       
++       mb->plscc = PORTSEL_AUI;
++}
++
++
++/*
+  * Load the address on a mace controller.
+  */
+ 
+-static int mace_set_address(struct net_device *dev, void *addr)
++static void __mace_set_address(struct net_device *dev, void *addr)
+ {
+-	unsigned char *p = addr;
+ 	struct mace_data *mp = (struct mace_data *) dev->priv;
+ 	volatile struct mace *mb = mp->mace;
++	unsigned char *p = addr;
+ 	int i;
++
++	/* load up the hardware address */
++	if (mp->chipid == BROKEN_ADDRCHG_REV)
++	  mb->iac = PHYADDR;
++        else {
++	  mb->iac = ADDRCHG | PHYADDR;
++	  while ((mb->iac & ADDRCHG) != 0)
++	    ;
++        }
++        for (i = 0; i < 6; ++i)
++	  mb->padr = dev->dev_addr[i] = p[i];
++        if (mp->chipid != BROKEN_ADDRCHG_REV)
++	  mb->iac = 0;
++}
++
++static int mace_set_address(struct net_device *dev, void *addr)
++{
++        struct mace_data *mp = (struct mace_data *) dev->priv;
++        volatile struct mace *mb = mp->mace;
++
+ 	unsigned long flags;
+ 	u8 maccc;
+ 
+@@ -272,15 +361,10 @@
+ 
+ 	maccc = mb->maccc;
+ 
+-	/* load up the hardware address */
+-	mb->iac = ADDRCHG | PHYADDR;
+-	while ((mb->iac & ADDRCHG) != 0);
+-	
+-	for (i = 0; i < 6; ++i) {
+-		mb->padr = dev->dev_addr[i] = p[i];
+-	}
++	__mace_set_address(dev, addr);
+ 
+ 	mb->maccc = maccc;
++
+ 	local_irq_restore(flags);
+ 
+ 	return 0;
+@@ -295,29 +379,9 @@
+ {
+ 	struct mace_data *mp = (struct mace_data *) dev->priv;
+ 	volatile struct mace *mb = mp->mace;
+-#if 0
+-	int i;
+ 
+-	i = 200;
+-	while (--i) {
+-		mb->biucc = SWRST;
+-		if (mb->biucc & SWRST) {
+-			udelay(10);
+-			continue;
+-		}
+-		break;
+-	}
+-	if (!i) {
+-		printk(KERN_ERR "%s: software reset failed!!\n", dev->name);
+-		return -EAGAIN;
+-	}
+-#endif
+-
+-	mb->biucc = XMTSP_64;
+-	mb->fifocc = XMTFW_16 | RCVFW_64 | XMTFWU | RCVFWU | XMTBRST | RCVBRST;
+-	mb->xmtfc = AUTO_PAD_XMIT;
+-	mb->plscc = PORTSEL_AUI;
+-	/* mb->utr = RTRD; */
++	/* reset the chip */
++	mace_reset(dev);
+ 
+ 	if (request_irq(dev->irq, mace_interrupt, 0, dev->name, dev)) {
+ 		printk(KERN_ERR "%s: can't get irq %d\n", dev->name, dev->irq);
+@@ -360,33 +424,14 @@
+ 	psc_write_word(PSC_ENETWR_CTL, 0x0400);
+ 	psc_write_word(PSC_ENETRD_CTL, 0x0400);
+ 
+-#if 0
+-	/* load up the hardware address */
+-	
+-	mb->iac = ADDRCHG | PHYADDR;
+-	
+-	while ((mb->iac & ADDRCHG) != 0);
+-	
+-	for (i = 0; i < 6; ++i)
+-		mb->padr = dev->dev_addr[i];
+-
+-	/* clear the multicast filter */
+-	mb->iac = ADDRCHG | LOGADDR;
+-
+-	while ((mb->iac & ADDRCHG) != 0);
+-	
+-	for (i = 0; i < 8; ++i)
+-		mb->ladrf = 0;
+-
+-	mb->plscc = PORTSEL_GPSI + ENPLSIO;
++	mace_rxdma_reset(dev);
++	mace_txdma_reset(dev);
+ 
++	/* turn it on! */
+ 	mb->maccc = ENXMT | ENRCV;
++	/* enable all interrupts except receive interrupts */
+ 	mb->imr = RCVINT;
+-#endif
+ 
+-	mace_rxdma_reset(dev);
+-	mace_txdma_reset(dev);
+-	
+ 	return 0;
+ }
+ 
+@@ -419,15 +464,20 @@
+ static int mace_xmit_start(struct sk_buff *skb, struct net_device *dev)
+ {
+ 	struct mace_data *mp = (struct mace_data *) dev->priv;
++	unsigned long flags;
+ 
+ 	/* Stop the queue if the buffer is full */
+ 
++	local_irq_save(flags);
+ 	if (!mp->tx_count) {
+ 		netif_stop_queue(dev);
+-		return 1;
++		local_irq_restore(flags);
++		return NETDEV_TX_BUSY;
++
+ 	}
+ 	mp->tx_count--;
+-	
++	local_irq_restore(flags);
++
+ 	mp->stats.tx_packets++;
+ 	mp->stats.tx_bytes += skb->len;
+ 
+@@ -461,7 +511,9 @@
+ 	int i, j;
+ 	u32 crc;
+ 	u8 maccc;
++	unsigned long flags;
+ 
++	local_irq_save(flags);
+ 	maccc = mb->maccc;
+ 	mb->maccc &= ~PROM;
+ 
+@@ -486,109 +538,96 @@
+ 			}
+ 		}
+ 
+-		mb->iac = ADDRCHG | LOGADDR;
+-		while (mb->iac & ADDRCHG);
+-		
+-		for (i = 0; i < 8; ++i) {
+-			mb->ladrf = multicast_filter[i];
++		if (mp->chipid == BROKEN_ADDRCHG_REV)
++                        mb->iac = LOGADDR;
++                else {
++                        mb->iac = ADDRCHG | LOGADDR;
++                        while ((mb->iac & ADDRCHG) != 0)
++                                ;
++                }
++                for (i = 0; i < 8; ++i)
++                        mb->ladrf = multicast_filter[i];
++                if (mp->chipid != BROKEN_ADDRCHG_REV)
++                        mb->iac = 0;
+ 		}
+ 	}
+ 
+ 	mb->maccc = maccc;
++        local_irq_restore(flags);
+ }
+ 
+-/*
+- * Miscellaneous interrupts are handled here. We may end up 
+- * having to bash the chip on the head for bad errors
+- */
+- 
+ static void mace_handle_misc_intrs(struct mace_data *mp, int intr)
+ {
+ 	volatile struct mace *mb = mp->mace;
+ 	static int mace_babbles, mace_jabbers;
+ 
+-	if (intr & MPCO) {
++	if (intr & MPCO) 
+ 		mp->stats.rx_missed_errors += 256;
+-	}
+-	mp->stats.rx_missed_errors += mb->mpc;	/* reading clears it */
+-
+-	if (intr & RNTPCO) {
++	mp->stats.rx_missed_errors += mb->mpc;   /* reading clears it */
++        if (intr & RNTPCO)
+ 		mp->stats.rx_length_errors += 256;
+-	}
+ 	mp->stats.rx_length_errors += mb->rntpc;	/* reading clears it */
+-
+-	if (intr & CERR) {
++	if (intr & CERR) 
+ 		++mp->stats.tx_heartbeat_errors;
+-	}
+-	if (intr & BABBLE) {
+-		if (mace_babbles++ < 4) {
+-			printk(KERN_DEBUG "mace: babbling transmitter\n");
+-		}
+-	}
+-	if (intr & JABBER) {
+-		if (mace_jabbers++ < 4) {
+-			printk(KERN_DEBUG "mace: jabbering transceiver\n");
+-		}
+-	}
++
++	if (intr & BABBLE)
++                if (mace_babbles++ < 4)
++                        printk(KERN_DEBUG "macmace: babbling transmitter\n");
++        if (intr & JABBER)
++                if (mace_jabbers++ < 4)
++                        printk(KERN_DEBUG "macmace: jabbering transceiver\n");
++
+ }
+ 
+-/*
+- *	A transmit error has occurred. (We kick the transmit side from
+- *	the DMA completion)
+- */
+- 
+-static void mace_xmit_error(struct net_device *dev)
++static irqreturn_t mace_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+ {
++        struct net_device *dev = (struct net_device *) dev_id;
+ 	struct mace_data *mp = (struct mace_data *) dev->priv;
+ 	volatile struct mace *mb = mp->mace;
+-	u8 xmtfs, xmtrc;
+-	
+-	xmtfs = mb->xmtfs;
+-	xmtrc = mb->xmtrc;
+-	
+-	if (xmtfs & XMTSV) {
+-		if (xmtfs & UFLO) {
+-			printk("%s: DMA underrun.\n", dev->name);
+-			mp->stats.tx_errors++;
+-			mp->stats.tx_fifo_errors++;
+-			mace_txdma_reset(dev);
++	int intr, fs;
++	unsigned int flags;
++
++       /* don't want the dma interrupt handler to fire */
++       local_irq_save(flags);
++
++       intr = mb->ir; /* read interrupt register */
++       mace_handle_misc_intrs(mp, intr);
++
++       if (mb->pr & XMTSV) {
++	 fs = mb->xmtfs;
++	 if ((fs & XMTSV) == 0) {
++	   printk(KERN_ERR "macmace: xmtfs not valid! (fs=%x)\n", fs);
++	   mace_reset(dev);
++	   /*
++	    * XXX mace likes to hang the machine after a xmtfs error.
++	    * This is hard to reproduce, reseting *may* help
++	    */
+ 		}
+-		if (xmtfs & RTRY) {
+-			mp->stats.collisions++;
++	        /* dma should have finished */
++                if (!mp->tx_count) {
++                        printk(KERN_DEBUG "macmace: tx ring ran out? (fs=%x)\n", fs);
+ 		}
+-	}			
+-}
++		/* Update stats */
++                if (fs & (UFLO|LCOL|LCAR|RTRY)) {
++                        ++mp->stats.tx_errors;
++                        if (fs & LCAR)
++                                ++mp->stats.tx_carrier_errors;
++                        else if (fs & (UFLO|LCOL|RTRY)) {
++                                ++mp->stats.tx_aborted_errors;
++                                if (mb->xmtfs & UFLO) {
++                                        printk(KERN_ERR "%s: DMA underrun.\n", dev->name);
++                                        mp->stats.tx_fifo_errors++;
++                                        mace_txdma_reset(dev);
++                                }
++                        }
++                }
++        }
+ 
+-/*
+- *	A receive interrupt occurred.
+- */
++       if (mp->tx_count)
++                netif_wake_queue(dev);
+  
+-static void mace_recv_interrupt(struct net_device *dev)
+-{
+-/*	struct mace_data *mp = (struct mace_data *) dev->priv; */
+-//	volatile struct mace *mb = mp->mace;
+-}
++        local_irq_restore(flags);
+ 
+-/*
+- * Process the chip interrupt
+- */
+- 
+-static irqreturn_t mace_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+-{
+-	struct net_device *dev = (struct net_device *) dev_id;
+-	struct mace_data *mp = (struct mace_data *) dev->priv;
+-	volatile struct mace *mb = mp->mace;
+-	u8 ir;
+-	
+-	ir = mb->ir;
+-	mace_handle_misc_intrs(mp, ir);
+-	
+-	if (ir & XMTINT) {
+-		mace_xmit_error(dev);
+-	}
+-	if (ir & RCVINT) {
+-		mace_recv_interrupt(dev);
+-	}
+ 	return IRQ_HANDLED;
+ }
+ 
+@@ -598,51 +637,30 @@
+ 
+ static void mace_tx_timeout(struct net_device *dev)
+ {
+-	struct mace_data *mp = (struct mace_data *) dev->priv;
+-	volatile struct mace *mb = mp->mace;
+-	unsigned long flags;
+-	u8 maccc, imr;
+-
+-	local_irq_save(flags);
+-
+-	// save state
+-	maccc = mb->maccc;
+-	imr   = mb->imr;
+-
+-	// stop card
+-	mb->maccc = 0;		/* disable rx and tx	 */
+-	mb->imr = 0xFF;		/* disable all irqs	 */
+-	mace_dma_off(dev);
+-
+-	// reset card
+-	mb->biucc = XMTSP_64;
+-	mb->fifocc = XMTFW_16 | RCVFW_64 | XMTFWU | RCVFWU | XMTBRST | RCVBRST;
+-	mb->xmtfc = AUTO_PAD_XMIT;
+-	mb->plscc = PORTSEL_AUI;
+-
+-	/* Not sure what these do - perhaps reset the PSC ??? */
+-
+-	psc_write_word(PSC_ENETWR_CTL, 0x9000);
+-	psc_write_word(PSC_ENETRD_CTL, 0x9000);
+-	psc_write_word(PSC_ENETWR_CTL, 0x0400);
+-	psc_write_word(PSC_ENETRD_CTL, 0x0400);
+-
+-	// reset both DMAs
+-	mace_rxdma_reset(dev);
+-	mace_txdma_reset(dev);
+-	
+-	// free skb's - not necessary, already done in mace_xmit_start
+-	// ring buffer pointers reset in txdma_reset, so just log error
+-	mp->stats.tx_errors++;
+-
+-	// re-kick upper level
+-	netif_wake_queue(dev);
+-
+-	// re-enable card, using saved imr/maccc (where is this ever set?)
+-	mb->maccc = maccc;
+-	mb->imr   = imr;
+-
+-	local_irq_restore(flags);
++        struct mace_data *mp = (struct mace_data *) dev->priv;
++        volatile struct mace *mb = mp->mace;
++        unsigned long flags;
++
++        local_irq_save(flags);
++ 
++        /* turn off both tx and rx and reset the chip */
++        mb->maccc = 0;
++        printk(KERN_ERR "macmace: transmit timeout - resetting\n");
++        mace_txdma_reset(dev);
++        mace_reset(dev);
++ 
++        /* restart rx dma */
++        mace_rxdma_reset(dev);
++ 
++        mp->tx_count = N_TX_RING;
++        netif_wake_queue(dev);
++ 
++        /* turn it on! */
++        mb->maccc = ENXMT | ENRCV;
++        /* enable all interrupts except receive interrupts */
++        mb->imr = RCVINT;
++ 
++        local_irq_restore(flags);
+ }
+ 
+ /*
+@@ -653,39 +671,39 @@
+ {
+ 	struct mace_data *mp = (struct mace_data *) dev->priv;
+ 	struct sk_buff *skb;
++	unsigned int frame_status = mf->rcvsts;
+ 
+-	if (mf->status & RS_OFLO) {
+-		printk("%s: fifo overflow.\n", dev->name);
+-		mp->stats.rx_errors++;
+-		mp->stats.rx_fifo_errors++;
+-	}
+-	if (mf->status&(RS_CLSN|RS_FRAMERR|RS_FCSERR))
++        if (frame_status & (RS_OFLO | RS_CLSN | RS_FRAMERR | RS_FCSERR)) {
+ 		mp->stats.rx_errors++;
+ 		
+-	if (mf->status&RS_CLSN) {
+-		mp->stats.collisions++;
+-	}
+-	if (mf->status&RS_FRAMERR) {
+-		mp->stats.rx_frame_errors++;
+-	}
+-	if (mf->status&RS_FCSERR) {
+-		mp->stats.rx_crc_errors++;
++                if (frame_status & RS_OFLO) {
++                        printk(KERN_DEBUG "%s: fifo overflow.\n", dev->name);
++                        mp->stats.rx_fifo_errors++;
++                }
++                if (frame_status & RS_CLSN)
++                        mp->stats.collisions++;
++                if (frame_status & RS_FRAMERR)
++                        mp->stats.rx_frame_errors++;
++                if (frame_status & RS_FCSERR)
++                        mp->stats.rx_crc_errors++;
++        } else {
++                unsigned int frame_length = mf->rcvcnt + ((frame_status & 0x0F) << 8 );
++
++                skb = dev_alloc_skb(frame_length + 2);
++                 if (!skb) {
++                        mp->stats.rx_dropped++;
++                        return;
++                }
++                skb_reserve(skb, 2);
++                memcpy(skb_put(skb, frame_length), mf->data, frame_length);
++ 
++                skb->dev = dev;
++                skb->protocol = eth_type_trans(skb, dev);
++                netif_rx(skb);
++                dev->last_rx = jiffies;
++                mp->stats.rx_packets++;
++                mp->stats.rx_bytes += frame_length;
+ 	}
+-		
+-	skb = dev_alloc_skb(mf->len+2);
+-	if (!skb) {
+-		mp->stats.rx_dropped++;
+-		return;
+-	}
+-	skb_reserve(skb,2);
+-	memcpy(skb_put(skb, mf->len), mf->data, mf->len);
+-	
+-	skb->dev = dev;
+-	skb->protocol = eth_type_trans(skb, dev);
+-	netif_rx(skb);
+-	dev->last_rx = jiffies;
+-	mp->stats.rx_packets++;
+-	mp->stats.rx_bytes += mf->len;
+ }
+ 
+ /*
