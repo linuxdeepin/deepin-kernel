@@ -1,0 +1,85 @@
+On Sat, Dec 30, 2006 at 04:39:55PM +0000, Russell King wrote:
+> Given that no one has any outstanding issues with the following patch, I'm
+> going to ask akpm to put this into -mm, and shortly after (a week or so)
+> I'll submit it and the ARM flush_anon_page() patch to Linus for -rc to fix
+> ARM data corruption issues.
+
+And here's the flush_anon_page() part.
+
+Add flush_anon_page() for ARM, to avoid data corruption issues when using
+fuse or other subsystems using get_user_pages().
+
+Signed-off-by: Russell King <rmk+kernel@arm.linux.org.uk>
+
+diff --git a/arch/arm/mm/flush.c b/arch/arm/mm/flush.c
+index 628348c..86dd204 100644
+--- a/arch/arm/mm/flush.c
++++ b/arch/arm/mm/flush.c
+@@ -202,3 +202,39 @@ #endif
+ 	}
+ }
+ EXPORT_SYMBOL(flush_dcache_page);
++
++/*
++ * Flush an anonymous page so that users of get_user_pages()
++ * can safely access the data.  The expected sequence is:
++ *
++ *  get_user_pages()
++ *    -> flush_anon_page
++ *  memcpy() to/from page
++ *  if written to page, flush_dcache_page()
++ */
++void __flush_anon_page(struct vm_area_struct *vma, struct page *page, unsigned long vmaddr)
++{
++	/* VIPT non-aliasing caches need do nothing */
++	if (cache_is_vipt_nonaliasing())
++		return;
++
++	/*
++	 * Write back and invalidate userspace mapping.
++	 */
++	if (cache_is_vivt()) {
++		flush_cache_page(vma, vmaddr, page_to_pfn(page));
++	} else {
++		/*
++		 * For aliasing VIPT, we can flush an alias of the
++		 * userspace address only.
++		 */
++		flush_pfn_alias(page_to_pfn(page), vmaddr);
++	}
++
++	/*
++	 * Invalidate kernel mapping.  No data should be contained
++	 * in this mapping of the page.  FIXME: this is overkill
++	 * since we actually ask for a write-back and invalidate.
++	 */
++	__cpuc_flush_dcache_page(page_address(page));
++}
+diff --git a/include/asm-arm/cacheflush.h b/include/asm-arm/cacheflush.h
+index 378a3a2..506ef15 100644
+--- a/include/asm-arm/cacheflush.h
++++ b/include/asm-arm/cacheflush.h
+@@ -355,6 +355,16 @@ #define clean_dcache_area(start,size)	cp
+  */
+ extern void flush_dcache_page(struct page *);
+ 
++#define ARCH_HAS_FLUSH_ANON_PAGE
++static inline void flush_anon_page(struct vm_area_struct *vma,
++			 struct page *page, unsigned long vmaddr)
++{
++	extern void __flush_anon_page(struct vm_area_struct *vma,
++				struct page *, unsigned long);
++	if (PageAnon(page))
++		__flush_anon_page(vma, page, vmaddr);
++}
++
+ #define flush_dcache_mmap_lock(mapping) \
+ 	write_lock_irq(&(mapping)->tree_lock)
+ #define flush_dcache_mmap_unlock(mapping) \
+
+
+-- 
+Russell King
+ Linux kernel    2.6 ARM Linux   - http://www.arm.linux.org.uk/
+ maintainer of:
+
