@@ -69,6 +69,7 @@ class main(object):
         cmdline = ['tar -czf', out, '-C', self.dir, self.orig]
         if os.spawnv(os.P_WAIT, '/bin/sh', ['sh', '-c', ' '.join(cmdline)]):
             raise RuntimeError("Can't patch source")
+        os.chmod(out, 0644)
 
 if __name__ == '__main__':
     main(*sys.argv[1:])()
