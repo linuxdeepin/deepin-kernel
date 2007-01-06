@@ -45,7 +45,7 @@ class main(object):
 
     def patch(self):
         self.log("Patching with debian patch source-%s\n" % self.input_patch)
-        cmdline = 'cd %s; python2.4 ../../bin/patch.apply --overwrite-home=../../patches --orig=%s' % (os.path.join(self.dir, self.orig), self.input_patch)
+        cmdline = 'cd %s; python2.4 ../../templates/patch.apply.in --overwrite-home=../../patches --orig=%s' % (os.path.join(self.dir, self.orig), self.input_patch)
         if os.spawnv(os.P_WAIT, '/bin/sh', ['sh', '-c', cmdline]):
             raise RuntimeError("Can't extract tarball")
 
