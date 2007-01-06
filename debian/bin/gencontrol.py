@@ -91,6 +91,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
             ('kpkg-arch', 'KPKG_ARCH'),
             ('kpkg-subarch', 'KPKG_SUBARCH'),
             ('localversion', 'LOCALVERSION'),
+            ('override-host-type', 'OVERRIDE_HOST_TYPE'),
             ('type', 'TYPE'),
         ):
             if vars.has_key(i[0]):
