@@ -1,34 +1,37 @@
-From 0eae8b0fed7d8342c027e15d2a6d52eae10366e1 Mon Sep 17 00:00:00 2001
-From: Nicolas DET <nd@bplan-gmbh.de>
-Date: Fri, 24 Nov 2006 13:09:04 +0100
-Subject: [PATCH] Add MPC5200 ethernet driver
+From 6b6e09cca4346ea737db427d568843034eb348fa Mon Sep 17 00:00:00 2001
+From: Andrey Volkov <avolkov@varma-el.com>
+Date: Fri, 18 Aug 2006 10:02:29 -0600
+Subject: [PATCH] [PATCH 02/02] Fec MPC5200 eth driver
 
-Signed-off-by: Nicolas DET <nd@bplan-gmbh.de>
+Second part. Contain only FEC parts.
+Depended on previous bestcomm patch.
+
+Signed-Off-By: Andrey Volkov <avolkov at varma-el.com>
 ---
  drivers/net/Kconfig               |    1 +
  drivers/net/Makefile              |    1 +
- drivers/net/fec_mpc52xx/Kconfig   |   22 +
+ drivers/net/fec_mpc52xx/Kconfig   |   23 ++
  drivers/net/fec_mpc52xx/Makefile  |    2 +
- drivers/net/fec_mpc52xx/fec.c     |  817 +++++++++++++++++++++++++++++++++++++
- drivers/net/fec_mpc52xx/fec.h     |  308 ++++++++++++++
- drivers/net/fec_mpc52xx/fec_phy.c |  532 ++++++++++++++++++++++++
+ drivers/net/fec_mpc52xx/fec.c     |  768 +++++++++++++++++++++++++++++++++++++
+ drivers/net/fec_mpc52xx/fec.h     |  308 +++++++++++++++
+ drivers/net/fec_mpc52xx/fec_phy.c |  526 +++++++++++++++++++++++++
  drivers/net/fec_mpc52xx/fec_phy.h |   73 ++++
- 8 files changed, 1756 insertions(+), 0 deletions(-)
+ 8 files changed, 1702 insertions(+), 0 deletions(-)
 
 diff --git a/drivers/net/Kconfig b/drivers/net/Kconfig
-index 6e863aa..c0bf347 100644
+index 8aa8dd0..0658e92 100644
 --- a/drivers/net/Kconfig
 +++ b/drivers/net/Kconfig
-@@ -1892,6 +1892,7 @@ config NE_H8300
+@@ -1902,6 +1902,7 @@ config NE_H8300
+ 	  controller on the Renesas H8/300 processor.
  
  source "drivers/net/fec_8xx/Kconfig"
- source "drivers/net/fs_enet/Kconfig"
 +source "drivers/net/fec_mpc52xx/Kconfig"
+ source "drivers/net/fs_enet/Kconfig"
  
  endmenu
- 
 diff --git a/drivers/net/Makefile b/drivers/net/Makefile
-index f270bc4..a39a931 100644
+index 4c0d4e5..e6f903d 100644
 --- a/drivers/net/Makefile
 +++ b/drivers/net/Makefile
 @@ -196,6 +196,7 @@ obj-$(CONFIG_SMC91X) += smc91x.o
@@ -37,27 +40,28 @@ index f270bc4..a39a931 100644
  obj-$(CONFIG_FEC_8XX) += fec_8xx/
 +obj-$(CONFIG_FEC_MPC52xx) += fec_mpc52xx/
  
- obj-$(CONFIG_ARM) += arm/
- obj-$(CONFIG_DEV_APPLETALK) += appletalk/
+ obj-$(CONFIG_MACB) += macb.o
+ 
 diff --git a/drivers/net/fec_mpc52xx/Kconfig b/drivers/net/fec_mpc52xx/Kconfig
 new file mode 100644
-index 0000000..dc3fee6
+index 0000000..098c3fa
 --- /dev/null
 +++ b/drivers/net/fec_mpc52xx/Kconfig
-@@ -0,0 +1,22 @@
+@@ -0,0 +1,23 @@
 +menu "MPC5200 Networking Options"
-+	depends (PPC_CHRP || PPC_MPC52xx) && NET_ETHERNET
++	depends PPC_MPC52xx && NET_ETHERNET
 +
 +config FEC_MPC52xx
 +	bool "FEC Ethernet"
 +	depends on NET_ETHERNET
++	select PPC_BESTCOMM
 +	select CRC32
 +	---help---
 +	  This option enables support for the MPC5200's on-chip
 +	  Fast Ethernet Controller
 +
 +config USE_MDIO
-+	bool "Use external Ethernet MII PHY"
++	bool "  Use external Ethernet MII PHY"
 +	select MII
 +	depends FEC_MPC52xx
 +	---help---
@@ -77,10 +81,10 @@ index 0000000..b8ae05c
 +obj-$(CONFIG_USE_MDIO)		+= fec_phy.o
 diff --git a/drivers/net/fec_mpc52xx/fec.c b/drivers/net/fec_mpc52xx/fec.c
 new file mode 100644
-index 0000000..5591bb7
+index 0000000..b5f1559
 --- /dev/null
 +++ b/drivers/net/fec_mpc52xx/fec.c
-@@ -0,0 +1,817 @@
+@@ -0,0 +1,768 @@
 +/*
 + * drivers/net/fec_mpc52xx/fec.c
 + *
@@ -110,40 +114,20 @@ index 0000000..5591bb7
 +
 +#include <asm/io.h>
 +#include <asm/delay.h>
++#include <asm/ppcboot.h>
 +#include <asm/mpc52xx.h>
-+#include <asm/of_device.h>
-+#include <asm/of_platform.h>
 +
-+#ifdef CONFIG_PPC_EFIKA
-+#include <platforms/efika/bestcomm.h>
-+#else
 +#include <syslib/bestcomm/bestcomm.h>
 +#include <syslib/bestcomm/fec.h>
-+#endif
-+
-+/******************/
-+/******************/
-+static unsigned long get_ipbfreq(void)
-+{
-+#ifdef CONFIG_PPC_EFIKA
-+	return (132*1000*1000);
-+#else
-+	bd_t *bd = (bd_t *)&__res;
-+	return bd->bi_ipbfreq
-+#endif
-+}
-+
-+/******************/
-+/******************/
 +
 +#include "fec_phy.h"
 +#include "fec.h"
 +
 +#define DRIVER_NAME "mpc52xx-fec"
 +
-+static irqreturn_t fec_interrupt(int, void *);
-+static irqreturn_t fec_rx_interrupt(int, void *);
-+static irqreturn_t fec_tx_interrupt(int, void *);
++static irqreturn_t fec_interrupt(int, void *, struct pt_regs *);
++static irqreturn_t fec_rx_interrupt(int, void *, struct pt_regs *);
++static irqreturn_t fec_tx_interrupt(int, void *, struct pt_regs *);
 +static struct net_device_stats *fec_get_stats(struct net_device *);
 +static void fec_set_multicast_list(struct net_device *dev);
 +static void fec_reinit(struct net_device *dev);
@@ -336,7 +320,7 @@ index 0000000..5591bb7
 +
 +/* This handles BestComm transmit task interrupts
 + */
-+static irqreturn_t fec_tx_interrupt(int irq, void *dev_id)
++static irqreturn_t fec_tx_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 +{
 +	struct net_device *dev = dev_id;
 +	struct fec_priv *priv = (struct fec_priv *)dev->priv;
@@ -362,7 +346,7 @@ index 0000000..5591bb7
 +	return IRQ_HANDLED;
 +}
 +
-+static irqreturn_t fec_rx_interrupt(int irq, void *dev_id)
++static irqreturn_t fec_rx_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 +{
 +	struct net_device *dev = dev_id;
 +	struct fec_priv *priv = (struct fec_priv *)dev->priv;
@@ -419,7 +403,7 @@ index 0000000..5591bb7
 +	return IRQ_HANDLED;
 +}
 +
-+static irqreturn_t fec_interrupt(int irq, void *dev_id)
++static irqreturn_t fec_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 +{
 +	struct net_device *dev = (struct net_device *)dev_id;
 +	struct fec_priv *priv = (struct fec_priv *)dev->priv;
@@ -427,24 +411,17 @@ index 0000000..5591bb7
 +	int ievent;
 +
 +	ievent = in_be32(&fec->ievent);
-+	if (!ievent)
-+	  return IRQ_NONE;
-+
 +	out_be32(&fec->ievent, ievent);		/* clear pending events */
 +
 +	if (ievent & (FEC_IEVENT_RFIFO_ERROR | FEC_IEVENT_XFIFO_ERROR)) {
-+		if ( net_ratelimit() )
-+		{
-+		  if (ievent & FEC_IEVENT_RFIFO_ERROR)
-+			printk(KERN_WARNING "FEC_IEVENT_RFIFO_ERROR (%8.8x)\n", ievent);
-+		  if (ievent & FEC_IEVENT_XFIFO_ERROR)
-+			printk(KERN_WARNING "FEC_IEVENT_XFIFO_ERROR (%8.8x)\n", ievent);
-+		}
++		if (ievent & FEC_IEVENT_RFIFO_ERROR)
++			printk(KERN_WARNING "FEC_IEVENT_RFIFO_ERROR\n");
++		if (ievent & FEC_IEVENT_XFIFO_ERROR)
++			printk(KERN_WARNING "FEC_IEVENT_XFIFO_ERROR\n");
 +		fec_reinit(dev);
 +	}
 +	else if (ievent & FEC_IEVENT_MII)
 +		fec_mii(dev);
-+
 +	return IRQ_HANDLED;
 +}
 +
@@ -605,7 +582,8 @@ index 0000000..5591bb7
 +{
 +	struct fec_priv *priv = (struct fec_priv *)dev->priv;
 +	struct mpc52xx_fec *fec = priv->fec;
-+	
++	bd_t *bd = (bd_t *) &__res;
++
 +	out_be32(&fec->op_pause, 0x00010020);
 +	out_be32(&fec->rfifo_cntrl, 0x0f000000);
 +	out_be32(&fec->rfifo_alarm, 0x0000030c);
@@ -616,7 +594,7 @@ index 0000000..5591bb7
 +	out_be32(&fec->iaddr1, 0x00000000);	/* No individual filter */
 +	out_be32(&fec->iaddr2, 0x00000000);	/* No individual filter */
 +
-+	priv->phy_speed = ((get_ipbfreq() >> 20) / 5) << 1;
++	priv->phy_speed = ((bd->bi_ipbfreq >> 20) / 5) << 1;
 +
 +	fec_restart(dev, 0);	/* always use half duplex mode only */
 +	/*
@@ -626,12 +604,13 @@ index 0000000..5591bb7
 +	fec_update_stat(dev);
 +}
 +
-+static void fec_update_stat(struct net_device *);
++
 +static void fec_reinit(struct net_device *dev)
 +{
 +	struct fec_priv *priv = (struct fec_priv *)dev->priv;
 +	struct mpc52xx_fec *fec = priv->fec;
-+	
++	static void fec_update_stat(struct net_device *);
++
 +	netif_stop_queue(dev);
 +	out_be32(&fec->imask, 0x0);
 +
@@ -660,31 +639,33 @@ index 0000000..5591bb7
 +/* ======================================================================== */
 +
 +static int __devinit
-+mpc52xx_fec_probe(struct of_device *op, const struct of_device_id *match)
++mpc52xx_fec_probe(struct device *dev)
 +{
 +	int ret;
-+	int rv;
++	struct platform_device *pdev = to_platform_device(dev);
 +	struct net_device *ndev;
 +	struct fec_priv *priv = NULL;
-+	struct resource mem;
++	struct resource *mem;
 +
++	volatile int dbg=0;
++	while(dbg)
++		__asm("nop");
 +	/* Reserve FEC control zone */
-+	rv = of_address_to_resource(op->node, 0, &mem);
-+	if (rv) {
-+		printk(KERN_ERR DRIVER_NAME ": "
-+			"Error while parsing device node resource\n" );
-+		return rv;
++	mem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
++	if ((mem->end - mem->start + 1) != sizeof(struct mpc52xx_fec)) {
++		printk(KERN_ERR DRIVER_NAME 
++			   " - invalid resource size (%lx != %x), check mpc52xx_devices.c\n",
++									mem->end - mem->start + 1, sizeof(struct mpc52xx_fec));
++		return -EINVAL;
 +	}
 +	
-+	if (!request_mem_region(mem.start, sizeof(struct mpc52xx_fec),
++	if (!request_mem_region(mem->start, sizeof(struct mpc52xx_fec),
 +	                        DRIVER_NAME))
 +		return -EBUSY;
 +
 +	/* Get the ether ndev & it's private zone */
 +	ndev = alloc_etherdev(sizeof(struct fec_priv));
 +	if (!ndev) {
-+		printk(KERN_ERR DRIVER_NAME ": "
-+			"Can not allocate the ethernet device\n" );
 +		ret = -ENOMEM;
 +		goto probe_error;
 +	}
@@ -702,7 +683,7 @@ index 0000000..5591bb7
 +	ndev->tx_timeout	= fec_tx_timeout;
 +	ndev->watchdog_timeo	= FEC_WATCHDOG_TIMEOUT;
 +	ndev->flags &= ~IFF_RUNNING;
-+	ndev->base_addr		= mem.start;
++	ndev->base_addr		= mem->start;
 +
 +	priv->rx_fifo = ndev->base_addr + FIELD_OFFSET(mpc52xx_fec,rfifo_data);
 +	priv->tx_fifo = ndev->base_addr + FIELD_OFFSET(mpc52xx_fec,tfifo_data);
@@ -712,27 +693,18 @@ index 0000000..5591bb7
 +
 +	/* ioremap the zones */
 +	priv->fec = (struct mpc52xx_fec *)
-+		ioremap(mem.start, sizeof(struct mpc52xx_fec));
++		ioremap(mem->start, sizeof(struct mpc52xx_fec));
 +	
 +	if (!priv->fec) {
-+		printk(KERN_ERR DRIVER_NAME ": "
-+			"Can not remap IO memory at 0x%8.8x\n", mem.start );
 +		ret = -ENOMEM;
 +		goto probe_error;
 +	}
 +
 +	/* SDMA init */
-+#ifdef CONFIG_PPC_EFIKA
-+	priv->rx_sdma = sdma_fex_rx_preinit(FEC_RX_NUM_BD);
-+	priv->tx_sdma = sdma_fex_tx_preinit(FEC_TX_NUM_BD);
-+#else
 +	priv->rx_sdma = sdma_alloc(FEC_RX_NUM_BD);
 +	priv->tx_sdma = sdma_alloc(FEC_TX_NUM_BD);
-+#endif
 +	
 +	if (!priv->rx_sdma || !priv->tx_sdma) {
-+		printk(KERN_ERR DRIVER_NAME ": "
-+			"Can not init SDMA tasks\n" );
 +		ret = -ENOMEM;
 +		goto probe_error;
 +	}
@@ -746,10 +718,8 @@ index 0000000..5591bb7
 +		goto probe_error;
 +
 +	/* Get the IRQ we need one by one */
-+	/* Control */
-+
-+	ndev->irq = irq_of_parse_and_map(op->node, 0);
-+
++		/* Control */
++	ndev->irq = platform_get_irq(pdev, 0);
 +	if (request_irq(ndev->irq, &fec_interrupt, SA_INTERRUPT,
 +	                DRIVER_NAME "_ctrl", ndev)) {
 +		printk(KERN_ERR DRIVER_NAME ": ctrl interrupt request failed\n");
@@ -758,7 +728,7 @@ index 0000000..5591bb7
 +		goto probe_error;
 +	}
 +
-+	/* RX */
++		/* RX */
 +	priv->r_irq = sdma_irq(priv->rx_sdma);
 +	if (request_irq(priv->r_irq, &fec_rx_interrupt, SA_INTERRUPT,
 +	                DRIVER_NAME "_rx", ndev)) {
@@ -768,7 +738,7 @@ index 0000000..5591bb7
 +		goto probe_error;
 +	}
 +
-+	/* TX */
++		/* TX */
 +	priv->t_irq = sdma_irq(priv->tx_sdma);
 +	if (request_irq(priv->t_irq, &fec_tx_interrupt, SA_INTERRUPT,
 +	                DRIVER_NAME "_tx", ndev)) {
@@ -796,11 +766,12 @@ index 0000000..5591bb7
 +	fec_mii_init(ndev);
 +	
 +	/* We're done ! */
-+	dev_set_drvdata(&op->dev, ndev);
++	dev_set_drvdata(dev, ndev);
 +
 +	return 0;
 +
-+	/* Errorx handling - free everything that might be allocated */
++
++	/* Error handling - free everything that might be allocated */
 +probe_error:
 +
 +	if (ndev) {
@@ -816,18 +787,18 @@ index 0000000..5591bb7
 +		free_netdev(ndev);
 +	}
 +	
-+	release_mem_region(mem.start, sizeof(struct mpc52xx_fec));
++	release_mem_region(mem->start, sizeof(struct mpc52xx_fec));
 +
 +	return ret;
 +}
 +
 +static int
-+mpc52xx_fec_remove(struct of_device *op)
++mpc52xx_fec_remove(struct device *dev)
 +{
 +	struct net_device *ndev;
 +	struct fec_priv *priv;
 +	
-+	ndev = (struct net_device *) dev_get_drvdata(&op->dev);
++	ndev = (struct net_device *) dev_get_drvdata(dev);
 +	if (!ndev)
 +		return 0;
 +	priv = (struct fec_priv *) ndev->priv;
@@ -844,35 +815,19 @@ index 0000000..5591bb7
 +
 +	free_netdev(ndev);
 +	
-+	dev_set_drvdata(&op->dev, NULL);
++	dev_set_drvdata(dev, NULL);
 +	return 0;
 +}
 +
-+static struct of_device_id mpc52xx_fec_of_match[] = {
-+	{
-+		.compatible = "mpc5200-ethernet",
-+	},
-+	{
-+		.compatible = "mpc52xx-fec",
-+	},
-+	{},
-+};
-+
-+
-+static struct of_platform_driver mpc52xx_fec_driver = {
++static struct device_driver mpc52xx_fec_driver = {
 +	.name	  = DRIVER_NAME,
-+	.owner		= THIS_MODULE,
-+	.match_table	= mpc52xx_fec_of_match,
++	.bus		= &platform_bus_type,
 +	.probe		= mpc52xx_fec_probe,
 +	.remove		= mpc52xx_fec_remove,
 +#ifdef CONFIG_PM
 +/*	.suspend	= mpc52xx_fec_suspend,	TODO */
 +/*	.resume		= mpc52xx_fec_resume,	TODO */
 +#endif
-+	.driver		= {
-+		.name	= DRIVER_NAME,
-+		.owner	= THIS_MODULE,
-+	},
 +};
 +
 +/* ======================================================================== */
@@ -882,13 +837,13 @@ index 0000000..5591bb7
 +static int __init
 +mpc52xx_fec_init(void)
 +{
-+	return of_register_platform_driver(&mpc52xx_fec_driver);
++	return driver_register(&mpc52xx_fec_driver);
 +}
 +
 +static void __exit
 +mpc52xx_fec_exit(void)
 +{
-+	of_unregister_platform_driver(&mpc52xx_fec_driver);
++	driver_unregister(&mpc52xx_fec_driver);
 +}
 +
 +
@@ -1214,10 +1169,10 @@ index 0000000..f9eed36
 +#endif	/* __DRIVERS_NET_MPC52XX_FEC_H__ */
 diff --git a/drivers/net/fec_mpc52xx/fec_phy.c b/drivers/net/fec_mpc52xx/fec_phy.c
 new file mode 100644
-index 0000000..1b2f4e1
+index 0000000..2a287de
 --- /dev/null
 +++ b/drivers/net/fec_mpc52xx/fec_phy.c
-@@ -0,0 +1,532 @@
+@@ -0,0 +1,526 @@
 +/*
 + * arch/ppc/52xx_io/fec_phy.c
 + *
@@ -1240,14 +1195,8 @@ index 0000000..1b2f4e1
 +#include <linux/mii.h>
 +#include <asm/io.h>
 +#include <asm/mpc52xx.h>
-+
-+#ifdef CONFIG_PPC_EFIKA
-+#include <platforms/efika/bestcomm.h>
-+#else
 +#include <syslib/bestcomm/bestcomm.h>
 +#include <syslib/bestcomm/fec.h>
-+#endif
-+
 +#include "fec_phy.h"
 +#include "fec.h"
 +
@@ -1457,7 +1406,7 @@ index 0000000..1b2f4e1
 +	},
 +	(const phy_cmd_t []) {	/* startup */
 +		/* restart auto-negotiation */
-+		{ mk_mii_write(MII_BMCR, (BMCR_ANENABLE | BMCR_ANRESTART) ),
++		{ mk_mii_write(MII_BMCR, (BMCR_ANENABLE | BMCR_ANRESTART)),
 +			NULL },
 +		{ mk_mii_end, }
 +	},
@@ -1830,5 +1779,5 @@ index 0000000..5c23bff
 +
 +extern int fec_ioctl(struct net_device *, struct ifreq *rq, int cmd);
 -- 
-1.4.3.2
+1.4.4.2
 
