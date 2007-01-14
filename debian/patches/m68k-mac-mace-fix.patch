@@ -1,0 +1,516 @@
+Fix a race condition in the transmit code, where the dma interrupt could
+update the free tx buffer count concurrently and wedge the tx queue.
+
+Fix the misuse of the rx frame status and rx frame length registers: no
+more "fifo overrun" errors caused by the OFLOW bit being tested in the
+frame length register, and no more missed packets due to incorrect length
+taken from status register.
+
+Fix a panic (skb_over_panic BUG) caused by allocating and then copying an
+incoming packet while the packet length register was changing.
+
+Cut-and-paste the reset code from the powermac mace driver (mace.c), so
+the NIC functions when MacOS does not initialise it (important for anyone
+wanting to use the Emile boot loader).
+
+Cut-and-paste the error counting and timeout recovery code from mace.c.
+
+Fix a race condition in the PSC interrupt dispatch code where the
+interrupt flag was cleared after the handler ran (same bug that was fixed
+recently in the VIA2 interrupt dispatcher).
+
+Fix over allocation of rx buffer memory (page order, not page count).
+
+Converted to driver model.
+
+Converted to DMA API.
+
+Since I've run out of ways to make it fail, and since it performs well
+now, promote the driver from EXPERIMENTAL status. Tested on both quadra
+840av and 660av.
+
+Signed-off-by: Finn Thain <fthain@telegraphics.com.au>
+
+diff -urN linux-2.6.18.orig/drivers/net/macmace.c linux-2.6.18/drivers/net/macmace.c
+--- linux-2.6.18.orig/drivers/net/macmace.c	2007-01-14 21:24:25.000000000 +0100
++++ linux-2.6.18/drivers/net/macmace.c	2007-01-14 21:20:15.000000000 +0100
+@@ -22,8 +22,9 @@
+ #include <linux/delay.h>
+ #include <linux/string.h>
+ #include <linux/crc32.h>
++#include <linux/dma-mapping.h>
++#include <linux/platform_device.h>
+ #include <asm/io.h>
+-#include <asm/pgtable.h>
+ #include <asm/irq.h>
+ #include <asm/macintosh.h>
+ #include <asm/macints.h>
+@@ -31,16 +32,23 @@
+ #include <asm/page.h>
+ #include "mace.h"
+ 
+-#define N_TX_RING	1
+-#define N_RX_RING	8
+-#define N_RX_PAGES	((N_RX_RING * 0x0800 + PAGE_SIZE - 1) / PAGE_SIZE)
++static char mac_mace_string[] = "macmace";
++static struct platform_device *mac_mace_device;
++
++#define N_TX_BUFF_ORDER        0
++#define N_TX_RING      (1 << N_TX_BUFF_ORDER)
++#define N_RX_BUFF_ORDER        3
++#define N_RX_RING      (1 << N_RX_BUFF_ORDER)
++
+ #define TX_TIMEOUT	HZ
+ 
+ /* Chip rev needs workaround on HW & multicast addr change */
+ #define BROKEN_ADDRCHG_REV     0x0941
+ 
+-/* Bits in transmit DMA status */
+-#define TX_DMA_ERR	0x80
++#define MACE_BUFF_SIZE 0x800
++
++/* Chip rev needs workaround on HW & multicast addr change */
++#define BROKEN_ADDRCHG_REV     0x0941
+ 
+ /* The MACE is simply wired down on a Mac68K box */
+ 
+@@ -49,15 +57,16 @@
+ 
+ struct mace_data {
+ 	volatile struct mace *mace;
+-	volatile unsigned char *tx_ring;
+-	volatile unsigned char *tx_ring_phys;
+-	volatile unsigned char *rx_ring;
+-	volatile unsigned char *rx_ring_phys;
++	unsigned char *tx_ring;
++	dma_addr_t tx_ring_phys;
++	unsigned char *rx_ring;
++	dma_addr_t rx_ring_phys;
+ 	int dma_intr;
+ 	struct net_device_stats stats;
+ 	int rx_slot, rx_tail;
+ 	int tx_slot, tx_sloti, tx_count;
+         int chipid;
++        struct device *device;
+ };
+ 
+ struct mace_frame {
+@@ -77,8 +86,6 @@
+ 
+ #define PRIV_BYTES	sizeof(struct mace_data)
+ 
+-extern void psc_debug_dump(void);
+-
+ static int mace_open(struct net_device *dev);
+ static int mace_close(struct net_device *dev);
+ static int mace_xmit_start(struct sk_buff *skb, struct net_device *dev);
+@@ -93,7 +100,7 @@
+ 
+ /* Bit-reverse one byte of an ethernet hardware address. */
+ 
+-static int bitrev(int b)
++static inline int bitrev(int b)
+ {
+ 	int d = 0, i;
+ 
+@@ -110,8 +117,8 @@
+ 
+ static void mace_load_rxdma_base(struct net_device *dev, int set)
+ {
+-	struct mace_data *mp = (struct mace_data *) dev->priv;
+-
++	struct mace_data *mp = netdev_priv(dev);
++	
+ 	psc_write_word(PSC_ENETRD_CMD + set, 0x0100);
+ 	psc_write_long(PSC_ENETRD_ADDR + set, (u32) mp->rx_ring_phys);
+ 	psc_write_long(PSC_ENETRD_LEN + set, N_RX_RING);
+@@ -125,7 +132,7 @@
+ 
+ static void mace_rxdma_reset(struct net_device *dev)
+ {
+-	struct mace_data *mp = (struct mace_data *) dev->priv;
++	struct mace_data *mp = netdev_priv(dev);
+ 	volatile struct mace *mace = mp->mace;
+ 	u8 maccc = mace->maccc;
+ 	
+@@ -152,7 +159,7 @@
+  
+ static void mace_txdma_reset(struct net_device *dev)
+ {
+-	struct mace_data *mp = (struct mace_data *) dev->priv;
++	struct mace_data *mp = netdev_priv(dev);
+ 	volatile struct mace *mace = mp->mace;
+ 	u8 maccc;
+ 
+@@ -190,7 +197,7 @@
+  * model of Macintrash has a MACE (AV macintoshes)
+  */
+  
+-struct net_device *mace_probe(int unit)
++static int __devinit mace_probe(struct platform_device *pdev)
+ {
+ 	int j;
+ 	struct mace_data *mp;
+@@ -201,18 +208,20 @@
+ 	int err;
+ 	
+ 	if (found || macintosh_config->ether_type != MAC_ETHER_MACE)
+-		return ERR_PTR(-ENODEV);
++		return -ENODEV;
+ 
+ 	found = 1;	/* prevent 'finding' one on every device probe */
+ 
+ 	dev = alloc_etherdev(PRIV_BYTES);
+ 	if (!dev)
+-		return ERR_PTR(-ENOMEM);
++		return -ENOMEM;
+ 
+-	if (unit >= 0)
+-		sprintf(dev->name, "eth%d", unit);
++	mp = netdev_priv(dev);
++
++	mp->device = &pdev->dev;
++	SET_NETDEV_DEV(dev, &pdev->dev);
++	SET_MODULE_OWNER(dev);
+ 
+-	mp = (struct mace_data *) dev->priv;
+ 	dev->base_addr = (u32)MACE_BASE;
+ 	mp->mace = (volatile struct mace *) MACE_BASE;
+ 	
+@@ -241,7 +250,7 @@
+ 	
+ 	if (checksum != 0xFF) {
+ 		free_netdev(dev);
+-		return ERR_PTR(-ENODEV);
++		return -ENODEV;
+ 	}
+ 
+ 	memset(&mp->stats, 0, sizeof(mp->stats));
+@@ -261,10 +270,10 @@
+ 
+ 	err = register_netdev(dev);
+ 	if (!err)
+-		return dev;
++		return 0;
+ 
+ 	free_netdev(dev);
+-	return ERR_PTR(err);
++	return err;
+ }
+ 
+ /*
+@@ -298,7 +307,8 @@
+        
+        mb->biucc = XMTSP_64;
+        mb->utr = RTRD;
+-       mb->fifocc = XMTFW_16 | RCVFW_64 | XMTFWU | RCVFWU | XMTBRST | RCVBRST;
++       mb->fifocc = XMTFW_8 | RCVFW_64 | XMTFWU | RCVFWU;
++
+        mb->xmtfc = AUTO_PAD_XMIT; /* auto-pad short frames */
+        mb->rcvfc = 0;
+        
+@@ -330,7 +340,7 @@
+ 
+ static void __mace_set_address(struct net_device *dev, void *addr)
+ {
+-	struct mace_data *mp = (struct mace_data *) dev->priv;
++	struct mace_data *mp = netdev_priv(dev);
+ 	volatile struct mace *mb = mp->mace;
+ 	unsigned char *p = addr;
+ 	int i;
+@@ -377,7 +387,7 @@
+  
+ static int mace_open(struct net_device *dev)
+ {
+-	struct mace_data *mp = (struct mace_data *) dev->priv;
++	struct mace_data *mp = netdev_priv(dev);
+ 	volatile struct mace *mb = mp->mace;
+ 
+ 	/* reset the chip */
+@@ -395,26 +405,22 @@
+ 
+ 	/* Allocate the DMA ring buffers */
+ 
+-	mp->rx_ring = (void *) __get_free_pages(GFP_KERNEL | GFP_DMA, N_RX_PAGES);
+-	mp->tx_ring = (void *) __get_free_pages(GFP_KERNEL | GFP_DMA, 0);
+-	
+-	if (mp->tx_ring==NULL || mp->rx_ring==NULL) {
+-		if (mp->rx_ring) free_pages((u32) mp->rx_ring, N_RX_PAGES);
+-		if (mp->tx_ring) free_pages((u32) mp->tx_ring, 0);
+-		free_irq(dev->irq, dev);
+-		free_irq(mp->dma_intr, dev);
+-		printk(KERN_ERR "%s: unable to allocate DMA buffers\n", dev->name);
+-		return -ENOMEM;
++	mp->tx_ring = dma_alloc_coherent(mp->device,
++			N_TX_RING * MACE_BUFF_SIZE,
++			&mp->tx_ring_phys, GFP_KERNEL);
++	if (mp->tx_ring == NULL) {
++		printk(KERN_ERR "%s: unable to allocate DMA tx buffers\n", dev->name);
++		goto out1;
++ 	}
++
++ 	mp->rx_ring = dma_alloc_coherent(mp->device,
++		N_RX_RING * MACE_BUFF_SIZE,
++		&mp->rx_ring_phys, GFP_KERNEL);
++		if (mp->rx_ring == NULL) {
++		printk(KERN_ERR "%s: unable to allocate DMA rx buffers\n", dev->name);
++		goto out2;
+ 	}
+-
+-	mp->rx_ring_phys = (unsigned char *) virt_to_bus((void *)mp->rx_ring);
+-	mp->tx_ring_phys = (unsigned char *) virt_to_bus((void *)mp->tx_ring);
+-
+-	/* We want the Rx buffer to be uncached and the Tx buffer to be writethrough */
+-
+-	kernel_set_cachemode((void *)mp->rx_ring, N_RX_PAGES * PAGE_SIZE, IOMAP_NOCACHE_NONSER);	
+-	kernel_set_cachemode((void *)mp->tx_ring, PAGE_SIZE, IOMAP_WRITETHROUGH);
+-
++ 	
+ 	mace_dma_off(dev);
+ 
+ 	/* Not sure what these do */
+@@ -433,6 +439,14 @@
+ 	mb->imr = RCVINT;
+ 
+ 	return 0;
++
++out2:
++	dma_free_coherent(mp->device, N_TX_RING * MACE_BUFF_SIZE,
++		mp->tx_ring, mp->tx_ring_phys);
++out1:
++	free_irq(dev->irq, dev);
++	free_irq(mp->dma_intr, dev);
++	return -ENOMEM;
+ }
+ 
+ /*
+@@ -441,19 +455,13 @@
+  
+ static int mace_close(struct net_device *dev)
+ {
+-	struct mace_data *mp = (struct mace_data *) dev->priv;
++	struct mace_data *mp = netdev_priv(dev);
+ 	volatile struct mace *mb = mp->mace;
+ 
+ 	mb->maccc = 0;		/* disable rx and tx	 */
+ 	mb->imr = 0xFF;		/* disable all irqs	 */
+ 	mace_dma_off(dev);	/* disable rx and tx dma */
+ 
+-	free_irq(dev->irq, dev);
+-	free_irq(IRQ_MAC_MACE_DMA, dev);
+-
+-	free_pages((u32) mp->rx_ring, N_RX_PAGES);
+-	free_pages((u32) mp->tx_ring, 0);
+-
+ 	return 0;
+ }
+ 
+@@ -463,17 +471,17 @@
+  
+ static int mace_xmit_start(struct sk_buff *skb, struct net_device *dev)
+ {
+-	struct mace_data *mp = (struct mace_data *) dev->priv;
++	struct mace_data *mp = netdev_priv(dev);
+ 	unsigned long flags;
+ 
+-	/* Stop the queue if the buffer is full */
++	 /* Stop the queue since there's only the one buffer */
+ 
+ 	local_irq_save(flags);
++	netif_stop_queue(dev);
+ 	if (!mp->tx_count) {
+-		netif_stop_queue(dev);
++		printk(KERN_ERR "macmace: tx queue running but no free buffers.\n");
+ 		local_irq_restore(flags);
+ 		return NETDEV_TX_BUSY;
+-
+ 	}
+ 	mp->tx_count--;
+ 	local_irq_restore(flags);
+@@ -494,19 +502,20 @@
+ 	mp->tx_slot ^= 0x10;
+ 
+ 	dev_kfree_skb(skb);
+-
+-	return 0;
++	
++	dev->trans_start = jiffies;
++	return NETDEV_TX_OK;
+ }
+ 
+ static struct net_device_stats *mace_stats(struct net_device *dev)
+ {
+-	struct mace_data *p = (struct mace_data *) dev->priv;
+-	return &p->stats;
++	struct mace_data *mp = netdev_priv(dev);
++	return &mp->stats;
+ }
+ 
+ static void mace_set_multicast(struct net_device *dev)
+ {
+-	struct mace_data *mp = (struct mace_data *) dev->priv;
++	struct mace_data *mp = netdev_priv(dev);
+ 	volatile struct mace *mb = mp->mace;
+ 	int i, j;
+ 	u32 crc;
+@@ -592,15 +601,15 @@
+        intr = mb->ir; /* read interrupt register */
+        mace_handle_misc_intrs(mp, intr);
+ 
+-       if (mb->pr & XMTSV) {
+-	 fs = mb->xmtfs;
+-	 if ((fs & XMTSV) == 0) {
+-	   printk(KERN_ERR "macmace: xmtfs not valid! (fs=%x)\n", fs);
+-	   mace_reset(dev);
+-	   /*
+-	    * XXX mace likes to hang the machine after a xmtfs error.
+-	    * This is hard to reproduce, reseting *may* help
+-	    */
++	if (intr & XMTINT) {
++		fs = mb->xmtfs;
++		if ((fs & XMTSV) == 0) {
++			printk(KERN_ERR "macmace: xmtfs not valid! (fs=%x)\n", fs);
++			mace_reset(dev);
++			/*
++			 * XXX mace likes to hang the machine after a xmtfs error.
++			 * This is hard to reproduce, reseting *may* help
++			 */
+ 		}
+ 	        /* dma should have finished */
+                 if (!mp->tx_count) {
+@@ -636,7 +645,7 @@
+ 
+ static void mace_tx_timeout(struct net_device *dev)
+ {
+-        struct mace_data *mp = (struct mace_data *) dev->priv;
++	struct mace_data *mp = netdev_priv(dev);
+         volatile struct mace *mb = mp->mace;
+         unsigned long flags;
+ 
+@@ -668,7 +677,7 @@
+  
+ static void mace_dma_rx_frame(struct net_device *dev, struct mace_frame *mf)
+ {
+-	struct mace_data *mp = (struct mace_data *) dev->priv;
++	struct mace_data *mp = netdev_priv(dev);
+ 	struct sk_buff *skb;
+ 	unsigned int frame_status = mf->rcvsts;
+ 
+@@ -712,7 +721,7 @@
+ static irqreturn_t mace_dma_intr(int irq, void *dev_id, struct pt_regs *regs)
+ {
+ 	struct net_device *dev = (struct net_device *) dev_id;
+-	struct mace_data *mp = (struct mace_data *) dev->priv;
++	struct mace_data *mp = netdev_priv(dev);
+ 	int left, head;
+ 	u16 status;
+ 	u32 baka;
+@@ -739,7 +748,8 @@
+ 		/* Loop through the ring buffer and process new packages */
+ 
+ 		while (mp->rx_tail < head) {
+-			mace_dma_rx_frame(dev, (struct mace_frame *) (mp->rx_ring + (mp->rx_tail * 0x0800)));
++			 mace_dma_rx_frame(dev, (struct mace_frame *) (mp->rx_ring +
++			 	(mp->rx_tail * MACE_BUFF_SIZE)));
+ 			mp->rx_tail++;
+ 		}
+ 			
+@@ -766,9 +776,76 @@
+ 		psc_write_word(PSC_ENETWR_CMD + mp->tx_sloti, 0x0100);
+ 		mp->tx_sloti ^= 0x10;
+ 		mp->tx_count++;
+-		netif_wake_queue(dev);
+ 	}
+ 	return IRQ_HANDLED;
+ }
+ 
+ MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("Macintosh MACE ethernet driver");
++
++static int __devexit mac_mace_device_remove (struct platform_device *pdev)
++{
++	struct net_device *dev = platform_get_drvdata(pdev);
++	struct mace_data *mp = netdev_priv(dev);
++
++	unregister_netdev(dev);
++
++	free_irq(dev->irq, dev);
++	free_irq(IRQ_MAC_MACE_DMA, dev);
++
++	dma_free_coherent(mp->device, N_RX_RING * MACE_BUFF_SIZE,
++		mp->rx_ring, mp->rx_ring_phys);
++	dma_free_coherent(mp->device, N_TX_RING * MACE_BUFF_SIZE,
++		mp->tx_ring, mp->tx_ring_phys);
++
++	free_netdev(dev);
++
++	return 0;
++}
++
++static struct platform_driver mac_mace_driver = {
++	.probe  = mace_probe,
++	.remove = __devexit_p(mac_mace_device_remove),
++	.driver = {
++		.name = mac_mace_string,
++	},
++};
++
++static int __init mac_mace_init_module(void)
++{
++	int err;
++
++	if ((err = platform_driver_register(&mac_mace_driver))) {
++		printk(KERN_ERR "Driver registration failed\n");
++		return err;
++	}
++
++	mac_mace_device = platform_device_alloc(mac_mace_string, 0);
++	if (!mac_mace_device)
++	goto out_unregister;
++
++	if (platform_device_add(mac_mace_device)) {
++		platform_device_put(mac_mace_device);
++		mac_mace_device = NULL;
++	}
++
++	return 0;
++
++out_unregister:
++	platform_driver_unregister(&mac_mace_driver);
++
++	return -ENOMEM;
++}
++
++static void __exit mac_mace_cleanup_module(void)
++{
++	platform_driver_unregister(&mac_mace_driver);
++
++	if (mac_mace_device) {
++		platform_device_unregister(mac_mace_device);
++		mac_mace_device = NULL;
++		}
++	}
++
++module_init(mac_mace_init_module);
++module_exit(mac_mace_cleanup_module);
+diff -urN linux-2.6.18.orig/drivers/net/Space.c linux-2.6.18/drivers/net/Space.c
+--- linux-2.6.18.orig/drivers/net/Space.c	2007-01-14 21:24:24.000000000 +0100
++++ linux-2.6.18/drivers/net/Space.c	2007-01-14 21:21:07.000000000 +0100
+@@ -87,7 +87,6 @@
+ extern struct net_device *mvme147lance_probe(int unit);
+ extern struct net_device *tc515_probe(int unit);
+ extern struct net_device *lance_probe(int unit);
+-extern struct net_device *mace_probe(int unit);
+ extern struct net_device *mac8390_probe(int unit);
+ extern struct net_device *mac89x0_probe(int unit);
+ extern struct net_device *mc32_probe(int unit);
+@@ -287,9 +286,6 @@
+ #ifdef CONFIG_MVME147_NET	/* MVME147 internal Ethernet */
+ 	{mvme147lance_probe, 0},
+ #endif
+-#ifdef CONFIG_MACMACE		/* Mac 68k Quadra AV builtin Ethernet */
+-	{mace_probe, 0},
+-#endif
+ #ifdef CONFIG_MAC8390           /* NuBus NS8390-based cards */
+ 	{mac8390_probe, 0},
+ #endif
