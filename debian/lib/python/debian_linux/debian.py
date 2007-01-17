@@ -24,7 +24,6 @@ def read_changelog(dir = ''):
 """, re.VERBOSE)
     f = file(os.path.join(dir, "debian/changelog"))
     entries = []
-    act_upstream = None
     while True:
         line = f.readline()
         if not line:
@@ -39,10 +38,6 @@ def read_changelog(dir = ''):
             e['Source'] = match.group('header_source')
             version = parse_version(match.group('header_version'))
             e['Version'] = version
-            if act_upstream is None:
-                act_upstream = version['upstream']
-            elif version['upstream'] != act_upstream:
-                break
             entries.append(e)
     return entries
 
@@ -85,6 +80,9 @@ def parse_version_linux(version):
             )
         )?
     )
+    (?:
+        \.dfsg\.\d+
+    )?
     -
     (?P<debian>[^-]+)
 )
@@ -93,12 +91,7 @@ $
     match = re.match(version_re, version, re.X)
     if match is None:
         raise ValueError
-    ret = match.groupdict()
-    if ret['parent'] is not None:
-        ret['source_upstream'] = ret['parent'] + ret['upstream']
-    else:
-        ret['source_upstream'] = ret['upstream']
-    return ret
+    return match.groupdict()
 
 class package_description(object):
     __slots__ = "short", "long"

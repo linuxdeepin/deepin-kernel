@@ -7,7 +7,6 @@ from debian_linux.debian import *
 class gencontrol(debian_linux.gencontrol.gencontrol):
     def __init__(self):
         super(gencontrol, self).__init__()
-        self.changelog = read_changelog()
         self.process_changelog()
 
     def do_main_setup(self, vars, makeflags, extra):
@@ -218,8 +217,9 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         vars = {
             'home': '/usr/src/kernel-patches/all/%s/debian' % self.version['linux']['upstream'],
             'revisions': ' '.join([i['Version']['debian'] for i in self.changelog[::-1]]),
+            'source': "%(upstream)s-%(debian)s" % self.version['linux'],
+            'upstream': self.version['linux']['upstream'],
         }
-        vars.update(self.version['linux'])
 
         apply = self.substitute(apply, vars)
         unpatch = self.substitute(unpatch, vars)
@@ -228,6 +228,14 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         file('debian/bin/patch.unpatch', 'w').write(unpatch)
 
     def process_changelog(self):
+        in_changelog = read_changelog()
+        act_upstream = in_changelog[0]['Version']['linux']['upstream']
+        changelog = []
+        for i in in_changelog:
+            if i['Version']['linux']['upstream'] != act_upstream:
+                break
+            changelog.append(i)
+        self.changelog = changelog
         self.version = self.changelog[0]['Version']
         if self.version['linux']['modifier'] is not None:
             self.abiname = ''
@@ -250,12 +258,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
 
     def process_real_tree(self, in_entry, vars):
         entry = self.process_package(in_entry, vars)
-        tmp = self.changelog[0]['Version']['linux']['upstream']
-        versions = []
-        for i in self.changelog:
-            if i['Version']['linux']['upstream'] != tmp:
-                break
-            versions.insert(0, i['Version']['linux'])
+        versions = [i['Version']['linux'] for i in self.changelog[::-1]]
         for i in (('Depends', 'Provides')):
             value = package_relation_list()
             value.extend(entry.get(i, []))

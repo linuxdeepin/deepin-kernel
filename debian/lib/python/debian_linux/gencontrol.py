@@ -241,7 +241,7 @@ class gencontrol(object):
         return {
             'upstreamversion': version['linux']['upstream'],
             'version': version['linux']['version'],
-            'source_upstream': version['linux']['source_upstream'],
+            'source_upstream': version['upstream'],
             'major': version['linux']['major'],
             'abiname': abiname,
         }
