@@ -1,0 +1,73 @@
+From 658fdbef66e5e9be79b457edc2cbbb3add840aa9 Mon Sep 17 00:00:00 2001
+From: Chuck Ebbert <76306.1226@compuserve.com>
+To: linux-stable <stable@kernel.org>
+Message-ID: <200612152142_MC3-1-D531-A859@compuserve.com>
+Date: Tue, 26 Sep 2006 10:52:41 +0200
+Subject: Don't leak NT bit into next task
+
+From: Andi Kleen <ak@suse.de>
+
+SYSENTER can cause a NT to be set which might cause crashes on the IRET
+in the next task.
+
+Following similar i386 patch from Linus.
+
+Signed-off-by: Andi Kleen <ak@suse.de>
+[backport from Chuck Ebbert]
+Signed-off-by: Chuck Ebbert <76306.1226@compuserve.com>
+Signed-off-by: Chris Wright <chrisw@sous-sol.org>
+---
+ arch/x86_64/kernel/entry.S   |    4 ++++
+ arch/x86_64/kernel/setup64.c |    4 ++++
+ include/asm-x86_64/system.h  |    5 +++--
+ 3 files changed, 11 insertions(+), 2 deletions(-)
+
+--- linux-2.6.18.6.orig/arch/x86_64/kernel/entry.S
++++ linux-2.6.18.6/arch/x86_64/kernel/entry.S
+@@ -146,6 +146,10 @@
+ /* rdi:	prev */	
+ ENTRY(ret_from_fork)
+ 	CFI_DEFAULT_STACK
++	push kernel_eflags(%rip)
++	CFI_ADJUST_CFA_OFFSET 4
++	popf				# reset kernel eflags
++	CFI_ADJUST_CFA_OFFSET -4
+ 	call schedule_tail
+ 	GET_THREAD_INFO(%rcx)
+ 	testl $(_TIF_SYSCALL_TRACE|_TIF_SYSCALL_AUDIT),threadinfo_flags(%rcx)
+--- linux-2.6.18.6.orig/arch/x86_64/kernel/setup64.c
++++ linux-2.6.18.6/arch/x86_64/kernel/setup64.c
+@@ -178,6 +178,8 @@ void __cpuinit check_efer(void)
+         }       
+ }
+ 
++unsigned long kernel_eflags;
++
+ /*
+  * cpu_init() initializes state that is per-CPU. Some data is already
+  * initialized (naturally) in the bootstrap process, such as the GDT
+@@ -290,4 +292,6 @@ void __cpuinit cpu_init (void)
+ 	set_debugreg(0UL, 7);
+ 
+ 	fpu_init(); 
++
++	raw_local_save_flags(kernel_eflags);
+ }
+--- linux-2.6.18.6.orig/include/asm-x86_64/system.h
++++ linux-2.6.18.6/include/asm-x86_64/system.h
+@@ -14,12 +14,13 @@
+ #define __RESTORE(reg,offset) "movq (14-" #offset ")*8(%%rsp),%%" #reg "\n\t"
+ 
+ /* frame pointer must be last for get_wchan */
+-#define SAVE_CONTEXT    "pushq %%rbp ; movq %%rsi,%%rbp\n\t"
+-#define RESTORE_CONTEXT "movq %%rbp,%%rsi ; popq %%rbp\n\t"
++#define SAVE_CONTEXT    "pushf ; pushq %%rbp ; movq %%rsi,%%rbp\n\t"
++#define RESTORE_CONTEXT "movq %%rbp,%%rsi ; popq %%rbp ; popf\t"
+ 
+ #define __EXTRA_CLOBBER  \
+ 	,"rcx","rbx","rdx","r8","r9","r10","r11","r12","r13","r14","r15"
+ 
++/* Save restore flags to clear handle leaking NT */
+ #define switch_to(prev,next,last) \
+ 	asm volatile(SAVE_CONTEXT						    \
+ 		     "movq %%rsp,%P[threadrsp](%[prev])\n\t" /* save RSP */	  \
