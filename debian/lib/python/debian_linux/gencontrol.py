@@ -202,6 +202,7 @@ class gencontrol(object):
             for in_item in in_groups:
                 item = package_relation()
                 item.name = self.substitute(in_item.name, vars)
+                item.operator = in_item.operator
                 if in_item.version is not None:
                     item.version = self.substitute(in_item.version, vars)
                 item.arches = in_item.arches
@@ -240,7 +241,7 @@ class gencontrol(object):
         return {
             'upstreamversion': version['linux']['upstream'],
             'version': version['linux']['version'],
-            'source_upstream': version['linux']['source_upstream'],
+            'source_upstream': version['upstream'],
             'major': version['linux']['major'],
             'abiname': abiname,
         }

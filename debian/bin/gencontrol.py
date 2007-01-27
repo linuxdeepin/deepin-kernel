@@ -7,7 +7,6 @@ from debian_linux.debian import *
 class gencontrol(debian_linux.gencontrol.gencontrol):
     def __init__(self):
         super(gencontrol, self).__init__()
-        self.changelog = read_changelog()
         self.process_changelog()
 
     def do_main_setup(self, vars, makeflags, extra):
@@ -91,15 +90,13 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
             ('kpkg-arch', 'KPKG_ARCH'),
             ('kpkg-subarch', 'KPKG_SUBARCH'),
             ('localversion', 'LOCALVERSION'),
+            ('override-host-type', 'OVERRIDE_HOST_TYPE'),
             ('type', 'TYPE'),
         ):
             if vars.has_key(i[0]):
                 makeflags[i[1]] = vars[i[0]]
 
     def do_flavour_packages(self, packages, makefile, arch, subarch, flavour, vars, makeflags, extra):
-        image_type_modulesextra = self.templates["control.image.type-modulesextra"]
-        image_type_modulesinline = self.templates["control.image.type-modulesinline"]
-        image_type_standalone = self.templates["control.image.type-standalone"]
         headers = self.templates["control.headers"]
 
         config_entry_base = self.config.merge('base', arch, subarch, flavour)
@@ -113,23 +110,34 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
                 item.arches = [arch]
         packages['source']['Build-Depends'].extend(relations_compiler_build_dep)
 
-        image_depends = package_relation_list()
+        image_relations = {
+            'conflicts': package_relation_list(),
+            'depends': package_relation_list(),
+        }
         if vars.get('initramfs', True):
             generators = vars['initramfs-generators']
             config_entry_commands_initramfs = self.config.merge('commands-image-initramfs-generators', arch, subarch, flavour)
             commands = [config_entry_commands_initramfs[i] for i in generators if config_entry_commands_initramfs.has_key(i)]
             makeflags['INITRD_CMD'] = ' '.join(commands)
-            l = package_relation_group()
-            l.extend(generators)
-            image_depends.append(l)
+            l_depends = package_relation_group()
+            for i in generators:
+                i = config_entry_relations.get(i, i)
+                l_depends.append(i)
+                a = package_relation(i)
+                if a.operator is not None:
+                    a.operator = -a.operator
+                    image_relations['conflicts'].append(package_relation_group([a]))
+            image_relations['depends'].append(l_depends)
 
         packages_dummy = []
         packages_own = []
 
         if vars['type'] == 'plain-s390-tape':
-            image = image_type_standalone
+            image = self.templates["control.image.type-standalone"]
+            build_modules = False
         elif vars['type'] == 'plain-xen':
-            image = image_type_modulesextra
+            image = self.templates["control.image.type-modulesextra"]
+            build_modules = True
             config_entry_xen = self.config.merge('xen', arch, subarch, flavour)
             p = self.process_packages(self.templates['control.xen-linux-system'], vars)
             l = package_relation_group()
@@ -139,15 +147,17 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
             p[0]['Depends'].append(l)
             packages_dummy.extend(p)
         else:
-            image = image_type_modulesinline
+            build_modules = True
+            image = self.templates["control.image.type-%s" % vars['type']]
+            #image = self.templates["control.image.type-modulesinline"]
 
         if not vars.has_key('desc'):
             vars['desc'] = None
 
-        packages_own.append(self.process_real_image(image[0], {'depends': image_depends}, config_entry_relations, vars))
+        packages_own.append(self.process_real_image(image[0], image_relations, config_entry_relations, vars))
         packages_own.extend(self.process_packages(image[1:], vars))
 
-        if image in (image_type_modulesextra, image_type_modulesinline):
+        if build_modules:
             makeflags['MODULES'] = True
             package_headers = self.process_package(headers[0], vars)
             package_headers['Depends'].extend(relations_compiler)
@@ -207,8 +217,9 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         vars = {
             'home': '/usr/src/kernel-patches/all/%s/debian' % self.version['linux']['upstream'],
             'revisions': ' '.join([i['Version']['debian'] for i in self.changelog[::-1]]),
+            'source': "%(upstream)s-%(debian)s" % self.version['linux'],
+            'upstream': self.version['linux']['upstream'],
         }
-        vars.update(self.version['linux'])
 
         apply = self.substitute(apply, vars)
         unpatch = self.substitute(unpatch, vars)
@@ -217,6 +228,14 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         file('debian/bin/patch.unpatch', 'w').write(unpatch)
 
     def process_changelog(self):
+        in_changelog = read_changelog()
+        act_upstream = in_changelog[0]['Version']['linux']['upstream']
+        changelog = []
+        for i in in_changelog:
+            if i['Version']['linux']['upstream'] != act_upstream:
+                break
+            changelog.append(i)
+        self.changelog = changelog
         self.version = self.changelog[0]['Version']
         if self.version['linux']['modifier'] is not None:
             self.abiname = ''
@@ -239,12 +258,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
 
     def process_real_tree(self, in_entry, vars):
         entry = self.process_package(in_entry, vars)
-        tmp = self.changelog[0]['Version']['linux']['upstream']
-        versions = []
-        for i in self.changelog:
-            if i['Version']['linux']['upstream'] != tmp:
-                break
-            versions.insert(0, i['Version']['linux'])
+        versions = [i['Version']['linux'] for i in self.changelog[::-1]]
         for i in (('Depends', 'Provides')):
             value = package_relation_list()
             value.extend(entry.get(i, []))
