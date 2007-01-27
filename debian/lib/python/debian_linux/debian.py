@@ -1,51 +1,51 @@
 import itertools, os.path, re, utils
 
-def read_changelog(dir = '', version = None):
-    r = re.compile(r"""
+class Changelog(list):
+    _rules = r"""
 ^
-(
-(?P<header>
-    (?P<header_source>
-        \w[-+0-9a-z.]+
-    )
-    \ 
-    \(
-    (?P<header_version>
-        [^\(\)\ \t]+
-    )
-    \)
-    \s+
-    (?P<header_distribution>
-        [-0-9a-zA-Z]+
-    )
-    \;
+(?P<source>
+    \w[-+0-9a-z.]+
 )
+\ 
+\(
+(?P<version>
+    [^\(\)\ \t]+
 )
-""", re.VERBOSE)
-    if version is None:
-        version = Version
-    f = file(os.path.join(dir, "debian/changelog"))
-    entries = []
-    while True:
-        line = f.readline()
-        if not line:
-            break
-        line = line.strip('\n')
-        match = r.match(line)
-        if not match:
-            continue
-        if match.group('header'):
-            e = {}
-            e['Distribution'] = match.group('header_distribution')
-            e['Source'] = match.group('header_source')
-            try:
-                e['Version'] = version(match.group('header_version'))
-            except Exception:
-                if not len(entries):
-                    raise
-                e['Version'] = Version(match.group('header_version'))
-            entries.append(e)
-    return entries
+\)
+\s+
+(?P<distribution>
+    [-0-9a-zA-Z]+
+)
+\;
+"""
+    _re = re.compile(_rules, re.X)
+
+    class Entry(object):
+        __slot__ = 'distribution', 'source', 'version'
+
+        def __init__(self, distribution, source, version):
+            self.distribution, self.source, self.version = distribution, source, version
+
+    def __init__(self, dir = '', version = None):
+        if version is None:
+            version = Version
+        f = file(os.path.join(dir, "debian/changelog"))
+        while True:
+            line = f.readline()
+            if not line:
+                break
+            line = line.strip('\n')
+            match = self._re.match(line)
+            if not match:
+                continue
+            if match.group('version'):
+                try:
+                    v = version(match.group('version'))
+                except Exception:
+                    if not len(self):
+                        raise
+                    v = Version(match.group('version'))
+                self.append(self.Entry(match.group('distribution'), match.group('source'), v))
 
 class Version(object):
     _version_rules = ur"""
