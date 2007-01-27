@@ -138,17 +138,3 @@ class wrap(textwrap.TextWrapper):
         r'(\s+|'                                  # any whitespace
         r'(?<=[\w\!\"\'\&\.\,\?])-{2,}(?=\w))')   # em-dash
 
-def rmtree(dir):
-    import os, os.path, stat
-    for root, dirs, files in os.walk(dir, topdown=False):
-        for name in files:
-            os.remove(os.path.join(root, name))
-        for name in dirs:
-            real = os.path.join(root, name)
-            mode = os.lstat(real)[stat.ST_MODE]
-            if stat.S_ISDIR(mode):
-                os.rmdir(real)
-            else:
-                os.remove(real)
-    os.rmdir(dir)
-
