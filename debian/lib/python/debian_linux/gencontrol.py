@@ -60,9 +60,9 @@ class gencontrol(object):
 
     def do_main_setup(self, vars, makeflags, extra):
         makeflags.update({
-            'MAJOR': self.version['linux']['major'],
-            'VERSION': self.version['linux']['version'],
-            'UPSTREAMVERSION': self.version['linux']['upstream'],
+            'MAJOR': self.version.linux_major,
+            'VERSION': self.version.linux_version,
+            'UPSTREAMVERSION': self.version.linux_upstream,
             'ABINAME': self.abiname,
         })
 
@@ -239,10 +239,10 @@ class gencontrol(object):
 
     def process_version_linux(self, version, abiname):
         return {
-            'upstreamversion': version['linux']['upstream'],
-            'version': version['linux']['version'],
-            'source_upstream': version['upstream'],
-            'major': version['linux']['major'],
+            'upstreamversion': version.linux_upstream,
+            'version': version.linux_version,
+            'source_upstream': version.upstream,
+            'major': version.linux_major,
             'abiname': abiname,
         }
 

@@ -13,7 +13,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         super(gencontrol, self).do_main_setup(vars, makeflags, extra)
         vars.update(self.config['image',])
         makeflags.update({
-            'SOURCEVERSION': self.version['linux']['source'],
+            'SOURCEVERSION': self.version.complete,
         })
 
     def do_main_packages(self, packages, extra):
@@ -215,10 +215,10 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         unpatch = self.templates['patch.unpatch']
 
         vars = {
-            'home': '/usr/src/kernel-patches/all/%s/debian' % self.version['linux']['upstream'],
-            'revisions': ' '.join([i['Version']['debian'] for i in self.changelog[::-1]]),
-            'source': "%(upstream)s-%(debian)s" % self.version['linux'],
-            'upstream': self.version['linux']['upstream'],
+            'home': '/usr/src/kernel-patches/all/%s/debian' % self.version.linux_upstream,
+            'revisions': ' '.join([i['Version'].debian for i in self.changelog[::-1]]),
+            'source': "%(linux_upstream)s-%(debian)s" % self.version.__dict__,
+            'upstream': self.version.linux_upstream,
         }
 
         apply = self.substitute(apply, vars)
@@ -228,16 +228,16 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         file('debian/bin/patch.unpatch', 'w').write(unpatch)
 
     def process_changelog(self):
-        in_changelog = read_changelog()
-        act_upstream = in_changelog[0]['Version']['linux']['upstream']
+        in_changelog = read_changelog(version = VersionLinux)
+        act_upstream = in_changelog[0]['Version'].linux_upstream
         changelog = []
         for i in in_changelog:
-            if i['Version']['linux']['upstream'] != act_upstream:
+            if i['Version'].linux_upstream != act_upstream:
                 break
             changelog.append(i)
         self.changelog = changelog
         self.version = self.changelog[0]['Version']
-        if self.version['linux']['modifier'] is not None:
+        if self.version.linux_modifier is not None:
             self.abiname = ''
         else:
             self.abiname = '-%s' % self.config['abi',]['abiname']
@@ -258,15 +258,15 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
 
     def process_real_tree(self, in_entry, vars):
         entry = self.process_package(in_entry, vars)
-        versions = [i['Version']['linux'] for i in self.changelog[::-1]]
+        versions = [i['Version'] for i in self.changelog[::-1]]
         for i in (('Depends', 'Provides')):
             value = package_relation_list()
             value.extend(entry.get(i, []))
             if i == 'Depends':
-                value.append("linux-patch-debian-%(version)s (= %(source)s)" % self.changelog[0]['Version']['linux'])
-                value.append(' | '.join(["linux-source-%(version)s (= %(source)s)" % v for v in versions]))
+                value.append("linux-patch-debian-%(linux_version)s (= %(complete)s)" % self.changelog[0]['Version'].__dict__)
+                value.append(' | '.join(["linux-source-%(linux_version)s (= %(complete)s)" % v.__dict__ for v in versions]))
             elif i == 'Provides':
-                value.extend(["linux-tree-%s" % v['source'].replace('~', '-') for v in versions])
+                value.extend(["linux-tree-%s" % v.complete.replace('~', '-') for v in versions])
             entry[i] = value
         return entry
 

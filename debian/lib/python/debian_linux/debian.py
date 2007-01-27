@@ -1,6 +1,6 @@
 import itertools, os.path, re, utils
 
-def read_changelog(dir = ''):
+def read_changelog(dir = '', version = None):
     r = re.compile(r"""
 ^
 (
@@ -22,6 +22,8 @@ def read_changelog(dir = ''):
 )
 )
 """, re.VERBOSE)
+    if version is None:
+        version = Version
     f = file(os.path.join(dir, "debian/changelog"))
     entries = []
     while True:
@@ -36,58 +38,91 @@ def read_changelog(dir = ''):
             e = {}
             e['Distribution'] = match.group('header_distribution')
             e['Source'] = match.group('header_source')
-            version = parse_version(match.group('header_version'))
-            e['Version'] = version
+            try:
+                e['Version'] = version(match.group('header_version'))
+            except Exception:
+                if not len(entries):
+                    raise
+                e['Version'] = Version(match.group('header_version'))
             entries.append(e)
     return entries
 
-def parse_version(version):
-    ret = {
-        'complete': version,
-        'upstream': version,
-        'debian': None,
-        'linux': None,
-    }
-    try:
-        i = len(version) - version[::-1].index('-')
-    except ValueError:
-        return ret
-    ret['upstream'] = version[:i-1]
-    ret['debian'] = version[i:]
-    try:
-        ret['linux'] = parse_version_linux(version)
-    except ValueError:
-        pass
-    return ret
-
-def parse_version_linux(version):
-    version_re = ur"""
+class Version(object):
+    _version_rules = ur"""
 ^
-(?P<source>
-    (?P<version>
-        (?P<major>\d+\.\d+)
-        \.
+(
+    (?P<epoch>
         \d+
     )
-    (?:
-        ~
-        (?P<modifier>
-            .+?
-        )
-    )?
-    (?:
-        \.dfsg\.\d+
-    )?
+    :
+)?
+(?P<upstream>
+    .+?
+)   
+(
     -
     (?P<debian>[^-]+)
-)
+)?
 $
 """
-    match = re.match(version_re, version, re.X)
-    if match is None:
-        raise ValueError
-    return match.groupdict()
+    _version_re = re.compile(_version_rules, re.X)
 
+    def __init__(self, version):
+        match = self._version_re.match(version)
+        if match is None:
+            raise RuntimeError, "Invalid debian version"
+        self.complete = version
+        self.epoch = None
+        if match.group("epoch") is not None:
+            self.epoch = int(match.group("epoch"))
+        self.upstream = match.group("upstream")
+        self.debian = match.group("debian")
+
+        if self.debian is not None:
+            self.complete_noepoch = "%s-%s" % (self.upstream, self.debian)
+        else:
+            self.complete_noepoch = self.upstream
+
+    def __str__(self):
+        return self.complete
+
+class VersionLinux(Version):
+    _version_linux_rules = ur"""
+^
+(?P<version>
+    (?P<major>\d+\.\d+)
+    \.
+    \d+
+)
+(?:
+    ~
+    (?P<modifier>
+        .+?
+    )
+)?
+(?:
+    \.dfsg\.\d+
+)?
+-
+(?:[^-]+)
+$
+"""
+    _version_linux_re = re.compile(_version_linux_rules, re.X)
+
+    def __init__(self, version):
+        super(VersionLinux, self).__init__(version)
+        match = self._version_linux_re.match(version)
+        if match is None:
+            raise RuntimeError, "Invalid debian linux version"
+        d = match.groupdict()
+        self.linux_major = d['major']
+        self.linux_modifier = d['modifier']
+        self.linux_version = d['version']
+        if d['modifier'] is not None:
+            self.linux_upstream = '-'.join((d['version'], d['modifier']))
+        else:
+            self.linux_upstream = d['version']
+ 
 class package_description(object):
     __slots__ = "short", "long"
 
