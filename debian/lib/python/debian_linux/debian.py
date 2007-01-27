@@ -50,7 +50,7 @@ def read_changelog(dir = '', version = None):
 class Version(object):
     _version_rules = ur"""
 ^
-(
+(?:
     (?P<epoch>
         \d+
     )
@@ -59,7 +59,7 @@ class Version(object):
 (?P<upstream>
     .+?
 )   
-(
+(?:
     -
     (?P<debian>[^-]+)
 )?
