@@ -37,10 +37,10 @@ class gencontrol(object):
 
     def do_main(self, packages, makefile):
         makeflags = {
-            'VERSION': self.version['version'],
-            'SOURCE_UPSTREAM': self.version['source_upstream'],
-            'SOURCEVERSION': self.version['source'],
-            'UPSTREAMVERSION': self.version['upstream'],
+            'VERSION': self.version['linux']['version'],
+            'SOURCE_UPSTREAM': self.version['upstream'],
+            'SOURCEVERSION': self.version['linux']['source'],
+            'UPSTREAMVERSION': self.version['linux']['upstream'],
         }
 
         vars = self.changelog_vars.copy()
@@ -68,10 +68,10 @@ class gencontrol(object):
         ret = [None, None]
         ret[0] = version = self.changelog[0]['Version']
         vars = in_vars.copy()
-        vars['upstreamversion'] = version['upstream']
-        vars['version'] = version['version']
-        vars['source_upstream'] = version['source_upstream']
-        vars['major'] = version['major']
+        vars['upstreamversion'] = version['linux']['upstream']
+        vars['version'] = version['linux']['version']
+        vars['source_upstream'] = version['upstream']
+        vars['major'] = version['linux']['major']
         ret[1] = vars
         return ret
 

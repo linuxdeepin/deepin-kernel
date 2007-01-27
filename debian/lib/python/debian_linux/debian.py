@@ -47,25 +47,39 @@ def read_changelog(dir = ''):
     return entries
 
 def parse_version(version):
+    ret = {
+        'complete': version,
+        'upstream': version,
+        'debian': None,
+        'linux': None,
+    }
+    try:
+        i = len(version) - version[::-1].index('-')
+    except ValueError:
+        return ret
+    ret['upstream'] = version[:i-1]
+    ret['debian'] = version[i:]
+    try:
+        ret['linux'] = parse_version_linux(version)
+    except ValueError:
+        pass
+    return ret
+
+def parse_version_linux(version):
     version_re = ur"""
 ^
 (?P<source>
-    (?P<parent>
-        \d+\.\d+\.\d+\+
-    )?
-    (?P<upstream>
-        (?P<version>
-            (?P<major>\d+\.\d+)
-            \.
-            \d+
-        )
-        (?:
-            -
-            (?P<modifier>
-                .+?
-            )
-        )?
+    (?P<version>
+        (?P<major>\d+\.\d+)
+        \.
+        \d+
     )
+    (?:
+        ~
+        (?P<modifier>
+            .+?
+        )
+    )?
     -
     (?P<debian>[^-]+)
 )
@@ -75,22 +89,24 @@ $
     if match is None:
         raise ValueError
     ret = match.groupdict()
-    if ret['parent'] is not None:
-        ret['source_upstream'] = ret['parent'] + ret['upstream']
+    if ret['modifier'] is not None:
+        ret['upstream'] = '%s-%s' % (ret['version'], ret['modifier'])
+        ret['source_upstream'] = '%s~%s' % (ret['version'], ret['modifier'])
     else:
-        ret['source_upstream'] = ret['upstream']
+        ret['upstream'] = ret['version']
+        ret['source_upstream'] = ret['version']
     return ret
 
 class package_description(object):
     __slots__ = "short", "long"
 
     def __init__(self, value = None):
+        self.long = []
         if value is not None:
-            self.short, long = value.split ("\n", 1)
-            self.long = long.split ("\n.\n")
+            self.short, long = value.split("\n", 1)
+            self.append(long)
         else:
             self.short = None
-            self.long = []
 
     def __str__(self):
         ret = self.short + '\n'
@@ -100,6 +116,11 @@ class package_description(object):
             pars.append('\n '.join(w.wrap(i)))
         return self.short + '\n ' + '\n .\n '.join(pars)
 
+    def append(self, str):
+        str = str.strip()
+        if str:
+            self.long.extend(str.split("\n.\n"))
+
 class package_relation(object):
     __slots__ = "name", "version", "arches"
 
@@ -107,16 +128,7 @@ class package_relation(object):
 
     def __init__(self, value = None):
         if value is not None:
-            match = self._re.match(value)
-            if match is None:
-                raise RuntimeError, "Can't parse dependency %s" % value
-            match = match.groups()
-            self.name = match[0]
-            self.version = match[1]
-            if match[2] is not None:
-                self.arches = re.split('\s+', match[2])
-            else:
-                self.arches = []
+            self.parse(value)
         else:
             self.name = None
             self.version = None
@@ -130,11 +142,29 @@ class package_relation(object):
             ret.extend([' [', ' '.join(self.arches), ']'])
         return ''.join(ret)
 
+    def config(self, entry):
+        if self.version is not None or self.arches:
+            return
+        value = entry.get(self.name, None)
+        if value is None:
+            return
+        self.parse(value)
+
+    def parse(self, value):
+        match = self._re.match(value)
+        if match is None:
+            raise RuntimeError, "Can't parse dependency %s" % value
+        match = match.groups()
+        self.name = match[0]
+        self.version = match[1]
+        if match[2] is not None:
+            self.arches = re.split('\s+', match[2])
+        else:
+            self.arches = []
+
 class package_relation_list(list):
     def __init__(self, value = None):
-        if isinstance(value, (list, tuple)):
-            self.extend(value)
-        elif value is not None:
+        if value is not None:
             self.extend(value)
 
     def __str__(self):
@@ -146,30 +176,36 @@ class package_relation_list(list):
                 return i
         return None
 
+    def append(self, value):
+        if isinstance(value, basestring):
+            value = package_relation_group(value)
+        elif not isinstance(value, package_relation_group):
+            raise ValueError, "got %s" % type(value)
+        j = self._match(value)
+        if j:
+            j._update_arches(value)
+        else:
+            super(package_relation_list, self).append(value)
+
+    def config(self, entry):
+        for i in self:
+            i.config(entry)
+
     def extend(self, value):
         if isinstance(value, basestring):
-            value = [package_relation_group(j.strip()) for j in re.split(',', value.strip())]
+            value = [j.strip() for j in re.split(',', value.strip())]
+        elif not isinstance(value, (list, tuple)):
+            raise ValueError, "got %s" % type(value)
         for i in value:
-            if isinstance(i, basestring):
-                i = package_relation_group(i)
-            j = self._match(i)
-            if j:
-                j._update_arches(i)
-            else:
-                self.append(i)
+            self.append(i)
 
 class package_relation_group(list):
     def __init__(self, value = None):
-        if isinstance(value, package_relation_list):
+        if value is not None:
             self.extend(value)
-        elif value is not None:
-            self._extend(value)
 
     def __str__(self):
         return ' | '.join([str(i) for i in self])
-
-    def _extend(self, value):
-        self.extend([package_relation(j.strip()) for j in re.split('\|', value.strip())])
 
     def _match(self, value):
         for i, j in itertools.izip(self, value):
@@ -183,6 +219,25 @@ class package_relation_group(list):
                 for arch in j.arches:
                     if arch not in i.arches:
                         i.arches.append(arch)
+
+    def append(self, value):
+        if isinstance(value, basestring):
+            value = package_relation(value)
+        elif not isinstance(value, package_relation):
+            raise ValueError
+        super(package_relation_group, self).append(value)
+
+    def config(self, entry):
+        for i in self:
+            i.config(entry)
+
+    def extend(self, value):
+        if isinstance(value, basestring):
+            value = [j.strip() for j in re.split('\|', value.strip())]
+        elif not isinstance(value, (list, tuple)):
+            raise ValueError
+        for i in value:
+            self.append(i)
 
 class package(dict):
     _fields = utils.sorted_dict((
@@ -202,7 +257,6 @@ class package(dict):
         ('Suggests', package_relation_list),
         ('Replaces', package_relation_list),
         ('Conflicts', package_relation_list),
-        ('Reverse-Depends', package_relation_list), # Some sort of hack
         ('Description', package_description),
     ))
 
@@ -215,17 +269,29 @@ class package(dict):
         super(package, self).__setitem__(key, value)
 
     def iterkeys(self):
+        keys = set(self.keys())
         for i in self._fields.iterkeys():
-            if self.has_key(i) and self[i]:
+            if self.has_key(i):
+                keys.remove(i)
                 yield i
+        for i in keys:
+            yield i
 
     def iteritems(self):
+        keys = set(self.keys())
         for i in self._fields.iterkeys():
-            if self.has_key(i) and self[i]:
+            if self.has_key(i):
+                keys.remove(i)
                 yield (i, self[i])
+        for i in keys:
+            yield (i, self[i])
 
     def itervalues(self):
+        keys = set(self.keys())
         for i in self._fields.iterkeys():
-            if self.has_key(i) and self[i]:
+            if self.has_key(i):
+                keys.remove(i)
                 yield self[i]
+        for i in keys:
+            yield self[i]
 
