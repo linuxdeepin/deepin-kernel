@@ -347,20 +347,10 @@ class package(dict):
             yield i
 
     def iteritems(self):
-        keys = set(self.keys())
-        for i in self._fields.iterkeys():
-            if self.has_key(i):
-                keys.remove(i)
-                yield (i, self[i])
-        for i in keys:
+        for i in self.iterkeys():
             yield (i, self[i])
 
     def itervalues(self):
-        keys = set(self.keys())
-        for i in self._fields.iterkeys():
-            if self.has_key(i):
-                keys.remove(i)
-                yield self[i]
-        for i in keys:
+        for i in self.iterkeys():
             yield self[i]
 
