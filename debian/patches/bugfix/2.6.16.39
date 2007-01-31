@@ -1,0 +1,887 @@
+diff --git a/arch/i386/kernel/smpboot.c b/arch/i386/kernel/smpboot.c
+index 7007e17..f04ff35 100644
+--- a/arch/i386/kernel/smpboot.c
++++ b/arch/i386/kernel/smpboot.c
+@@ -1054,7 +1054,7 @@ int __devinit smp_prepare_cpu(int cpu)
+ 
+ 	/* init low mem mapping */
+ 	clone_pgd_range(swapper_pg_dir, swapper_pg_dir + USER_PGD_PTRS,
+-			KERNEL_PGD_PTRS);
++			min_t(unsigned long, KERNEL_PGD_PTRS, USER_PGD_PTRS));
+ 	flush_tlb_all();
+ 	schedule_work(&task);
+ 	wait_for_completion(&done);
+diff --git a/arch/sparc/kernel/ioport.c b/arch/sparc/kernel/ioport.c
+index d39c9f2..aa07df5 100644
+--- a/arch/sparc/kernel/ioport.c
++++ b/arch/sparc/kernel/ioport.c
+@@ -581,7 +581,8 @@ int pci_map_sg(struct pci_dev *hwdev, struct scatterlist *sg, int nents,
+ 	/* IIep is write-through, not flushing. */
+ 	for (n = 0; n < nents; n++) {
+ 		BUG_ON(page_address(sg->page) == NULL);
+-		sg->dvma_address = virt_to_phys(page_address(sg->page));
++		sg->dvma_address =
++			virt_to_phys(page_address(sg->page)) + sg->offset;
+ 		sg->dvma_length = sg->length;
+ 		sg++;
+ 	}
+diff --git a/drivers/cdrom/cdrom.c b/drivers/cdrom/cdrom.c
+index e866df0..55e71b7 100644
+--- a/drivers/cdrom/cdrom.c
++++ b/drivers/cdrom/cdrom.c
+@@ -338,6 +338,12 @@ static const char *mrw_address_space[] = { "DMA", "GAA" };
+ /* used in the audio ioctls */
+ #define CHECKAUDIO if ((ret=check_for_audio_disc(cdi, cdo))) return ret
+ 
++/*
++ * Another popular OS uses 7 seconds as the hard timeout for default
++ * commands, so it is a good choice for us as well.
++ */
++#define CDROM_DEF_TIMEOUT	(7 * HZ)
++
+ /* Not-exported routines. */
+ static int open_for_data(struct cdrom_device_info * cdi);
+ static int check_for_audio_disc(struct cdrom_device_info * cdi,
+@@ -1528,7 +1534,7 @@ void init_cdrom_command(struct packet_command *cgc, void *buf, int len,
+ 	cgc->buffer = (char *) buf;
+ 	cgc->buflen = len;
+ 	cgc->data_direction = type;
+-	cgc->timeout = 5*HZ;
++	cgc->timeout = CDROM_DEF_TIMEOUT;
+ }
+ 
+ /* DVD handling */
+diff --git a/drivers/char/mem.c b/drivers/char/mem.c
+index 29c41f4..3b50f44 100644
+--- a/drivers/char/mem.c
++++ b/drivers/char/mem.c
+@@ -613,7 +613,8 @@ static inline size_t read_zero_pagealigned(char __user * buf, size_t size)
+ 			count = size;
+ 
+ 		zap_page_range(vma, addr, count, NULL);
+-        	zeromap_page_range(vma, addr, count, PAGE_COPY);
++        	if (zeromap_page_range(vma, addr, count, PAGE_COPY))
++			break;
+ 
+ 		size -= count;
+ 		buf += count;
+@@ -680,11 +681,14 @@ out:
+ 
+ static int mmap_zero(struct file * file, struct vm_area_struct * vma)
+ {
++	int err;
++
+ 	if (vma->vm_flags & VM_SHARED)
+ 		return shmem_zero_setup(vma);
+-	if (zeromap_page_range(vma, vma->vm_start, vma->vm_end - vma->vm_start, vma->vm_page_prot))
+-		return -EAGAIN;
+-	return 0;
++	err = zeromap_page_range(vma, vma->vm_start,
++			vma->vm_end - vma->vm_start, vma->vm_page_prot);
++	BUG_ON(err == -EEXIST);
++	return err;
+ }
+ #else /* CONFIG_MMU */
+ static ssize_t read_zero(struct file * file, char * buf, 
+diff --git a/drivers/ide/pci/atiixp.c b/drivers/ide/pci/atiixp.c
+index df9ee9a..1684ae0 100644
+--- a/drivers/ide/pci/atiixp.c
++++ b/drivers/ide/pci/atiixp.c
+@@ -47,6 +47,8 @@ static atiixp_ide_timing mdma_timing[] = {
+ 
+ static int save_mdma_mode[4];
+ 
++static DEFINE_SPINLOCK(atiixp_lock);
++
+ /**
+  *	atiixp_ratemask		-	compute rate mask for ATIIXP IDE
+  *	@drive: IDE drive to compute for
+@@ -106,7 +108,7 @@ static int atiixp_ide_dma_host_on(ide_drive_t *drive)
+ 	unsigned long flags;
+ 	u16 tmp16;
+ 
+-	spin_lock_irqsave(&ide_lock, flags);
++	spin_lock_irqsave(&atiixp_lock, flags);
+ 
+ 	pci_read_config_word(dev, ATIIXP_IDE_UDMA_CONTROL, &tmp16);
+ 	if (save_mdma_mode[drive->dn])
+@@ -115,7 +117,7 @@ static int atiixp_ide_dma_host_on(ide_drive_t *drive)
+ 		tmp16 |= (1 << drive->dn);
+ 	pci_write_config_word(dev, ATIIXP_IDE_UDMA_CONTROL, tmp16);
+ 
+-	spin_unlock_irqrestore(&ide_lock, flags);
++	spin_unlock_irqrestore(&atiixp_lock, flags);
+ 
+ 	return __ide_dma_host_on(drive);
+ }
+@@ -126,13 +128,13 @@ static int atiixp_ide_dma_host_off(ide_drive_t *drive)
+ 	unsigned long flags;
+ 	u16 tmp16;
+ 
+-	spin_lock_irqsave(&ide_lock, flags);
++	spin_lock_irqsave(&atiixp_lock, flags);
+ 
+ 	pci_read_config_word(dev, ATIIXP_IDE_UDMA_CONTROL, &tmp16);
+ 	tmp16 &= ~(1 << drive->dn);
+ 	pci_write_config_word(dev, ATIIXP_IDE_UDMA_CONTROL, tmp16);
+ 
+-	spin_unlock_irqrestore(&ide_lock, flags);
++	spin_unlock_irqrestore(&atiixp_lock, flags);
+ 
+ 	return __ide_dma_host_off(drive);
+ }
+@@ -153,7 +155,7 @@ static void atiixp_tuneproc(ide_drive_t *drive, u8 pio)
+ 	u32 pio_timing_data;
+ 	u16 pio_mode_data;
+ 
+-	spin_lock_irqsave(&ide_lock, flags);
++	spin_lock_irqsave(&atiixp_lock, flags);
+ 
+ 	pci_read_config_word(dev, ATIIXP_IDE_PIO_MODE, &pio_mode_data);
+ 	pio_mode_data &= ~(0x07 << (drive->dn * 4));
+@@ -166,7 +168,7 @@ static void atiixp_tuneproc(ide_drive_t *drive, u8 pio)
+ 		 (pio_timing[pio].command_width << (timing_shift + 4));
+ 	pci_write_config_dword(dev, ATIIXP_IDE_PIO_TIMING, pio_timing_data);
+ 
+-	spin_unlock_irqrestore(&ide_lock, flags);
++	spin_unlock_irqrestore(&atiixp_lock, flags);
+ }
+ 
+ /**
+@@ -190,7 +192,7 @@ static int atiixp_speedproc(ide_drive_t *drive, u8 xferspeed)
+ 
+ 	speed = ide_rate_filter(atiixp_ratemask(drive), xferspeed);
+ 
+-	spin_lock_irqsave(&ide_lock, flags);
++	spin_lock_irqsave(&atiixp_lock, flags);
+ 
+ 	save_mdma_mode[drive->dn] = 0;
+ 	if (speed >= XFER_UDMA_0) {
+@@ -209,7 +211,7 @@ static int atiixp_speedproc(ide_drive_t *drive, u8 xferspeed)
+ 		}
+ 	}
+ 
+-	spin_unlock_irqrestore(&ide_lock, flags);
++	spin_unlock_irqrestore(&atiixp_lock, flags);
+ 
+ 	if (speed >= XFER_SW_DMA_0)
+ 		pio = atiixp_dma_2_pio(speed);
+diff --git a/drivers/media/dvb/b2c2/flexcop-usb.c b/drivers/media/dvb/b2c2/flexcop-usb.c
+index a6c91db..f182a7b 100644
+--- a/drivers/media/dvb/b2c2/flexcop-usb.c
++++ b/drivers/media/dvb/b2c2/flexcop-usb.c
+@@ -246,7 +246,7 @@ static int flexcop_usb_i2c_req(struct flexcop_usb *fc_usb,
+ 	wIndex = (chipaddr << 8 ) | addr;
+ 
+ 	deb_i2c("i2c %2d: %02x %02x %02x %02x %02x %02x\n",func,request_type,req,
+-			((wValue && 0xff) << 8),wValue >> 8,((wIndex && 0xff) << 8),wIndex >> 8);
++		wValue & 0xff, wValue >> 8, wIndex & 0xff, wIndex >> 8);
+ 
+ 	len = usb_control_msg(fc_usb->udev,pipe,
+ 			req,
+diff --git a/drivers/media/dvb/dvb-core/dvb_frontend.c b/drivers/media/dvb/dvb-core/dvb_frontend.c
+index 771f32d..b7a6bc3 100644
+--- a/drivers/media/dvb/dvb-core/dvb_frontend.c
++++ b/drivers/media/dvb/dvb-core/dvb_frontend.c
+@@ -329,7 +329,7 @@ static int dvb_frontend_swzigzag_autotune(struct dvb_frontend *fe, int check_wra
+ 
+ static void dvb_frontend_swzigzag(struct dvb_frontend *fe)
+ {
+-	fe_status_t s;
++	fe_status_t s = 0;
+ 	struct dvb_frontend_private *fepriv = fe->frontend_priv;
+ 
+ 	/* if we've got no parameters, just keep idling */
+diff --git a/drivers/scsi/qla1280.c b/drivers/scsi/qla1280.c
+index e023024..6a229f1 100644
+--- a/drivers/scsi/qla1280.c
++++ b/drivers/scsi/qla1280.c
+@@ -955,11 +955,10 @@ qla1280_error_action(struct scsi_cmnd *cmd, enum action action)
+ 
+ 	case BUS_RESET:
+ 		if (qla1280_verbose)
+-			printk(KERN_INFO "qla1280(%ld:%d): Issuing BUS "
+-			       "DEVICE RESET\n", ha->host_no, bus);
+-		if (qla1280_bus_reset(ha, bus == 0))
++			printk(KERN_INFO "qla1280(%ld:%d): Issued bus "
++			       "reset.\n", ha->host_no, bus);
++		if (qla1280_bus_reset(ha, bus) == 0)
+ 			result = SUCCESS;
+-
+ 		break;
+ 
+ 	case ADAPTER_RESET:
+@@ -2886,7 +2885,7 @@ qla1280_64bit_start_scsi(struct scsi_qla_host *ha, struct srb * sp)
+ 	memset(((char *)pkt + 8), 0, (REQUEST_ENTRY_SIZE - 8));
+ 
+ 	/* Set ISP command timeout. */
+-	pkt->timeout = cpu_to_le16(30);
++	pkt->timeout = cpu_to_le16(cmd->timeout_per_command/HZ);
+ 
+ 	/* Set device target ID and LUN */
+ 	pkt->lun = SCSI_LUN_32(cmd);
+@@ -3185,7 +3184,7 @@ qla1280_32bit_start_scsi(struct scsi_qla_host *ha, struct srb * sp)
+ 	memset(((char *)pkt + 8), 0, (REQUEST_ENTRY_SIZE - 8));
+ 
+ 	/* Set ISP command timeout. */
+-	pkt->timeout = cpu_to_le16(30);
++	pkt->timeout = cpu_to_le16(cmd->timeout_per_command/HZ);
+ 
+ 	/* Set device target ID and LUN */
+ 	pkt->lun = SCSI_LUN_32(cmd);
+diff --git a/fs/adfs/dir_f.c b/fs/adfs/dir_f.c
+index bbfc862..b9b2b27 100644
+--- a/fs/adfs/dir_f.c
++++ b/fs/adfs/dir_f.c
+@@ -53,7 +53,7 @@ static inline int adfs_readname(char *buf, char *ptr, int maxlen)
+ {
+ 	char *old_buf = buf;
+ 
+-	while (*ptr >= ' ' && maxlen--) {
++	while ((unsigned char)*ptr >= ' ' && maxlen--) {
+ 		if (*ptr == '/')
+ 			*buf++ = '.';
+ 		else
+diff --git a/include/net/bluetooth/hci.h b/include/net/bluetooth/hci.h
+index b06a2d2..80a4c1b 100644
+--- a/include/net/bluetooth/hci.h
++++ b/include/net/bluetooth/hci.h
+@@ -329,6 +329,8 @@ struct hci_cp_inquiry {
+ 
+ #define OCF_INQUIRY_CANCEL	0x0002
+ 
++#define OCF_EXIT_PERIODIC_INQ	0x0004
++
+ #define OCF_LINK_KEY_REPLY	0x000B
+ struct hci_cp_link_key_reply {
+ 	bdaddr_t bdaddr;
+diff --git a/mm/memory.c b/mm/memory.c
+index a4caa2f..97f5ea3 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -1092,21 +1092,27 @@ static int zeromap_pte_range(struct mm_struct *mm, pmd_t *pmd,
+ {
+ 	pte_t *pte;
+ 	spinlock_t *ptl;
++	int err = 0;
+ 
+ 	pte = pte_alloc_map_lock(mm, pmd, addr, &ptl);
+ 	if (!pte)
+-		return -ENOMEM;
++		return -EAGAIN;
+ 	do {
+ 		struct page *page = ZERO_PAGE(addr);
+ 		pte_t zero_pte = pte_wrprotect(mk_pte(page, prot));
++
++		if (unlikely(!pte_none(*pte))) {
++			err = -EEXIST;
++			pte++;
++			break;
++		}
+ 		page_cache_get(page);
+ 		page_add_file_rmap(page);
+ 		inc_mm_counter(mm, file_rss);
+-		BUG_ON(!pte_none(*pte));
+ 		set_pte_at(mm, addr, pte, zero_pte);
+ 	} while (pte++, addr += PAGE_SIZE, addr != end);
+ 	pte_unmap_unlock(pte - 1, ptl);
+-	return 0;
++	return err;
+ }
+ 
+ static inline int zeromap_pmd_range(struct mm_struct *mm, pud_t *pud,
+@@ -1114,16 +1120,18 @@ static inline int zeromap_pmd_range(struct mm_struct *mm, pud_t *pud,
+ {
+ 	pmd_t *pmd;
+ 	unsigned long next;
++	int err;
+ 
+ 	pmd = pmd_alloc(mm, pud, addr);
+ 	if (!pmd)
+-		return -ENOMEM;
++		return -EAGAIN;
+ 	do {
+ 		next = pmd_addr_end(addr, end);
+-		if (zeromap_pte_range(mm, pmd, addr, next, prot))
+-			return -ENOMEM;
++		err = zeromap_pte_range(mm, pmd, addr, next, prot);
++		if (err)
++			break;
+ 	} while (pmd++, addr = next, addr != end);
+-	return 0;
++	return err;
+ }
+ 
+ static inline int zeromap_pud_range(struct mm_struct *mm, pgd_t *pgd,
+@@ -1131,16 +1139,18 @@ static inline int zeromap_pud_range(struct mm_struct *mm, pgd_t *pgd,
+ {
+ 	pud_t *pud;
+ 	unsigned long next;
++	int err;
+ 
+ 	pud = pud_alloc(mm, pgd, addr);
+ 	if (!pud)
+-		return -ENOMEM;
++		return -EAGAIN;
+ 	do {
+ 		next = pud_addr_end(addr, end);
+-		if (zeromap_pmd_range(mm, pud, addr, next, prot))
+-			return -ENOMEM;
++		err = zeromap_pmd_range(mm, pud, addr, next, prot);
++		if (err)
++			break;
+ 	} while (pud++, addr = next, addr != end);
+-	return 0;
++	return err;
+ }
+ 
+ int zeromap_page_range(struct vm_area_struct *vma,
+diff --git a/net/bluetooth/af_bluetooth.c b/net/bluetooth/af_bluetooth.c
+index fb031fe..8587844 100644
+--- a/net/bluetooth/af_bluetooth.c
++++ b/net/bluetooth/af_bluetooth.c
+@@ -54,36 +54,51 @@
+ /* Bluetooth sockets */
+ #define BT_MAX_PROTO	8
+ static struct net_proto_family *bt_proto[BT_MAX_PROTO];
++static DEFINE_RWLOCK(bt_proto_lock);
+ 
+ int bt_sock_register(int proto, struct net_proto_family *ops)
+ {
++	int err = 0;
++
+ 	if (proto < 0 || proto >= BT_MAX_PROTO)
+ 		return -EINVAL;
+ 
++	write_lock(&bt_proto_lock);
++
+ 	if (bt_proto[proto])
+-		return -EEXIST;
++		err = -EEXIST;
++	else
++		bt_proto[proto] = ops;
+ 
+-	bt_proto[proto] = ops;
+-	return 0;
++	write_unlock(&bt_proto_lock);
++
++	return err;
+ }
+ EXPORT_SYMBOL(bt_sock_register);
+ 
+ int bt_sock_unregister(int proto)
+ {
++	int err = 0;
++
+ 	if (proto < 0 || proto >= BT_MAX_PROTO)
+ 		return -EINVAL;
+ 
++	write_lock(&bt_proto_lock);
++
+ 	if (!bt_proto[proto])
+-		return -ENOENT;
++		err = -ENOENT;
++	else
++		bt_proto[proto] = NULL;
+ 
+-	bt_proto[proto] = NULL;
+-	return 0;
++	write_unlock(&bt_proto_lock);
++
++	return err;
+ }
+ EXPORT_SYMBOL(bt_sock_unregister);
+ 
+ static int bt_sock_create(struct socket *sock, int proto)
+ {
+-	int err = 0;
++	int err;
+ 
+ 	if (proto < 0 || proto >= BT_MAX_PROTO)
+ 		return -EINVAL;
+@@ -93,11 +108,18 @@ static int bt_sock_create(struct socket *sock, int proto)
+ 		request_module("bt-proto-%d", proto);
+ 	}
+ #endif
++
+ 	err = -EPROTONOSUPPORT;
++
++	read_lock(&bt_proto_lock);
++
+ 	if (bt_proto[proto] && try_module_get(bt_proto[proto]->owner)) {
+ 		err = bt_proto[proto]->create(sock, proto);
+ 		module_put(bt_proto[proto]->owner);
+ 	}
++
++	read_unlock(&bt_proto_lock);
++
+ 	return err; 
+ }
+ 
+@@ -274,7 +296,7 @@ int bt_sock_wait_state(struct sock *sk, int state, unsigned long timeo)
+ 		set_current_state(TASK_INTERRUPTIBLE);
+ 
+ 		if (!timeo) {
+-			err = -EAGAIN;
++			err = -EINPROGRESS;
+ 			break;
+ 		}
+ 
+diff --git a/net/bluetooth/bnep/sock.c b/net/bluetooth/bnep/sock.c
+index 2bfe796..e9b63e6 100644
+--- a/net/bluetooth/bnep/sock.c
++++ b/net/bluetooth/bnep/sock.c
+@@ -44,6 +44,7 @@
+ #include <linux/ioctl.h>
+ #include <linux/file.h>
+ #include <linux/init.h>
++#include <linux/compat.h>
+ #include <net/sock.h>
+ 
+ #include <asm/system.h>
+@@ -147,24 +148,56 @@ static int bnep_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long
+ 	return 0;
+ }
+ 
++#ifdef CONFIG_COMPAT
++static int bnep_sock_compat_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
++{
++	if (cmd == BNEPGETCONNLIST) {
++		struct bnep_connlist_req cl;
++		uint32_t uci;
++		int err;
++
++		if (get_user(cl.cnum, (uint32_t __user *) arg) ||
++				get_user(uci, (u32 __user *) (arg + 4)))
++			return -EFAULT;
++
++		cl.ci = compat_ptr(uci);
++
++		if (cl.cnum <= 0)
++			return -EINVAL;
++	
++		err = bnep_get_connlist(&cl);
++
++		if (!err && put_user(cl.cnum, (uint32_t __user *) arg))
++			err = -EFAULT;
++
++		return err;
++	}
++
++	return bnep_sock_ioctl(sock, cmd, arg);
++}
++#endif
++
+ static const struct proto_ops bnep_sock_ops = {
+-	.family     = PF_BLUETOOTH,
+-	.owner      = THIS_MODULE,
+-	.release    = bnep_sock_release,
+-	.ioctl      = bnep_sock_ioctl,
+-	.bind       = sock_no_bind,
+-	.getname    = sock_no_getname,
+-	.sendmsg    = sock_no_sendmsg,
+-	.recvmsg    = sock_no_recvmsg,
+-	.poll       = sock_no_poll,
+-	.listen     = sock_no_listen,
+-	.shutdown   = sock_no_shutdown,
+-	.setsockopt = sock_no_setsockopt,
+-	.getsockopt = sock_no_getsockopt,
+-	.connect    = sock_no_connect,
+-	.socketpair = sock_no_socketpair,
+-	.accept     = sock_no_accept,
+-	.mmap       = sock_no_mmap
++	.family		= PF_BLUETOOTH,
++	.owner		= THIS_MODULE,
++	.release	= bnep_sock_release,
++	.ioctl		= bnep_sock_ioctl,
++#ifdef CONFIG_COMPAT
++	.compat_ioctl	= bnep_sock_compat_ioctl,
++#endif
++	.bind		= sock_no_bind,
++	.getname	= sock_no_getname,
++	.sendmsg	= sock_no_sendmsg,
++	.recvmsg	= sock_no_recvmsg,
++	.poll		= sock_no_poll,
++	.listen		= sock_no_listen,
++	.shutdown	= sock_no_shutdown,
++	.setsockopt	= sock_no_setsockopt,
++	.getsockopt	= sock_no_getsockopt,
++	.connect	= sock_no_connect,
++	.socketpair	= sock_no_socketpair,
++	.accept		= sock_no_accept,
++	.mmap		= sock_no_mmap
+ };
+ 
+ static struct proto bnep_proto = {
+@@ -182,7 +215,7 @@ static int bnep_sock_create(struct socket *sock, int protocol)
+ 	if (sock->type != SOCK_RAW)
+ 		return -ESOCKTNOSUPPORT;
+ 
+-	sk = sk_alloc(PF_BLUETOOTH, GFP_KERNEL, &bnep_proto, 1);
++	sk = sk_alloc(PF_BLUETOOTH, GFP_ATOMIC, &bnep_proto, 1);
+ 	if (!sk)
+ 		return -ENOMEM;
+ 
+diff --git a/net/bluetooth/cmtp/sock.c b/net/bluetooth/cmtp/sock.c
+index 8f8fad2..d29e870 100644
+--- a/net/bluetooth/cmtp/sock.c
++++ b/net/bluetooth/cmtp/sock.c
+@@ -35,6 +35,7 @@
+ #include <linux/socket.h>
+ #include <linux/ioctl.h>
+ #include <linux/file.h>
++#include <linux/compat.h>
+ #include <net/sock.h>
+ 
+ #include <linux/isdn/capilli.h>
+@@ -138,11 +139,43 @@ static int cmtp_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long
+ 	return -EINVAL;
+ }
+ 
++#ifdef CONFIG_COMPAT
++static int cmtp_sock_compat_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
++{
++	if (cmd == CMTPGETCONNLIST) {
++		struct cmtp_connlist_req cl;
++		uint32_t uci;
++		int err;
++
++		if (get_user(cl.cnum, (uint32_t __user *) arg) ||
++				get_user(uci, (u32 __user *) (arg + 4)))
++			return -EFAULT;
++
++		cl.ci = compat_ptr(uci);
++
++		if (cl.cnum <= 0)
++			return -EINVAL;
++	
++		err = cmtp_get_connlist(&cl);
++
++		if (!err && put_user(cl.cnum, (uint32_t __user *) arg))
++			err = -EFAULT;
++
++		return err;
++	}
++
++	return cmtp_sock_ioctl(sock, cmd, arg);
++}
++#endif
++
+ static const struct proto_ops cmtp_sock_ops = {
+ 	.family		= PF_BLUETOOTH,
+ 	.owner		= THIS_MODULE,
+ 	.release	= cmtp_sock_release,
+ 	.ioctl		= cmtp_sock_ioctl,
++#ifdef CONFIG_COMPAT
++	.compat_ioctl	= cmtp_sock_compat_ioctl,
++#endif
+ 	.bind		= sock_no_bind,
+ 	.getname	= sock_no_getname,
+ 	.sendmsg	= sock_no_sendmsg,
+@@ -173,7 +206,7 @@ static int cmtp_sock_create(struct socket *sock, int protocol)
+ 	if (sock->type != SOCK_RAW)
+ 		return -ESOCKTNOSUPPORT;
+ 
+-	sk = sk_alloc(PF_BLUETOOTH, GFP_KERNEL, &cmtp_proto, 1);
++	sk = sk_alloc(PF_BLUETOOTH, GFP_ATOMIC, &cmtp_proto, 1);
+ 	if (!sk)
+ 		return -ENOMEM;
+ 
+diff --git a/net/bluetooth/hci_event.c b/net/bluetooth/hci_event.c
+index eb64555..d02ff17 100644
+--- a/net/bluetooth/hci_event.c
++++ b/net/bluetooth/hci_event.c
+@@ -63,6 +63,7 @@ static void hci_cc_link_ctl(struct hci_dev *hdev, __u16 ocf, struct sk_buff *skb
+ 
+ 	switch (ocf) {
+ 	case OCF_INQUIRY_CANCEL:
++	case OCF_EXIT_PERIODIC_INQ:
+ 		status = *((__u8 *) skb->data);
+ 
+ 		if (status) {
+diff --git a/net/bluetooth/hci_sock.c b/net/bluetooth/hci_sock.c
+index 97bdec7..ed117db 100644
+--- a/net/bluetooth/hci_sock.c
++++ b/net/bluetooth/hci_sock.c
+@@ -619,7 +622,7 @@ static int hci_sock_create(struct socket *sock, int protocol)
+ 
+ 	sock->ops = &hci_sock_ops;
+ 
+-	sk = sk_alloc(PF_BLUETOOTH, GFP_KERNEL, &hci_sk_proto, 1);
++	sk = sk_alloc(PF_BLUETOOTH, GFP_ATOMIC, &hci_sk_proto, 1);
+ 	if (!sk)
+ 		return -ENOMEM;
+ 
+diff --git a/net/bluetooth/hidp/sock.c b/net/bluetooth/hidp/sock.c
+index b8f6776..9ebab48 100644
+--- a/net/bluetooth/hidp/sock.c
++++ b/net/bluetooth/hidp/sock.c
+@@ -36,6 +36,7 @@
+ #include <linux/ioctl.h>
+ #include <linux/file.h>
+ #include <linux/init.h>
++#include <linux/compat.h>
+ #include <net/sock.h>
+ 
+ #include "hidp.h"
+@@ -144,11 +145,88 @@ static int hidp_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long
+ 	return -EINVAL;
+ }
+ 
++#ifdef CONFIG_COMPAT
++struct compat_hidp_connadd_req {
++	int   ctrl_sock;	// Connected control socket
++	int   intr_sock;	// Connteted interrupt socket
++	__u16 parser;
++	__u16 rd_size;
++	compat_uptr_t rd_data;
++	__u8  country;
++	__u8  subclass;
++	__u16 vendor;
++	__u16 product;
++	__u16 version;
++	__u32 flags;
++	__u32 idle_to;
++	char  name[128];
++};
++
++static int hidp_sock_compat_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
++{
++	if (cmd == HIDPGETCONNLIST) {
++		struct hidp_connlist_req cl;
++		uint32_t uci;
++		int err;
++
++		if (get_user(cl.cnum, (uint32_t __user *) arg) ||
++				get_user(uci, (u32 __user *) (arg + 4)))
++			return -EFAULT;
++
++		cl.ci = compat_ptr(uci);
++
++		if (cl.cnum <= 0)
++			return -EINVAL;
++
++		err = hidp_get_connlist(&cl);
++
++		if (!err && put_user(cl.cnum, (uint32_t __user *) arg))
++			err = -EFAULT;
++
++		return err;
++	} else if (cmd == HIDPCONNADD) {
++		struct compat_hidp_connadd_req ca;
++		struct hidp_connadd_req __user *uca;
++
++		uca = compat_alloc_user_space(sizeof(*uca));
++
++		if (copy_from_user(&ca, (void *) arg, sizeof(ca)))
++			return -EFAULT;
++
++		if (put_user(ca.ctrl_sock, &uca->ctrl_sock) ||
++				put_user(ca.intr_sock, &uca->intr_sock) ||
++				put_user(ca.parser, &uca->parser) ||
++				put_user(ca.rd_size, &uca->parser) ||
++				put_user(compat_ptr(ca.rd_data), &uca->rd_data) ||
++				put_user(ca.country, &uca->country) ||
++				put_user(ca.subclass, &uca->subclass) ||
++				put_user(ca.vendor, &uca->vendor) ||
++				put_user(ca.product, &uca->product) ||
++				put_user(ca.version, &uca->version) ||
++				put_user(ca.flags, &uca->flags) ||
++				put_user(ca.idle_to, &uca->idle_to) ||
++				copy_to_user(&uca->name[0], &ca.name[0], 128))
++			return -EFAULT;
++		
++		arg = (unsigned long) uca;
++
++		/* Fall through. We don't actually write back any _changes_
++		   to the structure anyway, so there's no need to copy back
++		   into the original compat version */
++	}
++
++	return hidp_sock_ioctl(sock, cmd, arg);
++}
++#endif
++
+ static const struct proto_ops hidp_sock_ops = {
+ 	.family		= PF_BLUETOOTH,
+ 	.owner		= THIS_MODULE,
+ 	.release	= hidp_sock_release,
+ 	.ioctl		= hidp_sock_ioctl,
++#ifdef CONFIG_COMPAT
++	.compat_ioctl	= hidp_sock_compat_ioctl,
++#endif
+ 	.bind		= sock_no_bind,
+ 	.getname	= sock_no_getname,
+ 	.sendmsg	= sock_no_sendmsg,
+@@ -179,7 +257,7 @@ static int hidp_sock_create(struct socket *sock, int protocol)
+ 	if (sock->type != SOCK_RAW)
+ 		return -ESOCKTNOSUPPORT;
+ 
+-	sk = sk_alloc(PF_BLUETOOTH, GFP_KERNEL, &hidp_proto, 1);
++	sk = sk_alloc(PF_BLUETOOTH, GFP_ATOMIC, &hidp_proto, 1);
+ 	if (!sk)
+ 		return -ENOMEM;
+ 
+diff --git a/net/bluetooth/l2cap.c b/net/bluetooth/l2cap.c
+index f6b4a80..9d2d1d6 100644
+--- a/net/bluetooth/l2cap.c
++++ b/net/bluetooth/l2cap.c
+@@ -414,7 +414,7 @@ static int l2cap_sock_create(struct socket *sock, int protocol)
+ 
+ 	sock->ops = &l2cap_sock_ops;
+ 
+-	sk = l2cap_sock_alloc(sock, protocol, GFP_KERNEL);
++	sk = l2cap_sock_alloc(sock, protocol, GFP_ATOMIC);
+ 	if (!sk)
+ 		return -ENOMEM;
+ 
+diff --git a/net/bluetooth/rfcomm/core.c b/net/bluetooth/rfcomm/core.c
+index 5b4253c..b9ec4c3 100644
+--- a/net/bluetooth/rfcomm/core.c
++++ b/net/bluetooth/rfcomm/core.c
+@@ -640,7 +640,7 @@ static struct rfcomm_session *rfcomm_session_create(bdaddr_t *src, bdaddr_t *dst
+ 	addr.l2_family = AF_BLUETOOTH;
+ 	addr.l2_psm    = htobs(RFCOMM_PSM);
+ 	*err = sock->ops->connect(sock, (struct sockaddr *) &addr, sizeof(addr), O_NONBLOCK);
+-	if (*err == 0 || *err == -EAGAIN)
++	if (*err == 0 || *err == -EINPROGRESS)
+ 		return s;
+ 
+ 	rfcomm_session_del(s);
+diff --git a/net/bluetooth/rfcomm/sock.c b/net/bluetooth/rfcomm/sock.c
+index 757d2dd..54f2a7c 100644
+--- a/net/bluetooth/rfcomm/sock.c
++++ b/net/bluetooth/rfcomm/sock.c
+@@ -337,7 +337,8 @@ static int rfcomm_sock_create(struct socket *sock, int protocol)
+ 
+ 	sock->ops = &rfcomm_sock_ops;
+ 
+-	if (!(sk = rfcomm_sock_alloc(sock, protocol, GFP_KERNEL)))
++	sk = rfcomm_sock_alloc(sock, protocol, GFP_ATOMIC);
++	if (!sk)
+ 		return -ENOMEM;
+ 
+ 	rfcomm_sock_init(sk, NULL);
+@@ -557,7 +558,6 @@ static int rfcomm_sock_sendmsg(struct kiocb *iocb, struct socket *sock,
+ 	struct sock *sk = sock->sk;
+ 	struct rfcomm_dlc *d = rfcomm_pi(sk)->dlc;
+ 	struct sk_buff *skb;
+-	int err;
+ 	int sent = 0;
+ 
+ 	if (msg->msg_flags & MSG_OOB)
+@@ -572,6 +572,7 @@ static int rfcomm_sock_sendmsg(struct kiocb *iocb, struct socket *sock,
+ 
+ 	while (len) {
+ 		size_t size = min_t(size_t, len, d->mtu);
++		int err;
+ 		
+ 		skb = sock_alloc_send_skb(sk, size + RFCOMM_SKB_RESERVE,
+ 				msg->msg_flags & MSG_DONTWAIT, &err);
+@@ -582,13 +583,16 @@ static int rfcomm_sock_sendmsg(struct kiocb *iocb, struct socket *sock,
+ 		err = memcpy_fromiovec(skb_put(skb, size), msg->msg_iov, size);
+ 		if (err) {
+ 			kfree_skb(skb);
+-			sent = err;
++			if (sent == 0)
++				sent = err;
+ 			break;
+ 		}
+ 
+ 		err = rfcomm_dlc_send(d, skb);
+ 		if (err < 0) {
+ 			kfree_skb(skb);
++			if (sent == 0)
++				sent = err;
+ 			break;
+ 		}
+ 
+@@ -598,7 +602,7 @@ static int rfcomm_sock_sendmsg(struct kiocb *iocb, struct socket *sock,
+ 
+ 	release_sock(sk);
+ 
+-	return sent ? sent : err;
++	return sent;
+ }
+ 
+ static long rfcomm_sock_data_wait(struct sock *sk, long timeo)
+diff --git a/net/bluetooth/rfcomm/tty.c b/net/bluetooth/rfcomm/tty.c
+index 74368f7..3685015 100644
+--- a/net/bluetooth/rfcomm/tty.c
++++ b/net/bluetooth/rfcomm/tty.c
+@@ -686,9 +686,13 @@ static int rfcomm_tty_write_room(struct tty_struct *tty)
+ 
+ 	BT_DBG("tty %p", tty);
+ 
++	if (!dev || !dev->dlc)
++		return 0;
++
+ 	room = rfcomm_room(dev->dlc) - atomic_read(&dev->wmem_alloc);
+ 	if (room < 0)
+ 		room = 0;
++
+ 	return room;
+ }
+ 
+@@ -901,12 +908,14 @@ static void rfcomm_tty_unthrottle(struct tty_struct *tty)
+ static int rfcomm_tty_chars_in_buffer(struct tty_struct *tty)
+ {
+ 	struct rfcomm_dev *dev = (struct rfcomm_dev *) tty->driver_data;
+-	struct rfcomm_dlc *dlc = dev->dlc;
+ 
+ 	BT_DBG("tty %p dev %p", tty, dev);
+ 
+-	if (!skb_queue_empty(&dlc->tx_queue))
+-		return dlc->mtu;
++	if (!dev || !dev->dlc)
++		return 0;
++
++	if (!skb_queue_empty(&dev->dlc->tx_queue))
++		return dev->dlc->mtu;
+ 
+ 	return 0;
+ }
+@@ -914,11 +923,12 @@ static int rfcomm_tty_chars_in_buffer(struct tty_struct *tty)
+ static void rfcomm_tty_flush_buffer(struct tty_struct *tty)
+ {
+ 	struct rfcomm_dev *dev = (struct rfcomm_dev *) tty->driver_data;
+-	if (!dev)
+-		return;
+ 
+ 	BT_DBG("tty %p dev %p", tty, dev);
+ 
++	if (!dev || !dev->dlc)
++		return;
++
+ 	skb_queue_purge(&dev->dlc->tx_queue);
+ 
+ 	if (test_bit(TTY_DO_WRITE_WAKEUP, &tty->flags) && tty->ldisc.write_wakeup)
+@@ -938,11 +948,12 @@ static void rfcomm_tty_wait_until_sent(struct tty_struct *tty, int timeout)
+ static void rfcomm_tty_hangup(struct tty_struct *tty)
+ {
+ 	struct rfcomm_dev *dev = (struct rfcomm_dev *) tty->driver_data;
+-	if (!dev)
+-		return;
+ 
+ 	BT_DBG("tty %p dev %p", tty, dev);
+ 
++	if (!dev)
++		return;
++
+ 	rfcomm_tty_flush_buffer(tty);
+ 
+ 	if (test_bit(RFCOMM_RELEASE_ONHUP, &dev->flags))
+diff --git a/net/bluetooth/sco.c b/net/bluetooth/sco.c
+index 6b61323..d0ed101 100644
+--- a/net/bluetooth/sco.c
++++ b/net/bluetooth/sco.c
+@@ -455,7 +455,8 @@ static int sco_sock_create(struct socket *sock, int protocol)
+ 
+ 	sock->ops = &sco_sock_ops;
+ 
+-	if (!(sk = sco_sock_alloc(sock, protocol, GFP_KERNEL)))
++	sk = sco_sock_alloc(sock, protocol, GFP_ATOMIC);
++	if (!sk)
+ 		return -ENOMEM;
+ 
+ 	sco_sock_init(sk, NULL);
