@@ -34,18 +34,16 @@ class Changelog(list):
             line = f.readline()
             if not line:
                 break
-            line = line.strip('\n')
             match = self._re.match(line)
             if not match:
                 continue
-            if match.group('version'):
-                try:
-                    v = version(match.group('version'))
-                except Exception:
-                    if not len(self):
-                        raise
-                    v = Version(match.group('version'))
-                self.append(self.Entry(match.group('distribution'), match.group('source'), v))
+            try:
+                v = version(match.group('version'))
+            except Exception:
+                if not len(self):
+                    raise
+                v = Version(match.group('version'))
+            self.append(self.Entry(match.group('distribution'), match.group('source'), v))
 
 class Version(object):
     _version_rules = ur"""
