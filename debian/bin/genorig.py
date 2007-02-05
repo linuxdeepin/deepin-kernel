@@ -3,9 +3,8 @@
 import sys
 sys.path.append("debian/lib/python")
 
-import os, os.path, re
-from debian_linux.debian import read_changelog
-from debian_linux.utils import rmtree
+import os, os.path, re, shutil
+from debian_linux.debian import Changelog
 
 class main(object):
     def __init__(self, input_tar, input_patch = None):
@@ -14,9 +13,9 @@ class main(object):
         self.input_tar = input_tar
         self.input_patch = input_patch
 
-        changelog = read_changelog()[0]
-        source = changelog['Source']
-        version = changelog['Version']['linux']['source_upstream']
+        changelog = Changelog()[0]
+        source = changelog.source
+        version = changelog.version.upstream
         self.orig = '%s-%s' % (source, version)
         self.orig_tar = '%s_%s.orig.tar.gz' % (source, version)
 
@@ -28,7 +27,7 @@ class main(object):
             self.patch()
             self.tar()
         finally:
-            rmtree(self.dir)
+            shutil.rmtree(self.dir)
 
     def extract(self):
         self.log("Extracting tarball %s\n" % self.input_tar)
