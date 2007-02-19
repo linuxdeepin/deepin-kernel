@@ -1,0 +1,45 @@
+From stable-bounces@linux.kernel.org  Thu Jan 11 11:51:30 2007
+To: stable@kernel.org
+From: Roland Dreier <rdreier@cisco.com>
+Date: Thu, 11 Jan 2007 11:42:49 -0800
+Message-ID: <ada4pqxjqo6.fsf@cisco.com>
+Cc: mst@mellanox.co.il, openib-general@openib.org
+Subject: IB/mad: Fix race between cancel and receive completion
+
+When ib_cancel_mad() is called, it puts the canceled send on a list
+and schedules a "flushed" callback from process context.  However,
+this leaves a window where a receive completion could be processed
+before the send is fully flushed.
+
+This is fine, except that ib_find_send_mad() will find the MAD and
+return it to the receive processing, which results in the sender
+getting both a successful receive and a "flushed" send completion for
+the same request.  Understandably, this confuses the sender, which is
+expecting only one of these two callbacks, and leads to grief such as
+a use-after-free in IPoIB.
+
+Fix this by changing ib_find_send_mad() to return a send struct only
+if the status is still successful (and not "flushed").  The search of
+the send_list already had this check, so this patch just adds the same
+check to the search of the wait_list.
+
+Signed-off-by: Roland Dreier <rolandd@cisco.com>
+Signed-off-by: Chris Wright <chrisw@sous-sol.org>
+---
+This fixes a crash seen in production when switching between IPoIB
+interfaces in a HA setup.
+
+ drivers/infiniband/core/mad.c |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+--- linux-2.6.18.6.orig/drivers/infiniband/core/mad.c
++++ linux-2.6.18.6/drivers/infiniband/core/mad.c
+@@ -1750,7 +1750,7 @@ ib_find_send_mad(struct ib_mad_agent_pri
+ 		     */
+ 		    (is_direct(wc->recv_buf.mad->mad_hdr.mgmt_class) ||
+ 		     rcv_has_same_gid(mad_agent_priv, wr, wc)))
+-			return wr;
++			return (wr->status == IB_WC_SUCCESS) ? wr : NULL;
+ 	}
+ 
+ 	/*
