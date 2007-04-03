@@ -14,7 +14,7 @@ class Changelog(list):
 \)
 \s+
 (?P<distribution>
-    [-0-9a-zA-Z]+
+    [-+0-9a-zA-Z.]+
 )
 \;
 """
