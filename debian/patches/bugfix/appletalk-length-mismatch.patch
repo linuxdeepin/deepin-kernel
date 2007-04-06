@@ -1,0 +1,93 @@
+From: Jean Delvare <jdelvare@suse.de>
+Date: Thu, 5 Apr 2007 06:52:46 +0000 (-0700)
+Subject: [APPLETALK]: Fix a remotely triggerable crash
+X-Git-Tag: v2.6.21-rc6~3
+X-Git-Url: http://git.kernel.org/?p=linux%2Fkernel%2Fgit%2Ftorvalds%2Flinux-2.6.git;a=commitdiff_plain;h=75559c167bddc1254db5bcff032ad5eed8bd6f4a
+
+[APPLETALK]: Fix a remotely triggerable crash
+
+When we receive an AppleTalk frame shorter than what its header says,
+we still attempt to verify its checksum, and trip on the BUG_ON() at
+the end of function atalk_sum_skb() because of the length mismatch.
+
+This has security implications because this can be triggered by simply
+sending a specially crafted ethernet frame to a target victim,
+effectively crashing that host. Thus this qualifies, I think, as a
+remote DoS. Here is the frame I used to trigger the crash, in npg
+format:
+
+<Appletalk Killer>
+{
+# Ethernet header -----
+
+  XX XX XX XX XX XX  # Destination MAC
+  00 00 00 00 00 00  # Source MAC
+  00 1D              # Length
+
+# LLC header -----
+
+  AA AA 03
+  08 00 07 80 9B  # Appletalk
+
+# Appletalk header -----
+
+  00 1B        # Packet length (invalid)
+  00 01        # Fake checksum
+  00 00 00 00  # Destination and source networks
+  00 00 00 00  # Destination and source nodes and ports
+
+# Payload -----
+
+  0C 0D 0E 0F 10 11 12 13
+  14
+}
+
+The destination MAC address must be set to those of the victim.
+
+The severity is mitigated by two requirements:
+* The target host must have the appletalk kernel module loaded. I
+  suspect this isn't so frequent.
+* AppleTalk frames are non-IP, thus I guess they can only travel on
+  local networks. I am no network expert though, maybe it is possible
+  to somehow encapsulate AppleTalk packets over IP.
+
+The bug has been reported back in June 2004:
+  http://bugzilla.kernel.org/show_bug.cgi?id=2979
+But it wasn't investigated, and was closed in July 2006 as both
+reporters had vanished meanwhile.
+
+This code was new in kernel 2.6.0-test5:
+  http://git.kernel.org/?p=linux/kernel/git/tglx/history.git;a=commitdiff;h=7ab442d7e0a76402c12553ee256f756097cae2d2
+And not modified since then, so we can assume that vanilla kernels
+2.6.0-test5 and later, and distribution kernels based thereon, are
+affected.
+
+Note that I still do not know for sure what triggered the bug in the
+real-world cases. The frame could have been corrupted by the kernel if
+we have a bug hiding somewhere. But more likely, we are receiving the
+faulty frame from the network.
+
+Signed-off-by: Jean Delvare <jdelvare@suse.de>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+
+diff --git a/net/appletalk/ddp.c b/net/appletalk/ddp.c
+index 113c175..c8b7dc2 100644
+--- a/net/appletalk/ddp.c
++++ b/net/appletalk/ddp.c
+@@ -1417,10 +1417,13 @@ static int atalk_rcv(struct sk_buff *skb, struct net_device *dev,
+ 	/*
+ 	 * Size check to see if ddp->deh_len was crap
+ 	 * (Otherwise we'll detonate most spectacularly
+-	 * in the middle of recvmsg()).
++	 * in the middle of atalk_checksum() or recvmsg()).
+ 	 */
+-	if (skb->len < sizeof(*ddp))
++	if (skb->len < sizeof(*ddp) || skb->len < (len_hops & 1023)) {
++		pr_debug("AppleTalk: dropping corrupted frame (deh_len=%u, "
++			 "skb->len=%u)\n", len_hops & 1023, skb->len);
+ 		goto freeit;
++	}
+ 
+ 	/*
+ 	 * Any checksums. Note we don't do htons() on this == is assumed to be
