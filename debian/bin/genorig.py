@@ -47,7 +47,7 @@ class main(object):
         if self.input_patch is None:
             return
         self.log("Patching source with %s\n" % self.input_patch)
-        match = re.match(r'(^|.*/)(patch-\d+\.\d+\.\d+(-\S+)?(\.(?P<extension>(bz2|gz))))?$', self.input_patch)
+        match = re.match(r'(^|.*/)patch-\d+\.\d+\.\d+(-\S+?)?(\.(?P<extension>(bz2|gz)))?$', self.input_patch)
         if not match:
             raise RuntimeError("Can't identify name of patch")
         cmdline = []
@@ -64,6 +64,7 @@ class main(object):
 
     def tar(self):
         out = os.path.join("../orig", self.orig_tar)
+        os.mkdir("../orig")
         self.log("Generate tarball %s\n" % out)
         cmdline = ['tar -czf', out, '-C', self.dir, self.orig]
         if os.spawnv(os.P_WAIT, '/bin/sh', ['sh', '-c', ' '.join(cmdline)]):
