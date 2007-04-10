@@ -64,7 +64,9 @@ class main(object):
 
     def tar(self):
         out = os.path.join("../orig", self.orig_tar)
-        os.mkdir("../orig")
+        try:
+            os.mkdir("../orig")
+        except OSError: pass
         self.log("Generate tarball %s\n" % out)
         cmdline = ['tar -czf', out, '-C', self.dir, self.orig]
         if os.spawnv(os.P_WAIT, '/bin/sh', ['sh', '-c', ' '.join(cmdline)]):
