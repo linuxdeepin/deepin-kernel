@@ -38,14 +38,14 @@ class main(object):
         self.override_subarch = subarch
         self.override_flavour = flavour
 
-        changelog = read_changelog()
-        while changelog[0]['Distribution'] == 'UNRELEASED':
+        changelog = Changelog(version = VersionLinux)
+        while changelog[0].distribution == 'UNRELEASED':
             changelog.pop(0)
         changelog = changelog[0]
 
-        self.source = changelog['Source']
-        self.version = changelog['Version']['linux']['version']
-        self.version_source = changelog['Version']['linux']['source']
+        self.source = changelog.source
+        self.version = changelog.version.linux_version
+        self.version_source = changelog.version.complete
 
         local_config = config_reader_arch(["debian/arch"])
 
