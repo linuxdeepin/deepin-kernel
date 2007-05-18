@@ -111,10 +111,11 @@ class config_reader_arch(config_reader):
             if avail:
                 self._read_subarch(arch, subarch)
 
+        base = self['base', arch]
+        base['subarches'] = subarches
+
         if flavours:
-            base = self['base', arch]
             subarches.insert(0, 'none')
-            base['subarches'] = subarches
             del base['flavours']
             self['base', arch] = base
             self['base', arch, 'none'] = {'flavours': flavours}
