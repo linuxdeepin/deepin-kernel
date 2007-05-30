@@ -25,24 +25,29 @@ int main (int argc, char *argv[])
       case 'w':
         break;
       default:
-        return 1;
+        return EXIT_FAILURE;
     }
   }
+
+  if (optind == argc)
+    return EXIT_SUCCESS;
 
   if (!(file = fopen (argv[optind], "r")))
   {
     fprintf (stderr, "Can't open file\n");
-    return 1;
+    return EXIT_FAILURE;
   }
+
   if (fread (ei, 1, EI_NIDENT, file) != EI_NIDENT)
   {
     fprintf (stderr, "Error: input truncated\n");
-    return 1;
+    return EXIT_FAILURE;
   }
+
   if (memcmp (ei, ELFMAG, SELFMAG) != 0)
   {
     fprintf (stderr, "Error: not ELF\n");
-    return 1;
+    return EXIT_FAILURE;
   }
   switch (ei[EI_DATA]) {
     case ELFDATA2LSB:
@@ -52,7 +57,7 @@ int main (int argc, char *argv[])
       data = "msb";
       break;
     default:
-      return 1;
+      return EXIT_FAILURE;
   }
   switch (ei[EI_CLASS]) {
     case ELFCLASS32:
@@ -62,7 +67,7 @@ int main (int argc, char *argv[])
       class = "64";
       break;
     default:
-      return 1;
+      return EXIT_FAILURE;
   }
   snprintf (prog, sizeof prog, "%s.real-%s-%s", argv[0], data, class);
 
