@@ -195,19 +195,11 @@ class Gencontrol(object):
         pass
 
     def process_relation(self, key, e, in_e, vars):
-        in_dep = in_e[key]
-        dep = PackageRelationList()
-        for in_groups in in_dep:
-            groups = PackageRelationGroup()
-            for in_item in in_groups:
-                item = PackageRelation()
-                item.name = self.substitute(in_item.name, vars)
-                item.operator = in_item.operator
-                if in_item.version is not None:
-                    item.version = self.substitute(in_item.version, vars)
-                item.arches = in_item.arches
-                groups.append(item)
-            dep.append(groups)
+        import copy
+        dep = copy.deepcopy(in_e[key])
+        for groups in dep:
+            for item in groups:
+                item.name = self.substitute(item.name, vars)
         e[key] = dep
 
     def process_description(self, e, in_e, vars):
@@ -221,7 +213,7 @@ class Gencontrol(object):
     def process_package(self, in_entry, vars):
         e = Package()
         for key, value in in_entry.iteritems():
-            if isinstance(value, PackageRelationList):
+            if isinstance(value, PackageRelation):
                 self.process_relation(key, e, in_entry, vars)
             elif key == 'Description':
                 self.process_description(e, in_entry, vars)

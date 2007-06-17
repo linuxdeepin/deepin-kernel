@@ -29,7 +29,7 @@ class Gencontrol(Base):
         headers_arch = self.templates["control.headers.arch"]
         packages_headers_arch = self.process_packages(headers_arch, vars)
         
-        extra['headers_arch_depends'] = packages_headers_arch[-1]['Depends'] = PackageRelationList()
+        extra['headers_arch_depends'] = packages_headers_arch[-1]['Depends'] = PackageRelation()
 
         for package in packages_headers_arch:
             name = package['Package']
@@ -104,16 +104,16 @@ class Gencontrol(Base):
         config_entry_relations = self.config.merge('relations', arch, subarch, flavour)
 
         compiler = config_entry_base.get('compiler', 'gcc')
-        relations_compiler = PackageRelationList(config_entry_relations[compiler])
-        relations_compiler_build_dep = PackageRelationList(config_entry_relations[compiler])
+        relations_compiler = PackageRelation(config_entry_relations[compiler])
+        relations_compiler_build_dep = PackageRelation(config_entry_relations[compiler])
         for group in relations_compiler_build_dep:
             for item in group:
                 item.arches = [arch]
         packages['source']['Build-Depends'].extend(relations_compiler_build_dep)
 
         image_relations = {
-            'conflicts': PackageRelationList(),
-            'depends': PackageRelationList(),
+            'conflicts': PackageRelation(),
+            'depends': PackageRelation(),
         }
         if vars.get('initramfs', True):
             generators = vars['initramfs-generators']
@@ -124,7 +124,7 @@ class Gencontrol(Base):
             for i in generators:
                 i = config_entry_relations.get(i, i)
                 l_depends.append(i)
-                a = PackageRelation(i)
+                a = PackageRelationEntry(i)
                 if a.operator is not None:
                     a.operator = -a.operator
                     image_relations['conflicts'].append(PackageRelationGroup([a]))
@@ -247,7 +247,7 @@ class Gencontrol(Base):
     def process_real_image(self, in_entry, relations, config, vars):
         entry = self.process_package(in_entry, vars)
         for field in 'Depends', 'Provides', 'Suggests', 'Recommends', 'Conflicts':
-            value = entry.get(field, PackageRelationList())
+            value = entry.get(field, PackageRelation())
             t = vars.get(field.lower(), [])
             value.extend(t)
             t = relations.get(field.lower(), [])
@@ -261,7 +261,7 @@ class Gencontrol(Base):
         entry = self.process_package(in_entry, vars)
         versions = [i.version for i in self.changelog[::-1]]
         for i in (('Depends', 'Provides')):
-            value = PackageRelationList()
+            value = PackageRelation()
             value.extend(entry.get(i, []))
             if i == 'Depends':
                 value.append("linux-patch-debian-%(linux_version)s (= %(complete)s)" % self.changelog[0].version.__dict__)
