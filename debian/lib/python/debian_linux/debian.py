@@ -187,10 +187,6 @@ class PackageRelation(list):
         else:
             super(PackageRelation, self).append(value)
 
-    def config(self, entry):
-        for i in self:
-            i.config(entry)
-
     def extend(self, value):
         if isinstance(value, basestring):
             value = [j.strip() for j in re.split(',', value.strip())]
@@ -226,10 +222,6 @@ class PackageRelationGroup(list):
         elif not isinstance(value, PackageRelationEntry):
             raise ValueError
         super(PackageRelationGroup, self).append(value)
-
-    def config(self, entry):
-        for i in self:
-            i.config(entry)
 
     def extend(self, value):
         if isinstance(value, basestring):
@@ -274,16 +266,6 @@ class PackageRelationEntry(object):
         if self.arches:
             ret.extend([' [', ' '.join(self.arches), ']'])
         return ''.join(ret)
-
-    def config(self, entry):
-        if self.version is not None or self.arches:
-            return
-        value = entry.get(self.name, None)
-        if value is None:
-            return
-        print "config:", this
-        self.parse(value)
-        print "config:", this
 
     def parse(self, value):
         match = self._re.match(value)

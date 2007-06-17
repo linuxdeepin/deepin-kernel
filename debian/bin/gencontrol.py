@@ -252,7 +252,6 @@ class Gencontrol(Base):
             value.extend(t)
             t = relations.get(field.lower(), [])
             value.extend(t)
-            value.config(config)
             if value:
                 entry[field] = value
         return entry
