@@ -6,7 +6,7 @@ from debian_linux.config import *
 
 class checker(object):
     def __init__(self, dir, arch, subarch, flavour):
-        self.config = config_reader_arch(["debian/arch"])
+        self.config = ConfigReaderCore(["debian/arch"])
         self.filename_new = "%s/Module.symvers" % dir
         abiname = self.config['abi',]['abiname']
         if subarch == 'none':
