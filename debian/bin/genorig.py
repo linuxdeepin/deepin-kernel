@@ -67,6 +67,10 @@ class main(object):
         try:
             os.mkdir("../orig")
         except OSError: pass
+        try:
+            os.stat(out)
+            raise RuntimeError("Destination already exists")
+        except OSError: pass
         self.log("Generate tarball %s\n" % out)
         cmdline = ['tar -czf', out, '-C', self.dir, self.orig]
         if os.spawnv(os.P_WAIT, '/bin/sh', ['sh', '-c', ' '.join(cmdline)]):
