@@ -1,21 +1,21 @@
 import debian, re, textwrap
 
-class sorted_dict(dict):
+class SortedDict(dict):
     __slots__ = '_list',
 
     def __init__(self, entries = None):
-        super(sorted_dict, self).__init__()
+        super(SortedDict, self).__init__()
         self._list = []
         if entries is not None:
             for key, value in entries:
                 self[key] = value
 
     def __delitem__(self, key):
-        super(sorted_dict, self).__delitem__(key)
+        super(SortedDict, self).__delitem__(key)
         self._list.remove(key)
 
     def __setitem__(self, key, value):
-        super(sorted_dict, self).__setitem__(key, value)
+        super(SortedDict, self).__setitem__(key, value)
         if key not in self._list:
             self._list.append(key)
 
@@ -31,50 +31,7 @@ class sorted_dict(dict):
         for i in iter(self._list):
             yield self[i]
 
-class field_list(list):
-    TYPE_WHITESPACE = object()
-    TYPE_COMMATA = object()
-
-    def __init__(self, value = None, type = TYPE_WHITESPACE):
-        self.type = type
-        if isinstance(value, field_list):
-            self.type = value.type
-            self.extend(value)
-        elif isinstance(value, (list, tuple)):
-            self.extend(value)
-        else:
-            self._extend(value)
-
-    def __str__(self):
-        if self.type is self.TYPE_WHITESPACE:
-            type = ' '
-        elif self.type is self.TYPE_COMMATA:
-            type = ', '
-        return type.join(self)
-
-    def _extend(self, value):
-        if self.type is self.TYPE_WHITESPACE:
-            type = '\s'
-        elif self.type is self.TYPE_COMMATA:
-            type = ','
-        if value is not None:
-            self.extend([j.strip() for j in re.split(type, value.strip())])
-
-    def extend(self, value):
-        if isinstance(value, str):
-            self._extend(value)
-        else:
-            super(field_list, self).extend(value)
-
-class field_list_commata(field_list):
-    def __init__(self, value = None):
-        super(field_list_commata, self).__init__(value, field_list.TYPE_COMMATA)
-
-class field_string(str):
-    def __str__(self):
-        return '\n '.join(self.split('\n'))
-
-class templates(dict):
+class Templates(dict):
     def __init__(self, dir = "debian/templates"):
         self.dir = dir
 
@@ -94,15 +51,15 @@ class templates(dict):
         f = file("%s/%s.in" % (self.dir, name))
 
         if prefix == 'control':
-            return self._read_control(f)
+            return self._readControl(f)
 
         return f.read()
 
-    def _read_control(self, f):
+    def _readControl(self, f):
         entries = []
 
         while True:
-            e = debian.package()
+            e = debian.Package()
             last = None
             lines = []
             while True:
@@ -133,7 +90,7 @@ class templates(dict):
 
         return entries
 
-class wrap(textwrap.TextWrapper):
+class TextWrapper(textwrap.TextWrapper):
     wordsep_re = re.compile(
         r'(\s+|'                                  # any whitespace
         r'(?<=[\w\!\"\'\&\.\,\?])-{2,}(?=\w))')   # em-dash

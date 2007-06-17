@@ -121,7 +121,24 @@ $
         else:
             self.linux_upstream = d['version']
  
-class package_description(object):
+class PackageFieldList(list):
+    def __init__(self, value = None):
+        self.extend(value)
+
+    def __str__(self):
+        return ' '.join(self)
+
+    def _extend(self, value):
+        if value is not None:
+            self.extend([j.strip() for j in re.split('\s', value.strip())])
+
+    def extend(self, value):
+        if isinstance(value, str):
+            self._extend(value)
+        else:
+            super(PackageFieldList, self).extend(value)
+
+class PackageDescription(object):
     __slots__ = "short", "long"
 
     def __init__(self, value = None):
@@ -134,7 +151,7 @@ class package_description(object):
 
     def __str__(self):
         ret = self.short + '\n'
-        w = utils.wrap(width = 74, fix_sentence_endings = True)
+        w = utils.TextWrapper(width = 74, fix_sentence_endings = True)
         pars = []
         for i in self.long:
             pars.append('\n '.join(w.wrap(i)))
@@ -145,7 +162,7 @@ class package_description(object):
         if str:
             self.long.extend(str.split("\n.\n"))
 
-class package_relation(object):
+class PackageRelation(object):
     __slots__ = "name", "operator", "version", "arches"
 
     _re = re.compile(r'^(\S+)(?: \((<<|<=|=|!=|>=|>>)\s*([^)]+)\))?(?: \[([^]]+)\])?$')
@@ -228,7 +245,7 @@ class package_relation(object):
         else:
             self.arches = []
 
-class package_relation_list(list):
+class PackageRelationList(list):
     def __init__(self, value = None):
         if value is not None:
             self.extend(value)
@@ -244,14 +261,14 @@ class package_relation_list(list):
 
     def append(self, value):
         if isinstance(value, basestring):
-            value = package_relation_group(value)
-        elif not isinstance(value, package_relation_group):
+            value = PackageRelationGroup(value)
+        elif not isinstance(value, PackageRelationGroup):
             raise ValueError, "got %s" % type(value)
         j = self._match(value)
         if j:
-            j._update_arches(value)
+            j._updateArches(value)
         else:
-            super(package_relation_list, self).append(value)
+            super(PackageRelationList, self).append(value)
 
     def config(self, entry):
         for i in self:
@@ -265,7 +282,7 @@ class package_relation_list(list):
         for i in value:
             self.append(i)
 
-class package_relation_group(list):
+class PackageRelationGroup(list):
     def __init__(self, value = None):
         if value is not None:
             self.extend(value)
@@ -279,7 +296,7 @@ class package_relation_group(list):
                 return None
         return self
 
-    def _update_arches(self, value):
+    def _updateArches(self, value):
         for i, j in itertools.izip(self, value):
             if i.arches:
                 for arch in j.arches:
@@ -288,10 +305,10 @@ class package_relation_group(list):
 
     def append(self, value):
         if isinstance(value, basestring):
-            value = package_relation(value)
-        elif not isinstance(value, package_relation):
+            value = PackageRelation(value)
+        elif not isinstance(value, PackageRelation):
             raise ValueError
-        super(package_relation_group, self).append(value)
+        super(PackageRelationGroup, self).append(value)
 
     def config(self, entry):
         for i in self:
@@ -305,26 +322,26 @@ class package_relation_group(list):
         for i in value:
             self.append(i)
 
-class package(dict):
-    _fields = utils.sorted_dict((
+class Package(dict):
+    _fields = utils.SortedDict((
         ('Package', str),
         ('Source', str),
-        ('Architecture', utils.field_list),
+        ('Architecture', PackageFieldList),
         ('Section', str),
         ('Priority', str),
         ('Maintainer', str),
         ('Uploaders', str),
         ('Standards-Version', str),
-        ('Build-Depends', package_relation_list),
-        ('Build-Depends-Indep', package_relation_list),
-        ('Provides', package_relation_list),
-        ('Pre-Depends', package_relation_list),
-        ('Depends', package_relation_list),
-        ('Recommends', package_relation_list),
-        ('Suggests', package_relation_list),
-        ('Replaces', package_relation_list),
-        ('Conflicts', package_relation_list),
-        ('Description', package_description),
+        ('Build-Depends', PackageRelationList),
+        ('Build-Depends-Indep', PackageRelationList),
+        ('Provides', PackageRelationList),
+        ('Pre-Depends', PackageRelationList),
+        ('Depends', PackageRelationList),
+        ('Recommends', PackageRelationList),
+        ('Suggests', PackageRelationList),
+        ('Replaces', PackageRelationList),
+        ('Conflicts', PackageRelationList),
+        ('Description', PackageDescription),
     ))
 
     def __setitem__(self, key, value):
@@ -333,7 +350,7 @@ class package(dict):
             if not isinstance(value, cls):
                 value = cls(value)
         except KeyError: pass
-        super(package, self).__setitem__(key, value)
+        super(Package, self).__setitem__(key, value)
 
     def iterkeys(self):
         keys = set(self.keys())

@@ -1,16 +1,17 @@
 #!/usr/bin/env python2.4
 import os, sys
 sys.path.append("debian/lib/python")
-import debian_linux.gencontrol
+
+from debian_linux.gencontrol import Gencontrol as Base
 from debian_linux.debian import *
 
-class gencontrol(debian_linux.gencontrol.gencontrol):
+class Gencontrol(Base):
     def __init__(self):
-        super(gencontrol, self).__init__()
+        super(Gencontrol, self).__init__()
         self.process_changelog()
 
     def do_main_setup(self, vars, makeflags, extra):
-        super(gencontrol, self).do_main_setup(vars, makeflags, extra)
+        super(Gencontrol, self).do_main_setup(vars, makeflags, extra)
         vars.update(self.config['image',])
         makeflags.update({
             'SOURCEVERSION': self.version.complete,
@@ -28,7 +29,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         headers_arch = self.templates["control.headers.arch"]
         packages_headers_arch = self.process_packages(headers_arch, vars)
         
-        extra['headers_arch_depends'] = packages_headers_arch[-1]['Depends'] = package_relation_list()
+        extra['headers_arch_depends'] = packages_headers_arch[-1]['Depends'] = PackageRelationList()
 
         for package in packages_headers_arch:
             name = package['Package']
@@ -103,30 +104,30 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         config_entry_relations = self.config.merge('relations', arch, subarch, flavour)
 
         compiler = config_entry_base.get('compiler', 'gcc')
-        relations_compiler = package_relation_list(config_entry_relations[compiler])
-        relations_compiler_build_dep = package_relation_list(config_entry_relations[compiler])
+        relations_compiler = PackageRelationList(config_entry_relations[compiler])
+        relations_compiler_build_dep = PackageRelationList(config_entry_relations[compiler])
         for group in relations_compiler_build_dep:
             for item in group:
                 item.arches = [arch]
         packages['source']['Build-Depends'].extend(relations_compiler_build_dep)
 
         image_relations = {
-            'conflicts': package_relation_list(),
-            'depends': package_relation_list(),
+            'conflicts': PackageRelationList(),
+            'depends': PackageRelationList(),
         }
         if vars.get('initramfs', True):
             generators = vars['initramfs-generators']
             config_entry_commands_initramfs = self.config.merge('commands-image-initramfs-generators', arch, subarch, flavour)
             commands = [config_entry_commands_initramfs[i] for i in generators if config_entry_commands_initramfs.has_key(i)]
             makeflags['INITRD_CMD'] = ' '.join(commands)
-            l_depends = package_relation_group()
+            l_depends = PackageRelationGroup()
             for i in generators:
                 i = config_entry_relations.get(i, i)
                 l_depends.append(i)
-                a = package_relation(i)
+                a = PackageRelation(i)
                 if a.operator is not None:
                     a.operator = -a.operator
-                    image_relations['conflicts'].append(package_relation_group([a]))
+                    image_relations['conflicts'].append(PackageRelationGroup([a]))
             image_relations['depends'].append(l_depends)
 
         packages_dummy = []
@@ -246,7 +247,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
     def process_real_image(self, in_entry, relations, config, vars):
         entry = self.process_package(in_entry, vars)
         for field in 'Depends', 'Provides', 'Suggests', 'Recommends', 'Conflicts':
-            value = entry.get(field, package_relation_list())
+            value = entry.get(field, PackageRelationList())
             t = vars.get(field.lower(), [])
             value.extend(t)
             t = relations.get(field.lower(), [])
@@ -260,7 +261,7 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         entry = self.process_package(in_entry, vars)
         versions = [i.version for i in self.changelog[::-1]]
         for i in (('Depends', 'Provides')):
-            value = package_relation_list()
+            value = PackageRelationList()
             value.extend(entry.get(i, []))
             if i == 'Depends':
                 value.append("linux-patch-debian-%(linux_version)s (= %(complete)s)" % self.changelog[0].version.__dict__)
@@ -271,4 +272,4 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
         return entry
 
 if __name__ == '__main__':
-    gencontrol()()
+    Gencontrol()()

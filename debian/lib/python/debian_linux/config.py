@@ -1,14 +1,14 @@
-import os, os.path, re, sys, textwrap, ConfigParser
+import os, os.path, re, sys, textwrap
 
 __all__ = [
-    'config_parser',
-    'config_reader',
-    'config_reader_arch',
+    'ConfigParser',
+    'ConfigReader',
+    'ConfigReaderCore',
 ]
 
 _marker = object()
 
-class schema_item_boolean(object):
+class SchemaItemBoolean(object):
     def __call__(self, i):
         i = i.strip().lower()
         if i in ("true", "1"):
@@ -17,7 +17,7 @@ class schema_item_boolean(object):
             return False
         raise Error
 
-class schema_item_list(object):
+class SchemaItemList(object):
     def __init__(self, type = "\s+"):
         self.type = type
 
@@ -27,7 +27,7 @@ class schema_item_list(object):
             return []
         return [j.strip() for j in re.split(self.type, i)]
 
-class config_reader(dict):
+class ConfigReader(dict):
     config_name = "defines"
 
     def __init__(self, dirs = []):
@@ -36,18 +36,18 @@ class config_reader(dict):
     def __getitem__(self, key):
         return self.get(key)
 
-    def _get_files(self, name):
-        return [os.path.join(i, name) for i in self._dirs if i]
-
     def _update(self, ret, inputkey):
-        for key, value in super(config_reader, self).get(tuple(inputkey), {}).iteritems():
+        for key, value in super(ConfigReader, self).get(tuple(inputkey), {}).iteritems():
             ret[key] = value
+
+    def getFiles(self, name):
+        return [os.path.join(i, name) for i in self._dirs if i]
 
     def get(self, key, default = _marker):
         if isinstance(key, basestring):
             key = key,
 
-        ret = super(config_reader, self).get(tuple(key), default)
+        ret = super(ConfigReader, self).get(tuple(key), default)
         if ret == _marker:
             raise KeyError, key
         return ret
@@ -59,28 +59,28 @@ class config_reader(dict):
         return ret
 
     def sections(self):
-        return super(config_reader, self).keys()
+        return super(ConfigReader, self).keys()
 
-class config_reader_arch(config_reader):
+class ConfigReaderCore(ConfigReader):
     schema = {
-        'arches': schema_item_list(),
-        'available': schema_item_boolean(),
-        'configs': schema_item_list(),
-        'flavours': schema_item_list(),
-        'initramfs': schema_item_boolean(),
-        'initramfs-generators': schema_item_list(),
-        'modules': schema_item_boolean(),
-        'subarches': schema_item_list(),
-        'versions': schema_item_list(),
+        'arches': SchemaItemList(),
+        'available': SchemaItemBoolean(),
+        'configs': SchemaItemList(),
+        'flavours': SchemaItemList(),
+        'initramfs': SchemaItemBoolean(),
+        'initramfs-generators': SchemaItemList(),
+        'modules': SchemaItemBoolean(),
+        'subarches': SchemaItemList(),
+        'versions': SchemaItemList(),
     }
 
     def __init__(self, dirs = []):
-        super(config_reader_arch, self).__init__(dirs)
-        self._read_base()
+        super(ConfigReaderCore, self).__init__(dirs)
+        self._readBase()
 
-    def _read_arch(self, arch):
-        files = self._get_files("%s/%s" % (arch, self.config_name))
-        config = config_parser(self.schema, files)
+    def _readArch(self, arch):
+        files = self.getFiles("%s/%s" % (arch, self.config_name))
+        config = ConfigParser(self.schema, files)
 
         subarches = config['base',].get('subarches', [])
         flavours = config['base',].get('flavours', [])
@@ -109,7 +109,7 @@ class config_reader_arch(config_reader):
             else:
                 avail = True
             if avail:
-                self._read_subarch(arch, subarch)
+                self._readSubarch(arch, subarch)
 
         base = self['base', arch]
         base['subarches'] = subarches
@@ -120,11 +120,11 @@ class config_reader_arch(config_reader):
             self['base', arch] = base
             self['base', arch, 'none'] = {'flavours': flavours}
             for flavour in flavours:
-                self._read_flavour(arch, 'none', flavour)
+                self._readFlavour(arch, 'none', flavour)
 
-    def _read_base(self):
-        files = self._get_files(self.config_name)
-        config = config_parser(self.schema, files)
+    def _readBase(self):
+        files = self.getFiles(self.config_name)
+        config = ConfigParser(self.schema, files)
 
         arches = config['base',]['arches']
 
@@ -142,18 +142,18 @@ class config_reader_arch(config_reader):
             except KeyError:
                 avail = True
             if avail:
-                self._read_arch(arch)
+                self._readArch(arch)
 
-    def _read_flavour(self, arch, subarch, flavour):
+    def _readFlavour(self, arch, subarch, flavour):
         if not self.has_key(('base', arch, subarch, flavour)):
             if subarch == 'none':
                 import warnings
                 warnings.warn('No config entry for flavour %s, subarch none, arch %s' % (flavour, arch), DeprecationWarning)
             self['base', arch, subarch, flavour] = {}
 
-    def _read_subarch(self, arch, subarch):
+    def _readSubarch(self, arch, subarch):
         files = self._get_files("%s/%s/%s" % (arch, subarch, self.config_name))
-        config = config_parser(self.schema, files)
+        config = ConfigParser(self.schema, files)
 
         flavours = config['base',].get('flavours', [])
 
@@ -169,7 +169,7 @@ class config_reader_arch(config_reader):
             self[tuple(real)] = s
 
         for flavour in flavours:
-            self._read_flavour(arch, subarch, flavour)
+            self._readFlavour(arch, subarch, flavour)
 
     def merge(self, section, arch = None, subarch = None, flavour = None):
         ret = {}
@@ -184,13 +184,14 @@ class config_reader_arch(config_reader):
             ret.update(self.get((section, arch, subarch, flavour), {}))
         return ret
 
-class config_parser(object):
+class ConfigParser(object):
     __slots__ = 'configs', 'schema'
 
     def __init__(self, schema, files):
         self.configs = []
         self.schema = schema
         for file in files:
+            import ConfigParser
             config = ConfigParser.ConfigParser()
             config.read(file)
             self.configs.append(config)

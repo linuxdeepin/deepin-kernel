@@ -2,7 +2,7 @@ from config import *
 from debian import *
 from utils import *
 
-class packages_list(sorted_dict):
+class PackagesList(SortedDict):
     def append(self, package):
         self[package['Package']] = package
 
@@ -10,7 +10,7 @@ class packages_list(sorted_dict):
         for package in packages:
             self[package['Package']] = package
 
-class flags(dict):
+class MakeFlags(dict):
     def __repr__(self):
         repr = super(flags, self).__repr__()
         return "%s(%s)" % (self.__class__.__name__, repr)
@@ -19,17 +19,17 @@ class flags(dict):
         return ' '.join(["%s='%s'" % i for i in self.iteritems()])
 
     def copy(self):
-        return self.__class__(super(flags, self).copy())
+        return self.__class__(super(MakeFlags, self).copy())
 
-class gencontrol(object):
+class Gencontrol(object):
     makefile_targets = ('binary-arch', 'build', 'setup', 'source')
 
     def __init__(self, underlay = None):
-        self.config = config_reader_arch([underlay, "debian/arch"])
-        self.templates = templates()
+        self.config = ConfigReaderCore([underlay, "debian/arch"])
+        self.templates = Templates()
 
     def __call__(self):
-        packages = packages_list()
+        packages = PackagesList()
         makefile = [('.NOTPARALLEL:', ())]
 
         self.do_source(packages)
@@ -48,7 +48,7 @@ class gencontrol(object):
         vars = self.vars.copy()
         vars.update(config_entry)
 
-        makeflags = flags()
+        makeflags = MakeFlags()
         extra = {}
 
         self.do_main_setup(vars, makeflags, extra)
@@ -196,11 +196,11 @@ class gencontrol(object):
 
     def process_relation(self, key, e, in_e, vars):
         in_dep = in_e[key]
-        dep = package_relation_list()
+        dep = PackageRelationList()
         for in_groups in in_dep:
-            groups = package_relation_group()
+            groups = PackageRelationGroup()
             for in_item in in_groups:
-                item = package_relation()
+                item = PackageRelation()
                 item.name = self.substitute(in_item.name, vars)
                 item.operator = in_item.operator
                 if in_item.version is not None:
@@ -219,9 +219,9 @@ class gencontrol(object):
         e['Description'] = desc
 
     def process_package(self, in_entry, vars):
-        e = package()
+        e = Package()
         for key, value in in_entry.iteritems():
-            if isinstance(value, package_relation_list):
+            if isinstance(value, PackageRelationList):
                 self.process_relation(key, e, in_entry, vars)
             elif key == 'Description':
                 self.process_description(e, in_entry, vars)
