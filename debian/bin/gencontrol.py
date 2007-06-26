@@ -83,6 +83,7 @@ class Gencontrol(Base):
     def do_flavour_setup(self, vars, makeflags, arch, subarch, flavour, extra):
         vars.update(self.config.get(('image', arch, subarch, flavour), {}))
         for i in (
+            ('cflags', 'CFLAGS'),
             ('compiler', 'COMPILER'),
             ('image-postproc', 'IMAGE_POSTPROC'),
             ('initramfs', 'INITRAMFS',),
