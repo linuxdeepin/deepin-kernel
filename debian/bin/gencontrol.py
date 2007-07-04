@@ -264,8 +264,9 @@ class Gencontrol(Base):
             value = PackageRelation()
             value.extend(entry.get(i, []))
             if i == 'Depends':
-                value.append("linux-patch-debian-%(linux_version)s (= %(complete)s)" % self.changelog[0].version.__dict__)
-                value.append(' | '.join(["linux-source-%(linux_version)s (= %(complete)s)" % v.__dict__ for v in versions]))
+                v = self.changelog[0].version
+                value.append("linux-patch-debian-%s (= %s)" % (v.linux_version, v.complete))
+                value.append(' | '.join(["linux-source-%s (= %s)" % (v.linux_version, v.complete) for v in versions]))
             elif i == 'Provides':
                 value.extend(["linux-tree-%s" % v.complete.replace('~', '-') for v in versions])
             entry[i] = value
