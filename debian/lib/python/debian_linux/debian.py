@@ -69,20 +69,26 @@ $
         match = self._version_re.match(version)
         if match is None:
             raise RuntimeError, "Invalid debian version"
-        self.complete = version
         self.epoch = None
         if match.group("epoch") is not None:
             self.epoch = int(match.group("epoch"))
         self.upstream = match.group("upstream")
         self.debian = match.group("debian")
 
-        if self.debian is not None:
-            self.complete_noepoch = "%s-%s" % (self.upstream, self.debian)
-        else:
-            self.complete_noepoch = self.upstream
-
     def __str__(self):
         return self.complete
+
+    @property
+    def complete(self):
+        if self.epoch is not None:
+            return "%d:%s" % (self.epoch, self.complete_noepoch)
+        return self.complete_noepoch
+
+    @property
+    def complete_noepoch(self):
+        if self.debian is not None:
+            return "%s-%s" % (self.upstream, self.debian)
+        return self.upstream
 
 class VersionLinux(Version):
     _version_linux_rules = ur"""
