@@ -152,7 +152,7 @@ class ConfigReaderCore(ConfigReader):
             self['base', arch, subarch, flavour] = {}
 
     def _readSubarch(self, arch, subarch):
-        files = self._get_files("%s/%s/%s" % (arch, subarch, self.config_name))
+        files = self.getFiles("%s/%s/%s" % (arch, subarch, self.config_name))
         config = ConfigParser(self.schema, files)
 
         flavours = config['base',].get('flavours', [])
@@ -190,10 +190,17 @@ class ConfigParser(object):
     def __init__(self, schema, files):
         self.configs = []
         self.schema = schema
-        for file in files:
+        fps = []
+        for i in files:
+            try:
+                fps.append(file(i))
+            except Exception: pass
+        if not fps:
+            raise RuntimeError("No files found")
+        for f in fps:
             import ConfigParser
             config = ConfigParser.ConfigParser()
-            config.read(file)
+            config.readfp(f)
             self.configs.append(config)
 
     def __getitem__(self, key):
