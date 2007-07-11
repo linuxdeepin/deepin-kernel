@@ -3,7 +3,7 @@
 import sys
 sys.path.append(sys.path[0] + "/../lib/python")
 
-import optparse, os, os.path
+import optparse, os, shutil, tempfile, urllib2
 from debian_linux.abi import *
 from debian_linux.config import *
 from debian_linux.debian import *
@@ -53,7 +53,6 @@ class main(object):
         self.version_abi = self.version + '-' + self.abiname
 
     def __call__(self):
-        import tempfile
         self.dir = tempfile.mkdtemp(prefix = 'abiupdate')
         try:
             self.log("Retreive config\n")
@@ -65,23 +64,9 @@ class main(object):
             for arch in arches:
                 self.update_arch(config, arch)
         finally:
-            self._rmtree(self.dir)
+            shutil.rmtree(self.dir)
 
-    def _rmtree(self, dir):
-        import stat
-        for root, dirs, files in os.walk(dir, topdown=False):
-            for name in files:
-                os.remove(os.path.join(root, name))
-            for name in dirs:
-                real = os.path.join(root, name)
-                mode = os.lstat(real)[stat.ST_MODE]
-                if stat.S_ISDIR(mode):
-                    os.rmdir(real)
-                else:
-                    os.remove(real)
-        os.rmdir(dir)
-
-    def extract_package(self, filename, base = "tmp"):
+    def extract_package(self, filename, base):
         base_out = self.dir + "/" + base
         os.mkdir(base_out)
         os.system("dpkg-deb --extract %s %s" % (filename, base_out))
@@ -94,23 +79,22 @@ class main(object):
             prefix = subarch + '-' + flavour
         filename = "linux-headers-%s-%s_%s_%s.deb" % (self.version_abi, prefix, self.version_source, arch)
         f = self.retrieve_package(self.url, filename)
-        d = self.extract_package(f)
+        d = self.extract_package(f, "linux-headers-%s_%s" % (prefix, arch))
         f1 = d + "/usr/src/linux-headers-%s-%s/Module.symvers" % (self.version_abi, prefix)
         s = symbols(f1)
-        self._rmtree(d)
+        shutil.rmtree(d)
         return s
 
     def get_config(self):
         filename = "linux-support-%s_%s_all.deb" % (self.version_abi, self.version_source)
         f = self.retrieve_package(self.url_config, filename)
-        d = self.extract_package(f)
+        d = self.extract_package(f, "linux-support")
         dir = d + "/usr/src/linux-support-" + self.version_abi + "/arch"
         config = config_reader_arch([dir])
-        self._rmtree(d)
+        shutil.rmtree(d)
         return config
 
     def retrieve_package(self, url, filename):
-        import urllib2
         u = url(self.source, filename)
         filename_out = self.dir + "/" + filename
         f_in = urllib2.urlopen(u)
