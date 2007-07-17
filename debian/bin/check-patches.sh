@@ -2,8 +2,8 @@
 
 TMPDIR=$(mktemp -d)
 trap "rm -rf $TMPDIR" EXIT
-awk '{if (NF >= 2) print "debian/patches/" $2}' debian/patches/series/* | sort -u > $TMPDIR/used
-find debian/patches ! -path '*/series*' -type f -printf "%p\n" | sort > $TMPDIR/avail
+grep -v "^#"  debian/patches/series/* | awk '{if (NF >= 2) print "debian/patches/" $2}' | sort -u > $TMPDIR/used
+find debian/patches ! -path '*/series*' -type f -name "*.diff" -o -name "*.patch" -printf "%p\n" | sort > $TMPDIR/avail
 echo "Used patches"
 echo "=============="
 cat $TMPDIR/used
