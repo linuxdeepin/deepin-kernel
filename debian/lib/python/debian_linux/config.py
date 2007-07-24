@@ -2,7 +2,6 @@ import os, os.path, re, sys, textwrap
 
 __all__ = [
     'ConfigParser',
-    'ConfigReader',
     'ConfigReaderCore',
 ]
 
@@ -27,60 +26,36 @@ class SchemaItemList(object):
             return []
         return [j.strip() for j in re.split(self.type, i)]
 
-class ConfigReader(dict):
+class ConfigReaderCore(dict):
     config_name = "defines"
 
-    def __init__(self, dirs = []):
-        self._dirs = dirs
-
-    def __getitem__(self, key):
-        return self.get(key)
-
-    def _update(self, ret, inputkey):
-        for key, value in super(ConfigReader, self).get(tuple(inputkey), {}).iteritems():
-            ret[key] = value
-
-    def getFiles(self, name):
-        return [os.path.join(i, name) for i in self._dirs if i]
-
-    def get(self, key, default = _marker):
-        if isinstance(key, basestring):
-            key = key,
-
-        ret = super(ConfigReader, self).get(tuple(key), default)
-        if ret == _marker:
-            raise KeyError, key
-        return ret
-
-    def merge(self, section, *args):
-        ret = {}
-        for i in xrange(0, len(args) + 1):
-            ret.update(self.get(tuple([section] + list(args[:i])), {}))
-        return ret
-
-    def sections(self):
-        return super(ConfigReader, self).keys()
-
-class ConfigReaderCore(ConfigReader):
-    schema = {
-        'arches': SchemaItemList(),
-        'available': SchemaItemBoolean(),
-        'configs': SchemaItemList(),
-        'flavours': SchemaItemList(),
-        'initramfs': SchemaItemBoolean(),
-        'initramfs-generators': SchemaItemList(),
-        'modules': SchemaItemBoolean(),
-        'subarches': SchemaItemList(),
-        'versions': SchemaItemList(),
+    schemas = {
+        'base': {
+            'arches': SchemaItemList(),
+            'available': SchemaItemBoolean(),
+            'flavours': SchemaItemList(),
+            'modules': SchemaItemBoolean(),
+            'subarches': SchemaItemList(),
+        },
+        'image': {
+            'configs': SchemaItemList(),
+            'initramfs': SchemaItemBoolean(),
+            'initramfs-generators': SchemaItemList(),
+        },
+        'relations': {
+        },
+        'xen': {
+            'versions': SchemaItemList(),
+        }
     }
 
     def __init__(self, dirs = []):
-        super(ConfigReaderCore, self).__init__(dirs)
+        self._dirs = dirs
         self._readBase()
 
     def _readArch(self, arch):
-        files = self.getFiles("%s/%s" % (arch, self.config_name))
-        config = ConfigParser(self.schema, files)
+        config = ConfigParser(self.schemas)
+        config.read(self.getFiles("%s/%s" % (arch, self.config_name)))
 
         subarches = config['base',].get('subarches', [])
         flavours = config['base',].get('flavours', [])
@@ -123,8 +98,8 @@ class ConfigReaderCore(ConfigReader):
                 self._readFlavour(arch, 'none', flavour)
 
     def _readBase(self):
-        files = self.getFiles(self.config_name)
-        config = ConfigParser(self.schema, files)
+        config = ConfigParser(self.schemas)
+        config.read(self.getFiles(self.config_name))
 
         arches = config['base',]['arches']
 
@@ -152,8 +127,8 @@ class ConfigReaderCore(ConfigReader):
             self['base', arch, subarch, flavour] = {}
 
     def _readSubarch(self, arch, subarch):
-        files = self.getFiles("%s/%s/%s" % (arch, subarch, self.config_name))
-        config = ConfigParser(self.schema, files)
+        config = ConfigParser(self.schemas)
+        config.read(self.getFiles("%s/%s/%s" % (arch, subarch, self.config_name)))
 
         flavours = config['base',].get('flavours', [])
 
@@ -171,6 +146,9 @@ class ConfigReaderCore(ConfigReader):
         for flavour in flavours:
             self._readFlavour(arch, subarch, flavour)
 
+    def getFiles(self, name):
+        return [os.path.join(i, name) for i in self._dirs if i]
+
     def merge(self, section, arch = None, subarch = None, flavour = None):
         ret = {}
         ret.update(self.get((section,), {}))
@@ -185,57 +163,62 @@ class ConfigReaderCore(ConfigReader):
         return ret
 
 class ConfigParser(object):
-    __slots__ = 'configs', 'schema'
+    __slots__ = '_config', 'schemas'
 
-    def __init__(self, schema, files):
-        self.configs = []
-        self.schema = schema
-        fps = []
-        for i in files:
-            try:
-                fps.append(file(i))
-            except Exception: pass
-        if not fps:
-            raise RuntimeError("No files found")
-        for f in fps:
-            import ConfigParser
-            config = ConfigParser.ConfigParser()
-            config.readfp(f)
-            self.configs.append(config)
+    def __init__(self, schemas):
+        self.schemas = schemas
+
+        from ConfigParser import RawConfigParser
+        self._config = config = RawConfigParser()
 
     def __getitem__(self, key):
-        return self.items(key)
+        return self._convert()[key]
 
     def __iter__(self):
-        return iter(self.sections())
+        return iter(self._convert())
 
-    def items(self, section, var = {}):
+    def __str__(self):
+        return '<%s(%s)>' % (self.__class__.__name__, self._convert())
+
+    def _convert(self):
         ret = {}
-        section = '_'.join(section)
-        exceptions = []
-        for config in self.configs:
-            try:
-                items = config.items(section)
-            except ConfigParser.NoSectionError, e:
-                exceptions.append(e)
+        for section in self._config.sections():
+            data = {}
+            for key, value in self._config.items(section):
+                data[key] = value
+            s1 = section.split('_')
+            if s1[-1] in self.schemas:
+                ret[tuple(s1)] = self.SectionSchema(data, self.schemas[s1[-1]])
+            elif 'base' in self.schemas:
+                import warnings
+                warnings.warn('Implicit base definition: %s' % section, DeprecationWarning)
+                ret[tuple(s1)] = self.SectionSchema(data, self.schemas['base'])
             else:
-                for key, value in items:
-                    try:
-                        value = self.schema[key](value)
-                    except KeyError: pass
-                    ret[key] = value
-        if len(exceptions) == len(self.configs):
-            raise exceptions[0]
+                ret[section] = self.Section(data)
         return ret
 
-    def sections(self):
-        sections = []
-        for config in self.configs:
-            for section in config.sections():
-                section = tuple(section.split('_'))
-                if section not in sections:
-                    sections.append(section)
-        return sections
+    def keys(self):
+        return self._convert().keys()
+
+    def read(self, data):
+        return self._config.read(data)
+
+    class Section(dict):
+        def __init__(self, data):
+            super(ConfigParser.Section, self).__init__(data)
+
+        def __str__(self):
+            return '<%s(%s)>' % (self.__class__.__name__, self._data)
+
+    class SectionSchema(Section):
+        __slots__ = ()
+
+        def __init__(self, data, schema):
+            for key in data.keys():
+                try:
+                    data[key] = schema[key](data[key])
+                except KeyError: pass
+            super(ConfigParser.SectionSchema, self).__init__(data)
 
 if __name__ == '__main__':
     import sys
