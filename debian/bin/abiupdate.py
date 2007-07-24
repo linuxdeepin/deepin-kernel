@@ -47,7 +47,7 @@ class main(object):
         self.version = changelog.version.linux_version
         self.version_source = changelog.version.complete
 
-        local_config = config_reader_arch(["debian/arch"])
+        local_config = config_reader_arch(["debian/config"])
 
         self.abiname = local_config['abi',]['abiname']
         self.version_abi = self.version + '-' + self.abiname
@@ -107,7 +107,7 @@ class main(object):
         return filename_out
 
     def save_abi(self, symbols, arch, subarch, flavour):
-        out = "debian/arch/%s" % arch
+        out = "debian/config/%s" % arch
         if subarch != 'none':
             out += "/%s" % subarch
         out += "/abi-%s.%s" % (self.abiname, flavour)

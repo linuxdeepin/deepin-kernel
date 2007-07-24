@@ -6,13 +6,13 @@ from debian_linux.config import *
 
 class checker(object):
     def __init__(self, dir, arch, subarch, flavour):
-        self.config = ConfigReaderCore(["debian/arch"])
+        self.config = ConfigReaderCore(["debian/config"])
         self.filename_new = "%s/Module.symvers" % dir
         abiname = self.config['abi',]['abiname']
         if subarch == 'none':
-            self.filename_ref = "debian/arch/%s/abi-%s.%s" % (arch, abiname, flavour)
+            self.filename_ref = "debian/config/%s/abi-%s.%s" % (arch, abiname, flavour)
         else:
-            self.filename_ref = "debian/arch/%s/%s/abi-%s.%s" % (arch, subarch, abiname, flavour)
+            self.filename_ref = "debian/config/%s/%s/abi-%s.%s" % (arch, subarch, abiname, flavour)
 
     def __call__(self, out):
         ret = 0

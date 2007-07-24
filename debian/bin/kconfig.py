@@ -4,7 +4,7 @@ import optparse, os.path, sys
 from debian_linux.kconfig import *
 
 def merge(output, *config):
-    config = [os.path.join('debian/arch', c) for c in config]
+    config = [os.path.join('debian/config', c) for c in config]
 
     kconfig = KconfigFile()
     for c in config:

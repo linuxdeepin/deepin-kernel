@@ -25,7 +25,7 @@ class Gencontrol(object):
     makefile_targets = ('binary-arch', 'build', 'setup', 'source')
 
     def __init__(self, underlay = None):
-        self.config = ConfigReaderCore([underlay, "debian/arch"])
+        self.config = ConfigReaderCore([underlay, "debian/config"])
         self.templates = Templates()
 
     def __call__(self):
