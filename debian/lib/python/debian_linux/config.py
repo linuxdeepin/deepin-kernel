@@ -33,9 +33,9 @@ class ConfigReaderCore(dict):
         'base': {
             'arches': SchemaItemList(),
             'available': SchemaItemBoolean(),
+            'featuresets': SchemaItemList(),
             'flavours': SchemaItemList(),
             'modules': SchemaItemBoolean(),
-            'subarches': SchemaItemList(),
         },
         'image': {
             'configs': SchemaItemList(),
@@ -51,19 +51,20 @@ class ConfigReaderCore(dict):
 
     def __init__(self, dirs = []):
         self._dirs = dirs
-        self._readBase()
+        self._read_base()
 
-    def _readArch(self, arch):
+    def _read_arch(self, arch):
         config = ConfigParser(self.schemas)
-        config.read(self.getFiles("%s/%s" % (arch, self.config_name)))
+        config.read(self.get_files("%s/%s" % (arch, self.config_name)))
 
-        subarches = config['base',].get('subarches', [])
+        featuresets = config['base',].get('featuresets', [])
+        print "featuresets", arch, featuresets
         flavours = config['base',].get('flavours', [])
 
         for section in iter(config):
             real = list(section)
             # TODO
-            if real[-1] in subarches:
+            if real[-1] in featuresets:
                 real[0:0] = ['base', arch]
             elif real[-1] in flavours:
                 real[0:0] = ['base', arch, 'none']
@@ -78,28 +79,29 @@ class ConfigReaderCore(dict):
             s.update(config[section])
             self[tuple(real)] = s
 
-        for subarch in subarches:
-            if self.has_key(('base', arch, subarch)):
-                avail = self['base', arch, subarch].get('available', True)
+        for featureset in featuresets:
+            if self.has_key(('base', arch, featureset)):
+                avail = self['base', arch, featureset].get('available', True)
             else:
                 avail = True
             if avail:
-                self._readSubarch(arch, subarch)
+                self._read_subarch(arch, featureset)
 
         base = self['base', arch]
-        base['subarches'] = subarches
+        # TODO
+        base['subarches'] = featuresets
 
         if flavours:
-            subarches.insert(0, 'none')
+            featuresets.insert(0, 'none')
             del base['flavours']
             self['base', arch] = base
             self['base', arch, 'none'] = {'flavours': flavours}
             for flavour in flavours:
-                self._readFlavour(arch, 'none', flavour)
+                self._read_flavour(arch, 'none', flavour)
 
-    def _readBase(self):
+    def _read_base(self):
         config = ConfigParser(self.schemas)
-        config.read(self.getFiles(self.config_name))
+        config.read(self.get_files(self.config_name))
 
         arches = config['base',]['arches']
 
@@ -117,18 +119,18 @@ class ConfigReaderCore(dict):
             except KeyError:
                 avail = True
             if avail:
-                self._readArch(arch)
+                self._read_arch(arch)
 
-    def _readFlavour(self, arch, subarch, flavour):
+    def _read_flavour(self, arch, subarch, flavour):
         if not self.has_key(('base', arch, subarch, flavour)):
             if subarch == 'none':
                 import warnings
                 warnings.warn('No config entry for flavour %s, subarch none, arch %s' % (flavour, arch), DeprecationWarning)
             self['base', arch, subarch, flavour] = {}
 
-    def _readSubarch(self, arch, subarch):
+    def _read_subarch(self, arch, subarch):
         config = ConfigParser(self.schemas)
-        config.read(self.getFiles("%s/%s/%s" % (arch, subarch, self.config_name)))
+        config.read(self.get_files("%s/%s/%s" % (arch, subarch, self.config_name)))
 
         flavours = config['base',].get('flavours', [])
 
@@ -144,9 +146,9 @@ class ConfigReaderCore(dict):
             self[tuple(real)] = s
 
         for flavour in flavours:
-            self._readFlavour(arch, subarch, flavour)
+            self._read_flavour(arch, subarch, flavour)
 
-    def getFiles(self, name):
+    def get_files(self, name):
         return [os.path.join(i, name) for i in self._dirs if i]
 
     def merge(self, section, arch = None, subarch = None, flavour = None):
