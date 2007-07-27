@@ -58,7 +58,6 @@ class ConfigReaderCore(dict):
         config.read(self.get_files("%s/%s" % (arch, self.config_name)))
 
         featuresets = config['base',].get('featuresets', [])
-        print "featuresets", arch, featuresets
         flavours = config['base',].get('flavours', [])
 
         for section in iter(config):
@@ -85,7 +84,7 @@ class ConfigReaderCore(dict):
             else:
                 avail = True
             if avail:
-                self._read_subarch(arch, featureset)
+                self._read_featureset(arch, featureset)
 
         base = self['base', arch]
         # TODO
@@ -121,47 +120,47 @@ class ConfigReaderCore(dict):
             if avail:
                 self._read_arch(arch)
 
-    def _read_flavour(self, arch, subarch, flavour):
-        if not self.has_key(('base', arch, subarch, flavour)):
-            if subarch == 'none':
-                import warnings
-                warnings.warn('No config entry for flavour %s, subarch none, arch %s' % (flavour, arch), DeprecationWarning)
-            self['base', arch, subarch, flavour] = {}
-
-    def _read_subarch(self, arch, subarch):
+    def _read_featureset(self, arch, featureset):
         config = ConfigParser(self.schemas)
-        config.read(self.get_files("%s/%s/%s" % (arch, subarch, self.config_name)))
+        config.read(self.get_files("%s/%s/%s" % (arch, featureset, self.config_name)))
 
         flavours = config['base',].get('flavours', [])
 
         for section in iter(config):
             real = list(section)
             if real[-1] in flavours:
-                real[0:0] = ['base', arch, subarch]
+                real[0:0] = ['base', arch, featureset]
             else:
-                real[0:0] = [real.pop(), arch, subarch]
+                real[0:0] = [real.pop(), arch, featureset]
             real = tuple(real)
             s = self.get(real, {})
             s.update(config[section])
             self[tuple(real)] = s
 
         for flavour in flavours:
-            self._read_flavour(arch, subarch, flavour)
+            self._read_flavour(arch, featureset, flavour)
+
+    def _read_flavour(self, arch, featureset, flavour):
+        if not self.has_key(('base', arch, featureset, flavour)):
+            if featureset == 'none':
+                import warnings
+                warnings.warn('No config entry for flavour %s, featureset none, arch %s' % (flavour, arch), DeprecationWarning)
+            self['base', arch, featureset, flavour] = {}
 
     def get_files(self, name):
         return [os.path.join(i, name) for i in self._dirs if i]
 
-    def merge(self, section, arch = None, subarch = None, flavour = None):
+    def merge(self, section, arch = None, featureset = None, flavour = None):
         ret = {}
         ret.update(self.get((section,), {}))
         if arch:
             ret.update(self.get((section, arch), {}))
-        if flavour and subarch and subarch != 'none':
+        if flavour and featureset and featureset != 'none':
             ret.update(self.get((section, arch, 'none', flavour), {}))
-        if subarch:
-            ret.update(self.get((section, arch, subarch), {}))
+        if featureset:
+            ret.update(self.get((section, arch, featureset), {}))
         if flavour:
-            ret.update(self.get((section, arch, subarch, flavour), {}))
+            ret.update(self.get((section, arch, featureset, flavour), {}))
         return ret
 
 class ConfigParser(object):
