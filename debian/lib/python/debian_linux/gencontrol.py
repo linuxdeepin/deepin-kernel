@@ -132,40 +132,40 @@ class Gencontrol(object):
             makefile.append("%s-%s-real:" % (i, arch))
 
     def do_arch_recurse(self, packages, makefile, arch, vars, makeflags, extra):
-        for subarch in self.config['base', arch]['subarches']:
-            self.do_subarch(packages, makefile, arch, subarch, vars.copy(), makeflags.copy(), extra)
+        for featureset in self.config['base', arch]['featuresets']:
+            self.do_featureset(packages, makefile, arch, featureset, vars.copy(), makeflags.copy(), extra)
 
-    def do_subarch(self, packages, makefile, arch, subarch, vars, makeflags, extra):
-        config_entry = self.config['base', arch, subarch]
+    def do_featureset(self, packages, makefile, arch, featureset, vars, makeflags, extra):
+        config_entry = self.config['base', arch, featureset]
         vars.update(config_entry)
 
-        makeflags['SUBARCH'] = subarch
-        if subarch != 'none':
-            vars['localversion'] += '-' + subarch
+        makeflags['SUBARCH'] = featureset
+        if featureset != 'none':
+            vars['localversion'] += '-' + featureset
 
-        self.do_subarch_setup(vars, makeflags, arch, subarch, extra)
-        self.do_subarch_makefile(makefile, arch, subarch, makeflags, extra)
-        self.do_subarch_packages(packages, makefile, arch, subarch, vars, makeflags, extra)
-        self.do_subarch_recurse(packages, makefile, arch, subarch, vars, makeflags, extra)
+        self.do_featureset_setup(vars, makeflags, arch, featureset, extra)
+        self.do_featureset_makefile(makefile, arch, featureset, makeflags, extra)
+        self.do_featureset_packages(packages, makefile, arch, featureset, vars, makeflags, extra)
+        self.do_featureset_recurse(packages, makefile, arch, featureset, vars, makeflags, extra)
 
-    def do_subarch_setup(self, vars, makeflags, arch, subarch, extra):
+    def do_featureset_setup(self, vars, makeflags, arch, featureset, extra):
         pass
 
-    def do_subarch_makefile(self, makefile, arch, subarch, makeflags, extra):
+    def do_featureset_makefile(self, makefile, arch, featureset, makeflags, extra):
         for i in self.makefile_targets:
-            makefile.append("%s-%s:: %s-%s-%s" % (i, arch, i, arch, subarch))
-            makefile.append("%s-%s-%s:: %s-%s-%s-real" % (i, arch, subarch, i, arch, subarch))
+            makefile.append("%s-%s:: %s-%s-%s" % (i, arch, i, arch, featureset))
+            makefile.append("%s-%s-%s:: %s-%s-%s-real" % (i, arch, featureset, i, arch, featureset))
 
-    def do_subarch_packages(self, packages, makefile, arch, subarch, vars, makeflags, extra):
+    def do_featureset_packages(self, packages, makefile, arch, featureset, vars, makeflags, extra):
         for i in self.makefile_targets:
-            makefile.append("%s-%s-%s-real:" % (i, arch, subarch))
+            makefile.append("%s-%s-%s-real:" % (i, arch, featureset))
 
-    def do_subarch_recurse(self, packages, makefile, arch, subarch, vars, makeflags, extra):
-        for flavour in self.config['base', arch, subarch]['flavours']:
-            self.do_flavour(packages, makefile, arch, subarch, flavour, vars.copy(), makeflags.copy(), extra)
+    def do_featureset_recurse(self, packages, makefile, arch, featureset, vars, makeflags, extra):
+        for flavour in self.config['base', arch, featureset]['flavours']:
+            self.do_flavour(packages, makefile, arch, featureset, flavour, vars.copy(), makeflags.copy(), extra)
 
-    def do_flavour(self, packages, makefile, arch, subarch, flavour, vars, makeflags, extra):
-        config_entry = self.config.merge('base', arch, subarch, flavour)
+    def do_flavour(self, packages, makefile, arch, featureset, flavour, vars, makeflags, extra):
+        config_entry = self.config.merge('base', arch, featureset, flavour)
         vars.update(config_entry)
 
         if not vars.has_key('longclass'):
@@ -174,11 +174,11 @@ class Gencontrol(object):
         makeflags['FLAVOUR'] = flavour
         vars['localversion'] += '-' + flavour
 
-        self.do_flavour_setup(vars, makeflags, arch, subarch, flavour, extra)
-        self.do_flavour_makefile(makefile, arch, subarch, flavour, makeflags, extra)
-        self.do_flavour_packages(packages, makefile, arch, subarch, flavour, vars, makeflags, extra)
+        self.do_flavour_setup(vars, makeflags, arch, featureset, flavour, extra)
+        self.do_flavour_makefile(makefile, arch, featureset, flavour, makeflags, extra)
+        self.do_flavour_packages(packages, makefile, arch, featureset, flavour, vars, makeflags, extra)
 
-    def do_flavour_setup(self, vars, makeflags, arch, subarch, flavour, extra):
+    def do_flavour_setup(self, vars, makeflags, arch, featureset, flavour, extra):
         for i in (
             ('kernel-arch', 'KERNEL_ARCH'),
             ('localversion', 'LOCALVERSION'),
@@ -186,12 +186,12 @@ class Gencontrol(object):
             if vars.has_key(i[0]):
                 makeflags[i[1]] = vars[i[0]]
 
-    def do_flavour_makefile(self, makefile, arch, subarch, flavour, makeflags, extra):
+    def do_flavour_makefile(self, makefile, arch, featureset, flavour, makeflags, extra):
         for i in self.makefile_targets:
-            makefile.append("%s-%s-%s:: %s-%s-%s-%s" % (i, arch, subarch, i, arch, subarch, flavour))
-            makefile.append("%s-%s-%s-%s:: %s-%s-%s-%s-real" % (i, arch, subarch, flavour, i, arch, subarch, flavour))
+            makefile.append("%s-%s-%s:: %s-%s-%s-%s" % (i, arch, featureset, i, arch, featureset, flavour))
+            makefile.append("%s-%s-%s-%s:: %s-%s-%s-%s-real" % (i, arch, featureset, flavour, i, arch, featureset, flavour))
 
-    def do_flavour_packages(self, packages, makefile, arch, subarch, flavour, vars, makeflags, extra):
+    def do_flavour_packages(self, packages, makefile, arch, featureset, flavour, vars, makeflags, extra):
         pass
 
     def process_relation(self, key, e, in_e, vars):

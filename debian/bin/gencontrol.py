@@ -49,8 +49,8 @@ class Gencontrol(Base):
         makefile.append(("setup-%s-real:" % arch))
         makefile.append(("source-%s-real:" % arch, cmds_source))
 
-    def do_subarch_setup(self, vars, makeflags, arch, subarch, extra):
-        vars.update(self.config.get(('image', arch, subarch), {}))
+    def do_featureset_setup(self, vars, makeflags, arch, featureset, extra):
+        vars.update(self.config.get(('image', arch, featureset), {}))
         vars['localversion_headers'] = vars['localversion']
         for i in (
             ('kernel-header-dirs', 'KERNEL_HEADER_DIRS'),
@@ -59,9 +59,9 @@ class Gencontrol(Base):
             if vars.has_key(i[0]):
                 makeflags[i[1]] = vars[i[0]]
 
-    def do_subarch_packages(self, packages, makefile, arch, subarch, vars, makeflags, extra):
-        headers_subarch = self.templates["control.headers.subarch"]
-        package_headers = self.process_package(headers_subarch[0], vars)
+    def do_featureset_packages(self, packages, makefile, arch, featureset, vars, makeflags, extra):
+        headers_featureset = self.templates["control.headers.subarch"]
+        package_headers = self.process_package(headers_featureset[0], vars)
 
         name = package_headers['Package']
         if packages.has_key(name):
@@ -75,13 +75,13 @@ class Gencontrol(Base):
         cmds_binary_arch.append(("$(MAKE) -f debian/rules.real binary-arch-subarch %s" % makeflags,))
         cmds_source = []
         cmds_source.append(("$(MAKE) -f debian/rules.real source-subarch %s" % makeflags,))
-        makefile.append(("binary-arch-%s-%s-real:" % (arch, subarch), cmds_binary_arch))
-        makefile.append("build-%s-%s-real:" % (arch, subarch))
-        makefile.append(("setup-%s-%s-real:" % (arch, subarch)))
-        makefile.append(("source-%s-%s-real:" % (arch, subarch), cmds_source))
+        makefile.append(("binary-arch-%s-%s-real:" % (arch, featureset), cmds_binary_arch))
+        makefile.append("build-%s-%s-real:" % (arch, featureset))
+        makefile.append(("setup-%s-%s-real:" % (arch, featureset)))
+        makefile.append(("source-%s-%s-real:" % (arch, featureset), cmds_source))
 
-    def do_flavour_setup(self, vars, makeflags, arch, subarch, flavour, extra):
-        vars.update(self.config.get(('image', arch, subarch, flavour), {}))
+    def do_flavour_setup(self, vars, makeflags, arch, featureset, flavour, extra):
+        vars.update(self.config.get(('image', arch, featureset, flavour), {}))
         for i in (
             ('cflags', 'CFLAGS'),
             ('compiler', 'COMPILER'),
@@ -98,11 +98,11 @@ class Gencontrol(Base):
             if vars.has_key(i[0]):
                 makeflags[i[1]] = vars[i[0]]
 
-    def do_flavour_packages(self, packages, makefile, arch, subarch, flavour, vars, makeflags, extra):
+    def do_flavour_packages(self, packages, makefile, arch, featureset, flavour, vars, makeflags, extra):
         headers = self.templates["control.headers"]
 
-        config_entry_base = self.config.merge('base', arch, subarch, flavour)
-        config_entry_relations = self.config.merge('relations', arch, subarch, flavour)
+        config_entry_base = self.config.merge('base', arch, featureset, flavour)
+        config_entry_relations = self.config.merge('relations', arch, featureset, flavour)
 
         compiler = config_entry_base.get('compiler', 'gcc')
         relations_compiler = PackageRelation(config_entry_relations[compiler])
@@ -118,7 +118,7 @@ class Gencontrol(Base):
         }
         if vars.get('initramfs', True):
             generators = vars['initramfs-generators']
-            config_entry_commands_initramfs = self.config.merge('commands-image-initramfs-generators', arch, subarch, flavour)
+            config_entry_commands_initramfs = self.config.merge('commands-image-initramfs-generators', arch, featureset, flavour)
             commands = [config_entry_commands_initramfs[i] for i in generators if config_entry_commands_initramfs.has_key(i)]
             makeflags['INITRD_CMD'] = ' '.join(commands)
             l_depends = PackageRelationGroup()
@@ -140,7 +140,7 @@ class Gencontrol(Base):
         elif vars['type'] == 'plain-xen':
             image = self.templates["control.image.type-modulesextra"]
             build_modules = True
-            config_entry_xen = self.config.merge('xen', arch, subarch, flavour)
+            config_entry_xen = self.config.merge('xen', arch, featureset, flavour)
             p = self.process_packages(self.templates['control.xen-linux-system'], vars)
             l = package_relation_group()
             for version in config_entry_xen['versions']:
@@ -192,11 +192,11 @@ class Gencontrol(Base):
 
         kconfig = ['config']
         kconfig.extend(get_config(["%s/config" % arch], arch))
-        if subarch == 'none':
-            kconfig.extend(get_config(["%s/config.%s" % (arch, flavour)], arch, subarch, flavour))
+        if featureset == 'none':
+            kconfig.extend(get_config(["%s/config.%s" % (arch, flavour)], arch, featureset, flavour))
         else:
-            kconfig.extend(get_config(["%s/%s/config" % (arch, subarch)], arch, subarch))
-            kconfig.extend(get_config(["%s/%s/config.%s" % (arch, subarch, flavour)], arch, subarch, flavour))
+            kconfig.extend(get_config(["%s/%s/config" % (arch, featureset)], arch, featureset))
+            kconfig.extend(get_config(["%s/%s/config.%s" % (arch, featureset, flavour)], arch, featureset, flavour))
         makeflags['KCONFIG'] = ' '.join(kconfig)
 
         cmds_binary_arch = []
@@ -207,10 +207,10 @@ class Gencontrol(Base):
         cmds_build.append(("$(MAKE) -f debian/rules.real build %s" % makeflags,))
         cmds_setup = []
         cmds_setup.append(("$(MAKE) -f debian/rules.real setup-flavour %s" % makeflags,))
-        makefile.append(("binary-arch-%s-%s-%s-real:" % (arch, subarch, flavour), cmds_binary_arch))
-        makefile.append(("build-%s-%s-%s-real:" % (arch, subarch, flavour), cmds_build))
-        makefile.append(("setup-%s-%s-%s-real:" % (arch, subarch, flavour), cmds_setup))
-        makefile.append(("source-%s-%s-%s-real:" % (arch, subarch, flavour)))
+        makefile.append(("binary-arch-%s-%s-%s-real:" % (arch, featureset, flavour), cmds_binary_arch))
+        makefile.append(("build-%s-%s-%s-real:" % (arch, featureset, flavour), cmds_build))
+        makefile.append(("setup-%s-%s-%s-real:" % (arch, featureset, flavour), cmds_setup))
+        makefile.append(("source-%s-%s-%s-real:" % (arch, featureset, flavour)))
 
     def do_extra(self, packages, makefile):
         apply = self.templates['patch.apply']

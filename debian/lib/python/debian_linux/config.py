@@ -88,7 +88,7 @@ class ConfigReaderCore(dict):
 
         base = self['base', arch]
         # TODO
-        base['subarches'] = featuresets
+        base['featuresets'] = base['subarches'] = featuresets
 
         if flavours:
             featuresets.insert(0, 'none')
