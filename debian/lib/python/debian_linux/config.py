@@ -79,12 +79,7 @@ class ConfigReaderCore(dict):
             self[tuple(real)] = s
 
         for featureset in featuresets:
-            if self.has_key(('base', arch, featureset)):
-                avail = self['base', arch, featureset].get('available', True)
-            else:
-                avail = True
-            if avail:
-                self._read_arch_featureset(arch, featureset)
+            self._read_arch_featureset(arch, featureset)
 
         if flavours:
             base = self['base', arch]
@@ -131,12 +126,7 @@ class ConfigReaderCore(dict):
             self[tuple(real)] = config[section]
 
         for arch in arches:
-            try:
-                avail = self['base', arch].get('available', True)
-            except KeyError:
-                avail = True
-            if avail:
-                self._read_arch(arch)
+            self._read_arch(arch)
 
     def _read_featureset(self, featureset):
         config = ConfigParser(self.schemas)
@@ -144,9 +134,11 @@ class ConfigReaderCore(dict):
 
         for section in iter(config):
             real = list(section)
-            real[0:0] = [real.pop(), None, featureset]
+            real[0:0] = [real.pop(), "featureset-" + featureset]
             real = tuple(real)
-            self[tuple(real)] = config[section]
+            s = self.get(real, {})
+            s.update(config[section])
+            self[tuple(real)] = s
 
     def _read_flavour(self, arch, featureset, flavour):
         if not self.has_key(('base', arch, featureset, flavour)):
