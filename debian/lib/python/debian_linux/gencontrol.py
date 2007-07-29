@@ -139,7 +139,7 @@ class Gencontrol(object):
         config_entry = self.config['base', arch, featureset]
         vars.update(config_entry)
 
-        makeflags['SUBARCH'] = featureset
+        makeflags['FEATURESET'] = featureset
         if featureset != 'none':
             vars['localversion'] += '-' + featureset
 

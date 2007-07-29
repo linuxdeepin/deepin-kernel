@@ -72,9 +72,9 @@ class Gencontrol(Base):
             packages.append(package_headers)
 
         cmds_binary_arch = []
-        cmds_binary_arch.append(("$(MAKE) -f debian/rules.real binary-arch-subarch %s" % makeflags,))
+        cmds_binary_arch.append(("$(MAKE) -f debian/rules.real binary-arch-featureset %s" % makeflags,))
         cmds_source = []
-        cmds_source.append(("$(MAKE) -f debian/rules.real source-subarch %s" % makeflags,))
+        cmds_source.append(("$(MAKE) -f debian/rules.real source-featureset %s" % makeflags,))
         makefile.append(("binary-arch-%s-%s-real:" % (arch, featureset), cmds_binary_arch))
         makefile.append("build-%s-%s-real:" % (arch, featureset))
         makefile.append(("setup-%s-%s-real:" % (arch, featureset)))
