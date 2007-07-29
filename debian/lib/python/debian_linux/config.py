@@ -32,7 +32,7 @@ class ConfigReaderCore(dict):
     schemas = {
         'base': {
             'arches': SchemaItemList(),
-            'available': SchemaItemBoolean(),
+            'enabled': SchemaItemBoolean(),
             'featuresets': SchemaItemList(),
             'flavours': SchemaItemList(),
             'modules': SchemaItemBoolean(),
@@ -84,19 +84,37 @@ class ConfigReaderCore(dict):
             else:
                 avail = True
             if avail:
-                self._read_featureset(arch, featureset)
-
-        base = self['base', arch]
-        # TODO
-        base['featuresets'] = base['subarches'] = featuresets
+                self._read_arch_featureset(arch, featureset)
 
         if flavours:
+            base = self['base', arch]
             featuresets.insert(0, 'none')
+            base['featuresets'] = featuresets
             del base['flavours']
             self['base', arch] = base
-            self['base', arch, 'none'] = {'flavours': flavours}
+            self['base', arch, 'none'] = {'flavours': flavours, 'implicit-flavour': True}
             for flavour in flavours:
                 self._read_flavour(arch, 'none', flavour)
+
+    def _read_arch_featureset(self, arch, featureset):
+        config = ConfigParser(self.schemas)
+        config.read(self.get_files("%s/%s/%s" % (arch, featureset, self.config_name)))
+
+        flavours = config['base',].get('flavours', [])
+
+        for section in iter(config):
+            real = list(section)
+            if real[-1] in flavours:
+                real[0:0] = ['base', arch, featureset]
+            else:
+                real[0:0] = [real.pop(), arch, featureset]
+            real = tuple(real)
+            s = self.get(real, {})
+            s.update(config[section])
+            self[tuple(real)] = s
+
+        for flavour in flavours:
+            self._read_flavour(arch, featureset, flavour)
 
     def _read_base(self):
         config = ConfigParser(self.schemas)
@@ -120,25 +138,15 @@ class ConfigReaderCore(dict):
             if avail:
                 self._read_arch(arch)
 
-    def _read_featureset(self, arch, featureset):
+    def _read_featureset(self, featureset):
         config = ConfigParser(self.schemas)
-        config.read(self.get_files("%s/%s/%s" % (arch, featureset, self.config_name)))
-
-        flavours = config['base',].get('flavours', [])
+        config.read(self.get_files("featureset-%s/%s" % (featureset, self.config_name)))
 
         for section in iter(config):
             real = list(section)
-            if real[-1] in flavours:
-                real[0:0] = ['base', arch, featureset]
-            else:
-                real[0:0] = [real.pop(), arch, featureset]
+            real[0:0] = [real.pop(), None, featureset]
             real = tuple(real)
-            s = self.get(real, {})
-            s.update(config[section])
-            self[tuple(real)] = s
-
-        for flavour in flavours:
-            self._read_flavour(arch, featureset, flavour)
+            self[tuple(real)] = config[section]
 
     def _read_flavour(self, arch, featureset, flavour):
         if not self.has_key(('base', arch, featureset, flavour)):
@@ -223,8 +231,8 @@ class ConfigParser(object):
 
 if __name__ == '__main__':
     import sys
-    config = config_reader()
-    sections = config.sections()
+    config = ConfigReaderCore(['debian/config'])
+    sections = config.keys()
     sections.sort()
     for section in sections:
         print "[%s]" % (section,)
