@@ -105,11 +105,6 @@ class Gencontrol(object):
         vars.update(config_entry)
         vars['arch'] = arch
 
-        if not config_entry.get('available', True):
-            for i in self.makefile_targets:
-                makefile.append(("%s-%s:" % (i, arch), ["@echo Architecture %s is not available!" % arch, "@exit 1"]))
-            return
-
         makeflags['ARCH'] = arch
 
         vars['localversion'] = ''
