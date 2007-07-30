@@ -101,13 +101,11 @@ class Gencontrol(object):
             makefile.append(("binary-arch-%s-extra:" % arch, cmds))
 
     def do_arch(self, packages, makefile, arch, vars, makeflags, extra):
-        config_entry = self.config['base', arch]
-        vars.update(config_entry)
+        config_base = self.config['base', arch]
+        vars.update(config_base)
         vars['arch'] = arch
 
         makeflags['ARCH'] = arch
-
-        vars['localversion'] = ''
 
         self.do_arch_setup(vars, makeflags, arch, extra)
         self.do_arch_makefile(makefile, arch, makeflags, extra)
@@ -131,12 +129,14 @@ class Gencontrol(object):
             self.do_featureset(packages, makefile, arch, featureset, vars.copy(), makeflags.copy(), extra)
 
     def do_featureset(self, packages, makefile, arch, featureset, vars, makeflags, extra):
-        config_entry = self.config['base', arch, featureset]
-        vars.update(config_entry)
+        config_base = self.config.merge('base', arch, featureset)
+        vars.update(config_base)
 
         makeflags['FEATURESET'] = featureset
+
+        vars['localversion'] = ''
         if featureset != 'none':
-            vars['localversion'] += '-' + featureset
+            vars['localversion'] = '-' + featureset
 
         self.do_featureset_setup(vars, makeflags, arch, featureset, extra)
         self.do_featureset_makefile(makefile, arch, featureset, makeflags, extra)
@@ -160,8 +160,8 @@ class Gencontrol(object):
             self.do_flavour(packages, makefile, arch, featureset, flavour, vars.copy(), makeflags.copy(), extra)
 
     def do_flavour(self, packages, makefile, arch, featureset, flavour, vars, makeflags, extra):
-        config_entry = self.config.merge('base', arch, featureset, flavour)
-        vars.update(config_entry)
+        config_base = self.config.merge('base', arch, featureset, flavour)
+        vars.update(config_base)
 
         if not vars.has_key('longclass'):
             vars['longclass'] = vars['class']
