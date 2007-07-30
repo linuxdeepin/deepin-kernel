@@ -132,6 +132,9 @@ class Gencontrol(object):
         config_base = self.config.merge('base', arch, featureset)
         vars.update(config_base)
 
+        if not config_base.get('enabled', True):
+            return
+
         makeflags['FEATURESET'] = featureset
 
         vars['localversion'] = ''
