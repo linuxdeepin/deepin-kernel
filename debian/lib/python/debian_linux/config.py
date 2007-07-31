@@ -102,9 +102,7 @@ class ConfigReaderCore(dict):
         featuresets = config['base',]['featuresets']
 
         for section in iter(config):
-            if section[0] in featuresets:
-                real = (section[-1], None, section[0])
-            elif section[0].startswith('featureset-'):
+            if section[0].startswith('featureset-'):
                 real = (section[-1], None, section[0].lstrip('featureset-'))
             else:
                 real = (section[-1],) + section[1:]
