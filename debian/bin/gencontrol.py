@@ -142,7 +142,7 @@ class Gencontrol(Base):
             build_modules = True
             config_entry_xen = self.config.merge('xen', arch, featureset, flavour)
             p = self.process_packages(self.templates['control.xen-linux-system'], vars)
-            l = package_relation_group()
+            l = PackageRelationGroup()
             for version in config_entry_xen['versions']:
                 l.append("xen-hypervisor-%s-%s" % (version, config_entry_xen['flavour']))
             makeflags['XEN_VERSIONS'] = ' '.join(['%s-%s' % (i, config_entry_xen['flavour']) for i in config_entry_xen['versions']])
