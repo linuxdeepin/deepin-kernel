@@ -180,23 +180,40 @@ class Gencontrol(Base):
                 j = self.substitute(self.templates["image.xen.%s" % i], vars)
                 file("debian/%s.%s" % (packages_own[0]['Package'], i), 'w').write(j)
 
-        def get_config(default, *entry_name):
+        def get_config(*entry_name):
             entry_real = ('image',) + entry_name
             entry = self.config.get(entry_real, None)
             if entry is None:
-                return default
-            configs = entry.get('configs', None)
+                return None
+            return entry.get('configs', None)
+
+        def check_config_default(fail, f):
+            f1 = "debian/config/" + f
+            if os.path.exists(f1):
+                return [f]
+            if fail:
+                raise RuntimeError("%s unavailable" % f)
+            return []
+
+        def check_config_files(files):
+            for f in files:
+                f1 = "debian/config/" + f
+                if not os.path.exists(f1):
+                    raise RuntimeError("%s unavailable" % f)
+            return files
+
+        def check_config(default, fail, *entry_name):
+            configs = get_config(*entry_name)
             if configs is None:
-                return default
-            return configs
+                return check_config_default(fail, default)
+            return check_config_files(configs)
 
         kconfig = ['config']
-        kconfig.extend(get_config(["%s/config" % arch], arch))
-        if featureset == 'none':
-            kconfig.extend(get_config(["%s/config.%s" % (arch, flavour)], arch, featureset, flavour))
-        else:
-            kconfig.extend(get_config(["%s/%s/config" % (arch, featureset)], arch, featureset))
-            kconfig.extend(get_config(["%s/%s/config.%s" % (arch, featureset, flavour)], arch, featureset, flavour))
+        kconfig.extend(check_config("featureset-%s/config" % featureset, False, None, featureset))
+        kconfig.extend(check_config("%s/config" % arch, True, arch))
+        kconfig.extend(check_config("%s/config.%s" % (arch, flavour), False, arch, None, flavour))
+        kconfig.extend(check_config("%s/%s/config" % (arch, featureset), False, arch, featureset))
+        kconfig.extend(check_config("%s/%s/config.%s" % (arch, featureset, flavour), False, arch, featureset, flavour))
         makeflags['KCONFIG'] = ' '.join(kconfig)
 
         cmds_binary_arch = []
