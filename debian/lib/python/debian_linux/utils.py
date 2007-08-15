@@ -1,4 +1,4 @@
-import debian, re, textwrap
+import debian, re, os, textwrap
 
 class SortedDict(dict):
     __slots__ = '_list',
@@ -32,30 +32,33 @@ class SortedDict(dict):
             yield self[i]
 
 class Templates(dict):
-    def __init__(self, dir = "debian/templates"):
-        self.dir = dir
+    def __init__(self, dirs = ["debian/templates"]):
+        self.dirs = dirs
 
     def __getitem__(self, key):
         try:
-            return dict.__getitem__(self, key)
+            return super(Templates, self).__getitem__(key)
         except KeyError: pass
-        ret = self._read(key)
-        dict.__setitem__(self, key, ret)
-        return ret
+        value = self._read(key)
+        super(Templates, self).__setitem__(key, value)
+        return value
 
     def __setitem__(self, key, value):
         raise NotImplemented()
 
     def _read(self, name):
         prefix, id = name.split('.', 1)
-        f = file("%s/%s.in" % (self.dir, name))
 
-        if prefix == 'control':
-            return self._readControl(f)
+        for dir in self.dirs:
+            filename = "%s/%s.in" % (dir, name)
+            if os.path.exists(filename):
+                f = file(filename)
+                if prefix == 'control':
+                    return self._read_control(f)
+                return f.read()
+        raise KeyError(name)
 
-        return f.read()
-
-    def _readControl(self, f):
+    def _read_control(self, f):
         entries = []
 
         while True:

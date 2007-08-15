@@ -24,9 +24,9 @@ class MakeFlags(dict):
 class Gencontrol(object):
     makefile_targets = ('binary-arch', 'build', 'setup', 'source')
 
-    def __init__(self, underlay = None):
-        self.config = ConfigReaderCore([underlay, "debian/config"])
-        self.templates = Templates()
+    def __init__(self, config_dirs = ["debian/config"], template_dirs = ["debian/templates"]):
+        self.config = ConfigReaderCore(config_dirs)
+        self.templates = Templates(template_dirs)
 
     def __call__(self):
         packages = PackagesList()
