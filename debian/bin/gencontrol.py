@@ -6,9 +6,10 @@ from debian_linux.gencontrol import Gencontrol as Base
 from debian_linux.debian import *
 
 class Gencontrol(Base):
-    def __init__(self):
-        super(Gencontrol, self).__init__()
+    def __init__(self, config_dirs = ["debian/config"], template_dirs = ["debian/templates"]):
+        super(Gencontrol, self).__init__(config_dirs = config_dirs, template_dirs = template_dirs)
         self.process_changelog()
+        self.config_dirs = config_dirs
 
     def do_main_setup(self, vars, makeflags, extra):
         super(Gencontrol, self).do_main_setup(vars, makeflags, extra)
@@ -188,19 +189,25 @@ class Gencontrol(Base):
             return entry.get('configs', None)
 
         def check_config_default(fail, f):
-            f1 = "debian/config/" + f
-            if os.path.exists(f1):
-                return [f]
+            for d in self.config_dirs[::-1]:
+                f1 = d + '/' + f
+                if os.path.exists(f1):
+                    return [f1]
             if fail:
                 raise RuntimeError("%s unavailable" % f)
             return []
 
         def check_config_files(files):
+            ret = []
             for f in files:
-                f1 = "debian/config/" + f
-                if not os.path.exists(f1):
+                for d in self.config_dirs[::-1]:
+                    f1 = d + '/' + f
+                    if os.path.exists(f1):
+                        ret.append(f1)
+                        break
+                else:
                     raise RuntimeError("%s unavailable" % f)
-            return files
+            return ret
 
         def check_config(default, fail, *entry_name):
             configs = get_config(*entry_name)
@@ -208,7 +215,7 @@ class Gencontrol(Base):
                 return check_config_default(fail, default)
             return check_config_files(configs)
 
-        kconfig = ['config']
+        kconfig = check_config('config', True)
         kconfig.extend(check_config("featureset-%s/config" % featureset, False, None, featureset))
         kconfig.extend(check_config("%s/config" % arch, True, arch))
         kconfig.extend(check_config("%s/config.%s" % (arch, flavour), False, arch, None, flavour))
