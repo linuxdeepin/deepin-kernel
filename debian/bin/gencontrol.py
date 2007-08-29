@@ -142,13 +142,14 @@ class Gencontrol(Base):
             image = self.templates["control.image.type-modulesextra"]
             build_modules = True
             config_entry_xen = self.config.merge('xen', arch, featureset, flavour)
-            p = self.process_packages(self.templates['control.xen-linux-system'], vars)
-            l = PackageRelationGroup()
-            for version in config_entry_xen['versions']:
-                l.append("xen-hypervisor-%s-%s" % (version, config_entry_xen['flavour']))
-            makeflags['XEN_VERSIONS'] = ' '.join(['%s-%s' % (i, config_entry_xen['flavour']) for i in config_entry_xen['versions']])
-            p[0]['Depends'].append(l)
-            packages_dummy.extend(p)
+            if config_entry_xen.get('dom0-support', True):
+                p = self.process_packages(self.templates['control.xen-linux-system'], vars)
+                l = PackageRelationGroup()
+                for version in config_entry_xen['versions']:
+                    l.append("xen-hypervisor-%s-%s" % (version, config_entry_xen['flavour']))
+                makeflags['XEN_VERSIONS'] = ' '.join(['%s-%s' % (i, config_entry_xen['flavour']) for i in config_entry_xen['versions']])
+                p[0]['Depends'].append(l)
+                packages_dummy.extend(p)
         else:
             build_modules = True
             image = self.templates["control.image.type-%s" % vars['type']]
@@ -216,9 +217,9 @@ class Gencontrol(Base):
             return check_config_files(configs)
 
         kconfig = check_config('config', True)
-        kconfig.extend(check_config("featureset-%s/config" % featureset, False, None, featureset))
         kconfig.extend(check_config("%s/config" % arch, True, arch))
         kconfig.extend(check_config("%s/config.%s" % (arch, flavour), False, arch, None, flavour))
+        kconfig.extend(check_config("featureset-%s/config" % featureset, False, None, featureset))
         kconfig.extend(check_config("%s/%s/config" % (arch, featureset), False, arch, featureset))
         kconfig.extend(check_config("%s/%s/config.%s" % (arch, featureset, flavour), False, arch, featureset, flavour))
         makeflags['KCONFIG'] = ' '.join(kconfig)

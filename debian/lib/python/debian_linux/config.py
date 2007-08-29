@@ -45,6 +45,7 @@ class ConfigReaderCore(dict):
         'relations': {
         },
         'xen': {
+            'dom0-support': SchemaItemBoolean(),
             'versions': SchemaItemList(),
         }
     }
