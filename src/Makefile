@@ -31,7 +31,6 @@ SCRIPTS =  \
 	reference_discarded.pl \
 	reference_init.pl \
 	setlocalversion \
-	show_delta \
 	ver_linux
 
 SUBDIRS = \
