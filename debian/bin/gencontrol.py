@@ -87,7 +87,6 @@ class Gencontrol(Base):
         for i in (
             ('cflags', 'CFLAGS'),
             ('compiler', 'COMPILER'),
-            ('image-postproc', 'IMAGE_POSTPROC'),
             ('initramfs', 'INITRAMFS',),
             ('kernel-arch', 'KERNEL_ARCH'),
             ('kernel-header-dirs', 'KERNEL_HEADER_DIRS'),
