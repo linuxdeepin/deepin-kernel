@@ -1,4 +1,4 @@
-#!/usr/bin/env python2.4
+#!/usr/bin/env python
 
 import optparse, os.path, sys
 from debian_linux.kconfig import *

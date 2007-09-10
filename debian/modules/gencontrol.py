@@ -1,4 +1,5 @@
-#!/usr/bin/env python2.4
+#!/usr/bin/env python
+
 import sys
 sys.path.append(sys.path[0] + "/../lib/python")
 import debian_linux.gencontrol

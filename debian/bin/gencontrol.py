@@ -1,4 +1,5 @@
-#!/usr/bin/env python2.4
+#!/usr/bin/env python
+
 import os, sys
 sys.path.append("debian/lib/python")
 
