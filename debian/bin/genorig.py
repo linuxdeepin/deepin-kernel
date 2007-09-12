@@ -4,32 +4,34 @@ import sys
 sys.path.append("debian/lib/python")
 
 import os, os.path, re, shutil
-from debian_linux.debian import Changelog
+from debian_linux.debian import Changelog, VersionLinux
+from debian_linux.patches import PatchSeries
 
-class main(object):
+class Main(object):
     def __init__(self, input_tar, input_patch = None):
         self.log = sys.stdout.write
 
         self.input_tar = input_tar
         self.input_patch = input_patch
 
-        changelog = Changelog()[0]
+        changelog = Changelog(version = VersionLinux)[0]
         source = changelog.source
-        version = changelog.version.upstream
-        self.orig = '%s-%s' % (source, version)
-        self.orig_tar = '%s_%s.orig.tar.gz' % (source, version)
+        self.version = changelog.version
+        self.orig = '%s-%s' % (source, changelog.version.upstream)
+        self.orig_tar = '%s_%s.orig.tar.gz' % (source, changelog.version.upstream)
 
     def __call__(self):
         import tempfile
         self.dir = tempfile.mkdtemp(prefix = 'genorig', dir = 'debian')
         try:
-            self.extract()
-            self.patch()
+            self.upstream_extract()
+            self.upstream_patch()
+            self.debian_patch()
             self.tar()
         finally:
             shutil.rmtree(self.dir)
 
-    def extract(self):
+    def upstream_extract(self):
         self.log("Extracting tarball %s\n" % self.input_tar)
         match = re.match(r'(^|.*/)(?P<dir>linux-\d+\.\d+\.\d+(-\S+)?)\.tar(\.(?P<extension>(bz2|gz)))?$', self.input_tar)
         if not match:
@@ -43,7 +45,7 @@ class main(object):
             raise RuntimeError("Can't extract tarball")
         os.rename(os.path.join(self.dir, match.group('dir')), os.path.join(self.dir, self.orig))
 
-    def patch(self):
+    def upstream_patch(self):
         if self.input_patch is None:
             return
         self.log("Patching source with %s\n" % self.input_patch)
@@ -62,6 +64,17 @@ class main(object):
         if os.spawnv(os.P_WAIT, '/bin/sh', ['sh', '-c', ' '.join(cmdline)]):
             raise RuntimeError("Can't patch source")
 
+    def debian_patch(self):
+        version = self.version.linux_dfsg
+        if version is None:
+            name = "orig-0"
+        else:
+            name = "orig-" + version
+        self.log("Patching source with debian patch (series %s)\n" % name)
+        fp = file("debian/patches/series/" + name)
+        series = PatchSeries(name, "debian/patches", fp)
+        series(dir = os.path.join(self.dir, self.orig))
+
     def tar(self):
         out = os.path.join("../orig", self.orig_tar)
         try:
@@ -78,4 +91,4 @@ class main(object):
         os.chmod(out, 0644)
 
 if __name__ == '__main__':
-    main(*sys.argv[1:])()
+    Main(*sys.argv[1:])()

@@ -105,7 +105,10 @@ class VersionLinux(Version):
     )
 )?
 (?:
-    \.dfsg\.\d+
+    \.dfsg\.
+    (?P<dfsg>
+        \d+
+    )
 )?
 -
 (?:[^-]+)
@@ -126,6 +129,7 @@ $
             self.linux_upstream = '-'.join((d['version'], d['modifier']))
         else:
             self.linux_upstream = d['version']
+        self.linux_dfsg = d['dfsg']
  
 class PackageFieldList(list):
     def __init__(self, value = None):
