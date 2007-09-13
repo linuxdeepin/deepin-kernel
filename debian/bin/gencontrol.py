@@ -25,7 +25,13 @@ class Gencontrol(Base):
         packages.extend(self.process_packages(self.templates["control.support"], self.vars))
 
     def do_arch_setup(self, vars, makeflags, arch, extra):
+        config_base = self.config.get(('base', arch), {})
         vars.update(self.config.get(('image', arch), {}))
+        config_libc_dev = self.config.get(('libc-dev', arch), {})
+        arch = config_libc_dev.get('arch', None)
+        if arch is None:
+            arch = config_base.get('kernel-arch')
+        makeflags['LIBC_DEV_ARCH'] = arch
 
     def do_arch_packages(self, packages, makefile, arch, vars, makeflags, extra):
         headers_arch = self.templates["control.headers.arch"]
