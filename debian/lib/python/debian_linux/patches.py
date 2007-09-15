@@ -81,8 +81,8 @@ class SubOperationFilesUnifdef(SubOperation):
         f = os.popen(cmdline, 'rb')
         data = f.read()
         ret = f.close()
-        if ret == 0:
-            raise RuntimeError("unifdef removed nothing")
+        if ret is None:
+            raise RuntimeError("unifdef of %s removed nothing" % self.name)
         f1 = file(filename, 'wb')
         f1.write(data)
         f1.close()
