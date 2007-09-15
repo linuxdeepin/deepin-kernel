@@ -86,9 +86,16 @@ class Main(object):
         except OSError: pass
         self.log("Generate tarball %s\n" % out)
         cmdline = ['tar -czf', out, '-C', self.dir, self.orig]
-        if os.spawnv(os.P_WAIT, '/bin/sh', ['sh', '-c', ' '.join(cmdline)]):
-            raise RuntimeError("Can't patch source")
-        os.chmod(out, 0644)
+        try:
+            if os.spawnv(os.P_WAIT, '/bin/sh', ['sh', '-c', ' '.join(cmdline)]):
+                raise RuntimeError("Can't patch source")
+            os.chmod(out, 0644)
+        except:
+            try:
+                os.unlink(out)
+            except OSError:
+                pass
+            raise
 
 if __name__ == '__main__':
     Main(*sys.argv[1:])()
