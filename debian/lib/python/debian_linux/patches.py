@@ -75,6 +75,18 @@ class SubOperationFilesRemove(SubOperation):
 class SubOperationFilesUnifdef(SubOperation):
     operation = "unifdef"
 
+    def do(self, dir):
+        filename = os.path.join(dir, self.name)
+        cmdline = "unifdef %s %s" % (filename, ' '.join(self.data))
+        f = os.popen(cmdline, 'rb')
+        data = f.read()
+        ret = f.close()
+        if ret == 0:
+            raise RuntimeError("unifdef removed nothing")
+        f1 = file(filename, 'wb')
+        f1.write(data)
+        f1.close()
+
 class OperationFiles(Operation):
     operation = 'X'
 
