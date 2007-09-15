@@ -1,8 +1,8 @@
 import os, shutil
 
 class Operation(object):
-    def __init__(self, name, fp, data):
-        self.name, self.fp, self.data = name, fp, data
+    def __init__(self, name, data):
+        self.name, self.data = name, data
 
     def __call__(self, dir = '.', reverse = False):
         try:
@@ -29,6 +29,10 @@ class Operation(object):
         raise NotImplementedError
 
 class OperationPatch(Operation):
+    def __init__(self, name, fp, data):
+        super(OperationPatch, self).__init__(name, data)
+        self.fp = fp
+
     def _call(self, dir, extraargs):
         cmdline = "cd %s; patch -p1 -f -s -t --no-backup-if-mismatch %s" % (dir, extraargs)
         f = os.popen(cmdline, 'wb')
@@ -54,22 +58,62 @@ class OperationPatchPop(OperationPatch):
     do = OperationPatch.patch_pop
     do_reverse = OperationPatch.patch_push
 
-class OperationRemoveFiles(Operation):
-    operation = 'X'
+class SubOperation(Operation):
+    def _log(self, result):
+        if result:
+            s = "OK"
+        else:
+            s = "FAIL"
+        print """    %-10s %-4s %s""" % ('(%s)' % self.operation, s, self.name)
+
+class SubOperationFilesRemove(SubOperation):
+    operation = "remove"
 
     def do(self, dir):
-        for line in self.fp:
+        os.unlink(os.path.join(dir, self.name))
+
+class SubOperationFilesUnifdef(SubOperation):
+    operation = "unifdef"
+
+class OperationFiles(Operation):
+    operation = 'X'
+
+    suboperations = {
+        'remove': SubOperationFilesRemove,
+        'rm': SubOperationFilesRemove,
+        'unifdef': SubOperationFilesUnifdef,
+    }
+
+    def __init__(self, name, fp, data):
+        super(OperationFiles, self).__init__(name, data)
+
+        ops = []
+
+        for line in fp:
             line = line.strip()
             if not line or line[0] == '#':
                 continue
 
-            os.unlink(os.path.join(dir, line))
+            items = line.split()
+            operation, filename = items[:2]
+            data = items[2:]
+
+            if operation not in self.suboperations:
+                raise RuntimeError('Undefined operation "%s" in series %s' % (operation, name))
+
+            ops.append(self.suboperations[operation](filename, data))
+
+        self.ops = ops
+
+    def do(self, dir):
+        for i in self.ops:
+            i(dir = dir)
 
 class PatchSeries(list):
     operations = {
         '+': OperationPatchPush,
         '-': OperationPatchPop,
-        'X': OperationRemoveFiles,
+        'X': OperationFiles,
     }
 
     def __init__(self, name, root, fp):
