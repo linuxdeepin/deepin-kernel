@@ -83,6 +83,8 @@ class SubOperationFilesUnifdef(SubOperation):
         ret = f.close()
         if ret is None:
             raise RuntimeError("unifdef of %s removed nothing" % self.name)
+        elif ret != 256:
+            raise RuntimeError("unifdef failed")
         f1 = file(filename, 'wb')
         f1.write(data)
         f1.close()
