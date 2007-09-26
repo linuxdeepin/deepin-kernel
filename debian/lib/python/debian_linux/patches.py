@@ -70,7 +70,11 @@ class SubOperationFilesRemove(SubOperation):
     operation = "remove"
 
     def do(self, dir):
-        os.unlink(os.path.join(dir, self.name))
+        dir = os.path.join(dir, self.name)
+        if os.path.isdir(dir):
+            shutil.rmtree(dir)
+        else:
+            os.unlink(dir)
 
 class SubOperationFilesUnifdef(SubOperation):
     operation = "unifdef"
