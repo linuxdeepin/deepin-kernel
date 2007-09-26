@@ -68,7 +68,7 @@ class Gencontrol(Base):
                 makeflags[i[1]] = vars[i[0]]
 
     def do_featureset_packages(self, packages, makefile, arch, featureset, vars, makeflags, extra):
-        headers_featureset = self.templates["control.headers.subarch"]
+        headers_featureset = self.templates["control.headers.featureset"]
         package_headers = self.process_package(headers_featureset[0], vars)
 
         name = package_headers['Package']
