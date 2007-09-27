@@ -47,15 +47,12 @@ class gencontrol(debian_linux.gencontrol.gencontrol):
 
         makeflags_string = ' '.join(["%s='%s'" % i for i in makeflags.iteritems()])
 
-        cmds_binary_arch = []
-        cmds_binary_arch.append(("$(MAKE) -f debian/rules.real binary-arch-flavour %s" % makeflags_string,))
-        cmds_build = []
-        cmds_build.append(("$(MAKE) -f debian/rules.real build %s" % makeflags_string,))
-        cmds_setup = []
-        cmds_setup.append(("$(MAKE) -f debian/rules.real setup-flavour %s" % makeflags_string,))
-        makefile.append(("binary-arch-%s-%s-%s-real:" % (arch, subarch, flavour), cmds_binary_arch))
-        makefile.append(("build-%s-%s-%s-real:" % (arch, subarch, flavour), cmds_build))
-        makefile.append(("setup-%s-%s-%s-real:" % (arch, subarch, flavour), cmds_setup))
+        cmds_binary_arch = [("$(MAKE) -f debian/rules.real binary-arch-flavour %s" % makeflags_string,)]
+        cmds_build = [("$(MAKE) -f debian/rules.real build %s" % makeflags_string,)]
+        cmds_setup = [("$(MAKE) -f debian/rules.real setup-flavour %s" % makeflags_string,)]
+        makefile.append(("binary-arch_%s_%s_%s_real:" % (arch, subarch, flavour), cmds_binary_arch))
+        makefile.append(("build_%s_%s_%s_real:" % (arch, subarch, flavour), cmds_build))
+        makefile.append(("setup_%s_%s_%s_real:" % (arch, subarch, flavour), cmds_setup))
 
     def process_config_version(self, config):
         entry = config['version',]

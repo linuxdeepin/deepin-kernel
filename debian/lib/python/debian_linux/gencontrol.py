@@ -69,7 +69,7 @@ class Gencontrol(object):
     def do_main_makefile(self, makefile, makeflags, extra):
         cmds_binary_indep = []
         cmds_binary_indep.append(("$(MAKE) -f debian/rules.real binary-indep %s" % makeflags,))
-        makefile.append(("binary-indep:", cmds_binary_indep))
+        makefile.append(("binary-indep::", cmds_binary_indep))
 
     def do_main_packages(self, packages, extra):
         pass
@@ -97,8 +97,8 @@ class Gencontrol(object):
                 if i.has_key('X-Version-Overwrite-Epoch'):
                         tmp.append("-v1:%s" % self.version['source'])
                 cmds.append("$(MAKE) -f debian/rules.real install-dummy DH_OPTIONS='-p%s' GENCONTROL_ARGS='%s'" % (i['Package'], ' '.join(tmp)))
-            makefile.append("binary-arch-%s:: binary-arch-%s-extra" % (arch, arch))
-            makefile.append(("binary-arch-%s-extra:" % arch, cmds))
+            makefile.append("binary-arch_%s:: binary-arch_%s_extra" % (arch, arch))
+            makefile.append(("binary-arch_%s_extra::" % arch, cmds))
 
     def do_arch(self, packages, makefile, arch, vars, makeflags, extra):
         config_base = self.config['base', arch]
@@ -117,12 +117,14 @@ class Gencontrol(object):
 
     def do_arch_makefile(self, makefile, arch, makeflags, extra):
         for i in self.makefile_targets:
-            makefile.append("%s:: %s-%s" % (i, i, arch))
-            makefile.append("%s-%s:: %s-%s-real" % (i, arch, i, arch))
+            target1 = i
+            target2 = "%s_%s" % (i, arch)
+            makefile.append("%s:: %s" % (target1, target2))
+            makefile.append("%s:: %s_real" % (target2, target2))
+            makefile.append("%s_real::" % target2)
 
     def do_arch_packages(self, packages, makefile, arch, vars, makeflags, extra):
-        for i in self.makefile_targets:
-            makefile.append("%s-%s-real:" % (i, arch))
+        pass
 
     def do_arch_recurse(self, packages, makefile, arch, vars, makeflags, extra):
         for featureset in self.config['base', arch]['featuresets']:
@@ -151,12 +153,14 @@ class Gencontrol(object):
 
     def do_featureset_makefile(self, makefile, arch, featureset, makeflags, extra):
         for i in self.makefile_targets:
-            makefile.append("%s-%s:: %s-%s-%s" % (i, arch, i, arch, featureset))
-            makefile.append("%s-%s-%s:: %s-%s-%s-real" % (i, arch, featureset, i, arch, featureset))
+            target1 = "%s_%s" % (i, arch)
+            target2 = "%s_%s_%s" % (i, arch, featureset)
+            makefile.append("%s:: %s" % (target1, target2))
+            makefile.append("%s:: %s_real" % (target2, target2))
+            makefile.append("%s_real::" % target2)
 
     def do_featureset_packages(self, packages, makefile, arch, featureset, vars, makeflags, extra):
-        for i in self.makefile_targets:
-            makefile.append("%s-%s-%s-real:" % (i, arch, featureset))
+        pass
 
     def do_featureset_recurse(self, packages, makefile, arch, featureset, vars, makeflags, extra):
         for flavour in self.config['base', arch, featureset]['flavours']:
@@ -186,8 +190,11 @@ class Gencontrol(object):
 
     def do_flavour_makefile(self, makefile, arch, featureset, flavour, makeflags, extra):
         for i in self.makefile_targets:
-            makefile.append("%s-%s-%s:: %s-%s-%s-%s" % (i, arch, featureset, i, arch, featureset, flavour))
-            makefile.append("%s-%s-%s-%s:: %s-%s-%s-%s-real" % (i, arch, featureset, flavour, i, arch, featureset, flavour))
+            target1 = "%s_%s_%s" % (i, arch, featureset)
+            target2 = "%s_%s_%s_%s" % (i, arch, featureset, flavour)
+            makefile.append("%s:: %s" % (target1, target2))
+            makefile.append("%s:: %s_real" % (target2, target2))
+            makefile.append("%s_real::" % target2)
 
     def do_flavour_packages(self, packages, makefile, arch, featureset, flavour, vars, makeflags, extra):
         pass
