@@ -36,6 +36,9 @@ class Gencontrol(Base):
     def do_arch_packages(self, packages, makefile, arch, vars, makeflags, extra):
         headers_arch = self.templates["control.headers.arch"]
         packages_headers_arch = self.process_packages(headers_arch, vars)
+
+        libc_dev = self.templates["control.libc-dev"]
+        packages_headers_arch[0:0] = self.process_packages(libc_dev, {})
         
         extra['headers_arch_depends'] = packages_headers_arch[-1]['Depends'] = PackageRelation()
 
