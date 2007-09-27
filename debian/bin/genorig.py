@@ -8,7 +8,7 @@ from debian_linux.debian import Changelog, VersionLinux
 from debian_linux.patches import PatchSeries
 
 class Main(object):
-    def __init__(self, input_tar, input_patch = None):
+    def __init__(self, input_tar, input_patch, override_version):
         self.log = sys.stdout.write
 
         self.input_tar = input_tar
@@ -16,9 +16,19 @@ class Main(object):
 
         changelog = Changelog(version = VersionLinux)[0]
         source = changelog.source
-        self.version = changelog.version
-        self.orig = '%s-%s' % (source, changelog.version.upstream)
-        self.orig_tar = '%s_%s.orig.tar.gz' % (source, changelog.version.upstream)
+        version = changelog.version
+
+        if override_version:
+            version = VersionLinux('%s-undef' % override_version)
+
+        self.version_dfsg = version.linux_dfsg
+        if self.version_dfsg is None:
+            self.version_dfsg = '0'
+
+        self.log('Using source name %s, version %s, dfsg %s\n' % (source, version.upstream, self.version_dfsg))
+
+        self.orig = '%s-%s' % (source, version.upstream)
+        self.orig_tar = '%s_%s.orig.tar.gz' % (source, version.upstream)
 
     def __call__(self):
         import tempfile
@@ -65,11 +75,7 @@ class Main(object):
             raise RuntimeError("Can't patch source")
 
     def debian_patch(self):
-        version = self.version.linux_dfsg
-        if version is None:
-            name = "orig-0"
-        else:
-            name = "orig-" + version
+        name = "orig-" + self.version_dfsg
         self.log("Patching source with debian patch (series %s)\n" % name)
         fp = file("debian/patches/series/" + name)
         series = PatchSeries(name, "debian/patches", fp)
@@ -98,4 +104,14 @@ class Main(object):
             raise
 
 if __name__ == '__main__':
-    Main(*sys.argv[1:])()
+    from optparse import OptionParser
+    parser = OptionParser(usage = "%prog [OPTION]... TAR [PATCH]")
+    parser.add_option("-V", "--override-version", dest = "override_version", help = "Override version", metavar = "VERSION")
+    options, args = parser.parse_args()
+
+    input_tar = args[0]
+    input_patch = None
+    if len(args) > 1:
+        input_patch = args[1]
+
+    Main(input_tar, input_patch, options.override_version)()
