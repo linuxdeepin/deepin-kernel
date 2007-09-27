@@ -5,8 +5,6 @@ __all__ = [
     'ConfigReaderCore',
 ]
 
-_marker = object()
-
 class SchemaItemBoolean(object):
     def __call__(self, i):
         i = i.strip().lower()
