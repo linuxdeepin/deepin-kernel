@@ -10,6 +10,52 @@ class PackagesList(SortedDict):
         for package in packages:
             self[package['Package']] = package
 
+class Makefile(object):
+    def __init__(self):
+        self.rules = {}
+        self.add('.NOTPARALLEL')
+
+    def add(self, name, deps = None, cmds = None):
+        if name in self.rules:
+            self.rules[name].add(deps, cmds)
+        else:
+            self.rules[name] = self.Rule(name, deps, cmds)
+
+    def write(self, out):
+        r = self.rules.keys()
+        r.sort()
+        for i in r:
+            self.rules[i].write(out)
+
+    class Rule(object):
+        def __init__(self, name, deps = None, cmds = None):
+            self.name = name
+            self.deps, self.cmds = set(), []
+            self.add(deps, cmds)
+
+        def add(self, deps = None, cmds = None):
+            if deps is not None:
+                self.deps.update(deps)
+            if cmds is not None:
+                self.cmds.append(cmds)
+
+        def write(self, out):
+            deps_string = ''
+            if self.deps:
+                deps = list(self.deps)
+                deps.sort()
+                deps_string = ' ' + ' '.join(deps)
+
+            if self.cmds:
+                if deps_string:
+                    out.write('%s::%s\n' % (self.name, deps_string))
+                for c in self.cmds:
+                    out.write('%s::\n' % self.name)
+                    for i in c:
+                        out.write('\t%s\n' % i)
+            else:
+                out.write('%s:%s\n' % (self.name, deps_string))
+
 class MakeFlags(dict):
     def __repr__(self):
         repr = super(flags, self).__repr__()
@@ -30,7 +76,7 @@ class Gencontrol(object):
 
     def __call__(self):
         packages = PackagesList()
-        makefile = [('.NOTPARALLEL:', ())]
+        makefile = Makefile()
 
         self.do_source(packages)
         self.do_main(packages, makefile)
@@ -67,9 +113,7 @@ class Gencontrol(object):
         })
 
     def do_main_makefile(self, makefile, makeflags, extra):
-        cmds_binary_indep = []
-        cmds_binary_indep.append(("$(MAKE) -f debian/rules.real binary-indep %s" % makeflags,))
-        makefile.append(("binary-indep::", cmds_binary_indep))
+        makefile.add('binary-indep', cmds = ["$(MAKE) -f debian/rules.real binary-indep %s" % makeflags])
 
     def do_main_packages(self, packages, extra):
         pass
@@ -97,8 +141,8 @@ class Gencontrol(object):
                 if i.has_key('X-Version-Overwrite-Epoch'):
                         tmp.append("-v1:%s" % self.version['source'])
                 cmds.append("$(MAKE) -f debian/rules.real install-dummy DH_OPTIONS='-p%s' GENCONTROL_ARGS='%s'" % (i['Package'], ' '.join(tmp)))
-            makefile.append("binary-arch_%s:: binary-arch_%s_extra" % (arch, arch))
-            makefile.append(("binary-arch_%s_extra::" % arch, cmds))
+            makefile.add('binary-arch_%s' % arch ['binary-arch_%s_extra' % arch])
+            makefile.add("binary-arch_%s_extra" % arch, cmds = cmds)
 
     def do_arch(self, packages, makefile, arch, vars, makeflags, extra):
         config_base = self.config['base', arch]
@@ -119,9 +163,9 @@ class Gencontrol(object):
         for i in self.makefile_targets:
             target1 = i
             target2 = "%s_%s" % (i, arch)
-            makefile.append("%s:: %s" % (target1, target2))
-            makefile.append("%s:: %s_real" % (target2, target2))
-            makefile.append("%s_real::" % target2)
+            makefile.add(target1, [target2])
+            makefile.add(target2, ['%s_real' % target2])
+            makefile.add('%s_real' % target2)
 
     def do_arch_packages(self, packages, makefile, arch, vars, makeflags, extra):
         pass
@@ -155,9 +199,9 @@ class Gencontrol(object):
         for i in self.makefile_targets:
             target1 = "%s_%s" % (i, arch)
             target2 = "%s_%s_%s" % (i, arch, featureset)
-            makefile.append("%s:: %s" % (target1, target2))
-            makefile.append("%s:: %s_real" % (target2, target2))
-            makefile.append("%s_real::" % target2)
+            makefile.add(target1, [target2])
+            makefile.add(target2, ['%s_real' % target2])
+            makefile.add('%s_real' % target2)
 
     def do_featureset_packages(self, packages, makefile, arch, featureset, vars, makeflags, extra):
         pass
@@ -192,9 +236,9 @@ class Gencontrol(object):
         for i in self.makefile_targets:
             target1 = "%s_%s_%s" % (i, arch, featureset)
             target2 = "%s_%s_%s_%s" % (i, arch, featureset, flavour)
-            makefile.append("%s:: %s" % (target1, target2))
-            makefile.append("%s:: %s_real" % (target2, target2))
-            makefile.append("%s_real::" % target2)
+            makefile.add(target1, [target2])
+            makefile.add(target2, ['%s_real' % target2])
+            makefile.add('%s_real' % target2)
 
     def do_flavour_packages(self, packages, makefile, arch, featureset, flavour, vars, makeflags, extra):
         pass
@@ -255,18 +299,10 @@ class Gencontrol(object):
     def write_control(self, list):
         self.write_rfc822(file("debian/control", 'w'), list)
 
-    def write_makefile(self, out_list):
-        out = file("debian/rules.gen", 'w')
-        for item in out_list:
-            if isinstance(item, (list, tuple)):
-                out.write("%s\n" % item[0])
-                cmd_list = item[1]
-                if isinstance(cmd_list, basestring):
-                    cmd_list = cmd_list.split('\n')
-                for j in cmd_list:
-                    out.write("\t%s\n" % j)
-            else:
-                out.write("%s\n" % item)
+    def write_makefile(self, makefile):
+        f = file("debian/rules.gen", 'w')
+        makefile.write(f)
+        f.close()
 
     def write_rfc822(self, f, list):
         for entry in list:

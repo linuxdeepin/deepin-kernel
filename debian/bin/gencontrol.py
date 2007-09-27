@@ -48,10 +48,10 @@ class Gencontrol(Base):
                 package['Architecture'] = [arch]
                 packages.append(package)
 
-        cmds_binary_arch = [("$(MAKE) -f debian/rules.real binary-arch-arch %s" % makeflags)]
-        cmds_source = [("$(MAKE) -f debian/rules.real source-arch %s" % makeflags,)]
-        makefile.append(("binary-arch_%s_real::" % arch, cmds_binary_arch))
-        makefile.append(("source_%s_real::" % arch, cmds_source))
+        cmds_binary_arch = ["$(MAKE) -f debian/rules.real binary-arch-arch %s" % makeflags]
+        cmds_source = ["$(MAKE) -f debian/rules.real source-arch %s" % makeflags]
+        makefile.add('binary-arch_%s_real' % arch, cmds = cmds_binary_arch)
+        makefile.add('source_%s_real' % arch, cmds = cmds_source)
 
     def do_featureset_setup(self, vars, makeflags, arch, featureset, extra):
         vars.update(self.config.get(('image', arch, featureset), {}))
@@ -75,10 +75,10 @@ class Gencontrol(Base):
             package_headers['Architecture'] = [arch]
             packages.append(package_headers)
 
-        cmds_binary_arch = [("$(MAKE) -f debian/rules.real binary-arch-featureset %s" % makeflags,)]
-        cmds_source = [("$(MAKE) -f debian/rules.real source-featureset %s" % makeflags,)]
-        makefile.append(("binary-arch_%s_%s_real::" % (arch, featureset), cmds_binary_arch))
-        makefile.append(("source_%s_%s_real::" % (arch, featureset), cmds_source))
+        cmds_binary_arch = ["$(MAKE) -f debian/rules.real binary-arch-featureset %s" % makeflags]
+        cmds_source = ["$(MAKE) -f debian/rules.real source-featureset %s" % makeflags]
+        makefile.add('binary-arch_%s_%s_real' % (arch, featureset), cmds = cmds_binary_arch)
+        makefile.add('source_%s_%s_real' % (arch, featureset), cmds = cmds_source)
 
     def do_flavour_setup(self, vars, makeflags, arch, featureset, flavour, extra):
         vars.update(self.config.get(('image', arch, featureset, flavour), {}))
@@ -223,15 +223,14 @@ class Gencontrol(Base):
         makeflags['KCONFIG'] = ' '.join(kconfig)
 
         cmds_binary_arch = []
-        cmds_binary_arch.append(("$(MAKE) -f debian/rules.real binary-arch-flavour %s" % makeflags,))
+        cmds_binary_arch.append("$(MAKE) -f debian/rules.real binary-arch-flavour %s" % makeflags)
         if packages_dummy:
-            cmds_binary_arch.append(("$(MAKE) -f debian/rules.real install-dummy DH_OPTIONS='%s' %s" % (' '.join(["-p%s" % i['Package'] for i in packages_dummy]), makeflags),))
-        cmds_build = [("$(MAKE) -f debian/rules.real build %s" % makeflags,)]
-        cmds_setup = [("$(MAKE) -f debian/rules.real setup-flavour %s" % makeflags,)]
-        makefile.append(("binary-arch_%s_%s_%s_real::" % (arch, featureset, flavour), cmds_binary_arch))
-        makefile.append(("build_%s_%s_%s_real::" % (arch, featureset, flavour), cmds_build))
-        makefile.append(("setup_%s_%s_%s_real::" % (arch, featureset, flavour), cmds_setup))
-        makefile.append(("source_%s_%s_%s_real::" % (arch, featureset, flavour)))
+            cmds_binary_arch.append("$(MAKE) -f debian/rules.real install-dummy DH_OPTIONS='%s' %s" % (' '.join(["-p%s" % i['Package'] for i in packages_dummy]), makeflags))
+        cmds_build = ["$(MAKE) -f debian/rules.real build %s" % makeflags]
+        cmds_setup = ["$(MAKE) -f debian/rules.real setup-flavour %s" % makeflags]
+        makefile.add('binary-arch_%s_%s_%s_real' % (arch, featureset, flavour), cmds = cmds_binary_arch)
+        makefile.add('build_%s_%s_%s_real' % (arch, featureset, flavour), cmds = cmds_build)
+        makefile.add('setup_%s_%s_%s_real' % (arch, featureset, flavour), cmds = cmds_setup)
 
     def do_extra(self, packages, makefile):
         apply = self.templates['patch.apply']
