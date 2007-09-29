@@ -36,7 +36,6 @@ class Main(object):
         try:
             self.upstream_extract()
             self.upstream_patch()
-            self.debian_patch()
             self.tar()
         finally:
             shutil.rmtree(self.dir)
