@@ -1,29 +1,22 @@
 #!/usr/bin/env python2.4
+
 import sys
 sys.path.append("debian/lib/python")
-import warnings
+
 from debian_linux.debian import *
+from debian_linux.gencontrol import PackagesList, Makefile, MakeFlags
 from debian_linux.utils import *
-
-class packages_list(sorted_dict):
-    def append(self, package):
-        self[package['Package']] = package
-
-    def extend(self, packages):
-        for package in packages:
-            self[package['Package']] = package
 
 class gencontrol(object):
     makefile_targets = ('binary-arch', 'build')
 
     def __init__(self, underlay = None):
-        self.changelog = read_changelog()
-        self.templates = templates()
-        self.version, self.changelog_vars = self.process_changelog({})
+        self.templates = Templates(['debian/templates'])
+        self.process_changelog()
 
     def __call__(self):
-        packages = packages_list()
-        makefile = []
+        packages = PackagesList()
+        makefile = Makefile()
 
         self.do_source(packages)
         self.do_main(packages, makefile)
@@ -33,61 +26,47 @@ class gencontrol(object):
 
     def do_source(self, packages):
         source = self.templates["control.source"]
-        packages['source'] = self.process_package(source[0], self.changelog_vars)
+        packages['source'] = self.process_package(source[0], self.vars)
 
     def do_main(self, packages, makefile):
-        makeflags = {
-            'VERSION': self.version['linux']['version'],
-            'SOURCE_UPSTREAM': self.version['upstream'],
-            'SOURCEVERSION': self.version['linux']['source'],
-            'UPSTREAMVERSION': self.version['linux']['upstream'],
-        }
-
-        vars = self.changelog_vars.copy()
+        vars = self.vars.copy()
+        makeflags = MakeFlags()
 
         self.do_main_setup(vars, makeflags)
         self.do_main_packages(packages)
         self.do_main_makefile(makefile, makeflags)
 
     def do_main_setup(self, vars, makeflags):
-        pass
+        makeflags.update({
+            'MAJOR': self.version.linux_major,
+            'VERSION': self.version.linux_version,
+            'UPSTREAMVERSION': self.version.linux_upstream,
+        })
 
     def do_main_makefile(self, makefile, makeflags):
-        makeflags_string = ' '.join(["%s='%s'" % i for i in makeflags.iteritems()])
-
         for i in self.makefile_targets:
-            makefile.append(("%s:" % i, ("$(MAKE) -f debian/rules.real %s %s" % (i, makeflags_string))))
+            makefile.add(i, cmds = ["$(MAKE) -f debian/rules.real %s %s" % (i, makeflags)])
 
     def do_main_packages(self, packages):
-        vars = self.changelog_vars
-
         main = self.templates["control.main"]
-        packages.extend(self.process_packages(main, vars))
+        packages.extend(self.process_packages(main, self.vars))
 
-    def process_changelog(self, in_vars):
-        ret = [None, None]
-        ret[0] = version = self.changelog[0]['Version']
-        vars = in_vars.copy()
-        vars['upstreamversion'] = version['linux']['upstream']
-        vars['version'] = version['linux']['version']
-        vars['source_upstream'] = version['upstream']
-        vars['major'] = version['linux']['major']
-        ret[1] = vars
-        return ret
+    def process_changelog(self):
+        changelog = Changelog(version = VersionLinux)
+        self.version = version = changelog[0].version
+        self.vars = {
+            'upstreamversion': version.linux_upstream,
+            'version': version.linux_version,
+            'source_upstream': version.upstream,
+            'major': version.linux_major,
+        }
 
     def process_relation(self, key, e, in_e, vars):
-        in_dep = in_e[key]
-        dep = package_relation_list()
-        for in_groups in in_dep:
-            groups = package_relation_group()
-            for in_item in in_groups:
-                item = package_relation()
-                item.name = self.substitute(in_item.name, vars)
-                if in_item.version is not None:
-                    item.version = self.substitute(in_item.version, vars)
-                item.arches = in_item.arches
-                groups.append(item)
-            dep.append(groups)
+        import copy
+        dep = copy.deepcopy(in_e[key])
+        for groups in dep:
+            for item in groups:
+                item.name = self.substitute(item.name, vars)
         e[key] = dep
 
     def process_description(self, e, in_e, vars):
@@ -95,13 +74,13 @@ class gencontrol(object):
         desc = in_desc.__class__()
         desc.short = self.substitute(in_desc.short, vars)
         for i in in_desc.long:
-            desc.long.append(self.substitute(i, vars))
+            desc.append(self.substitute(i, vars))
         e['Description'] = desc
 
     def process_package(self, in_entry, vars):
-        e = package()
+        e = Package()
         for key, value in in_entry.iteritems():
-            if isinstance(value, package_relation_list):
+            if isinstance(value, PackageRelation):
                 self.process_relation(key, e, in_entry, vars)
             elif key == 'Description':
                 self.process_description(e, in_entry, vars)
@@ -129,25 +108,16 @@ class gencontrol(object):
     def write_control(self, list):
         self.write_rfc822(file("debian/control", 'w'), list)
 
-    def write_makefile(self, out_list):
-        out = file("debian/rules.gen", 'w')
-        for item in out_list:
-            if isinstance(item, (list, tuple)):
-                out.write("%s\n" % item[0])
-                cmd_list = item[1]
-                if isinstance(cmd_list, basestring):
-                    cmd_list = cmd_list.split('\n')
-                for j in cmd_list:
-                    out.write("\t%s\n" % j)
-            else:
-                out.write("%s\n" % item)
+    def write_makefile(self, makefile):
+        f = file("debian/rules.gen", 'w')
+        makefile.write(f)
+        f.close()
 
     def write_rfc822(self, f, list):
         for entry in list:
             for key, value in entry.iteritems():
                 f.write("%s: %s\n" % (key, value))
             f.write('\n')
-
 
 if __name__ == '__main__':
     gencontrol()()

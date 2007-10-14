@@ -1,103 +1,154 @@
 import itertools, os.path, re, utils
 
-def read_changelog(dir = ''):
-    r = re.compile(r"""
-^
-(
-(?P<header>
-    (?P<header_source>
-        \w[-+0-9a-z.]+
-    )
-    \ 
-    \(
-    (?P<header_version>
-        [^\(\)\ \t]+
-    )
-    \)
-    \s+
-    (?P<header_distribution>
-        [-0-9a-zA-Z]+
-    )
-    \;
-)
-)
-""", re.VERBOSE)
-    f = file(os.path.join(dir, "debian/changelog"))
-    entries = []
-    act_upstream = None
-    while True:
-        line = f.readline()
-        if not line:
-            break
-        line = line.strip('\n')
-        match = r.match(line)
-        if not match:
-            continue
-        if match.group('header'):
-            e = {}
-            e['Distribution'] = match.group('header_distribution')
-            e['Source'] = match.group('header_source')
-            version = parse_version(match.group('header_version'))
-            e['Version'] = version
-            if act_upstream is None:
-                act_upstream = version['upstream']
-            elif version['upstream'] != act_upstream:
-                break
-            entries.append(e)
-    return entries
-
-def parse_version(version):
-    ret = {
-        'complete': version,
-        'upstream': version,
-        'debian': None,
-        'linux': None,
-    }
-    try:
-        i = len(version) - version[::-1].index('-')
-    except ValueError:
-        return ret
-    ret['upstream'] = version[:i-1]
-    ret['debian'] = version[i:]
-    try:
-        ret['linux'] = parse_version_linux(version)
-    except ValueError:
-        pass
-    return ret
-
-def parse_version_linux(version):
-    version_re = ur"""
+class Changelog(list):
+    _rules = r"""
 ^
 (?P<source>
-    (?P<version>
-        (?P<major>\d+\.\d+)
-        \.
+    \w[-+0-9a-z.]+
+)
+\ 
+\(
+(?P<version>
+    [^\(\)\ \t]+
+)
+\)
+\s+
+(?P<distribution>
+    [-+0-9a-zA-Z.]+
+)
+\;
+"""
+    _re = re.compile(_rules, re.X)
+
+    class Entry(object):
+        __slot__ = 'distribution', 'source', 'version'
+
+        def __init__(self, distribution, source, version):
+            self.distribution, self.source, self.version = distribution, source, version
+
+    def __init__(self, dir = '', version = None):
+        if version is None:
+            version = Version
+        f = file(os.path.join(dir, "debian/changelog"))
+        while True:
+            line = f.readline()
+            if not line:
+                break
+            match = self._re.match(line)
+            if not match:
+                continue
+            try:
+                v = version(match.group('version'))
+            except Exception:
+                if not len(self):
+                    raise
+                v = Version(match.group('version'))
+            self.append(self.Entry(match.group('distribution'), match.group('source'), v))
+
+class Version(object):
+    _version_rules = ur"""
+^
+(?:
+    (?P<epoch>
         \d+
     )
-    (?:
-        ~
-        (?P<modifier>
-            .+?
-        )
-    )?
+    :
+)?
+(?P<upstream>
+    .+?
+)   
+(?:
     -
     (?P<debian>[^-]+)
-)
+)?
 $
 """
-    match = re.match(version_re, version, re.X)
-    if match is None:
-        raise ValueError
-    ret = match.groupdict()
-    if ret['modifier'] is not None:
-        ret['upstream'] = '%s-%s' % (ret['version'], ret['modifier'])
-        ret['source_upstream'] = '%s~%s' % (ret['version'], ret['modifier'])
-    else:
-        ret['upstream'] = ret['version']
-        ret['source_upstream'] = ret['version']
-    return ret
+    _version_re = re.compile(_version_rules, re.X)
 
-class package_description(object):
+    def __init__(self, version):
+        match = self._version_re.match(version)
+        if match is None:
+            raise RuntimeError, "Invalid debian version"
+        self.epoch = None
+        if match.group("epoch") is not None:
+            self.epoch = int(match.group("epoch"))
+        self.upstream = match.group("upstream")
+        self.debian = match.group("debian")
+
+    def __str__(self):
+        return self.complete
+
+    @property
+    def complete(self):
+        if self.epoch is not None:
+            return "%d:%s" % (self.epoch, self.complete_noepoch)
+        return self.complete_noepoch
+
+    @property
+    def complete_noepoch(self):
+        if self.debian is not None:
+            return "%s-%s" % (self.upstream, self.debian)
+        return self.upstream
+
+class VersionLinux(Version):
+    _version_linux_rules = ur"""
+^
+(?P<version>
+    (?P<major>\d+\.\d+)
+    \.
+    \d+
+)
+(?:
+    ~
+    (?P<modifier>
+        .+?
+    )
+)?
+(?:
+    \.dfsg\.
+    (?P<dfsg>
+        \d+
+    )
+)?
+-
+(?:[^-]+)
+$
+"""
+    _version_linux_re = re.compile(_version_linux_rules, re.X)
+
+    def __init__(self, version):
+        super(VersionLinux, self).__init__(version)
+        match = self._version_linux_re.match(version)
+        if match is None:
+            raise RuntimeError, "Invalid debian linux version"
+        d = match.groupdict()
+        self.linux_major = d['major']
+        self.linux_modifier = d['modifier']
+        self.linux_version = d['version']
+        if d['modifier'] is not None:
+            self.linux_upstream = '-'.join((d['version'], d['modifier']))
+        else:
+            self.linux_upstream = d['version']
+        self.linux_dfsg = d['dfsg']
+ 
+class PackageFieldList(list):
+    def __init__(self, value = None):
+        self.extend(value)
+
+    def __str__(self):
+        return ' '.join(self)
+
+    def _extend(self, value):
+        if value is not None:
+            self.extend([j.strip() for j in re.split('\s', value.strip())])
+
+    def extend(self, value):
+        if isinstance(value, str):
+            self._extend(value)
+        else:
+            super(PackageFieldList, self).extend(value)
+
+class PackageDescription(object):
     __slots__ = "short", "long"
 
     def __init__(self, value = None):
@@ -110,7 +161,7 @@ class package_description(object):
 
     def __str__(self):
         ret = self.short + '\n'
-        w = utils.wrap(width = 74, fix_sentence_endings = True)
+        w = utils.TextWrapper(width = 74, fix_sentence_endings = True)
         pars = []
         for i in self.long:
             pars.append('\n '.join(w.wrap(i)))
@@ -121,48 +172,7 @@ class package_description(object):
         if str:
             self.long.extend(str.split("\n.\n"))
 
-class package_relation(object):
-    __slots__ = "name", "version", "arches"
-
-    _re = re.compile(r'^(\S+)(?: \(([^)]+)\))?(?: \[([^]]+)\])?$')
-
-    def __init__(self, value = None):
-        if value is not None:
-            self.parse(value)
-        else:
-            self.name = None
-            self.version = None
-            self.arches = []
-
-    def __str__(self):
-        ret = [self.name]
-        if self.version is not None:
-            ret.extend([' (', self.version, ')'])
-        if self.arches:
-            ret.extend([' [', ' '.join(self.arches), ']'])
-        return ''.join(ret)
-
-    def config(self, entry):
-        if self.version is not None or self.arches:
-            return
-        value = entry.get(self.name, None)
-        if value is None:
-            return
-        self.parse(value)
-
-    def parse(self, value):
-        match = self._re.match(value)
-        if match is None:
-            raise RuntimeError, "Can't parse dependency %s" % value
-        match = match.groups()
-        self.name = match[0]
-        self.version = match[1]
-        if match[2] is not None:
-            self.arches = re.split('\s+', match[2])
-        else:
-            self.arches = []
-
-class package_relation_list(list):
+class PackageRelation(list):
     def __init__(self, value = None):
         if value is not None:
             self.extend(value)
@@ -178,18 +188,14 @@ class package_relation_list(list):
 
     def append(self, value):
         if isinstance(value, basestring):
-            value = package_relation_group(value)
-        elif not isinstance(value, package_relation_group):
+            value = PackageRelationGroup(value)
+        elif not isinstance(value, PackageRelationGroup):
             raise ValueError, "got %s" % type(value)
         j = self._match(value)
         if j:
-            j._update_arches(value)
+            j._updateArches(value)
         else:
-            super(package_relation_list, self).append(value)
-
-    def config(self, entry):
-        for i in self:
-            i.config(entry)
+            super(PackageRelation, self).append(value)
 
     def extend(self, value):
         if isinstance(value, basestring):
@@ -199,7 +205,7 @@ class package_relation_list(list):
         for i in value:
             self.append(i)
 
-class package_relation_group(list):
+class PackageRelationGroup(list):
     def __init__(self, value = None):
         if value is not None:
             self.extend(value)
@@ -213,7 +219,7 @@ class package_relation_group(list):
                 return None
         return self
 
-    def _update_arches(self, value):
+    def _updateArches(self, value):
         for i, j in itertools.izip(self, value):
             if i.arches:
                 for arch in j.arches:
@@ -222,14 +228,10 @@ class package_relation_group(list):
 
     def append(self, value):
         if isinstance(value, basestring):
-            value = package_relation(value)
-        elif not isinstance(value, package_relation):
+            value = PackageRelationEntry(value)
+        elif not isinstance(value, PackageRelationEntry):
             raise ValueError
-        super(package_relation_group, self).append(value)
-
-    def config(self, entry):
-        for i in self:
-            i.config(entry)
+        super(PackageRelationGroup, self).append(value)
 
     def extend(self, value):
         if isinstance(value, basestring):
@@ -239,25 +241,78 @@ class package_relation_group(list):
         for i in value:
             self.append(i)
 
-class package(dict):
-    _fields = utils.sorted_dict((
+class PackageRelationEntry(object):
+    __slots__ = "name", "operator", "version", "arches"
+
+    _re = re.compile(r'^(\S+)(?: \((<<|<=|=|!=|>=|>>)\s*([^)]+)\))?(?: \[([^]]+)\])?$')
+
+    class _operator(object):
+        OP_LT = 1; OP_LE = 2; OP_EQ = 3; OP_NE = 4; OP_GE = 5; OP_GT = 6
+        operators = { '<<': OP_LT, '<=': OP_LE, '=':  OP_EQ, '!=': OP_NE, '>=': OP_GE, '>>': OP_GT }
+        operators_neg = { OP_LT: OP_GE, OP_LE: OP_GT, OP_EQ: OP_NE, OP_NE: OP_EQ, OP_GE: OP_LT, OP_GT: OP_LE }
+        operators_text = dict([(b, a) for a, b in operators.iteritems()])
+
+        __slots__ = '_op',
+
+        def __init__(self, value):
+            self._op = self.operators[value]
+
+        def __neg__(self):
+            return self.__class__(self.operators_text[self.operators_neg[self._op]])
+
+        def __str__(self):
+            return self.operators_text[self._op]
+
+    def __init__(self, value = None):
+        if isinstance(value, basestring):
+            self.parse(value)
+        else:
+            raise ValueError
+
+    def __str__(self):
+        ret = [self.name]
+        if self.operator is not None and self.version is not None:
+            ret.extend([' (', str(self.operator), ' ', self.version, ')'])
+        if self.arches:
+            ret.extend([' [', ' '.join(self.arches), ']'])
+        return ''.join(ret)
+
+    def parse(self, value):
+        match = self._re.match(value)
+        if match is None:
+            raise RuntimeError, "Can't parse dependency %s" % value
+        match = match.groups()
+        self.name = match[0]
+        if match[1] is not None:
+            self.operator = self._operator(match[1])
+        else:
+            self.operator = None
+        self.version = match[2]
+        if match[3] is not None:
+            self.arches = re.split('\s+', match[3])
+        else:
+            self.arches = []
+
+class Package(dict):
+    _fields = utils.SortedDict((
         ('Package', str),
         ('Source', str),
-        ('Architecture', utils.field_list),
+        ('Architecture', PackageFieldList),
         ('Section', str),
         ('Priority', str),
         ('Maintainer', str),
         ('Uploaders', str),
         ('Standards-Version', str),
-        ('Build-Depends', package_relation_list),
-        ('Build-Depends-Indep', package_relation_list),
-        ('Provides', package_relation_list),
-        ('Depends', package_relation_list),
-        ('Recommends', package_relation_list),
-        ('Suggests', package_relation_list),
-        ('Replaces', package_relation_list),
-        ('Conflicts', package_relation_list),
-        ('Description', package_description),
+        ('Build-Depends', PackageRelation),
+        ('Build-Depends-Indep', PackageRelation),
+        ('Provides', PackageRelation),
+        ('Pre-Depends', PackageRelation),
+        ('Depends', PackageRelation),
+        ('Recommends', PackageRelation),
+        ('Suggests', PackageRelation),
+        ('Replaces', PackageRelation),
+        ('Conflicts', PackageRelation),
+        ('Description', PackageDescription),
     ))
 
     def __setitem__(self, key, value):
@@ -266,7 +321,7 @@ class package(dict):
             if not isinstance(value, cls):
                 value = cls(value)
         except KeyError: pass
-        super(package, self).__setitem__(key, value)
+        super(Package, self).__setitem__(key, value)
 
     def iterkeys(self):
         keys = set(self.keys())
@@ -278,20 +333,10 @@ class package(dict):
             yield i
 
     def iteritems(self):
-        keys = set(self.keys())
-        for i in self._fields.iterkeys():
-            if self.has_key(i):
-                keys.remove(i)
-                yield (i, self[i])
-        for i in keys:
+        for i in self.iterkeys():
             yield (i, self[i])
 
     def itervalues(self):
-        keys = set(self.keys())
-        for i in self._fields.iterkeys():
-            if self.has_key(i):
-                keys.remove(i)
-                yield self[i]
-        for i in keys:
+        for i in self.iterkeys():
             yield self[i]
 
