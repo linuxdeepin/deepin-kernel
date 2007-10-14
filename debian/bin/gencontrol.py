@@ -3,12 +3,14 @@
 import os, sys
 sys.path.append("debian/lib/python")
 
-from debian_linux.gencontrol import Gencontrol as Base
+from debian_linux.config import ConfigCoreHierarchy
 from debian_linux.debian import *
+from debian_linux.gencontrol import Gencontrol as Base
+from debian_linux.utils import Templates
 
 class Gencontrol(Base):
     def __init__(self, config_dirs = ["debian/config"], template_dirs = ["debian/templates"]):
-        super(Gencontrol, self).__init__(config_dirs = config_dirs, template_dirs = template_dirs)
+        super(Gencontrol, self).__init__(ConfigCoreHierarchy(config_dirs), Templates(template_dirs))
         self.process_changelog()
         self.config_dirs = config_dirs
 
@@ -267,6 +269,7 @@ class Gencontrol(Base):
         else:
             self.abiname = '-%s' % self.config['abi',]['abiname']
         self.vars = self.process_version_linux(self.version, self.abiname)
+        self.config['version',] = {'source': self.version.complete, 'abiname': self.abiname}
 
     def process_real_image(self, in_entry, relations, config, vars):
         entry = self.process_package(in_entry, vars)
@@ -294,6 +297,15 @@ class Gencontrol(Base):
                 value.extend(["linux-tree-%s" % v.complete.replace('~', '-') for v in versions])
             entry[i] = value
         return entry
+
+    def write(self, packages, makefile):
+        self.write_config()
+        super(Gencontrol, self).write(packages, makefile)
+
+    def write_config(self):
+        f = file("debian/config.defines.dump", 'w')
+        self.config.dump(f)
+        f.close()
 
 if __name__ == '__main__':
     Gencontrol()()

@@ -47,7 +47,7 @@ class main(object):
         self.version = changelog.version.linux_version
         self.version_source = changelog.version.complete
 
-        local_config = ConfigReaderCore(["debian/config"])
+        local_config = ConfigCoreDump(fp = file("debian/config.defines.dump"))
 
         self.abiname = local_config['abi',]['abiname']
         self.version_abi = self.version + '-' + self.abiname
@@ -72,11 +72,7 @@ class main(object):
         os.system("dpkg-deb --extract %s %s" % (filename, base_out))
         return base_out
 
-    def get_abi(self, arch, featureset, flavour):
-        if featureset == 'none':
-            prefix = flavour
-        else:
-            prefix = featureset + '-' + flavour
+    def get_abi(self, arch, prefix):
         filename = "linux-headers-%s-%s_%s_%s.deb" % (self.version_abi, prefix, self.version_source, arch)
         f = self.retrieve_package(self.url, filename)
         d = self.extract_package(f, "linux-headers-%s_%s" % (prefix, arch))
@@ -89,8 +85,8 @@ class main(object):
         filename = "linux-support-%s_%s_all.deb" % (self.version_abi, self.version_source)
         f = self.retrieve_package(self.url_config, filename)
         d = self.extract_package(f, "linux-support")
-        dir = d + "/usr/src/linux-support-" + self.version_abi + "/config"
-        config = ConfigReaderCore([dir])
+        c = d + "/usr/src/linux-support-" + self.version_abi + "/config.defines.dump"
+        config = ConfigCoreDump(fp = file(c))
         shutil.rmtree(d)
         return config
 
@@ -122,23 +118,32 @@ class main(object):
             self.update_featureset(config, arch, featureset)
 
     def update_featureset(self, config, arch, featureset):
-        config_entry = config[('base', arch, featureset)]
-        if not config_entry.get('modules', True):
+        config_base = config.merge('base', arch, featureset)
+
+        if not config_base.get('enabled', True):
             return
+
         if self.override_flavour:
             flavours = [self.override_flavour]
         else:
-            flavours = config_entry['flavours']
+            flavours = config_base['flavours']
         for flavour in flavours:
             self.update_flavour(config, arch, featureset, flavour)
 
     def update_flavour(self, config, arch, featureset, flavour):
-        config_entry = config[('base', arch, featureset, flavour)]
-        if not config_entry.get('modules', True):
+        config_base = config.merge('base', arch, featureset, flavour)
+
+        if not config_base.get('modules', True):
             return
+
         self.log("Updating ABI for arch %s, featureset %s, flavour %s: " % (arch, featureset, flavour))
         try:
-            abi = self.get_abi(arch, featureset, flavour)
+            if featureset == 'none':
+                localversion = flavour
+            else:
+                localversion = featureset + '-' + flavour
+
+            abi = self.get_abi(arch, localversion)
             self.save_abi(abi, arch, featureset, flavour)
             self.log("Ok.\n")
         except KeyboardInterrupt:

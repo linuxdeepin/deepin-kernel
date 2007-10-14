@@ -1,12 +1,14 @@
 #!/usr/bin/env python
 
 import sys
+sys.path.append('debian/lib/python')
+
 from debian_linux.abi import *
-from debian_linux.config import *
+from debian_linux.config import ConfigCoreDump
 
 class checker(object):
     def __init__(self, dir, arch, featureset, flavour):
-        self.config = ConfigReaderCore(["debian/config"])
+        self.config = ConfigCoreDump(fp = file("debian/config.defines.dump"))
         self.filename_new = "%s/Module.symvers" % dir
         abiname = self.config['abi',]['abiname']
         self.filename_ref = "debian/abi/%s/%s_%s_%s" % (abiname, arch, featureset, flavour)

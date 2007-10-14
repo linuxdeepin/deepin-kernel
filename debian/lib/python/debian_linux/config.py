@@ -1,8 +1,9 @@
 import os, os.path, re, sys, textwrap
 
 __all__ = [
+    'ConfigCoreDump',
+    'ConfigCoreHierarchy',
     'ConfigParser',
-    'ConfigReaderCore',
 ]
 
 class SchemaItemBoolean(object):
@@ -24,7 +25,51 @@ class SchemaItemList(object):
             return []
         return [j.strip() for j in re.split(self.type, i)]
 
-class ConfigReaderCore(dict):
+class ConfigCore(dict):
+    def merge(self, section, arch = None, featureset = None, flavour = None):
+        ret = {}
+        ret.update(self.get((section,), {}))
+        if featureset:
+            ret.update(self.get((section, None, featureset), {}))
+        if arch:
+            ret.update(self.get((section, arch), {}))
+        if arch and featureset:
+            ret.update(self.get((section, arch, featureset), {}))
+        if arch and featureset and flavour:
+            ret.update(self.get((section, arch, None, flavour), {}))
+            ret.update(self.get((section, arch, featureset, flavour), {}))
+        return ret
+
+    def dump(self, fp):
+        sections = self.keys()
+        sections.sort()
+        for section in sections:
+            fp.write('[%r]\n' % (section,))
+            items = self[section]
+            items_keys = items.keys()
+            items_keys.sort()
+            for item in items:
+                fp.write('%s: %r\n' % (item, items[item]))
+            fp.write('\n')
+
+class ConfigCoreDump(ConfigCore):
+    def __init__(self, config = None, fp = None):
+        super(ConfigCoreDump, self).__init__(self)
+        if config is not None:
+            self.update(config)
+        if fp is not None:
+            from ConfigParser import RawConfigParser
+            config = RawConfigParser()
+            config.readfp(fp)
+            for section in config.sections():
+                section_real = eval(section)
+                data = {}
+                for key, value in config.items(section):
+                    value_real = eval(value)
+                    data[key] = value_real
+                self[section_real] = data
+
+class ConfigCoreHierarchy(ConfigCore):
     config_name = "defines"
 
     schemas = {
@@ -49,6 +94,7 @@ class ConfigReaderCore(dict):
     }
 
     def __init__(self, dirs = []):
+        super(ConfigCoreHierarchy, self).__init__()
         self._dirs = dirs
         self._read_base()
 
@@ -98,7 +144,7 @@ class ConfigReaderCore(dict):
         config.read(self.get_files(self.config_name))
 
         arches = config['base',]['arches']
-        featuresets = config['base',]['featuresets']
+        featuresets = config['base',].get('featuresets', [])
 
         for section in iter(config):
             if section[0].startswith('featureset-'):
@@ -124,20 +170,6 @@ class ConfigReaderCore(dict):
 
     def get_files(self, name):
         return [os.path.join(i, name) for i in self._dirs if i]
-
-    def merge(self, section, arch = None, featureset = None, flavour = None):
-        ret = {}
-        ret.update(self.get((section,), {}))
-        if featureset:
-            ret.update(self.get((section, None, featureset), {}))
-        if arch:
-            ret.update(self.get((section, arch), {}))
-        if arch and featureset:
-            ret.update(self.get((section, arch, featureset), {}))
-        if arch and featureset and flavour:
-            ret.update(self.get((section, arch, None, flavour), {}))
-            ret.update(self.get((section, arch, featureset, flavour), {}))
-        return ret
 
 class ConfigParser(object):
     __slots__ = '_config', 'schemas'

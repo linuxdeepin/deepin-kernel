@@ -1,6 +1,5 @@
-from config import *
 from debian import *
-from utils import *
+from utils import SortedDict
 
 class PackagesList(SortedDict):
     def append(self, package):
@@ -70,9 +69,8 @@ class MakeFlags(dict):
 class Gencontrol(object):
     makefile_targets = ('binary-arch', 'build', 'setup', 'source')
 
-    def __init__(self, config_dirs, template_dirs):
-        self.config = ConfigReaderCore(config_dirs)
-        self.templates = Templates(template_dirs)
+    def __init__(self, config, templates):
+        self.config, self.templates = config, templates
 
     def __call__(self):
         packages = PackagesList()
@@ -82,8 +80,7 @@ class Gencontrol(object):
         self.do_main(packages, makefile)
         self.do_extra(packages, makefile)
 
-        self.write_control(packages.itervalues())
-        self.write_makefile(makefile)
+        self.write(packages, makefile)
 
     def do_source(self, packages):
         source = self.templates["control.source"]
@@ -295,6 +292,15 @@ class Gencontrol(object):
         def subst(match):
             return vars[match.group(1)]
         return re.sub(r'@([-_a-z]+)@', subst, s)
+
+    def write(self, packages, makefile):
+        self.write_control(packages.itervalues())
+        self.write_makefile(makefile)
+
+    def write_config(self):
+        f = file("debian/config.dump", 'w')
+        self.config.write(f)
+        f.close()
 
     def write_control(self, list):
         self.write_rfc822(file("debian/control", 'w'), list)
