@@ -5,14 +5,14 @@ from debian_linux.abi import *
 from debian_linux.config import *
 
 class checker(object):
-    def __init__(self, dir, arch, subarch, flavour):
+    def __init__(self, dir, arch, featureset, flavour):
         self.config = ConfigReaderCore(["debian/config"])
         self.filename_new = "%s/Module.symvers" % dir
         abiname = self.config['abi',]['abiname']
-        if subarch == 'none':
+        if featureset == 'none':
             self.filename_ref = "debian/config/%s/abi-%s.%s" % (arch, abiname, flavour)
         else:
-            self.filename_ref = "debian/config/%s/%s/abi-%s.%s" % (arch, subarch, abiname, flavour)
+            self.filename_ref = "debian/config/%s/%s/abi-%s.%s" % (arch, featureset, abiname, flavour)
 
     def __call__(self, out):
         ret = 0
