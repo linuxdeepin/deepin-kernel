@@ -107,10 +107,10 @@ class main(object):
         return filename_out
 
     def save_abi(self, symbols, arch, featureset, flavour):
-        out = "debian/config/%s" % arch
-        if featureset != 'none':
-            out += "/%s" % featureset
-        out += "/abi-%s.%s" % (self.abiname, flavour)
+        dir = "debian/abi/%s" % self.abiname
+        if not os.path.exists(dir):
+            os.makedirs(dir)
+        out = "%s/%s_%s_%s" % (dir, arch, featureset, flavour)
         symbols.write(file(out, 'w'))
 
     def update_arch(self, config, arch):

@@ -9,10 +9,7 @@ class checker(object):
         self.config = ConfigReaderCore(["debian/config"])
         self.filename_new = "%s/Module.symvers" % dir
         abiname = self.config['abi',]['abiname']
-        if featureset == 'none':
-            self.filename_ref = "debian/config/%s/abi-%s.%s" % (arch, abiname, flavour)
-        else:
-            self.filename_ref = "debian/config/%s/%s/abi-%s.%s" % (arch, featureset, abiname, flavour)
+        self.filename_ref = "debian/abi/%s/%s_%s_%s" % (abiname, arch, featureset, flavour)
 
     def __call__(self, out):
         ret = 0
