@@ -28,14 +28,14 @@ class url_debian_pool(object):
 class main(object):
     dir = None
 
-    def __init__(self, url, url_config = None, arch = None, subarch = None, flavour = None):
+    def __init__(self, url, url_config = None, arch = None, featureset = None, flavour = None):
         self.log = sys.stdout.write
 
         self.url = self.url_config = url
         if url_config is not None:
             self.url_config = url_config
         self.override_arch = arch
-        self.override_subarch = subarch
+        self.override_featureset = featureset
         self.override_flavour = flavour
 
         changelog = Changelog(version = VersionLinux)
@@ -72,11 +72,11 @@ class main(object):
         os.system("dpkg-deb --extract %s %s" % (filename, base_out))
         return base_out
 
-    def get_abi(self, arch, subarch, flavour):
-        if subarch == 'none':
+    def get_abi(self, arch, featureset, flavour):
+        if featureset == 'none':
             prefix = flavour
         else:
-            prefix = subarch + '-' + flavour
+            prefix = featureset + '-' + flavour
         filename = "linux-headers-%s-%s_%s_%s.deb" % (self.version_abi, prefix, self.version_source, arch)
         f = self.retrieve_package(self.url, filename)
         d = self.extract_package(f, "linux-headers-%s_%s" % (prefix, arch))
@@ -106,23 +106,23 @@ class main(object):
             f_out.write(r)
         return filename_out
 
-    def save_abi(self, symbols, arch, subarch, flavour):
+    def save_abi(self, symbols, arch, featureset, flavour):
         out = "debian/config/%s" % arch
-        if subarch != 'none':
-            out += "/%s" % subarch
+        if featureset != 'none':
+            out += "/%s" % featureset
         out += "/abi-%s.%s" % (self.abiname, flavour)
         symbols.write(file(out, 'w'))
 
     def update_arch(self, config, arch):
-        if self.override_subarch:
-            subarches = [self.override_subarch]
+        if self.override_featureset:
+            featuresets = [self.override_featureset]
         else:
-            subarches = config[('base', arch)]['subarches']
-        for subarch in subarches:
-            self.update_subarch(config, arch, subarch)
+            featuresets = config[('base', arch)]['featuresets']
+        for featureset in featuresets:
+            self.update_featureset(config, arch, featureset)
 
-    def update_subarch(self, config, arch, subarch):
-        config_entry = config[('base', arch, subarch)]
+    def update_featureset(self, config, arch, featureset):
+        config_entry = config[('base', arch, featureset)]
         if not config_entry.get('modules', True):
             return
         if self.override_flavour:
@@ -130,16 +130,16 @@ class main(object):
         else:
             flavours = config_entry['flavours']
         for flavour in flavours:
-            self.update_flavour(config, arch, subarch, flavour)
+            self.update_flavour(config, arch, featureset, flavour)
 
-    def update_flavour(self, config, arch, subarch, flavour):
-        config_entry = config[('base', arch, subarch, flavour)]
+    def update_flavour(self, config, arch, featureset, flavour):
+        config_entry = config[('base', arch, featureset, flavour)]
         if not config_entry.get('modules', True):
             return
-        self.log("Updating ABI for arch %s, subarch %s, flavour %s: " % (arch, subarch, flavour))
+        self.log("Updating ABI for arch %s, featureset %s, flavour %s: " % (arch, featureset, flavour))
         try:
-            abi = self.get_abi(arch, subarch, flavour)
-            self.save_abi(abi, arch, subarch, flavour)
+            abi = self.get_abi(arch, featureset, flavour)
+            self.save_abi(abi, arch, featureset, flavour)
             self.log("Ok.\n")
         except KeyboardInterrupt:
             self.log("Interrupted!\n")
@@ -160,7 +160,7 @@ if __name__ == '__main__':
     if len(args) >= 1:
         kw['arch'] =args[0]
     if len(args) >= 2:
-        kw['subarch'] =args[1]
+        kw['featureset'] =args[1]
     if len(args) >= 3:
         kw['flavour'] =args[2]
 
