@@ -1,0 +1,1001 @@
+diff --git a/Makefile b/Makefile
+index c6d545c..b0c2c32 100644
+diff --git a/arch/i386/boot/boot.h b/arch/i386/boot/boot.h
+index 20bab94..3eeb9e5 100644
+--- a/arch/i386/boot/boot.h
++++ b/arch/i386/boot/boot.h
+@@ -17,6 +17,8 @@
+ #ifndef BOOT_BOOT_H
+ #define BOOT_BOOT_H
+ 
++#define STACK_SIZE	512	/* Minimum number of bytes for stack */
++
+ #ifndef __ASSEMBLY__
+ 
+ #include <stdarg.h>
+@@ -198,8 +200,6 @@ static inline int isdigit(int ch)
+ }
+ 
+ /* Heap -- available for dynamic lists. */
+-#define STACK_SIZE	512	/* Minimum number of bytes for stack */
+-
+ extern char _end[];
+ extern char *HEAP;
+ extern char *heap_end;
+@@ -216,9 +216,9 @@ static inline char *__get_heap(size_t s, size_t a, size_t n)
+ #define GET_HEAP(type, n) \
+ 	((type *)__get_heap(sizeof(type),__alignof__(type),(n)))
+ 
+-static inline int heap_free(void)
++static inline bool heap_free(size_t n)
+ {
+-	return heap_end-HEAP;
++	return (int)(heap_end-HEAP) >= (int)n;
+ }
+ 
+ /* copy.S */
+diff --git a/arch/i386/boot/header.S b/arch/i386/boot/header.S
+index f3140e5..fff7059 100644
+--- a/arch/i386/boot/header.S
++++ b/arch/i386/boot/header.S
+@@ -173,7 +173,8 @@ ramdisk_size:	.long	0		# its size in bytes
+ bootsect_kludge:
+ 		.long	0		# obsolete
+ 
+-heap_end_ptr:	.word	_end+1024	# (Header version 0x0201 or later)
++heap_end_ptr:	.word	_end+STACK_SIZE-512
++					# (Header version 0x0201 or later)
+ 					# space from here (exclusive) down to
+ 					# end of setup code can be used by setup
+ 					# for local heap purposes.
+@@ -225,28 +226,53 @@ start_of_setup:
+ 	int	$0x13
+ #endif
+ 
+-# We will have entered with %cs = %ds+0x20, normalize %cs so
+-# it is on par with the other segments.
+-	pushw	%ds
+-	pushw	$setup2
+-	lretw
+-
+-setup2:
+ # Force %es = %ds
+ 	movw	%ds, %ax
+ 	movw	%ax, %es
+ 	cld
+ 
+-# Stack paranoia: align the stack and make sure it is good
+-# for both 16- and 32-bit references.  In particular, if we
+-# were meant to have been using the full 16-bit segment, the
+-# caller might have set %sp to zero, which breaks %esp-based
+-# references.
+-	andw	$~3, %sp	# dword align (might as well...)
+-	jnz	1f
+-	movw	$0xfffc, %sp	# Make sure we're not zero
+-1:	movzwl	%sp, %esp	# Clear upper half of %esp
+-	sti
++# Apparently some ancient versions of LILO invoked the kernel
++# with %ss != %ds, which happened to work by accident for the
++# old code.  If the CAN_USE_HEAP flag is set in loadflags, or
++# %ss != %ds, then adjust the stack pointer.
++
++	# Smallest possible stack we can tolerate
++	movw	$(_end+STACK_SIZE), %cx
++
++	movw	heap_end_ptr, %dx
++	addw	$512, %dx
++	jnc	1f
++	xorw	%dx, %dx	# Wraparound - whole segment available
++1:	testb	$CAN_USE_HEAP, loadflags
++	jnz	2f
++
++	# No CAN_USE_HEAP
++	movw	%ss, %dx
++	cmpw	%ax, %dx	# %ds == %ss?
++	movw	%sp, %dx
++	# If so, assume %sp is reasonably set, otherwise use
++	# the smallest possible stack.
++	jne	4f		# -> Smallest possible stack...
++
++	# Make sure the stack is at least minimum size.  Take a value
++	# of zero to mean "full segment."
++2:
++	andw	$~3, %dx	# dword align (might as well...)
++	jnz	3f
++	movw	$0xfffc, %dx	# Make sure we're not zero
++3:	cmpw	%cx, %dx
++	jnb	5f
++4:	movw	%cx, %dx	# Minimum value we can possibly use
++5:	movw	%ax, %ss
++	movzwl	%dx, %esp	# Clear upper half of %esp
++	sti			# Now we should have a working stack
++
++# We will have entered with %cs = %ds+0x20, normalize %cs so
++# it is on par with the other segments.
++	pushw	%ds
++	pushw	$6f
++	lretw
++6:
+ 
+ # Check signature at end of setup
+ 	cmpl	$0x5a5aaa55, setup_sig
+diff --git a/arch/i386/boot/video-bios.c b/arch/i386/boot/video-bios.c
+index 68e65d9..ed0672a 100644
+--- a/arch/i386/boot/video-bios.c
++++ b/arch/i386/boot/video-bios.c
+@@ -79,7 +79,7 @@ static int bios_probe(void)
+ 	video_bios.modes = GET_HEAP(struct mode_info, 0);
+ 
+ 	for (mode = 0x14; mode <= 0x7f; mode++) {
+-		if (heap_free() < sizeof(struct mode_info))
++		if (!heap_free(sizeof(struct mode_info)))
+ 			break;
+ 
+ 		if (mode_defined(VIDEO_FIRST_BIOS+mode))
+diff --git a/arch/i386/boot/video-vesa.c b/arch/i386/boot/video-vesa.c
+index 1921907..4716b9a 100644
+--- a/arch/i386/boot/video-vesa.c
++++ b/arch/i386/boot/video-vesa.c
+@@ -57,7 +57,7 @@ static int vesa_probe(void)
+ 	while ((mode = rdfs16(mode_ptr)) != 0xffff) {
+ 		mode_ptr += 2;
+ 
+-		if (heap_free() < sizeof(struct mode_info))
++		if (!heap_free(sizeof(struct mode_info)))
+ 			break;	/* Heap full, can't save mode info */
+ 
+ 		if (mode & ~0x1ff)
+diff --git a/arch/i386/boot/video.c b/arch/i386/boot/video.c
+index e4ba897..ad9712f 100644
+--- a/arch/i386/boot/video.c
++++ b/arch/i386/boot/video.c
+@@ -371,7 +371,7 @@ static void save_screen(void)
+ 	saved.curx = boot_params.screen_info.orig_x;
+ 	saved.cury = boot_params.screen_info.orig_y;
+ 
+-	if (heap_free() < saved.x*saved.y*sizeof(u16)+512)
++	if (!heap_free(saved.x*saved.y*sizeof(u16)+512))
+ 		return;		/* Not enough heap to save the screen */
+ 
+ 	saved.data = GET_HEAP(u16, saved.x*saved.y);
+diff --git a/arch/i386/kernel/tsc.c b/arch/i386/kernel/tsc.c
+index a39280b..7f6add1 100644
+--- a/arch/i386/kernel/tsc.c
++++ b/arch/i386/kernel/tsc.c
+@@ -137,7 +137,7 @@ unsigned long native_calculate_cpu_khz(void)
+ {
+ 	unsigned long long start, end;
+ 	unsigned long count;
+-	u64 delta64;
++	u64 delta64 = (u64)ULLONG_MAX;
+ 	int i;
+ 	unsigned long flags;
+ 
+@@ -149,6 +149,7 @@ unsigned long native_calculate_cpu_khz(void)
+ 		rdtscll(start);
+ 		mach_countup(&count);
+ 		rdtscll(end);
++		delta64 = min(delta64, (end - start));
+ 	}
+ 	/*
+ 	 * Error: ECTCNEVERSET
+@@ -159,8 +160,6 @@ unsigned long native_calculate_cpu_khz(void)
+ 	if (count <= 1)
+ 		goto err;
+ 
+-	delta64 = end - start;
+-
+ 	/* cpu freq too fast: */
+ 	if (delta64 > (1ULL<<32))
+ 		goto err;
+diff --git a/arch/i386/xen/enlighten.c b/arch/i386/xen/enlighten.c
+index f01bfcd..1ba2408 100644
+--- a/arch/i386/xen/enlighten.c
++++ b/arch/i386/xen/enlighten.c
+@@ -56,7 +56,23 @@ DEFINE_PER_CPU(enum paravirt_lazy_mode, xen_lazy_mode);
+ 
+ DEFINE_PER_CPU(struct vcpu_info *, xen_vcpu);
+ DEFINE_PER_CPU(struct vcpu_info, xen_vcpu_info);
+-DEFINE_PER_CPU(unsigned long, xen_cr3);
++
++/*
++ * Note about cr3 (pagetable base) values:
++ *
++ * xen_cr3 contains the current logical cr3 value; it contains the
++ * last set cr3.  This may not be the current effective cr3, because
++ * its update may be being lazily deferred.  However, a vcpu looking
++ * at its own cr3 can use this value knowing that it everything will
++ * be self-consistent.
++ *
++ * xen_current_cr3 contains the actual vcpu cr3; it is set once the
++ * hypercall to set the vcpu cr3 is complete (so it may be a little
++ * out of date, but it will never be set early).  If one vcpu is
++ * looking at another vcpu's cr3 value, it should use this variable.
++ */
++DEFINE_PER_CPU(unsigned long, xen_cr3);	 /* cr3 stored as physaddr */
++DEFINE_PER_CPU(unsigned long, xen_current_cr3);	 /* actual vcpu cr3 */
+ 
+ struct start_info *xen_start_info;
+ EXPORT_SYMBOL_GPL(xen_start_info);
+@@ -100,7 +116,7 @@ static void __init xen_vcpu_setup(int cpu)
+ 	info.mfn = virt_to_mfn(vcpup);
+ 	info.offset = offset_in_page(vcpup);
+ 
+-	printk(KERN_DEBUG "trying to map vcpu_info %d at %p, mfn %x, offset %d\n",
++	printk(KERN_DEBUG "trying to map vcpu_info %d at %p, mfn %llx, offset %d\n",
+ 	       cpu, vcpup, info.mfn, info.offset);
+ 
+ 	/* Check to see if the hypervisor will put the vcpu_info
+@@ -632,32 +648,36 @@ static unsigned long xen_read_cr3(void)
+ 	return x86_read_percpu(xen_cr3);
+ }
+ 
++static void set_current_cr3(void *v)
++{
++	x86_write_percpu(xen_current_cr3, (unsigned long)v);
++}
++
+ static void xen_write_cr3(unsigned long cr3)
+ {
++	struct mmuext_op *op;
++	struct multicall_space mcs;
++	unsigned long mfn = pfn_to_mfn(PFN_DOWN(cr3));
++
+ 	BUG_ON(preemptible());
+ 
+-	if (cr3 == x86_read_percpu(xen_cr3)) {
+-		/* just a simple tlb flush */
+-		xen_flush_tlb();
+-		return;
+-	}
++	mcs = xen_mc_entry(sizeof(*op));  /* disables interrupts */
+ 
++	/* Update while interrupts are disabled, so its atomic with
++	   respect to ipis */
+ 	x86_write_percpu(xen_cr3, cr3);
+ 
++	op = mcs.args;
++	op->cmd = MMUEXT_NEW_BASEPTR;
++	op->arg1.mfn = mfn;
+ 
+-	{
+-		struct mmuext_op *op;
+-		struct multicall_space mcs = xen_mc_entry(sizeof(*op));
+-		unsigned long mfn = pfn_to_mfn(PFN_DOWN(cr3));
+-
+-		op = mcs.args;
+-		op->cmd = MMUEXT_NEW_BASEPTR;
+-		op->arg1.mfn = mfn;
++	MULTI_mmuext_op(mcs.mc, op, 1, NULL, DOMID_SELF);
+ 
+-		MULTI_mmuext_op(mcs.mc, op, 1, NULL, DOMID_SELF);
++	/* Update xen_update_cr3 once the batch has actually
++	   been submitted. */
++	xen_mc_callback(set_current_cr3, (void *)cr3);
+ 
+-		xen_mc_issue(PARAVIRT_LAZY_CPU);
+-	}
++	xen_mc_issue(PARAVIRT_LAZY_CPU);  /* interrupts restored */
+ }
+ 
+ /* Early in boot, while setting up the initial pagetable, assume
+@@ -1113,6 +1133,7 @@ asmlinkage void __init xen_start_kernel(void)
+ 	/* keep using Xen gdt for now; no urgent need to change it */
+ 
+ 	x86_write_percpu(xen_cr3, __pa(pgd));
++	x86_write_percpu(xen_current_cr3, __pa(pgd));
+ 
+ #ifdef CONFIG_SMP
+ 	/* Don't do the full vcpu_info placement stuff until we have a
+diff --git a/arch/i386/xen/mmu.c b/arch/i386/xen/mmu.c
+index 874db0c..c476dfa 100644
+--- a/arch/i386/xen/mmu.c
++++ b/arch/i386/xen/mmu.c
+@@ -515,20 +515,43 @@ static void drop_other_mm_ref(void *info)
+ 
+ 	if (__get_cpu_var(cpu_tlbstate).active_mm == mm)
+ 		leave_mm(smp_processor_id());
++
++	/* If this cpu still has a stale cr3 reference, then make sure
++	   it has been flushed. */
++	if (x86_read_percpu(xen_current_cr3) == __pa(mm->pgd)) {
++		load_cr3(swapper_pg_dir);
++		arch_flush_lazy_cpu_mode();
++	}
+ }
+ 
+ static void drop_mm_ref(struct mm_struct *mm)
+ {
++	cpumask_t mask;
++	unsigned cpu;
++
+ 	if (current->active_mm == mm) {
+ 		if (current->mm == mm)
+ 			load_cr3(swapper_pg_dir);
+ 		else
+ 			leave_mm(smp_processor_id());
++		arch_flush_lazy_cpu_mode();
++	}
++
++	/* Get the "official" set of cpus referring to our pagetable. */
++	mask = mm->cpu_vm_mask;
++
++	/* It's possible that a vcpu may have a stale reference to our
++	   cr3, because its in lazy mode, and it hasn't yet flushed
++	   its set of pending hypercalls yet.  In this case, we can
++	   look at its actual current cr3 value, and force it to flush
++	   if needed. */
++	for_each_online_cpu(cpu) {
++		if (per_cpu(xen_current_cr3, cpu) == __pa(mm->pgd))
++			cpu_set(cpu, mask);
+ 	}
+ 
+-	if (!cpus_empty(mm->cpu_vm_mask))
+-		xen_smp_call_function_mask(mm->cpu_vm_mask, drop_other_mm_ref,
+-					   mm, 1);
++	if (!cpus_empty(mask))
++		xen_smp_call_function_mask(mask, drop_other_mm_ref, mm, 1);
+ }
+ #else
+ static void drop_mm_ref(struct mm_struct *mm)
+diff --git a/arch/i386/xen/multicalls.c b/arch/i386/xen/multicalls.c
+index c837e8e..ce9c4b4 100644
+--- a/arch/i386/xen/multicalls.c
++++ b/arch/i386/xen/multicalls.c
+@@ -32,7 +32,11 @@
+ struct mc_buffer {
+ 	struct multicall_entry entries[MC_BATCH];
+ 	u64 args[MC_ARGS];
+-	unsigned mcidx, argidx;
++	struct callback {
++		void (*fn)(void *);
++		void *data;
++	} callbacks[MC_BATCH];
++	unsigned mcidx, argidx, cbidx;
+ };
+ 
+ static DEFINE_PER_CPU(struct mc_buffer, mc_buffer);
+@@ -43,6 +47,7 @@ void xen_mc_flush(void)
+ 	struct mc_buffer *b = &__get_cpu_var(mc_buffer);
+ 	int ret = 0;
+ 	unsigned long flags;
++	int i;
+ 
+ 	BUG_ON(preemptible());
+ 
+@@ -51,8 +56,6 @@ void xen_mc_flush(void)
+ 	local_irq_save(flags);
+ 
+ 	if (b->mcidx) {
+-		int i;
+-
+ 		if (HYPERVISOR_multicall(b->entries, b->mcidx) != 0)
+ 			BUG();
+ 		for (i = 0; i < b->mcidx; i++)
+@@ -65,6 +68,13 @@ void xen_mc_flush(void)
+ 
+ 	local_irq_restore(flags);
+ 
++	for(i = 0; i < b->cbidx; i++) {
++		struct callback *cb = &b->callbacks[i];
++
++		(*cb->fn)(cb->data);
++	}
++	b->cbidx = 0;
++
+ 	BUG_ON(ret);
+ }
+ 
+@@ -88,3 +98,16 @@ struct multicall_space __xen_mc_entry(size_t args)
+ 
+ 	return ret;
+ }
++
++void xen_mc_callback(void (*fn)(void *), void *data)
++{
++	struct mc_buffer *b = &__get_cpu_var(mc_buffer);
++	struct callback *cb;
++
++	if (b->cbidx == MC_BATCH)
++		xen_mc_flush();
++
++	cb = &b->callbacks[b->cbidx++];
++	cb->fn = fn;
++	cb->data = data;
++}
+diff --git a/arch/i386/xen/multicalls.h b/arch/i386/xen/multicalls.h
+index e6f7530..e3ed9c8 100644
+--- a/arch/i386/xen/multicalls.h
++++ b/arch/i386/xen/multicalls.h
+@@ -42,4 +42,7 @@ static inline void xen_mc_issue(unsigned mode)
+ 	local_irq_restore(x86_read_percpu(xen_mc_irq_flags));
+ }
+ 
++/* Set up a callback to be called when the current batch is flushed */
++void xen_mc_callback(void (*fn)(void *), void *data);
++
+ #endif /* _XEN_MULTICALLS_H */
+diff --git a/arch/i386/xen/xen-ops.h b/arch/i386/xen/xen-ops.h
+index b9aaea4..c69708b 100644
+--- a/arch/i386/xen/xen-ops.h
++++ b/arch/i386/xen/xen-ops.h
+@@ -11,6 +11,7 @@ void xen_copy_trap_info(struct trap_info *traps);
+ 
+ DECLARE_PER_CPU(struct vcpu_info *, xen_vcpu);
+ DECLARE_PER_CPU(unsigned long, xen_cr3);
++DECLARE_PER_CPU(unsigned long, xen_current_cr3);
+ 
+ extern struct start_info *xen_start_info;
+ extern struct shared_info *HYPERVISOR_shared_info;
+diff --git a/arch/mips/mm/c-r4k.c b/arch/mips/mm/c-r4k.c
+index bad5719..9da2a42 100644
+--- a/arch/mips/mm/c-r4k.c
++++ b/arch/mips/mm/c-r4k.c
+@@ -360,11 +360,26 @@ static void r4k___flush_cache_all(void)
+ 	r4k_on_each_cpu(local_r4k___flush_cache_all, NULL, 1, 1);
+ }
+ 
++static inline int has_valid_asid(const struct mm_struct *mm)
++{
++#if defined(CONFIG_MIPS_MT_SMP) || defined(CONFIG_MIPS_MT_SMTC)
++	int i;
++
++	for_each_online_cpu(i)
++		if (cpu_context(i, mm))
++			return 1;
++
++	return 0;
++#else
++	return cpu_context(smp_processor_id(), mm);
++#endif
++}
++
+ static inline void local_r4k_flush_cache_range(void * args)
+ {
+ 	struct vm_area_struct *vma = args;
+ 
+-	if (!(cpu_context(smp_processor_id(), vma->vm_mm)))
++	if (!(has_valid_asid(vma->vm_mm)))
+ 		return;
+ 
+ 	r4k_blast_dcache();
+@@ -383,7 +398,7 @@ static inline void local_r4k_flush_cache_mm(void * args)
+ {
+ 	struct mm_struct *mm = args;
+ 
+-	if (!cpu_context(smp_processor_id(), mm))
++	if (!has_valid_asid(mm))
+ 		return;
+ 
+ 	/*
+@@ -434,7 +449,7 @@ static inline void local_r4k_flush_cache_page(void *args)
+ 	 * If ownes no valid ASID yet, cannot possibly have gotten
+ 	 * this page into the cache.
+ 	 */
+-	if (cpu_context(smp_processor_id(), mm) == 0)
++	if (!has_valid_asid(mm))
+ 		return;
+ 
+ 	addr &= PAGE_MASK;
+diff --git a/arch/powerpc/math-emu/math.c b/arch/powerpc/math-emu/math.c
+index 69058b2..381306b 100644
+--- a/arch/powerpc/math-emu/math.c
++++ b/arch/powerpc/math-emu/math.c
+@@ -407,11 +407,16 @@ do_mathemu(struct pt_regs *regs)
+ 
+ 	case XE:
+ 		idx = (insn >> 16) & 0x1f;
+-		if (!idx)
+-			goto illegal;
+-
+ 		op0 = (void *)&current->thread.fpr[(insn >> 21) & 0x1f];
+-		op1 = (void *)(regs->gpr[idx] + regs->gpr[(insn >> 11) & 0x1f]);
++		if (!idx) {
++			if (((insn >> 1) & 0x3ff) == STFIWX)
++				op1 = (void *)(regs->gpr[(insn >> 11) & 0x1f]);
++			else
++				goto illegal;
++		} else {
++			op1 = (void *)(regs->gpr[idx] + regs->gpr[(insn >> 11) & 0x1f]);
++		}
++
+ 		break;
+ 
+ 	case XEU:
+diff --git a/arch/powerpc/platforms/cell/axon_msi.c b/arch/powerpc/platforms/cell/axon_msi.c
+index 4c9ab5b..c767065 100644
+--- a/arch/powerpc/platforms/cell/axon_msi.c
++++ b/arch/powerpc/platforms/cell/axon_msi.c
+@@ -126,7 +126,7 @@ static struct axon_msic *find_msi_translator(struct pci_dev *dev)
+ 	const phandle *ph;
+ 	struct axon_msic *msic = NULL;
+ 
+-	dn = pci_device_to_OF_node(dev);
++	dn = of_node_get(pci_device_to_OF_node(dev));
+ 	if (!dn) {
+ 		dev_dbg(&dev->dev, "axon_msi: no pci_dn found\n");
+ 		return NULL;
+@@ -183,7 +183,7 @@ static int setup_msi_msg_address(struct pci_dev *dev, struct msi_msg *msg)
+ 	int len;
+ 	const u32 *prop;
+ 
+-	dn = pci_device_to_OF_node(dev);
++	dn = of_node_get(pci_device_to_OF_node(dev));
+ 	if (!dn) {
+ 		dev_dbg(&dev->dev, "axon_msi: no pci_dn found\n");
+ 		return -ENODEV;
+diff --git a/arch/sparc64/kernel/sys_sparc.c b/arch/sparc64/kernel/sys_sparc.c
+index d108eeb..6bf7bcd 100644
+--- a/arch/sparc64/kernel/sys_sparc.c
++++ b/arch/sparc64/kernel/sys_sparc.c
+@@ -319,7 +319,7 @@ unsigned long get_fb_unmapped_area(struct file *filp, unsigned long orig_addr, u
+ 
+ 	if (flags & MAP_FIXED) {
+ 		/* Ok, don't mess with it. */
+-		return get_unmapped_area(NULL, addr, len, pgoff, flags);
++		return get_unmapped_area(NULL, orig_addr, len, pgoff, flags);
+ 	}
+ 	flags &= ~MAP_SHARED;
+ 
+diff --git a/arch/sparc64/lib/xor.S b/arch/sparc64/lib/xor.S
+index a79c888..f44f58f 100644
+--- a/arch/sparc64/lib/xor.S
++++ b/arch/sparc64/lib/xor.S
+@@ -491,12 +491,12 @@ xor_niagara_4:		/* %o0=bytes, %o1=dest, %o2=src1, %o3=src2, %o4=src3 */
+ 	ldda		[%i1 + 0x10] %asi, %i2	/* %i2/%i3 = src1 + 0x10 */
+ 	xor		%g2, %i4, %g2
+ 	xor		%g3, %i5, %g3
+-	ldda		[%i7 + 0x10] %asi, %i4	/* %i4/%i5 = src2 + 0x10 */
++	ldda		[%l7 + 0x10] %asi, %i4	/* %i4/%i5 = src2 + 0x10 */
+ 	xor		%l0, %g2, %l0
+ 	xor		%l1, %g3, %l1
+ 	stxa		%l0, [%i0 + 0x00] %asi
+ 	stxa		%l1, [%i0 + 0x08] %asi
+-	ldda		[%i6 + 0x10] %asi, %g2	/* %g2/%g3 = src3 + 0x10 */
++	ldda		[%l6 + 0x10] %asi, %g2	/* %g2/%g3 = src3 + 0x10 */
+ 	ldda		[%i0 + 0x10] %asi, %l0	/* %l0/%l1 = dest + 0x10 */
+ 
+ 	xor		%i4, %i2, %i4
+@@ -504,12 +504,12 @@ xor_niagara_4:		/* %o0=bytes, %o1=dest, %o2=src1, %o3=src2, %o4=src3 */
+ 	ldda		[%i1 + 0x20] %asi, %i2	/* %i2/%i3 = src1 + 0x20 */
+ 	xor		%g2, %i4, %g2
+ 	xor		%g3, %i5, %g3
+-	ldda		[%i7 + 0x20] %asi, %i4	/* %i4/%i5 = src2 + 0x20 */
++	ldda		[%l7 + 0x20] %asi, %i4	/* %i4/%i5 = src2 + 0x20 */
+ 	xor		%l0, %g2, %l0
+ 	xor		%l1, %g3, %l1
+ 	stxa		%l0, [%i0 + 0x10] %asi
+ 	stxa		%l1, [%i0 + 0x18] %asi
+-	ldda		[%i6 + 0x20] %asi, %g2	/* %g2/%g3 = src3 + 0x20 */
++	ldda		[%l6 + 0x20] %asi, %g2	/* %g2/%g3 = src3 + 0x20 */
+ 	ldda		[%i0 + 0x20] %asi, %l0	/* %l0/%l1 = dest + 0x20 */
+ 
+ 	xor		%i4, %i2, %i4
+@@ -517,12 +517,12 @@ xor_niagara_4:		/* %o0=bytes, %o1=dest, %o2=src1, %o3=src2, %o4=src3 */
+ 	ldda		[%i1 + 0x30] %asi, %i2	/* %i2/%i3 = src1 + 0x30 */
+ 	xor		%g2, %i4, %g2
+ 	xor		%g3, %i5, %g3
+-	ldda		[%i7 + 0x30] %asi, %i4	/* %i4/%i5 = src2 + 0x30 */
++	ldda		[%l7 + 0x30] %asi, %i4	/* %i4/%i5 = src2 + 0x30 */
+ 	xor		%l0, %g2, %l0
+ 	xor		%l1, %g3, %l1
+ 	stxa		%l0, [%i0 + 0x20] %asi
+ 	stxa		%l1, [%i0 + 0x28] %asi
+-	ldda		[%i6 + 0x30] %asi, %g2	/* %g2/%g3 = src3 + 0x30 */
++	ldda		[%l6 + 0x30] %asi, %g2	/* %g2/%g3 = src3 + 0x30 */
+ 	ldda		[%i0 + 0x30] %asi, %l0	/* %l0/%l1 = dest + 0x30 */
+ 
+ 	prefetch	[%i1 + 0x40], #one_read
+diff --git a/arch/um/Makefile b/arch/um/Makefile
+index 989224f..c3a399e 100644
+--- a/arch/um/Makefile
++++ b/arch/um/Makefile
+@@ -60,7 +60,8 @@ SYS_DIR		:= $(ARCH_DIR)/include/sysdep-$(SUBARCH)
+ 
+ CFLAGS += $(CFLAGS-y) -D__arch_um__ -DSUBARCH=\"$(SUBARCH)\"	\
+ 	$(ARCH_INCLUDE) $(MODE_INCLUDE) -Dvmap=kernel_vmap	\
+-	-Din6addr_loopback=kernel_in6addr_loopback
++	-Din6addr_loopback=kernel_in6addr_loopback \
++	-Din6addr_any=kernel_in6addr_any
+ 
+ AFLAGS += $(ARCH_INCLUDE)
+ 
+diff --git a/arch/um/include/common-offsets.h b/arch/um/include/common-offsets.h
+index 6eee343..2378ff4 100644
+--- a/arch/um/include/common-offsets.h
++++ b/arch/um/include/common-offsets.h
+@@ -10,6 +10,7 @@ OFFSET(HOST_TASK_PID, task_struct, pid);
+ 
+ DEFINE(UM_KERN_PAGE_SIZE, PAGE_SIZE);
+ DEFINE(UM_KERN_PAGE_MASK, PAGE_MASK);
++DEFINE(UM_KERN_PAGE_SHIFT, PAGE_SHIFT);
+ DEFINE(UM_NSEC_PER_SEC, NSEC_PER_SEC);
+ 
+ DEFINE_STR(UM_KERN_EMERG, KERN_EMERG);
+diff --git a/arch/um/include/sysdep-i386/stub.h b/arch/um/include/sysdep-i386/stub.h
+index 4fffae7..19c85f3 100644
+--- a/arch/um/include/sysdep-i386/stub.h
++++ b/arch/um/include/sysdep-i386/stub.h
+@@ -9,7 +9,6 @@
+ #include <sys/mman.h>
+ #include <asm/ptrace.h>
+ #include <asm/unistd.h>
+-#include <asm/page.h>
+ #include "stub-data.h"
+ #include "kern_constants.h"
+ #include "uml-config.h"
+@@ -19,7 +18,7 @@ extern void stub_clone_handler(void);
+ 
+ #define STUB_SYSCALL_RET EAX
+ #define STUB_MMAP_NR __NR_mmap2
+-#define MMAP_OFFSET(o) ((o) >> PAGE_SHIFT)
++#define MMAP_OFFSET(o) ((o) >> UM_KERN_PAGE_SHIFT)
+ 
+ static inline long stub_syscall0(long syscall)
+ {
+diff --git a/arch/um/kernel/skas/clone.c b/arch/um/kernel/skas/clone.c
+index 47b812b..885a125 100644
+--- a/arch/um/kernel/skas/clone.c
++++ b/arch/um/kernel/skas/clone.c
+@@ -3,7 +3,6 @@
+ #include <sys/mman.h>
+ #include <sys/time.h>
+ #include <asm/unistd.h>
+-#include <asm/page.h>
+ #include "ptrace_user.h"
+ #include "skas.h"
+ #include "stub-data.h"
+diff --git a/arch/um/os-Linux/main.c b/arch/um/os-Linux/main.c
+index e85f499..919c25b 100644
+--- a/arch/um/os-Linux/main.c
++++ b/arch/um/os-Linux/main.c
+@@ -12,7 +12,6 @@
+ #include <sys/resource.h>
+ #include <sys/mman.h>
+ #include <sys/user.h>
+-#include <asm/page.h>
+ #include "kern_util.h"
+ #include "as-layout.h"
+ #include "mem_user.h"
+diff --git a/arch/um/os-Linux/skas/mem.c b/arch/um/os-Linux/skas/mem.c
+index 0f7df4e..9fbf210 100644
+--- a/arch/um/os-Linux/skas/mem.c
++++ b/arch/um/os-Linux/skas/mem.c
+@@ -9,7 +9,6 @@
+ #include <unistd.h>
+ #include <sys/mman.h>
+ #include <sys/wait.h>
+-#include <asm/page.h>
+ #include <asm/unistd.h>
+ #include "mem_user.h"
+ #include "mem.h"
+diff --git a/arch/um/os-Linux/skas/process.c b/arch/um/os-Linux/skas/process.c
+index ba9af8d..607d2b8 100644
+--- a/arch/um/os-Linux/skas/process.c
++++ b/arch/um/os-Linux/skas/process.c
+@@ -182,7 +182,7 @@ static int userspace_tramp(void *stack)
+ 
+ 	ptrace(PTRACE_TRACEME, 0, 0, 0);
+ 
+-	init_new_thread_signals();
++	signal(SIGTERM, SIG_DFL);
+ 	err = set_interval(1);
+ 	if(err)
+ 		panic("userspace_tramp - setting timer failed, errno = %d\n",
+diff --git a/arch/um/os-Linux/start_up.c b/arch/um/os-Linux/start_up.c
+index 46f6139..f4f2981 100644
+--- a/arch/um/os-Linux/start_up.c
++++ b/arch/um/os-Linux/start_up.c
+@@ -19,7 +19,6 @@
+ #include <sys/mman.h>
+ #include <sys/resource.h>
+ #include <asm/unistd.h>
+-#include <asm/page.h>
+ #include <sys/types.h>
+ #include "kern_util.h"
+ #include "user.h"
+diff --git a/arch/um/os-Linux/tt.c b/arch/um/os-Linux/tt.c
+index bcf9359..5dc113d 100644
+--- a/arch/um/os-Linux/tt.c
++++ b/arch/um/os-Linux/tt.c
+@@ -17,7 +17,6 @@
+ #include <sys/mman.h>
+ #include <asm/ptrace.h>
+ #include <asm/unistd.h>
+-#include <asm/page.h>
+ #include "kern_util.h"
+ #include "user.h"
+ #include "signal_kern.h"
+diff --git a/arch/um/os-Linux/util.c b/arch/um/os-Linux/util.c
+index 7cbcf48..ef09543 100644
+--- a/arch/um/os-Linux/util.c
++++ b/arch/um/os-Linux/util.c
+@@ -105,6 +105,44 @@ int setjmp_wrapper(void (*proc)(void *, void *), ...)
+ 
+ void os_dump_core(void)
+ {
++	int pid;
++
+ 	signal(SIGSEGV, SIG_DFL);
++
++	/*
++	 * We are about to SIGTERM this entire process group to ensure that
++	 * nothing is around to run after the kernel exits.  The
++	 * kernel wants to abort, not die through SIGTERM, so we
++	 * ignore it here.
++	 */
++
++	signal(SIGTERM, SIG_IGN);
++	kill(0, SIGTERM);
++	/*
++	 * Most of the other processes associated with this UML are
++	 * likely sTopped, so give them a SIGCONT so they see the
++	 * SIGTERM.
++	 */
++	kill(0, SIGCONT);
++
++	/*
++	 * Now, having sent signals to everyone but us, make sure they
++	 * die by ptrace.  Processes can survive what's been done to
++	 * them so far - the mechanism I understand is receiving a
++	 * SIGSEGV and segfaulting immediately upon return.  There is
++	 * always a SIGSEGV pending, and (I'm guessing) signals are
++	 * processed in numeric order so the SIGTERM (signal 15 vs
++	 * SIGSEGV being signal 11) is never handled.
++	 *
++	 * Run a waitpid loop until we get some kind of error.
++	 * Hopefully, it's ECHILD, but there's not a lot we can do if
++	 * it's something else.  Tell os_kill_ptraced_process not to
++	 * wait for the child to report its death because there's
++	 * nothing reasonable to do if that fails.
++	 */
++
++	while ((pid = waitpid(-1, NULL, WNOHANG)) > 0)
++		os_kill_ptraced_process(pid, 0);
++
+ 	abort();
+ }
+diff --git a/arch/um/sys-i386/user-offsets.c b/arch/um/sys-i386/user-offsets.c
+index 29118cf..5142415 100644
+--- a/arch/um/sys-i386/user-offsets.c
++++ b/arch/um/sys-i386/user-offsets.c
+@@ -2,9 +2,9 @@
+ #include <stddef.h>
+ #include <signal.h>
+ #include <sys/poll.h>
++#include <sys/user.h>
+ #include <sys/mman.h>
+ #include <asm/ptrace.h>
+-#include <asm/user.h>
+ 
+ #define DEFINE(sym, val) \
+ 	asm volatile("\n->" #sym " %0 " #val : : "i" (val))
+@@ -48,8 +48,8 @@ void foo(void)
+ 	OFFSET(HOST_SC_FP_ST, _fpstate, _st);
+ 	OFFSET(HOST_SC_FXSR_ENV, _fpstate, _fxsr_env);
+ 
+-	DEFINE_LONGS(HOST_FP_SIZE, sizeof(struct user_i387_struct));
+-	DEFINE_LONGS(HOST_XFP_SIZE, sizeof(struct user_fxsr_struct));
++	DEFINE_LONGS(HOST_FP_SIZE, sizeof(struct user_fpregs_struct));
++	DEFINE_LONGS(HOST_XFP_SIZE, sizeof(struct user_fpxregs_struct));
+ 
+ 	DEFINE(HOST_IP, EIP);
+ 	DEFINE(HOST_SP, UESP);
+diff --git a/arch/um/sys-x86_64/user-offsets.c b/arch/um/sys-x86_64/user-offsets.c
+index 0d5fd76..f1ef2a8 100644
+--- a/arch/um/sys-x86_64/user-offsets.c
++++ b/arch/um/sys-x86_64/user-offsets.c
+@@ -3,17 +3,10 @@
+ #include <signal.h>
+ #include <sys/poll.h>
+ #include <sys/mman.h>
++#include <sys/user.h>
+ #define __FRAME_OFFSETS
+ #include <asm/ptrace.h>
+ #include <asm/types.h>
+-/* For some reason, x86_64 defines u64 and u32 only in <pci/types.h>, which I
+- * refuse to include here, even though they're used throughout the headers.
+- * These are used in asm/user.h, and that include can't be avoided because of
+- * the sizeof(struct user_regs_struct) below.
+- */
+-typedef __u64 u64;
+-typedef __u32 u32;
+-#include <asm/user.h>
+ 
+ #define DEFINE(sym, val) \
+         asm volatile("\n->" #sym " %0 " #val : : "i" (val))
+diff --git a/arch/x86_64/mm/init.c b/arch/x86_64/mm/init.c
+index 458893b..e2d6bad 100644
+--- a/arch/x86_64/mm/init.c
++++ b/arch/x86_64/mm/init.c
+@@ -734,12 +734,6 @@ int in_gate_area_no_task(unsigned long addr)
+ 	return (addr >= VSYSCALL_START) && (addr < VSYSCALL_END);
+ }
+ 
+-void * __init alloc_bootmem_high_node(pg_data_t *pgdat, unsigned long size)
+-{
+-	return __alloc_bootmem_core(pgdat->bdata, size,
+-			SMP_CACHE_BYTES, (4UL*1024*1024*1024), 0);
+-}
+-
+ const char *arch_vma_name(struct vm_area_struct *vma)
+ {
+ 	if (vma->vm_mm && vma->vm_start == (long)vma->vm_mm->context.vdso)
+diff --git a/arch/x86_64/mm/pageattr.c b/arch/x86_64/mm/pageattr.c
+index 10b9809..0416ffb 100644
+--- a/arch/x86_64/mm/pageattr.c
++++ b/arch/x86_64/mm/pageattr.c
+@@ -229,9 +229,14 @@ void global_flush_tlb(void)
+ 	struct page *pg, *next;
+ 	struct list_head l;
+ 
+-	down_read(&init_mm.mmap_sem);
++	/*
++	 * Write-protect the semaphore, to exclude two contexts
++	 * doing a list_replace_init() call in parallel and to
++	 * exclude new additions to the deferred_pages list:
++	 */
++	down_write(&init_mm.mmap_sem);
+ 	list_replace_init(&deferred_pages, &l);
+-	up_read(&init_mm.mmap_sem);
++	up_write(&init_mm.mmap_sem);
+ 
+ 	flush_map(&l);
+ 
+diff --git a/fs/xfs/linux-2.6/xfs_buf.c b/fs/xfs/linux-2.6/xfs_buf.c
+index b0f0e58..be9e65b 100644
+--- a/fs/xfs/linux-2.6/xfs_buf.c
++++ b/fs/xfs/linux-2.6/xfs_buf.c
+@@ -187,6 +187,19 @@ free_address(
+ {
+ 	a_list_t	*aentry;
+ 
++#ifdef CONFIG_XEN
++	/*
++	 * Xen needs to be able to make sure it can get an exclusive
++	 * RO mapping of pages it wants to turn into a pagetable.  If
++	 * a newly allocated page is also still being vmap()ed by xfs,
++	 * it will cause pagetable construction to fail.  This is a
++	 * quick workaround to always eagerly unmap pages so that Xen
++	 * is happy.
++	 */
++	vunmap(addr);
++	return;
++#endif
++
+ 	aentry = kmalloc(sizeof(a_list_t), GFP_NOWAIT);
+ 	if (likely(aentry)) {
+ 		spin_lock(&as_lock);
+diff --git a/include/asm-mips/hazards.h b/include/asm-mips/hazards.h
+index 6a5fa32..684f622 100644
+--- a/include/asm-mips/hazards.h
++++ b/include/asm-mips/hazards.h
+@@ -10,11 +10,12 @@
+ #ifndef _ASM_HAZARDS_H
+ #define _ASM_HAZARDS_H
+ 
+-
+ #ifdef __ASSEMBLY__
+ #define ASMMACRO(name, code...) .macro name; code; .endm
+ #else
+ 
++#include <asm/cpu-features.h>
++
+ #define ASMMACRO(name, code...)						\
+ __asm__(".macro " #name "; " #code "; .endm");				\
+ 									\
+@@ -86,6 +87,57 @@ do {									\
+ 	: "=r" (tmp));							\
+ } while (0)
+ 
++#elif defined(CONFIG_CPU_MIPSR1)
++
++/*
++ * These are slightly complicated by the fact that we guarantee R1 kernels to
++ * run fine on R2 processors.
++ */
++ASMMACRO(mtc0_tlbw_hazard,
++	_ssnop; _ssnop; _ehb
++	)
++ASMMACRO(tlbw_use_hazard,
++	_ssnop; _ssnop; _ssnop; _ehb
++	)
++ASMMACRO(tlb_probe_hazard,
++	 _ssnop; _ssnop; _ssnop; _ehb
++	)
++ASMMACRO(irq_enable_hazard,
++	 _ssnop; _ssnop; _ssnop; _ehb
++	)
++ASMMACRO(irq_disable_hazard,
++	_ssnop; _ssnop; _ssnop; _ehb
++	)
++ASMMACRO(back_to_back_c0_hazard,
++	 _ssnop; _ssnop; _ssnop; _ehb
++	)
++/*
++ * gcc has a tradition of misscompiling the previous construct using the
++ * address of a label as argument to inline assembler.  Gas otoh has the
++ * annoying difference between la and dla which are only usable for 32-bit
++ * rsp. 64-bit code, so can't be used without conditional compilation.
++ * The alterantive is switching the assembler to 64-bit code which happens
++ * to work right even for 32-bit code ...
++ */
++#define __instruction_hazard()						\
++do {									\
++	unsigned long tmp;						\
++									\
++	__asm__ __volatile__(						\
++	"	.set	mips64r2				\n"	\
++	"	dla	%0, 1f					\n"	\
++	"	jr.hb	%0					\n"	\
++	"	.set	mips0					\n"	\
++	"1:							\n"	\
++	: "=r" (tmp));							\
++} while (0)
++
++#define instruction_hazard()						\
++do {									\
++	if (cpu_has_mips_r2)						\
++		__instruction_hazard();					\
++} while (0)
++
+ #elif defined(CONFIG_CPU_R10000)
+ 
+ /*
+diff --git a/include/linux/bootmem.h b/include/linux/bootmem.h
+index c83534e..0365ec9 100644
+--- a/include/linux/bootmem.h
++++ b/include/linux/bootmem.h
+@@ -59,7 +59,6 @@ extern void *__alloc_bootmem_core(struct bootmem_data *bdata,
+ 				  unsigned long align,
+ 				  unsigned long goal,
+ 				  unsigned long limit);
+-extern void *alloc_bootmem_high_node(pg_data_t *pgdat, unsigned long size);
+ 
+ #ifndef CONFIG_HAVE_ARCH_BOOTMEM_NODE
+ extern void reserve_bootmem(unsigned long addr, unsigned long size);
+diff --git a/include/xen/interface/vcpu.h b/include/xen/interface/vcpu.h
+index ff61ea3..b05d8a6 100644
+--- a/include/xen/interface/vcpu.h
++++ b/include/xen/interface/vcpu.h
+@@ -160,8 +160,9 @@ struct vcpu_set_singleshot_timer {
+  */
+ #define VCPUOP_register_vcpu_info   10  /* arg == struct vcpu_info */
+ struct vcpu_register_vcpu_info {
+-    uint32_t mfn;               /* mfn of page to place vcpu_info */
+-    uint32_t offset;            /* offset within page */
++    uint64_t mfn;    /* mfn of page to place vcpu_info */
++    uint32_t offset; /* offset within page */
++    uint32_t rsvd;   /* unused */
+ };
+ 
+ #endif /* __XEN_PUBLIC_VCPU_H__ */
+diff --git a/mm/sparse.c b/mm/sparse.c
+index 239f5a7..1facdff 100644
+--- a/mm/sparse.c
++++ b/mm/sparse.c
+@@ -215,12 +215,6 @@ static int __meminit sparse_init_one_section(struct mem_section *ms,
+ 	return 1;
+ }
+ 
+-__attribute__((weak)) __init
+-void *alloc_bootmem_high_node(pg_data_t *pgdat, unsigned long size)
+-{
+-	return NULL;
+-}
+-
+ static struct page __init *sparse_early_mem_map_alloc(unsigned long pnum)
+ {
+ 	struct page *map;
+@@ -231,11 +225,6 @@ static struct page __init *sparse_early_mem_map_alloc(unsigned long pnum)
+ 	if (map)
+ 		return map;
+ 
+-  	map = alloc_bootmem_high_node(NODE_DATA(nid),
+-                       sizeof(struct page) * PAGES_PER_SECTION);
+-	if (map)
+-		return map;
+-
+ 	map = alloc_bootmem_node(NODE_DATA(nid),
+ 			sizeof(struct page) * PAGES_PER_SECTION);
+ 	if (map)

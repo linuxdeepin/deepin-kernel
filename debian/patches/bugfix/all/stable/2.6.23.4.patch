@@ -1,0 +1,875 @@
+diff --git a/Makefile b/Makefile
+index b0c2c32..0c34409 100644
+diff --git a/include/linux/netlink.h b/include/linux/netlink.h
+index 83d8239..63af986 100644
+--- a/include/linux/netlink.h
++++ b/include/linux/netlink.h
+@@ -175,7 +175,7 @@ extern int netlink_unregister_notifier(struct notifier_block *nb);
+ /* finegrained unicast helpers: */
+ struct sock *netlink_getsockbyfilp(struct file *filp);
+ int netlink_attachskb(struct sock *sk, struct sk_buff *skb, int nonblock,
+-		long timeo, struct sock *ssk);
++		      long *timeo, struct sock *ssk);
+ void netlink_detachskb(struct sock *sk, struct sk_buff *skb);
+ int netlink_sendskb(struct sock *sk, struct sk_buff *skb, int protocol);
+ 
+diff --git a/include/linux/skbuff.h b/include/linux/skbuff.h
+index a656cec..ed2c458 100644
+--- a/include/linux/skbuff.h
++++ b/include/linux/skbuff.h
+@@ -41,8 +41,7 @@
+ #define SKB_DATA_ALIGN(X)	(((X) + (SMP_CACHE_BYTES - 1)) & \
+ 				 ~(SMP_CACHE_BYTES - 1))
+ #define SKB_WITH_OVERHEAD(X)	\
+-	(((X) - sizeof(struct skb_shared_info)) & \
+-	 ~(SMP_CACHE_BYTES - 1))
++	((X) - SKB_DATA_ALIGN(sizeof(struct skb_shared_info)))
+ #define SKB_MAX_ORDER(X, ORDER) \
+ 	SKB_WITH_OVERHEAD((PAGE_SIZE << (ORDER)) - (X))
+ #define SKB_MAX_HEAD(X)		(SKB_MAX_ORDER((X), 0))
+diff --git a/include/net/9p/9p.h b/include/net/9p/9p.h
+index 88884d3..7726ff4 100644
+--- a/include/net/9p/9p.h
++++ b/include/net/9p/9p.h
+@@ -412,6 +412,18 @@ int p9_idpool_check(int id, struct p9_idpool *p);
+ 
+ int p9_error_init(void);
+ int p9_errstr2errno(char *, int);
++
++#ifdef CONFIG_SYSCTL
+ int __init p9_sysctl_register(void);
+ void __exit p9_sysctl_unregister(void);
++#else
++static inline int p9_sysctl_register(void)
++{
++	return 0;
++}
++static inline void p9_sysctl_unregister(void)
++{
++}
++#endif
++
+ #endif /* NET_9P_H */
+diff --git a/include/net/sock.h b/include/net/sock.h
+index dfeb8b1..bdd9ebe 100644
+--- a/include/net/sock.h
++++ b/include/net/sock.h
+@@ -1199,14 +1199,16 @@ static inline struct sk_buff *sk_stream_alloc_pskb(struct sock *sk,
+ 						   gfp_t gfp)
+ {
+ 	struct sk_buff *skb;
+-	int hdr_len;
+ 
+-	hdr_len = SKB_DATA_ALIGN(sk->sk_prot->max_header);
+-	skb = alloc_skb_fclone(size + hdr_len, gfp);
++	skb = alloc_skb_fclone(size + sk->sk_prot->max_header, gfp);
+ 	if (skb) {
+ 		skb->truesize += mem;
+ 		if (sk_stream_wmem_schedule(sk, skb->truesize)) {
+-			skb_reserve(skb, hdr_len);
++			/*
++			 * Make sure that we have exactly size bytes
++			 * available to the caller, no more, no less.
++			 */
++			skb_reserve(skb, skb_tailroom(skb) - size);
+ 			return skb;
+ 		}
+ 		__kfree_skb(skb);
+diff --git a/ipc/mqueue.c b/ipc/mqueue.c
+index 145d5a0..1c0de2c 100644
+--- a/ipc/mqueue.c
++++ b/ipc/mqueue.c
+@@ -1014,6 +1014,8 @@ asmlinkage long sys_mq_notify(mqd_t mqdes,
+ 			return -EINVAL;
+ 		}
+ 		if (notification.sigev_notify == SIGEV_THREAD) {
++			long timeo;
++
+ 			/* create the notify skb */
+ 			nc = alloc_skb(NOTIFY_COOKIE_LEN, GFP_KERNEL);
+ 			ret = -ENOMEM;
+@@ -1042,8 +1044,8 @@ retry:
+ 				goto out;
+ 			}
+ 
+-			ret = netlink_attachskb(sock, nc, 0,
+-					MAX_SCHEDULE_TIMEOUT, NULL);
++			timeo = MAX_SCHEDULE_TIMEOUT;
++			ret = netlink_attachskb(sock, nc, 0, &timeo, NULL);
+ 			if (ret == 1)
+ 		       		goto retry;
+ 			if (ret) {
+diff --git a/net/8021q/vlan.c b/net/8021q/vlan.c
+index 2a54691..ef3f789 100644
+--- a/net/8021q/vlan.c
++++ b/net/8021q/vlan.c
+@@ -629,6 +629,10 @@ static int vlan_device_event(struct notifier_block *unused, unsigned long event,
+ 			if (!vlandev)
+ 				continue;
+ 
++			flgs = vlandev->flags;
++			if (!(flgs & IFF_UP))
++				continue;
++
+ 			vlan_sync_address(dev, vlandev);
+ 		}
+ 		break;
+@@ -740,6 +744,7 @@ static int vlan_ioctl_handler(void __user *arg)
+ 		vlan_dev_set_ingress_priority(dev,
+ 					      args.u.skb_priority,
+ 					      args.vlan_qos);
++		err = 0;
+ 		break;
+ 
+ 	case SET_VLAN_EGRESS_PRIORITY_CMD:
+diff --git a/net/ieee80211/ieee80211_crypt_tkip.c b/net/ieee80211/ieee80211_crypt_tkip.c
+index 5a48d8e..7f11dd9 100644
+--- a/net/ieee80211/ieee80211_crypt_tkip.c
++++ b/net/ieee80211/ieee80211_crypt_tkip.c
+@@ -584,7 +584,7 @@ static void michael_mic_hdr(struct sk_buff *skb, u8 * hdr)
+ 	if (stype & IEEE80211_STYPE_QOS_DATA) {
+ 		const struct ieee80211_hdr_3addrqos *qoshdr =
+ 			(struct ieee80211_hdr_3addrqos *)skb->data;
+-		hdr[12] = qoshdr->qos_ctl & cpu_to_le16(IEEE80211_QCTL_TID);
++		hdr[12] = le16_to_cpu(qoshdr->qos_ctl) & IEEE80211_QCTL_TID;
+ 	} else
+ 		hdr[12] = 0;		/* priority */
+ 
+diff --git a/net/ieee80211/softmac/ieee80211softmac_wx.c b/net/ieee80211/softmac/ieee80211softmac_wx.c
+index 5742dc8..2b0b4c7 100644
+--- a/net/ieee80211/softmac/ieee80211softmac_wx.c
++++ b/net/ieee80211/softmac/ieee80211softmac_wx.c
+@@ -469,7 +469,7 @@ ieee80211softmac_wx_set_mlme(struct net_device *dev,
+ {
+ 	struct ieee80211softmac_device *mac = ieee80211_priv(dev);
+ 	struct iw_mlme *mlme = (struct iw_mlme *)extra;
+-	u16 reason = cpu_to_le16(mlme->reason_code);
++	u16 reason = mlme->reason_code;
+ 	struct ieee80211softmac_network *net;
+ 	int err = -EINVAL;
+ 
+diff --git a/net/ipv4/ipcomp.c b/net/ipv4/ipcomp.c
+index e787044..a8a9f13 100644
+--- a/net/ipv4/ipcomp.c
++++ b/net/ipv4/ipcomp.c
+@@ -17,6 +17,7 @@
+ #include <asm/scatterlist.h>
+ #include <asm/semaphore.h>
+ #include <linux/crypto.h>
++#include <linux/err.h>
+ #include <linux/pfkeyv2.h>
+ #include <linux/percpu.h>
+ #include <linux/smp.h>
+@@ -355,7 +356,7 @@ static struct crypto_comp **ipcomp_alloc_tfms(const char *alg_name)
+ 	for_each_possible_cpu(cpu) {
+ 		struct crypto_comp *tfm = crypto_alloc_comp(alg_name, 0,
+ 							    CRYPTO_ALG_ASYNC);
+-		if (!tfm)
++		if (IS_ERR(tfm))
+ 			goto error;
+ 		*per_cpu_ptr(tfms, cpu) = tfm;
+ 	}
+diff --git a/net/ipv6/ipcomp6.c b/net/ipv6/ipcomp6.c
+index 473f165..9dd1ebc 100644
+--- a/net/ipv6/ipcomp6.c
++++ b/net/ipv6/ipcomp6.c
+@@ -37,6 +37,7 @@
+ #include <asm/scatterlist.h>
+ #include <asm/semaphore.h>
+ #include <linux/crypto.h>
++#include <linux/err.h>
+ #include <linux/pfkeyv2.h>
+ #include <linux/random.h>
+ #include <linux/percpu.h>
+@@ -366,7 +367,7 @@ static struct crypto_comp **ipcomp6_alloc_tfms(const char *alg_name)
+ 	for_each_possible_cpu(cpu) {
+ 		struct crypto_comp *tfm = crypto_alloc_comp(alg_name, 0,
+ 							    CRYPTO_ALG_ASYNC);
+-		if (!tfm)
++		if (IS_ERR(tfm))
+ 			goto error;
+ 		*per_cpu_ptr(tfms, cpu) = tfm;
+ 	}
+diff --git a/net/mac80211/ieee80211.c b/net/mac80211/ieee80211.c
+index ff2172f..9e0da6e 100644
+--- a/net/mac80211/ieee80211.c
++++ b/net/mac80211/ieee80211.c
+@@ -350,7 +350,7 @@ static int ieee80211_get_radiotap_len(struct sk_buff *skb)
+ 	struct ieee80211_radiotap_header *hdr =
+ 		(struct ieee80211_radiotap_header *) skb->data;
+ 
+-	return le16_to_cpu(hdr->it_len);
++	return le16_to_cpu(get_unaligned(&hdr->it_len));
+ }
+ 
+ #ifdef CONFIG_MAC80211_LOWTX_FRAME_DUMP
+@@ -1680,46 +1680,54 @@ int ieee80211_monitor_start_xmit(struct sk_buff *skb,
+ 	struct ieee80211_tx_packet_data *pkt_data;
+ 	struct ieee80211_radiotap_header *prthdr =
+ 		(struct ieee80211_radiotap_header *)skb->data;
+-	u16 len;
++	u16 len_rthdr;
+ 
+-	/*
+-	 * there must be a radiotap header at the
+-	 * start in this case
+-	 */
+-	if (unlikely(prthdr->it_version)) {
+-		/* only version 0 is supported */
+-		dev_kfree_skb(skb);
+-		return NETDEV_TX_OK;
+-	}
++	/* check for not even having the fixed radiotap header part */
++	if (unlikely(skb->len < sizeof(struct ieee80211_radiotap_header)))
++		goto fail; /* too short to be possibly valid */
++
++	/* is it a header version we can trust to find length from? */
++	if (unlikely(prthdr->it_version))
++		goto fail; /* only version 0 is supported */
++
++	/* then there must be a radiotap header with a length we can use */
++	len_rthdr = ieee80211_get_radiotap_len(skb);
++
++	/* does the skb contain enough to deliver on the alleged length? */
++	if (unlikely(skb->len < len_rthdr))
++		goto fail; /* skb too short for claimed rt header extent */
+ 
+ 	skb->dev = local->mdev;
+ 
+ 	pkt_data = (struct ieee80211_tx_packet_data *)skb->cb;
+ 	memset(pkt_data, 0, sizeof(*pkt_data));
++	/* needed because we set skb device to master */
+ 	pkt_data->ifindex = dev->ifindex;
++
+ 	pkt_data->mgmt_iface = 0;
+ 	pkt_data->do_not_encrypt = 1;
+ 
+-	/* above needed because we set skb device to master */
+-
+ 	/*
+ 	 * fix up the pointers accounting for the radiotap
+ 	 * header still being in there.  We are being given
+ 	 * a precooked IEEE80211 header so no need for
+ 	 * normal processing
+ 	 */
+-	len = le16_to_cpu(get_unaligned(&prthdr->it_len));
+-	skb_set_mac_header(skb, len);
+-	skb_set_network_header(skb, len + sizeof(struct ieee80211_hdr));
+-	skb_set_transport_header(skb, len + sizeof(struct ieee80211_hdr));
+-
++	skb_set_mac_header(skb, len_rthdr);
+ 	/*
+-	 * pass the radiotap header up to
+-	 * the next stage intact
++	 * these are just fixed to the end of the rt area since we
++	 * don't have any better information and at this point, nobody cares
+ 	 */
+-	dev_queue_xmit(skb);
++	skb_set_network_header(skb, len_rthdr);
++	skb_set_transport_header(skb, len_rthdr);
+ 
++	/* pass the radiotap header up to the next stage intact */
++	dev_queue_xmit(skb);
+ 	return NETDEV_TX_OK;
++
++fail:
++	dev_kfree_skb(skb);
++	return NETDEV_TX_OK; /* meaning, we dealt with the skb */
+ }
+ 
+ 
+@@ -2836,9 +2844,10 @@ ieee80211_rx_h_data(struct ieee80211_txrx_data *rx)
+ 		memcpy(dst, hdr->addr1, ETH_ALEN);
+ 		memcpy(src, hdr->addr3, ETH_ALEN);
+ 
+-		if (sdata->type != IEEE80211_IF_TYPE_STA) {
++		if (sdata->type != IEEE80211_IF_TYPE_STA ||
++		    (is_multicast_ether_addr(dst) &&
++		     !compare_ether_addr(src, dev->dev_addr)))
+ 			return TXRX_DROP;
+-		}
+ 		break;
+ 	case 0:
+ 		/* DA SA BSSID */
+diff --git a/net/mac80211/ieee80211_ioctl.c b/net/mac80211/ieee80211_ioctl.c
+index e7904db..7b5b801 100644
+--- a/net/mac80211/ieee80211_ioctl.c
++++ b/net/mac80211/ieee80211_ioctl.c
+@@ -687,10 +687,11 @@ static int ieee80211_ioctl_giwap(struct net_device *dev,
+ 
+ static int ieee80211_ioctl_siwscan(struct net_device *dev,
+ 				   struct iw_request_info *info,
+-				   struct iw_point *data, char *extra)
++				   union iwreq_data *wrqu, char *extra)
+ {
+ 	struct ieee80211_local *local = wdev_priv(dev->ieee80211_ptr);
+ 	struct ieee80211_sub_if_data *sdata = IEEE80211_DEV_TO_SUB_IF(dev);
++	struct iw_scan_req *req = NULL;
+ 	u8 *ssid = NULL;
+ 	size_t ssid_len = 0;
+ 
+@@ -715,6 +716,14 @@ static int ieee80211_ioctl_siwscan(struct net_device *dev,
+ 		return -EOPNOTSUPP;
+ 	}
+ 
++	/* if SSID was specified explicitly then use that */
++	if (wrqu->data.length == sizeof(struct iw_scan_req) &&
++	    wrqu->data.flags & IW_SCAN_THIS_ESSID) {
++		req = (struct iw_scan_req *)extra;
++		ssid = req->essid;
++		ssid_len = req->essid_len;
++	}
++
+ 	return ieee80211_sta_req_scan(dev, ssid, ssid_len);
+ }
+ 
+diff --git a/net/mac80211/ieee80211_sta.c b/net/mac80211/ieee80211_sta.c
+index 0d99b68..73d39e1 100644
+--- a/net/mac80211/ieee80211_sta.c
++++ b/net/mac80211/ieee80211_sta.c
+@@ -12,7 +12,6 @@
+  */
+ 
+ /* TODO:
+- * BSS table: use <BSSID,SSID> as the key to support multi-SSID APs
+  * order BSS list by RSSI(?) ("quality of AP")
+  * scan result table filtering (by capability (privacy, IBSS/BSS, WPA/RSN IE,
+  *    SSID)
+@@ -61,7 +60,8 @@
+ static void ieee80211_send_probe_req(struct net_device *dev, u8 *dst,
+ 				     u8 *ssid, size_t ssid_len);
+ static struct ieee80211_sta_bss *
+-ieee80211_rx_bss_get(struct net_device *dev, u8 *bssid);
++ieee80211_rx_bss_get(struct net_device *dev, u8 *bssid, int channel,
++		     u8 *ssid, u8 ssid_len);
+ static void ieee80211_rx_bss_put(struct net_device *dev,
+ 				 struct ieee80211_sta_bss *bss);
+ static int ieee80211_sta_find_ibss(struct net_device *dev,
+@@ -108,15 +108,11 @@ struct ieee802_11_elems {
+ 	u8 wmm_param_len;
+ };
+ 
+-typedef enum { ParseOK = 0, ParseUnknown = 1, ParseFailed = -1 } ParseRes;
+-
+-
+-static ParseRes ieee802_11_parse_elems(u8 *start, size_t len,
+-				       struct ieee802_11_elems *elems)
++static void ieee802_11_parse_elems(u8 *start, size_t len,
++				   struct ieee802_11_elems *elems)
+ {
+ 	size_t left = len;
+ 	u8 *pos = start;
+-	int unknown = 0;
+ 
+ 	memset(elems, 0, sizeof(*elems));
+ 
+@@ -127,15 +123,8 @@ static ParseRes ieee802_11_parse_elems(u8 *start, size_t len,
+ 		elen = *pos++;
+ 		left -= 2;
+ 
+-		if (elen > left) {
+-#if 0
+-			if (net_ratelimit())
+-				printk(KERN_DEBUG "IEEE 802.11 element parse "
+-				       "failed (id=%d elen=%d left=%d)\n",
+-				       id, elen, left);
+-#endif
+-			return ParseFailed;
+-		}
++		if (elen > left)
++			return;
+ 
+ 		switch (id) {
+ 		case WLAN_EID_SSID:
+@@ -202,28 +191,15 @@ static ParseRes ieee802_11_parse_elems(u8 *start, size_t len,
+ 			elems->ext_supp_rates_len = elen;
+ 			break;
+ 		default:
+-#if 0
+-			printk(KERN_DEBUG "IEEE 802.11 element parse ignored "
+-				      "unknown element (id=%d elen=%d)\n",
+-				      id, elen);
+-#endif
+-			unknown++;
+ 			break;
+ 		}
+ 
+ 		left -= elen;
+ 		pos += elen;
+ 	}
+-
+-	/* Do not trigger error if left == 1 as Apple Airport base stations
+-	 * send AssocResps that are one spurious byte too long. */
+-
+-	return unknown ? ParseUnknown : ParseOK;
+ }
+ 
+ 
+-
+-
+ static int ecw2cw(int ecw)
+ {
+ 	int cw = 1;
+@@ -387,6 +363,7 @@ static void ieee80211_set_associated(struct net_device *dev,
+ 				     struct ieee80211_if_sta *ifsta, int assoc)
+ {
+ 	union iwreq_data wrqu;
++	struct ieee80211_local *local = wdev_priv(dev->ieee80211_ptr);
+ 	struct ieee80211_sub_if_data *sdata = IEEE80211_DEV_TO_SUB_IF(dev);
+ 
+ 	if (ifsta->associated == assoc)
+@@ -401,7 +378,9 @@ static void ieee80211_set_associated(struct net_device *dev,
+ 		if (sdata->type != IEEE80211_IF_TYPE_STA)
+ 			return;
+ 
+-		bss = ieee80211_rx_bss_get(dev, ifsta->bssid);
++		bss = ieee80211_rx_bss_get(dev, ifsta->bssid,
++					   local->hw.conf.channel,
++					   ifsta->ssid, ifsta->ssid_len);
+ 		if (bss) {
+ 			if (bss->has_erp_value)
+ 				ieee80211_handle_erp_ie(dev, bss->erp_value);
+@@ -543,7 +522,8 @@ static void ieee80211_send_assoc(struct net_device *dev,
+ 		capab |= WLAN_CAPABILITY_SHORT_SLOT_TIME |
+ 			WLAN_CAPABILITY_SHORT_PREAMBLE;
+ 	}
+-	bss = ieee80211_rx_bss_get(dev, ifsta->bssid);
++	bss = ieee80211_rx_bss_get(dev, ifsta->bssid, local->hw.conf.channel,
++				   ifsta->ssid, ifsta->ssid_len);
+ 	if (bss) {
+ 		if (bss->capability & WLAN_CAPABILITY_PRIVACY)
+ 			capab |= WLAN_CAPABILITY_PRIVACY;
+@@ -695,6 +675,7 @@ static void ieee80211_send_disassoc(struct net_device *dev,
+ static int ieee80211_privacy_mismatch(struct net_device *dev,
+ 				      struct ieee80211_if_sta *ifsta)
+ {
++	struct ieee80211_local *local = wdev_priv(dev->ieee80211_ptr);
+ 	struct ieee80211_sta_bss *bss;
+ 	int res = 0;
+ 
+@@ -702,7 +683,8 @@ static int ieee80211_privacy_mismatch(struct net_device *dev,
+ 	    ifsta->key_mgmt != IEEE80211_KEY_MGMT_NONE)
+ 		return 0;
+ 
+-	bss = ieee80211_rx_bss_get(dev, ifsta->bssid);
++	bss = ieee80211_rx_bss_get(dev, ifsta->bssid, local->hw.conf.channel,
++				   ifsta->ssid, ifsta->ssid_len);
+ 	if (!bss)
+ 		return 0;
+ 
+@@ -901,12 +883,7 @@ static void ieee80211_auth_challenge(struct net_device *dev,
+ 
+ 	printk(KERN_DEBUG "%s: replying to auth challenge\n", dev->name);
+ 	pos = mgmt->u.auth.variable;
+-	if (ieee802_11_parse_elems(pos, len - (pos - (u8 *) mgmt), &elems)
+-	    == ParseFailed) {
+-		printk(KERN_DEBUG "%s: failed to parse Auth(challenge)\n",
+-		       dev->name);
+-		return;
+-	}
++	ieee802_11_parse_elems(pos, len - (pos - (u8 *) mgmt), &elems);
+ 	if (!elems.challenge) {
+ 		printk(KERN_DEBUG "%s: no challenge IE in shared key auth "
+ 		       "frame\n", dev->name);
+@@ -1174,15 +1151,11 @@ static void ieee80211_rx_mgmt_assoc_resp(struct net_device *dev,
+ 	capab_info = le16_to_cpu(mgmt->u.assoc_resp.capab_info);
+ 	status_code = le16_to_cpu(mgmt->u.assoc_resp.status_code);
+ 	aid = le16_to_cpu(mgmt->u.assoc_resp.aid);
+-	if ((aid & (BIT(15) | BIT(14))) != (BIT(15) | BIT(14)))
+-		printk(KERN_DEBUG "%s: invalid aid value %d; bits 15:14 not "
+-		       "set\n", dev->name, aid);
+-	aid &= ~(BIT(15) | BIT(14));
+ 
+ 	printk(KERN_DEBUG "%s: RX %sssocResp from " MAC_FMT " (capab=0x%x "
+ 	       "status=%d aid=%d)\n",
+ 	       dev->name, reassoc ? "Rea" : "A", MAC_ARG(mgmt->sa),
+-	       capab_info, status_code, aid);
++	       capab_info, status_code, aid & ~(BIT(15) | BIT(14)));
+ 
+ 	if (status_code != WLAN_STATUS_SUCCESS) {
+ 		printk(KERN_DEBUG "%s: AP denied association (code=%d)\n",
+@@ -1192,13 +1165,13 @@ static void ieee80211_rx_mgmt_assoc_resp(struct net_device *dev,
+ 		return;
+ 	}
+ 
++	if ((aid & (BIT(15) | BIT(14))) != (BIT(15) | BIT(14)))
++		printk(KERN_DEBUG "%s: invalid aid value %d; bits 15:14 not "
++		       "set\n", dev->name, aid);
++	aid &= ~(BIT(15) | BIT(14));
++
+ 	pos = mgmt->u.assoc_resp.variable;
+-	if (ieee802_11_parse_elems(pos, len - (pos - (u8 *) mgmt), &elems)
+-	    == ParseFailed) {
+-		printk(KERN_DEBUG "%s: failed to parse AssocResp\n",
+-		       dev->name);
+-		return;
+-	}
++	ieee802_11_parse_elems(pos, len - (pos - (u8 *) mgmt), &elems);
+ 
+ 	if (!elems.supp_rates) {
+ 		printk(KERN_DEBUG "%s: no SuppRates element in AssocResp\n",
+@@ -1210,7 +1183,9 @@ static void ieee80211_rx_mgmt_assoc_resp(struct net_device *dev,
+ 	 * update our stored copy */
+ 	if (elems.erp_info && elems.erp_info_len >= 1) {
+ 		struct ieee80211_sta_bss *bss
+-			= ieee80211_rx_bss_get(dev, ifsta->bssid);
++			= ieee80211_rx_bss_get(dev, ifsta->bssid,
++					       local->hw.conf.channel,
++					       ifsta->ssid, ifsta->ssid_len);
+ 		if (bss) {
+ 			bss->erp_value = elems.erp_info[0];
+ 			bss->has_erp_value = 1;
+@@ -1240,7 +1215,9 @@ static void ieee80211_rx_mgmt_assoc_resp(struct net_device *dev,
+ 			       " AP\n", dev->name);
+ 			return;
+ 		}
+-		bss = ieee80211_rx_bss_get(dev, ifsta->bssid);
++		bss = ieee80211_rx_bss_get(dev, ifsta->bssid,
++					   local->hw.conf.channel,
++					   ifsta->ssid, ifsta->ssid_len);
+ 		if (bss) {
+ 			sta->last_rssi = bss->rssi;
+ 			sta->last_signal = bss->signal;
+@@ -1321,7 +1298,8 @@ static void __ieee80211_rx_bss_hash_del(struct net_device *dev,
+ 
+ 
+ static struct ieee80211_sta_bss *
+-ieee80211_rx_bss_add(struct net_device *dev, u8 *bssid)
++ieee80211_rx_bss_add(struct net_device *dev, u8 *bssid, int channel,
++		     u8 *ssid, u8 ssid_len)
+ {
+ 	struct ieee80211_local *local = wdev_priv(dev->ieee80211_ptr);
+ 	struct ieee80211_sta_bss *bss;
+@@ -1332,6 +1310,11 @@ ieee80211_rx_bss_add(struct net_device *dev, u8 *bssid)
+ 	atomic_inc(&bss->users);
+ 	atomic_inc(&bss->users);
+ 	memcpy(bss->bssid, bssid, ETH_ALEN);
++	bss->channel = channel;
++	if (ssid && ssid_len <= IEEE80211_MAX_SSID_LEN) {
++		memcpy(bss->ssid, ssid, ssid_len);
++		bss->ssid_len = ssid_len;
++	}
+ 
+ 	spin_lock_bh(&local->sta_bss_lock);
+ 	/* TODO: order by RSSI? */
+@@ -1343,7 +1326,8 @@ ieee80211_rx_bss_add(struct net_device *dev, u8 *bssid)
+ 
+ 
+ static struct ieee80211_sta_bss *
+-ieee80211_rx_bss_get(struct net_device *dev, u8 *bssid)
++ieee80211_rx_bss_get(struct net_device *dev, u8 *bssid, int channel,
++		     u8 *ssid, u8 ssid_len)
+ {
+ 	struct ieee80211_local *local = wdev_priv(dev->ieee80211_ptr);
+ 	struct ieee80211_sta_bss *bss;
+@@ -1351,7 +1335,10 @@ ieee80211_rx_bss_get(struct net_device *dev, u8 *bssid)
+ 	spin_lock_bh(&local->sta_bss_lock);
+ 	bss = local->sta_bss_hash[STA_HASH(bssid)];
+ 	while (bss) {
+-		if (memcmp(bss->bssid, bssid, ETH_ALEN) == 0) {
++		if (!memcmp(bss->bssid, bssid, ETH_ALEN) &&
++		    bss->channel == channel &&
++		    bss->ssid_len == ssid_len &&
++		    (ssid_len == 0 || !memcmp(bss->ssid, ssid, ssid_len))) {
+ 			atomic_inc(&bss->users);
+ 			break;
+ 		}
+@@ -1413,7 +1400,7 @@ static void ieee80211_rx_bss_info(struct net_device *dev,
+ 	struct ieee80211_local *local = wdev_priv(dev->ieee80211_ptr);
+ 	struct ieee802_11_elems elems;
+ 	size_t baselen;
+-	int channel, invalid = 0, clen;
++	int channel, clen;
+ 	struct ieee80211_sta_bss *bss;
+ 	struct sta_info *sta;
+ 	struct ieee80211_sub_if_data *sdata = IEEE80211_DEV_TO_SUB_IF(dev);
+@@ -1457,9 +1444,7 @@ static void ieee80211_rx_bss_info(struct net_device *dev,
+ #endif /* CONFIG_MAC80211_IBSS_DEBUG */
+ 	}
+ 
+-	if (ieee802_11_parse_elems(mgmt->u.beacon.variable, len - baselen,
+-				   &elems) == ParseFailed)
+-		invalid = 1;
++	ieee802_11_parse_elems(mgmt->u.beacon.variable, len - baselen, &elems);
+ 
+ 	if (sdata->type == IEEE80211_IF_TYPE_IBSS && elems.supp_rates &&
+ 	    memcmp(mgmt->bssid, sdata->u.sta.bssid, ETH_ALEN) == 0 &&
+@@ -1519,9 +1504,11 @@ static void ieee80211_rx_bss_info(struct net_device *dev,
+ 	else
+ 		channel = rx_status->channel;
+ 
+-	bss = ieee80211_rx_bss_get(dev, mgmt->bssid);
++	bss = ieee80211_rx_bss_get(dev, mgmt->bssid, channel,
++				   elems.ssid, elems.ssid_len);
+ 	if (!bss) {
+-		bss = ieee80211_rx_bss_add(dev, mgmt->bssid);
++		bss = ieee80211_rx_bss_add(dev, mgmt->bssid, channel,
++					   elems.ssid, elems.ssid_len);
+ 		if (!bss)
+ 			return;
+ 	} else {
+@@ -1547,10 +1534,6 @@ static void ieee80211_rx_bss_info(struct net_device *dev,
+ 
+ 	bss->beacon_int = le16_to_cpu(mgmt->u.beacon.beacon_int);
+ 	bss->capability = le16_to_cpu(mgmt->u.beacon.capab_info);
+-	if (elems.ssid && elems.ssid_len <= IEEE80211_MAX_SSID_LEN) {
+-		memcpy(bss->ssid, elems.ssid, elems.ssid_len);
+-		bss->ssid_len = elems.ssid_len;
+-	}
+ 
+ 	bss->supp_rates_len = 0;
+ 	if (elems.supp_rates) {
+@@ -1621,7 +1604,6 @@ static void ieee80211_rx_bss_info(struct net_device *dev,
+ 
+ 
+ 	bss->hw_mode = rx_status->phymode;
+-	bss->channel = channel;
+ 	bss->freq = rx_status->freq;
+ 	if (channel != rx_status->channel &&
+ 	    (bss->hw_mode == MODE_IEEE80211G ||
+@@ -1681,9 +1663,7 @@ static void ieee80211_rx_mgmt_beacon(struct net_device *dev,
+ 	if (baselen > len)
+ 		return;
+ 
+-	if (ieee802_11_parse_elems(mgmt->u.beacon.variable, len - baselen,
+-				   &elems) == ParseFailed)
+-		return;
++	ieee802_11_parse_elems(mgmt->u.beacon.variable, len - baselen, &elems);
+ 
+ 	if (elems.erp_info && elems.erp_info_len >= 1)
+ 		ieee80211_handle_erp_ie(dev, elems.erp_info[0]);
+@@ -2332,7 +2312,7 @@ static int ieee80211_sta_create_ibss(struct net_device *dev,
+ {
+ 	struct ieee80211_local *local = wdev_priv(dev->ieee80211_ptr);
+ 	struct ieee80211_sta_bss *bss;
+-	struct ieee80211_sub_if_data *sdata;
++	struct ieee80211_sub_if_data *sdata = IEEE80211_DEV_TO_SUB_IF(dev);
+ 	struct ieee80211_hw_mode *mode;
+ 	u8 bssid[ETH_ALEN], *pos;
+ 	int i;
+@@ -2354,18 +2334,17 @@ static int ieee80211_sta_create_ibss(struct net_device *dev,
+ 	printk(KERN_DEBUG "%s: Creating new IBSS network, BSSID " MAC_FMT "\n",
+ 	       dev->name, MAC_ARG(bssid));
+ 
+-	bss = ieee80211_rx_bss_add(dev, bssid);
++	bss = ieee80211_rx_bss_add(dev, bssid, local->hw.conf.channel,
++				   sdata->u.sta.ssid, sdata->u.sta.ssid_len);
+ 	if (!bss)
+ 		return -ENOMEM;
+ 
+-	sdata = IEEE80211_DEV_TO_SUB_IF(dev);
+ 	mode = local->oper_hw_mode;
+ 
+ 	if (local->hw.conf.beacon_int == 0)
+ 		local->hw.conf.beacon_int = 100;
+ 	bss->beacon_int = local->hw.conf.beacon_int;
+ 	bss->hw_mode = local->hw.conf.phymode;
+-	bss->channel = local->hw.conf.channel;
+ 	bss->freq = local->hw.conf.freq;
+ 	bss->last_update = jiffies;
+ 	bss->capability = WLAN_CAPABILITY_IBSS;
+@@ -2425,7 +2404,8 @@ static int ieee80211_sta_find_ibss(struct net_device *dev,
+ 	       MAC_FMT "\n", MAC_ARG(bssid), MAC_ARG(ifsta->bssid));
+ #endif /* CONFIG_MAC80211_IBSS_DEBUG */
+ 	if (found && memcmp(ifsta->bssid, bssid, ETH_ALEN) != 0 &&
+-	    (bss = ieee80211_rx_bss_get(dev, bssid))) {
++	    (bss = ieee80211_rx_bss_get(dev, bssid, local->hw.conf.channel,
++					ifsta->ssid, ifsta->ssid_len))) {
+ 		printk(KERN_DEBUG "%s: Selected IBSS BSSID " MAC_FMT
+ 		       " based on configured SSID\n",
+ 		       dev->name, MAC_ARG(bssid));
+diff --git a/net/netfilter/nf_conntrack_proto_tcp.c b/net/netfilter/nf_conntrack_proto_tcp.c
+index eb3fe74..70c5b7d 100644
+--- a/net/netfilter/nf_conntrack_proto_tcp.c
++++ b/net/netfilter/nf_conntrack_proto_tcp.c
+@@ -831,6 +831,22 @@ static int tcp_packet(struct nf_conn *conntrack,
+ 	tuple = &conntrack->tuplehash[dir].tuple;
+ 
+ 	switch (new_state) {
++	case TCP_CONNTRACK_SYN_SENT:
++		if (old_state < TCP_CONNTRACK_TIME_WAIT)
++			break;
++		if ((conntrack->proto.tcp.seen[!dir].flags &
++			IP_CT_TCP_FLAG_CLOSE_INIT)
++		    || (conntrack->proto.tcp.last_dir == dir
++		        && conntrack->proto.tcp.last_index == TCP_RST_SET)) {
++			/* Attempt to reopen a closed/aborted connection.
++			 * Delete this connection and look up again. */
++			write_unlock_bh(&tcp_lock);
++			if (del_timer(&conntrack->timeout))
++				conntrack->timeout.function((unsigned long)
++							    conntrack);
++			return -NF_REPEAT;
++		}
++		/* Fall through */
+ 	case TCP_CONNTRACK_IGNORE:
+ 		/* Ignored packets:
+ 		 *
+@@ -879,27 +895,6 @@ static int tcp_packet(struct nf_conn *conntrack,
+ 			nf_log_packet(pf, 0, skb, NULL, NULL, NULL,
+ 				  "nf_ct_tcp: invalid state ");
+ 		return -NF_ACCEPT;
+-	case TCP_CONNTRACK_SYN_SENT:
+-		if (old_state < TCP_CONNTRACK_TIME_WAIT)
+-			break;
+-		if ((conntrack->proto.tcp.seen[dir].flags &
+-			IP_CT_TCP_FLAG_CLOSE_INIT)
+-		    || after(ntohl(th->seq),
+-			     conntrack->proto.tcp.seen[dir].td_end)) {
+-			/* Attempt to reopen a closed connection.
+-			* Delete this connection and look up again. */
+-			write_unlock_bh(&tcp_lock);
+-			if (del_timer(&conntrack->timeout))
+-				conntrack->timeout.function((unsigned long)
+-							    conntrack);
+-			return -NF_REPEAT;
+-		} else {
+-			write_unlock_bh(&tcp_lock);
+-			if (LOG_INVALID(IPPROTO_TCP))
+-				nf_log_packet(pf, 0, skb, NULL, NULL,
+-					      NULL, "nf_ct_tcp: invalid SYN");
+-			return -NF_ACCEPT;
+-		}
+ 	case TCP_CONNTRACK_CLOSE:
+ 		if (index == TCP_RST_SET
+ 		    && ((test_bit(IPS_SEEN_REPLY_BIT, &conntrack->status)
+@@ -932,6 +927,7 @@ static int tcp_packet(struct nf_conn *conntrack,
+      in_window:
+ 	/* From now on we have got in-window packets */
+ 	conntrack->proto.tcp.last_index = index;
++	conntrack->proto.tcp.last_dir = dir;
+ 
+ 	pr_debug("tcp_conntracks: ");
+ 	NF_CT_DUMP_TUPLE(tuple);
+diff --git a/net/netlink/af_netlink.c b/net/netlink/af_netlink.c
+index 5681ce3..1a0fcc5 100644
+--- a/net/netlink/af_netlink.c
++++ b/net/netlink/af_netlink.c
+@@ -744,7 +744,7 @@ struct sock *netlink_getsockbyfilp(struct file *filp)
+  * 1: repeat lookup - reference dropped while waiting for socket memory.
+  */
+ int netlink_attachskb(struct sock *sk, struct sk_buff *skb, int nonblock,
+-		long timeo, struct sock *ssk)
++		      long *timeo, struct sock *ssk)
+ {
+ 	struct netlink_sock *nlk;
+ 
+@@ -753,7 +753,7 @@ int netlink_attachskb(struct sock *sk, struct sk_buff *skb, int nonblock,
+ 	if (atomic_read(&sk->sk_rmem_alloc) > sk->sk_rcvbuf ||
+ 	    test_bit(0, &nlk->state)) {
+ 		DECLARE_WAITQUEUE(wait, current);
+-		if (!timeo) {
++		if (!*timeo) {
+ 			if (!ssk || nlk_sk(ssk)->pid == 0)
+ 				netlink_overrun(sk);
+ 			sock_put(sk);
+@@ -767,7 +767,7 @@ int netlink_attachskb(struct sock *sk, struct sk_buff *skb, int nonblock,
+ 		if ((atomic_read(&sk->sk_rmem_alloc) > sk->sk_rcvbuf ||
+ 		     test_bit(0, &nlk->state)) &&
+ 		    !sock_flag(sk, SOCK_DEAD))
+-			timeo = schedule_timeout(timeo);
++			*timeo = schedule_timeout(*timeo);
+ 
+ 		__set_current_state(TASK_RUNNING);
+ 		remove_wait_queue(&nlk->wait, &wait);
+@@ -775,7 +775,7 @@ int netlink_attachskb(struct sock *sk, struct sk_buff *skb, int nonblock,
+ 
+ 		if (signal_pending(current)) {
+ 			kfree_skb(skb);
+-			return sock_intr_errno(timeo);
++			return sock_intr_errno(*timeo);
+ 		}
+ 		return 1;
+ 	}
+@@ -839,7 +839,7 @@ retry:
+ 		kfree_skb(skb);
+ 		return PTR_ERR(sk);
+ 	}
+-	err = netlink_attachskb(sk, skb, nonblock, timeo, ssk);
++	err = netlink_attachskb(sk, skb, nonblock, &timeo, ssk);
+ 	if (err == 1)
+ 		goto retry;
+ 	if (err)
+diff --git a/net/sched/cls_u32.c b/net/sched/cls_u32.c
+index d4d5d2f..fceb75b 100644
+--- a/net/sched/cls_u32.c
++++ b/net/sched/cls_u32.c
+@@ -91,7 +91,7 @@ static struct tc_u_common *u32_list;
+ 
+ static __inline__ unsigned u32_hash_fold(u32 key, struct tc_u32_sel *sel, u8 fshift)
+ {
+-	unsigned h = (key & sel->hmask)>>fshift;
++	unsigned h = ntohl(key & sel->hmask)>>fshift;
+ 
+ 	return h;
+ }
+@@ -615,7 +615,7 @@ static int u32_change(struct tcf_proto *tp, unsigned long base, u32 handle,
+ 	n->handle = handle;
+ {
+ 	u8 i = 0;
+-	u32 mask = s->hmask;
++	u32 mask = ntohl(s->hmask);
+ 	if (mask) {
+ 		while (!(mask & 1)) {
+ 			i++;
+diff --git a/net/sched/sch_api.c b/net/sched/sch_api.c
+index dee0d5f..8f1bcf6 100644
+--- a/net/sched/sch_api.c
++++ b/net/sched/sch_api.c
+@@ -1225,10 +1225,13 @@ EXPORT_SYMBOL(tcf_destroy_chain);
+ #ifdef CONFIG_PROC_FS
+ static int psched_show(struct seq_file *seq, void *v)
+ {
++	struct timespec ts;
++
++	hrtimer_get_res(CLOCK_MONOTONIC, &ts);
+ 	seq_printf(seq, "%08x %08x %08x %08x\n",
+ 		   (u32)NSEC_PER_USEC, (u32)PSCHED_US2NS(1),
+ 		   1000000,
+-		   (u32)NSEC_PER_SEC/(u32)ktime_to_ns(KTIME_MONOTONIC_RES));
++		   (u32)NSEC_PER_SEC/(u32)ktime_to_ns(timespec_to_ktime(ts)));
+ 
+ 	return 0;
+ }
+diff --git a/net/sched/sch_teql.c b/net/sched/sch_teql.c
+index 0968184..cb5754b 100644
+--- a/net/sched/sch_teql.c
++++ b/net/sched/sch_teql.c
+@@ -249,6 +249,9 @@ __teql_resolve(struct sk_buff *skb, struct sk_buff *skb_res, struct net_device *
+ static __inline__ int
+ teql_resolve(struct sk_buff *skb, struct sk_buff *skb_res, struct net_device *dev)
+ {
++	if (dev->qdisc == &noop_qdisc)
++		return -ENODEV;
++
+ 	if (dev->hard_header == NULL ||
+ 	    skb->dst == NULL ||
+ 	    skb->dst->neighbour == NULL)
+diff --git a/net/socket.c b/net/socket.c
+index b09eb90..8e5be74 100644
+--- a/net/socket.c
++++ b/net/socket.c
+@@ -1245,11 +1245,14 @@ asmlinkage long sys_socketpair(int family, int type, int protocol,
+ 		goto out_release_both;
+ 
+ 	fd1 = sock_alloc_fd(&newfile1);
+-	if (unlikely(fd1 < 0))
++	if (unlikely(fd1 < 0)) {
++		err = fd1;
+ 		goto out_release_both;
++	}
+ 
+ 	fd2 = sock_alloc_fd(&newfile2);
+ 	if (unlikely(fd2 < 0)) {
++		err = fd2;
+ 		put_filp(newfile1);
+ 		put_unused_fd(fd1);
+ 		goto out_release_both;
+@@ -2230,6 +2233,7 @@ int kernel_accept(struct socket *sock, struct socket **newsock, int flags)
+ 	err = sock->ops->accept(sock, *newsock, flags);
+ 	if (err < 0) {
+ 		sock_release(*newsock);
++		*newsock = NULL;
+ 		goto done;
+ 	}
+ 

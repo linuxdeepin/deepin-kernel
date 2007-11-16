@@ -1,0 +1,1597 @@
+diff --git a/Makefile b/Makefile
+index e11814e..798ffe9 100644
+diff --git a/drivers/acpi/sleep/main.c b/drivers/acpi/sleep/main.c
+index 2cbb9aa..37b651e 100644
+--- a/drivers/acpi/sleep/main.c
++++ b/drivers/acpi/sleep/main.c
+@@ -170,8 +170,8 @@ static int acpi_pm_finish(suspend_state_t pm_state)
+ {
+ 	u32 acpi_state = acpi_target_sleep_state;
+ 
+-	acpi_leave_sleep_state(acpi_state);
+ 	acpi_disable_wakeup_device(acpi_state);
++	acpi_leave_sleep_state(acpi_state);
+ 
+ 	/* reset firmware waking vector */
+ 	acpi_set_firmware_waking_vector((acpi_physical_address) 0);
+@@ -256,8 +256,8 @@ static int acpi_hibernation_enter(void)
+ 
+ static void acpi_hibernation_finish(void)
+ {
+-	acpi_leave_sleep_state(ACPI_STATE_S4);
+ 	acpi_disable_wakeup_device(ACPI_STATE_S4);
++	acpi_leave_sleep_state(ACPI_STATE_S4);
+ 
+ 	/* reset firmware waking vector */
+ 	acpi_set_firmware_waking_vector((acpi_physical_address) 0);
+@@ -389,6 +389,7 @@ static void acpi_power_off(void)
+ 	/* acpi_sleep_prepare(ACPI_STATE_S5) should have already been called */
+ 	printk("%s called\n", __FUNCTION__);
+ 	local_irq_disable();
++	acpi_enable_wakeup_device(ACPI_STATE_S5);
+ 	acpi_enter_sleep_state(ACPI_STATE_S5);
+ }
+ 
+diff --git a/drivers/ata/ahci.c b/drivers/ata/ahci.c
+index c168203..d684208 100644
+--- a/drivers/ata/ahci.c
++++ b/drivers/ata/ahci.c
+@@ -41,6 +41,7 @@
+ #include <linux/interrupt.h>
+ #include <linux/dma-mapping.h>
+ #include <linux/device.h>
++#include <linux/dmi.h>
+ #include <scsi/scsi_host.h>
+ #include <scsi/scsi_cmnd.h>
+ #include <linux/libata.h>
+@@ -231,6 +232,7 @@ static void ahci_freeze(struct ata_port *ap);
+ static void ahci_thaw(struct ata_port *ap);
+ static void ahci_error_handler(struct ata_port *ap);
+ static void ahci_vt8251_error_handler(struct ata_port *ap);
++static void ahci_p5wdh_error_handler(struct ata_port *ap);
+ static void ahci_post_internal_cmd(struct ata_queued_cmd *qc);
+ static int ahci_port_resume(struct ata_port *ap);
+ static unsigned int ahci_fill_sg(struct ata_queued_cmd *qc, void *cmd_tbl);
+@@ -329,6 +331,40 @@ static const struct ata_port_operations ahci_vt8251_ops = {
+ 	.port_stop		= ahci_port_stop,
+ };
+ 
++static const struct ata_port_operations ahci_p5wdh_ops = {
++	.port_disable		= ata_port_disable,
++
++	.check_status		= ahci_check_status,
++	.check_altstatus	= ahci_check_status,
++	.dev_select		= ata_noop_dev_select,
++
++	.tf_read		= ahci_tf_read,
++
++	.qc_prep		= ahci_qc_prep,
++	.qc_issue		= ahci_qc_issue,
++
++	.irq_clear		= ahci_irq_clear,
++	.irq_on			= ata_dummy_irq_on,
++	.irq_ack		= ata_dummy_irq_ack,
++
++	.scr_read		= ahci_scr_read,
++	.scr_write		= ahci_scr_write,
++
++	.freeze			= ahci_freeze,
++	.thaw			= ahci_thaw,
++
++	.error_handler		= ahci_p5wdh_error_handler,
++	.post_internal_cmd	= ahci_post_internal_cmd,
++
++#ifdef CONFIG_PM
++	.port_suspend		= ahci_port_suspend,
++	.port_resume		= ahci_port_resume,
++#endif
++
++	.port_start		= ahci_port_start,
++	.port_stop		= ahci_port_stop,
++};
++
+ static const struct ata_port_info ahci_port_info[] = {
+ 	/* board_ahci */
+ 	{
+@@ -1176,6 +1212,52 @@ static int ahci_vt8251_hardreset(struct ata_port *ap, unsigned int *class,
+ 	return rc ?: -EAGAIN;
+ }
+ 
++static int ahci_p5wdh_hardreset(struct ata_port *ap, unsigned int *class,
++				unsigned long deadline)
++{
++	struct ahci_port_priv *pp = ap->private_data;
++	u8 *d2h_fis = pp->rx_fis + RX_FIS_D2H_REG;
++	struct ata_taskfile tf;
++	int rc;
++
++	ahci_stop_engine(ap);
++
++	/* clear D2H reception area to properly wait for D2H FIS */
++	ata_tf_init(ap->device, &tf);
++	tf.command = 0x80;
++	ata_tf_to_fis(&tf, 0, 0, d2h_fis);
++
++	rc = sata_port_hardreset(ap, sata_ehc_deb_timing(&ap->eh_context),
++				 deadline);
++
++	ahci_start_engine(ap);
++
++	if (rc || ata_port_offline(ap))
++		return rc;
++
++	/* spec mandates ">= 2ms" before checking status */
++	msleep(150);
++
++	/* The pseudo configuration device on SIMG4726 attached to
++	 * ASUS P5W-DH Deluxe doesn't send signature FIS after
++	 * hardreset if no device is attached to the first downstream
++	 * port && the pseudo device locks up on SRST w/ PMP==0.  To
++	 * work around this, wait for !BSY only briefly.  If BSY isn't
++	 * cleared, perform CLO and proceed to IDENTIFY (achieved by
++	 * ATA_LFLAG_NO_SRST and ATA_LFLAG_ASSUME_ATA).
++	 *
++	 * Wait for two seconds.  Devices attached to downstream port
++	 * which can't process the following IDENTIFY after this will
++	 * have to be reset again.  For most cases, this should
++	 * suffice while making probing snappish enough.
++	 */
++	rc = ata_wait_ready(ap, jiffies + 2 * HZ);
++	if (rc)
++		ahci_kick_engine(ap, 0);
++
++	return 0;
++}
++
+ static void ahci_postreset(struct ata_port *ap, unsigned int *class)
+ {
+ 	void __iomem *port_mmio = ahci_port_base(ap);
+@@ -1556,6 +1638,19 @@ static void ahci_vt8251_error_handler(struct ata_port *ap)
+ 		  ahci_postreset);
+ }
+ 
++static void ahci_p5wdh_error_handler(struct ata_port *ap)
++{
++	if (!(ap->pflags & ATA_PFLAG_FROZEN)) {
++		/* restart engine */
++		ahci_stop_engine(ap);
++		ahci_start_engine(ap);
++	}
++
++	/* perform recovery */
++	ata_do_eh(ap, ata_std_prereset, ahci_softreset, ahci_p5wdh_hardreset,
++		  ahci_postreset);
++}
++
+ static void ahci_post_internal_cmd(struct ata_queued_cmd *qc)
+ {
+ 	struct ata_port *ap = qc->ap;
+@@ -1802,6 +1897,51 @@ static void ahci_print_info(struct ata_host *host)
+ 		);
+ }
+ 
++/* On ASUS P5W DH Deluxe, the second port of PCI device 00:1f.2 is
++ * hardwired to on-board SIMG 4726.  The chipset is ICH8 and doesn't
++ * support PMP and the 4726 either directly exports the device
++ * attached to the first downstream port or acts as a hardware storage
++ * controller and emulate a single ATA device (can be RAID 0/1 or some
++ * other configuration).
++ *
++ * When there's no device attached to the first downstream port of the
++ * 4726, "Config Disk" appears, which is a pseudo ATA device to
++ * configure the 4726.  However, ATA emulation of the device is very
++ * lame.  It doesn't send signature D2H Reg FIS after the initial
++ * hardreset, pukes on SRST w/ PMP==0 and has bunch of other issues.
++ *
++ * The following function works around the problem by always using
++ * hardreset on the port and not depending on receiving signature FIS
++ * afterward.  If signature FIS isn't received soon, ATA class is
++ * assumed without follow-up softreset.
++ */
++static void ahci_p5wdh_workaround(struct ata_host *host)
++{
++	static struct dmi_system_id sysids[] = {
++		{
++			.ident = "P5W DH Deluxe",
++			.matches = {
++				DMI_MATCH(DMI_SYS_VENDOR,
++					  "ASUSTEK COMPUTER INC"),
++				DMI_MATCH(DMI_PRODUCT_NAME, "P5W DH Deluxe"),
++			},
++		},
++		{ }
++	};
++	struct pci_dev *pdev = to_pci_dev(host->dev);
++
++	if (pdev->bus->number == 0 && pdev->devfn == PCI_DEVFN(0x1f, 2) &&
++	    dmi_check_system(sysids)) {
++		struct ata_port *ap = host->ports[1];
++
++		dev_printk(KERN_INFO, &pdev->dev, "enabling ASUS P5W DH "
++			   "Deluxe on-board SIMG4726 workaround\n");
++
++		ap->ops = &ahci_p5wdh_ops;
++		ap->flags |= ATA_FLAG_NO_SRST | ATA_FLAG_ASSUME_ATA;
++	}
++}
++
+ static int ahci_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
+ {
+ 	static int printed_version;
+@@ -1863,6 +2003,9 @@ static int ahci_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
+ 			ap->ops = &ata_dummy_port_ops;
+ 	}
+ 
++	/* apply workaround for ASUS P5W DH Deluxe mainboard */
++	ahci_p5wdh_workaround(host);
++
+ 	/* initialize adapter */
+ 	rc = ahci_configure_dma_masks(pdev, hpriv->cap & HOST_CAP_64);
+ 	if (rc)
+diff --git a/drivers/ata/libata-core.c b/drivers/ata/libata-core.c
+index 772be09..78b670d 100644
+--- a/drivers/ata/libata-core.c
++++ b/drivers/ata/libata-core.c
+@@ -3793,11 +3793,18 @@ static const struct ata_blacklist_entry ata_device_blacklist [] = {
+ 	/* Drives which do spurious command completion */
+ 	{ "HTS541680J9SA00",	"SB2IC7EP",	ATA_HORKAGE_NONCQ, },
+ 	{ "HTS541612J9SA00",	"SBDIC7JP",	ATA_HORKAGE_NONCQ, },
++	{ "HDT722516DLA380",	"V43OA96A",	ATA_HORKAGE_NONCQ, },
+ 	{ "Hitachi HTS541616J9SA00", "SB4OC70P", ATA_HORKAGE_NONCQ, },
++	{ "Hitachi HTS542525K9SA00", "BBFOC31P", ATA_HORKAGE_NONCQ, },
+ 	{ "WDC WD740ADFD-00NLR1", NULL,		ATA_HORKAGE_NONCQ, },
++	{ "WDC WD3200AAJS-00RYA0", "12.01B01",	ATA_HORKAGE_NONCQ, },
+ 	{ "FUJITSU MHV2080BH",	"00840028",	ATA_HORKAGE_NONCQ, },
++	{ "ST9120822AS",	"3.CLF",	ATA_HORKAGE_NONCQ, },
+ 	{ "ST9160821AS",	"3.CLF",	ATA_HORKAGE_NONCQ, },
+-	{ "ST3160812AS",	"3.AD",		ATA_HORKAGE_NONCQ, },
++	{ "ST9160821AS",	"3.ALD",	ATA_HORKAGE_NONCQ, },
++	{ "ST9160821AS",	"3.CCD",	ATA_HORKAGE_NONCQ, },
++	{ "ST3160812AS",	"3.ADJ",	ATA_HORKAGE_NONCQ, },
++	{ "ST980813AS",		"3.ADB",	ATA_HORKAGE_NONCQ, },
+ 	{ "SAMSUNG HD401LJ",	"ZZ100-15",	ATA_HORKAGE_NONCQ, },
+ 
+ 	/* devices which puke on READ_NATIVE_MAX */
+diff --git a/drivers/ata/libata-eh.c b/drivers/ata/libata-eh.c
+index ac6ceed..6ebdbd8 100644
+--- a/drivers/ata/libata-eh.c
++++ b/drivers/ata/libata-eh.c
+@@ -1759,9 +1759,11 @@ static int ata_do_reset(struct ata_port *ap, ata_reset_fn_t reset,
+ 	return 0;
+ }
+ 
+-static int ata_eh_followup_srst_needed(int rc, int classify,
+-				       const unsigned int *classes)
++static int ata_eh_followup_srst_needed(struct ata_port *ap, int rc,
++				int classify, const unsigned int *classes)
+ {
++	if (ap->flags & ATA_FLAG_NO_SRST)
++		return 0;
+ 	if (rc == -EAGAIN)
+ 		return 1;
+ 	if (rc != 0)
+@@ -1792,7 +1794,8 @@ static int ata_eh_reset(struct ata_port *ap, int classify,
+ 	 */
+ 	action = ehc->i.action;
+ 	ehc->i.action &= ~ATA_EH_RESET_MASK;
+-	if (softreset && (!hardreset || (!sata_set_spd_needed(ap) &&
++	if (softreset && (!hardreset || (!(ap->flags & ATA_FLAG_NO_SRST) &&
++					 !sata_set_spd_needed(ap) &&
+ 					 !(action & ATA_EH_HARDRESET))))
+ 		ehc->i.action |= ATA_EH_SOFTRESET;
+ 	else
+@@ -1855,7 +1858,7 @@ static int ata_eh_reset(struct ata_port *ap, int classify,
+ 	rc = ata_do_reset(ap, reset, classes, deadline);
+ 
+ 	if (reset == hardreset &&
+-	    ata_eh_followup_srst_needed(rc, classify, classes)) {
++	    ata_eh_followup_srst_needed(ap, rc, classify, classes)) {
+ 		/* okay, let's do follow-up softreset */
+ 		reset = softreset;
+ 
+@@ -1870,8 +1873,8 @@ static int ata_eh_reset(struct ata_port *ap, int classify,
+ 		ata_eh_about_to_do(ap, NULL, ATA_EH_RESET_MASK);
+ 		rc = ata_do_reset(ap, reset, classes, deadline);
+ 
+-		if (rc == 0 && classify &&
+-		    classes[0] == ATA_DEV_UNKNOWN) {
++		if (rc == 0 && classify && classes[0] == ATA_DEV_UNKNOWN &&
++		    !(ap->flags & ATA_FLAG_ASSUME_ATA)) {
+ 			ata_port_printk(ap, KERN_ERR,
+ 					"classification failed\n");
+ 			rc = -EINVAL;
+@@ -1879,6 +1882,10 @@ static int ata_eh_reset(struct ata_port *ap, int classify,
+ 		}
+ 	}
+ 
++	/* if we skipped follow-up srst, clear rc */
++	if (rc == -EAGAIN)
++		rc = 0;
++
+ 	if (rc && try < ARRAY_SIZE(ata_eh_reset_timeouts)) {
+ 		unsigned long now = jiffies;
+ 
+@@ -1906,8 +1913,17 @@ static int ata_eh_reset(struct ata_port *ap, int classify,
+ 		/* After the reset, the device state is PIO 0 and the
+ 		 * controller state is undefined.  Record the mode.
+ 		 */
+-		for (i = 0; i < ATA_MAX_DEVICES; i++)
+-			ap->device[i].pio_mode = XFER_PIO_0;
++		for (i = 0; i < ata_port_max_devices(ap); i++) {
++			struct ata_device *dev = &ap->device[i];
++
++			dev->pio_mode = XFER_PIO_0;
++
++			if (ata_port_offline(ap))
++				continue;
++
++			if (ap->flags & ATA_FLAG_ASSUME_ATA)
++				classes[dev->devno] = ATA_DEV_ATA;
++		}
+ 
+ 		/* record current link speed */
+ 		if (sata_scr_read(ap, SCR_STATUS, &sstatus) == 0)
+diff --git a/drivers/char/drm/i915_irq.c b/drivers/char/drm/i915_irq.c
+index bb8e9e9..94d638e 100644
+--- a/drivers/char/drm/i915_irq.c
++++ b/drivers/char/drm/i915_irq.c
+@@ -553,7 +553,7 @@ int i915_vblank_swap(DRM_IOCTL_ARGS)
+ 		return DRM_ERR(EBUSY);
+ 	}
+ 
+-	vbl_swap = drm_calloc(1, sizeof(vbl_swap), DRM_MEM_DRIVER);
++	vbl_swap = drm_calloc(1, sizeof(*vbl_swap), DRM_MEM_DRIVER);
+ 
+ 	if (!vbl_swap) {
+ 		DRM_ERROR("Failed to allocate memory to queue swap\n");
+diff --git a/drivers/char/drm/radeon_cp.c b/drivers/char/drm/radeon_cp.c
+index af5790f..2e9fdb9 100644
+--- a/drivers/char/drm/radeon_cp.c
++++ b/drivers/char/drm/radeon_cp.c
+@@ -1679,7 +1679,7 @@ static int radeon_do_init_cp(struct drm_device * dev, drm_radeon_init_t * init)
+ 			dev_priv->gart_info.bus_addr =
+ 			    dev_priv->pcigart_offset + dev_priv->fb_location;
+ 			dev_priv->gart_info.mapping.offset =
+-			    dev_priv->gart_info.bus_addr;
++			    dev_priv->pcigart_offset + dev_priv->fb_aper_offset;
+ 			dev_priv->gart_info.mapping.size =
+ 			    dev_priv->gart_info.table_size;
+ 
+@@ -2291,7 +2291,8 @@ int radeon_driver_firstopen(struct drm_device *dev)
+ 	if (ret != 0)
+ 		return ret;
+ 
+-	ret = drm_addmap(dev, drm_get_resource_start(dev, 0),
++	dev_priv->fb_aper_offset = drm_get_resource_start(dev, 0);
++	ret = drm_addmap(dev, dev_priv->fb_aper_offset,
+ 			 drm_get_resource_len(dev, 0), _DRM_FRAME_BUFFER,
+ 			 _DRM_WRITE_COMBINING, &map);
+ 	if (ret != 0)
+diff --git a/drivers/char/drm/radeon_drv.h b/drivers/char/drm/radeon_drv.h
+index 3b3d935..41e91ea 100644
+--- a/drivers/char/drm/radeon_drv.h
++++ b/drivers/char/drm/radeon_drv.h
+@@ -293,6 +293,7 @@ typedef struct drm_radeon_private {
+ 
+ 	/* starting from here on, data is preserved accross an open */
+ 	uint32_t flags;		/* see radeon_chip_flags */
++	unsigned long fb_aper_offset;
+ } drm_radeon_private_t;
+ 
+ typedef struct drm_radeon_buf_priv {
+diff --git a/drivers/char/moxa.c b/drivers/char/moxa.c
+index ed76f0a..5000b3b 100644
+--- a/drivers/char/moxa.c
++++ b/drivers/char/moxa.c
+@@ -1040,14 +1040,14 @@ static void check_xmit_empty(unsigned long data)
+ 	struct moxa_port *ch;
+ 
+ 	ch = (struct moxa_port *) data;
+-	del_timer_sync(&moxa_ports[ch->port].emptyTimer);
+ 	if (ch->tty && (ch->statusflags & EMPTYWAIT)) {
+ 		if (MoxaPortTxQueue(ch->port) == 0) {
+ 			ch->statusflags &= ~EMPTYWAIT;
+ 			tty_wakeup(ch->tty);
+ 			return;
+ 		}
+-		mod_timer(&moxa_ports[ch->port].emptyTimer, jiffies + HZ);
++		mod_timer(&moxa_ports[ch->port].emptyTimer,
++				round_jiffies(jiffies + HZ));
+ 	} else
+ 		ch->statusflags &= ~EMPTYWAIT;
+ }
+diff --git a/drivers/char/rocket.c b/drivers/char/rocket.c
+index 56cbba7..94bb3d0 100644
+--- a/drivers/char/rocket.c
++++ b/drivers/char/rocket.c
+@@ -699,8 +699,8 @@ static void init_r_port(int board, int aiop, int chan, struct pci_dev *pci_dev)
+ 	spin_lock_init(&info->slock);
+ 	mutex_init(&info->write_mtx);
+ 	rp_table[line] = info;
+-	if (pci_dev)
+-		tty_register_device(rocket_driver, line, &pci_dev->dev);
++	tty_register_device(rocket_driver, line, pci_dev ? &pci_dev->dev :
++			NULL);
+ }
+ 
+ /*
+@@ -2434,7 +2434,7 @@ static int __init rp_init(void)
+ 	rocket_driver->init_termios.c_ispeed = 9600;
+ 	rocket_driver->init_termios.c_ospeed = 9600;
+ #ifdef ROCKET_SOFT_FLOW
+-	rocket_driver->flags |= TTY_DRIVER_REAL_RAW | TTY_DRIVER_DYNAMIC_DEV;
++	rocket_driver->flags |= TTY_DRIVER_REAL_RAW;
+ #endif
+ 	tty_set_operations(rocket_driver, &rocket_ops);
+ 
+@@ -2491,10 +2491,14 @@ static void rp_cleanup_module(void)
+ 	if (retval)
+ 		printk(KERN_INFO "Error %d while trying to unregister "
+ 		       "rocketport driver\n", -retval);
+-	put_tty_driver(rocket_driver);
+ 
+ 	for (i = 0; i < MAX_RP_PORTS; i++)
+-		kfree(rp_table[i]);
++		if (rp_table[i]) {
++			tty_unregister_device(rocket_driver, i);
++			kfree(rp_table[i]);
++		}
++
++	put_tty_driver(rocket_driver);
+ 
+ 	for (i = 0; i < NUM_BOARDS; i++) {
+ 		if (rcktpt_io_addr[i] <= 0 || is_PCI[i])
+diff --git a/drivers/hwmon/lm87.c b/drivers/hwmon/lm87.c
+index 988ae1c..1128153 100644
+--- a/drivers/hwmon/lm87.c
++++ b/drivers/hwmon/lm87.c
+@@ -129,7 +129,7 @@ static u8 LM87_REG_TEMP_LOW[3] = { 0x3A, 0x38, 0x2C };
+ 				 (((val) < 0 ? (val)-500 : (val)+500) / 1000))
+ 
+ #define FAN_FROM_REG(reg,div)	((reg) == 255 || (reg) == 0 ? 0 : \
+-				 1350000 + (reg)*(div) / 2) / ((reg)*(div))
++				 (1350000 + (reg)*(div) / 2) / ((reg)*(div)))
+ #define FAN_TO_REG(val,div)	((val)*(div) * 255 <= 1350000 ? 255 : \
+ 				 (1350000 + (val)*(div) / 2) / ((val)*(div)))
+ 
+@@ -145,7 +145,7 @@ static u8 LM87_REG_TEMP_LOW[3] = { 0x3A, 0x38, 0x2C };
+ #define CHAN_NO_FAN(nr)		(1 << (nr))
+ #define CHAN_TEMP3		(1 << 2)
+ #define CHAN_VCC_5V		(1 << 3)
+-#define CHAN_NO_VID		(1 << 8)
++#define CHAN_NO_VID		(1 << 7)
+ 
+ /*
+  * Functions declaration
+diff --git a/drivers/hwmon/w83627hf.c b/drivers/hwmon/w83627hf.c
+index 7a4a15f..329b599 100644
+--- a/drivers/hwmon/w83627hf.c
++++ b/drivers/hwmon/w83627hf.c
+@@ -391,6 +391,7 @@ static int __devexit w83627hf_remove(struct platform_device *pdev);
+ 
+ static int w83627hf_read_value(struct w83627hf_data *data, u16 reg);
+ static int w83627hf_write_value(struct w83627hf_data *data, u16 reg, u16 value);
++static void w83627hf_update_fan_div(struct w83627hf_data *data);
+ static struct w83627hf_data *w83627hf_update_device(struct device *dev);
+ static void w83627hf_init_device(struct platform_device *pdev);
+ 
+@@ -1244,6 +1245,7 @@ static int __devinit w83627hf_probe(struct platform_device *pdev)
+ 	data->fan_min[0] = w83627hf_read_value(data, W83781D_REG_FAN_MIN(1));
+ 	data->fan_min[1] = w83627hf_read_value(data, W83781D_REG_FAN_MIN(2));
+ 	data->fan_min[2] = w83627hf_read_value(data, W83781D_REG_FAN_MIN(3));
++	w83627hf_update_fan_div(data);
+ 
+ 	/* Register common device attributes */
+ 	if ((err = sysfs_create_group(&dev->kobj, &w83627hf_group)))
+@@ -1333,6 +1335,24 @@ static int __devexit w83627hf_remove(struct platform_device *pdev)
+ }
+ 
+ 
++/* Registers 0x50-0x5f are banked */
++static inline void w83627hf_set_bank(struct w83627hf_data *data, u16 reg)
++{
++	if ((reg & 0x00f0) == 0x50) {
++		outb_p(W83781D_REG_BANK, data->addr + W83781D_ADDR_REG_OFFSET);
++		outb_p(reg >> 8, data->addr + W83781D_DATA_REG_OFFSET);
++	}
++}
++
++/* Not strictly necessary, but play it safe for now */
++static inline void w83627hf_reset_bank(struct w83627hf_data *data, u16 reg)
++{
++	if (reg & 0xff00) {
++		outb_p(W83781D_REG_BANK, data->addr + W83781D_ADDR_REG_OFFSET);
++		outb_p(0, data->addr + W83781D_DATA_REG_OFFSET);
++	}
++}
++
+ static int w83627hf_read_value(struct w83627hf_data *data, u16 reg)
+ {
+ 	int res, word_sized;
+@@ -1343,12 +1363,7 @@ static int w83627hf_read_value(struct w83627hf_data *data, u16 reg)
+ 		  && (((reg & 0x00ff) == 0x50)
+ 		   || ((reg & 0x00ff) == 0x53)
+ 		   || ((reg & 0x00ff) == 0x55));
+-	if (reg & 0xff00) {
+-		outb_p(W83781D_REG_BANK,
+-		       data->addr + W83781D_ADDR_REG_OFFSET);
+-		outb_p(reg >> 8,
+-		       data->addr + W83781D_DATA_REG_OFFSET);
+-	}
++	w83627hf_set_bank(data, reg);
+ 	outb_p(reg & 0xff, data->addr + W83781D_ADDR_REG_OFFSET);
+ 	res = inb_p(data->addr + W83781D_DATA_REG_OFFSET);
+ 	if (word_sized) {
+@@ -1358,11 +1373,7 @@ static int w83627hf_read_value(struct w83627hf_data *data, u16 reg)
+ 		    (res << 8) + inb_p(data->addr +
+ 				       W83781D_DATA_REG_OFFSET);
+ 	}
+-	if (reg & 0xff00) {
+-		outb_p(W83781D_REG_BANK,
+-		       data->addr + W83781D_ADDR_REG_OFFSET);
+-		outb_p(0, data->addr + W83781D_DATA_REG_OFFSET);
+-	}
++	w83627hf_reset_bank(data, reg);
+ 	mutex_unlock(&data->lock);
+ 	return res;
+ }
+@@ -1433,12 +1444,7 @@ static int w83627hf_write_value(struct w83627hf_data *data, u16 reg, u16 value)
+ 		   || ((reg & 0xff00) == 0x200))
+ 		  && (((reg & 0x00ff) == 0x53)
+ 		   || ((reg & 0x00ff) == 0x55));
+-	if (reg & 0xff00) {
+-		outb_p(W83781D_REG_BANK,
+-		       data->addr + W83781D_ADDR_REG_OFFSET);
+-		outb_p(reg >> 8,
+-		       data->addr + W83781D_DATA_REG_OFFSET);
+-	}
++	w83627hf_set_bank(data, reg);
+ 	outb_p(reg & 0xff, data->addr + W83781D_ADDR_REG_OFFSET);
+ 	if (word_sized) {
+ 		outb_p(value >> 8,
+@@ -1448,11 +1454,7 @@ static int w83627hf_write_value(struct w83627hf_data *data, u16 reg, u16 value)
+ 	}
+ 	outb_p(value & 0xff,
+ 	       data->addr + W83781D_DATA_REG_OFFSET);
+-	if (reg & 0xff00) {
+-		outb_p(W83781D_REG_BANK,
+-		       data->addr + W83781D_ADDR_REG_OFFSET);
+-		outb_p(0, data->addr + W83781D_DATA_REG_OFFSET);
+-	}
++	w83627hf_reset_bank(data, reg);
+ 	mutex_unlock(&data->lock);
+ 	return 0;
+ }
+@@ -1556,6 +1558,24 @@ static void __devinit w83627hf_init_device(struct platform_device *pdev)
+ 			    | 0x01);
+ }
+ 
++static void w83627hf_update_fan_div(struct w83627hf_data *data)
++{
++	int reg;
++
++	reg = w83627hf_read_value(data, W83781D_REG_VID_FANDIV);
++	data->fan_div[0] = (reg >> 4) & 0x03;
++	data->fan_div[1] = (reg >> 6) & 0x03;
++	if (data->type != w83697hf) {
++		data->fan_div[2] = (w83627hf_read_value(data,
++				       W83781D_REG_PIN) >> 6) & 0x03;
++	}
++	reg = w83627hf_read_value(data, W83781D_REG_VBAT);
++	data->fan_div[0] |= (reg >> 3) & 0x04;
++	data->fan_div[1] |= (reg >> 4) & 0x04;
++	if (data->type != w83697hf)
++		data->fan_div[2] |= (reg >> 5) & 0x04;
++}
++
+ static struct w83627hf_data *w83627hf_update_device(struct device *dev)
+ {
+ 	struct w83627hf_data *data = dev_get_drvdata(dev);
+@@ -1633,18 +1653,8 @@ static struct w83627hf_data *w83627hf_update_device(struct device *dev)
+ 			  w83627hf_read_value(data, W83781D_REG_TEMP_HYST(3));
+ 		}
+ 
+-		i = w83627hf_read_value(data, W83781D_REG_VID_FANDIV);
+-		data->fan_div[0] = (i >> 4) & 0x03;
+-		data->fan_div[1] = (i >> 6) & 0x03;
+-		if (data->type != w83697hf) {
+-			data->fan_div[2] = (w83627hf_read_value(data,
+-					       W83781D_REG_PIN) >> 6) & 0x03;
+-		}
+-		i = w83627hf_read_value(data, W83781D_REG_VBAT);
+-		data->fan_div[0] |= (i >> 3) & 0x04;
+-		data->fan_div[1] |= (i >> 4) & 0x04;
+-		if (data->type != w83697hf)
+-			data->fan_div[2] |= (i >> 5) & 0x04;
++		w83627hf_update_fan_div(data);
++
+ 		data->alarms =
+ 		    w83627hf_read_value(data, W83781D_REG_ALARM1) |
+ 		    (w83627hf_read_value(data, W83781D_REG_ALARM2) << 8) |
+diff --git a/drivers/ide/pci/cs5535.c b/drivers/ide/pci/cs5535.c
+index 082ca7d..6102aa9 100644
+--- a/drivers/ide/pci/cs5535.c
++++ b/drivers/ide/pci/cs5535.c
+@@ -84,7 +84,7 @@ static void cs5535_set_speed(ide_drive_t *drive, u8 speed)
+ 
+ 	/* Set the PIO timings */
+ 	if ((speed & XFER_MODE) == XFER_PIO) {
+-		ide_drive_t *pair = &drive->hwif->drives[drive->dn ^ 1];
++		ide_drive_t *pair = ide_get_paired_drive(drive);
+ 		u8 cmd, pioa;
+ 
+ 		cmd = pioa = speed - XFER_PIO_0;
+diff --git a/drivers/ide/pci/serverworks.c b/drivers/ide/pci/serverworks.c
+index 9fead2e..e887058 100644
+--- a/drivers/ide/pci/serverworks.c
++++ b/drivers/ide/pci/serverworks.c
+@@ -97,6 +97,7 @@ static u8 svwks_udma_filter(ide_drive_t *drive)
+ 			mode = 2;
+ 
+ 		switch(mode) {
++		case 3:	 mask = 0x3f; break;
+ 		case 2:	 mask = 0x1f; break;
+ 		case 1:	 mask = 0x07; break;
+ 		default: mask = 0x00; break;
+diff --git a/drivers/ide/pci/siimage.c b/drivers/ide/pci/siimage.c
+index 50f6d17..713064d 100644
+--- a/drivers/ide/pci/siimage.c
++++ b/drivers/ide/pci/siimage.c
+@@ -180,7 +180,7 @@ static void sil_tune_pio(ide_drive_t *drive, u8 pio)
+ 	const u16 data_speed[]	= { 0x328a, 0x2283, 0x1104, 0x10c3, 0x10c1 };
+ 
+ 	ide_hwif_t *hwif	= HWIF(drive);
+-	ide_drive_t *pair	= &hwif->drives[drive->dn ^ 1];
++	ide_drive_t *pair	= ide_get_paired_drive(drive);
+ 	u32 speedt		= 0;
+ 	u16 speedp		= 0;
+ 	unsigned long addr	= siimage_seldev(drive, 0x04);
+diff --git a/drivers/infiniband/core/uverbs_cmd.c b/drivers/infiniband/core/uverbs_cmd.c
+index 01d7008..495c803 100644
+--- a/drivers/infiniband/core/uverbs_cmd.c
++++ b/drivers/infiniband/core/uverbs_cmd.c
+@@ -147,8 +147,12 @@ static struct ib_uobject *__idr_get_uobj(struct idr *idr, int id,
+ 
+ 	spin_lock(&ib_uverbs_idr_lock);
+ 	uobj = idr_find(idr, id);
+-	if (uobj)
+-		kref_get(&uobj->ref);
++	if (uobj) {
++		if (uobj->context == context)
++			kref_get(&uobj->ref);
++		else
++			uobj = NULL;
++	}
+ 	spin_unlock(&ib_uverbs_idr_lock);
+ 
+ 	return uobj;
+diff --git a/drivers/infiniband/hw/mthca/mthca_cmd.c b/drivers/infiniband/hw/mthca/mthca_cmd.c
+index acc9589..6966f94 100644
+--- a/drivers/infiniband/hw/mthca/mthca_cmd.c
++++ b/drivers/infiniband/hw/mthca/mthca_cmd.c
+@@ -290,6 +290,12 @@ static int mthca_cmd_post(struct mthca_dev *dev,
+ 		err = mthca_cmd_post_hcr(dev, in_param, out_param, in_modifier,
+ 					 op_modifier, op, token, event);
+ 
++	/*
++	 * Make sure that our HCR writes don't get mixed in with
++	 * writes from another CPU starting a FW command.
++	 */
++	mmiowb();
++
+ 	mutex_unlock(&dev->cmd.hcr_mutex);
+ 	return err;
+ }
+diff --git a/drivers/isdn/hardware/avm/b1.c b/drivers/isdn/hardware/avm/b1.c
+index 7a69a18..4484a64 100644
+--- a/drivers/isdn/hardware/avm/b1.c
++++ b/drivers/isdn/hardware/avm/b1.c
+@@ -321,12 +321,15 @@ void b1_reset_ctr(struct capi_ctr *ctrl)
+ 	avmctrl_info *cinfo = (avmctrl_info *)(ctrl->driverdata);
+ 	avmcard *card = cinfo->card;
+ 	unsigned int port = card->port;
++	unsigned long flags;
+ 
+ 	b1_reset(port);
+ 	b1_reset(port);
+ 
+ 	memset(cinfo->version, 0, sizeof(cinfo->version));
++	spin_lock_irqsave(&card->lock, flags);
+ 	capilib_release(&cinfo->ncci_head);
++	spin_unlock_irqrestore(&card->lock, flags);
+ 	capi_ctr_reseted(ctrl);
+ }
+ 
+@@ -361,9 +364,8 @@ void b1_release_appl(struct capi_ctr *ctrl, u16 appl)
+ 	unsigned int port = card->port;
+ 	unsigned long flags;
+ 
+-	capilib_release_appl(&cinfo->ncci_head, appl);
+-
+ 	spin_lock_irqsave(&card->lock, flags);
++	capilib_release_appl(&cinfo->ncci_head, appl);
+ 	b1_put_byte(port, SEND_RELEASE);
+ 	b1_put_word(port, appl);
+ 	spin_unlock_irqrestore(&card->lock, flags);
+@@ -380,27 +382,27 @@ u16 b1_send_message(struct capi_ctr *ctrl, struct sk_buff *skb)
+ 	u8 subcmd = CAPIMSG_SUBCOMMAND(skb->data);
+ 	u16 dlen, retval;
+ 
++	spin_lock_irqsave(&card->lock, flags);
+ 	if (CAPICMD(cmd, subcmd) == CAPI_DATA_B3_REQ) {
+ 		retval = capilib_data_b3_req(&cinfo->ncci_head,
+ 					     CAPIMSG_APPID(skb->data),
+ 					     CAPIMSG_NCCI(skb->data),
+ 					     CAPIMSG_MSGID(skb->data));
+-		if (retval != CAPI_NOERROR) 
++		if (retval != CAPI_NOERROR) {
++			spin_unlock_irqrestore(&card->lock, flags);
+ 			return retval;
++		}
+ 
+ 		dlen = CAPIMSG_DATALEN(skb->data);
+ 
+-	 	spin_lock_irqsave(&card->lock, flags);
+ 		b1_put_byte(port, SEND_DATA_B3_REQ);
+ 		b1_put_slice(port, skb->data, len);
+ 		b1_put_slice(port, skb->data + len, dlen);
+-		spin_unlock_irqrestore(&card->lock, flags);
+ 	} else {
+-	 	spin_lock_irqsave(&card->lock, flags);
+ 		b1_put_byte(port, SEND_MESSAGE);
+ 		b1_put_slice(port, skb->data, len);
+-		spin_unlock_irqrestore(&card->lock, flags);
+ 	}
++	spin_unlock_irqrestore(&card->lock, flags);
+ 
+ 	dev_kfree_skb_any(skb);
+ 	return CAPI_NOERROR;
+@@ -534,17 +536,17 @@ irqreturn_t b1_interrupt(int interrupt, void *devptr)
+ 
+ 		ApplId = (unsigned) b1_get_word(card->port);
+ 		MsgLen = b1_get_slice(card->port, card->msgbuf);
+-		spin_unlock_irqrestore(&card->lock, flags);
+ 		if (!(skb = alloc_skb(MsgLen, GFP_ATOMIC))) {
+ 			printk(KERN_ERR "%s: incoming packet dropped\n",
+ 					card->name);
++			spin_unlock_irqrestore(&card->lock, flags);
+ 		} else {
+ 			memcpy(skb_put(skb, MsgLen), card->msgbuf, MsgLen);
+ 			if (CAPIMSG_CMD(skb->data) == CAPI_DATA_B3_CONF)
+ 				capilib_data_b3_conf(&cinfo->ncci_head, ApplId,
+ 						     CAPIMSG_NCCI(skb->data),
+ 						     CAPIMSG_MSGID(skb->data));
+-
++			spin_unlock_irqrestore(&card->lock, flags);
+ 			capi_ctr_handle_message(ctrl, ApplId, skb);
+ 		}
+ 		break;
+@@ -554,21 +556,17 @@ irqreturn_t b1_interrupt(int interrupt, void *devptr)
+ 		ApplId = b1_get_word(card->port);
+ 		NCCI = b1_get_word(card->port);
+ 		WindowSize = b1_get_word(card->port);
+-		spin_unlock_irqrestore(&card->lock, flags);
+-
+ 		capilib_new_ncci(&cinfo->ncci_head, ApplId, NCCI, WindowSize);
+-
++		spin_unlock_irqrestore(&card->lock, flags);
+ 		break;
+ 
+ 	case RECEIVE_FREE_NCCI:
+ 
+ 		ApplId = b1_get_word(card->port);
+ 		NCCI = b1_get_word(card->port);
+-		spin_unlock_irqrestore(&card->lock, flags);
+-
+ 		if (NCCI != 0xffffffff)
+ 			capilib_free_ncci(&cinfo->ncci_head, ApplId, NCCI);
+-	       
++		spin_unlock_irqrestore(&card->lock, flags);
+ 		break;
+ 
+ 	case RECEIVE_START:
+diff --git a/drivers/isdn/hardware/avm/c4.c b/drivers/isdn/hardware/avm/c4.c
+index d58f927..8710cf6 100644
+--- a/drivers/isdn/hardware/avm/c4.c
++++ b/drivers/isdn/hardware/avm/c4.c
+@@ -727,6 +727,7 @@ static void c4_send_init(avmcard *card)
+ {
+ 	struct sk_buff *skb;
+ 	void *p;
++	unsigned long flags;
+ 
+ 	skb = alloc_skb(15, GFP_ATOMIC);
+ 	if (!skb) {
+@@ -744,12 +745,15 @@ static void c4_send_init(avmcard *card)
+ 	skb_put(skb, (u8 *)p - (u8 *)skb->data);
+ 
+ 	skb_queue_tail(&card->dma->send_queue, skb);
++	spin_lock_irqsave(&card->lock, flags);
+ 	c4_dispatch_tx(card);
++	spin_unlock_irqrestore(&card->lock, flags);
+ }
+ 
+ static int queue_sendconfigword(avmcard *card, u32 val)
+ {
+ 	struct sk_buff *skb;
++	unsigned long flags;
+ 	void *p;
+ 
+ 	skb = alloc_skb(3+4, GFP_ATOMIC);
+@@ -766,7 +770,9 @@ static int queue_sendconfigword(avmcard *card, u32 val)
+ 	skb_put(skb, (u8 *)p - (u8 *)skb->data);
+ 
+ 	skb_queue_tail(&card->dma->send_queue, skb);
++	spin_lock_irqsave(&card->lock, flags);
+ 	c4_dispatch_tx(card);
++	spin_unlock_irqrestore(&card->lock, flags);
+ 	return 0;
+ }
+ 
+@@ -986,7 +992,9 @@ static void c4_release_appl(struct capi_ctr *ctrl, u16 appl)
+ 	struct sk_buff *skb;
+ 	void *p;
+ 
++	spin_lock_irqsave(&card->lock, flags);
+ 	capilib_release_appl(&cinfo->ncci_head, appl);
++	spin_unlock_irqrestore(&card->lock, flags);
+ 
+ 	if (ctrl->cnr == card->cardnr) {
+ 		skb = alloc_skb(7, GFP_ATOMIC);
+@@ -1019,7 +1027,8 @@ static u16 c4_send_message(struct capi_ctr *ctrl, struct sk_buff *skb)
+ 	u16 retval = CAPI_NOERROR;
+ 	unsigned long flags;
+ 
+- 	if (CAPIMSG_CMD(skb->data) == CAPI_DATA_B3_REQ) {
++	spin_lock_irqsave(&card->lock, flags);
++	if (CAPIMSG_CMD(skb->data) == CAPI_DATA_B3_REQ) {
+ 		retval = capilib_data_b3_req(&cinfo->ncci_head,
+ 					     CAPIMSG_APPID(skb->data),
+ 					     CAPIMSG_NCCI(skb->data),
+@@ -1027,10 +1036,9 @@ static u16 c4_send_message(struct capi_ctr *ctrl, struct sk_buff *skb)
+ 	}
+ 	if (retval == CAPI_NOERROR) {
+ 		skb_queue_tail(&card->dma->send_queue, skb);
+-		spin_lock_irqsave(&card->lock, flags);
+ 		c4_dispatch_tx(card);
+-		spin_unlock_irqrestore(&card->lock, flags);
+ 	}
++	spin_unlock_irqrestore(&card->lock, flags);
+ 	return retval;
+ }
+ 
+diff --git a/drivers/md/bitmap.c b/drivers/md/bitmap.c
+index 927cb34..7c426d0 100644
+--- a/drivers/md/bitmap.c
++++ b/drivers/md/bitmap.c
+@@ -274,7 +274,7 @@ static int write_sb_page(struct bitmap *bitmap, struct page *page, int wait)
+ 			if (bitmap->offset < 0) {
+ 				/* DATA  BITMAP METADATA  */
+ 				if (bitmap->offset
+-				    + page->index * (PAGE_SIZE/512)
++				    + (long)(page->index * (PAGE_SIZE/512))
+ 				    + size/512 > 0)
+ 					/* bitmap runs in to metadata */
+ 					return -EINVAL;
+diff --git a/drivers/md/dm-delay.c b/drivers/md/dm-delay.c
+index 6928c13..9538331 100644
+--- a/drivers/md/dm-delay.c
++++ b/drivers/md/dm-delay.c
+@@ -305,7 +305,7 @@ static int delay_status(struct dm_target *ti, status_type_t type,
+ 		       (unsigned long long) dc->start_read,
+ 		       dc->read_delay);
+ 		if (dc->dev_write)
+-			DMEMIT("%s %llu %u", dc->dev_write->name,
++			DMEMIT(" %s %llu %u", dc->dev_write->name,
+ 			       (unsigned long long) dc->start_write,
+ 			       dc->write_delay);
+ 		break;
+diff --git a/drivers/md/dm.c b/drivers/md/dm.c
+index 2120155..998d450 100644
+--- a/drivers/md/dm.c
++++ b/drivers/md/dm.c
+@@ -1064,12 +1064,14 @@ static struct mapped_device *alloc_dev(int minor)
+ 	return NULL;
+ }
+ 
++static void unlock_fs(struct mapped_device *md);
++
+ static void free_dev(struct mapped_device *md)
+ {
+ 	int minor = md->disk->first_minor;
+ 
+ 	if (md->suspended_bdev) {
+-		thaw_bdev(md->suspended_bdev, NULL);
++		unlock_fs(md);
+ 		bdput(md->suspended_bdev);
+ 	}
+ 	mempool_destroy(md->tio_pool);
+diff --git a/drivers/md/raid5.c b/drivers/md/raid5.c
+index f96dea9..3808f52 100644
+--- a/drivers/md/raid5.c
++++ b/drivers/md/raid5.c
+@@ -377,7 +377,12 @@ static unsigned long get_stripe_work(struct stripe_head *sh)
+ 		ack++;
+ 
+ 	sh->ops.count -= ack;
+-	BUG_ON(sh->ops.count < 0);
++	if (unlikely(sh->ops.count < 0)) {
++		printk(KERN_ERR "pending: %#lx ops.pending: %#lx ops.ack: %#lx "
++			"ops.complete: %#lx\n", pending, sh->ops.pending,
++			sh->ops.ack, sh->ops.complete);
++		BUG();
++	}
+ 
+ 	return pending;
+ }
+@@ -551,8 +556,7 @@ static void ops_complete_biofill(void *stripe_head_ref)
+ 			}
+ 		}
+ 	}
+-	clear_bit(STRIPE_OP_BIOFILL, &sh->ops.ack);
+-	clear_bit(STRIPE_OP_BIOFILL, &sh->ops.pending);
++	set_bit(STRIPE_OP_BIOFILL, &sh->ops.complete);
+ 
+ 	return_io(return_bi);
+ 
+@@ -2630,6 +2634,13 @@ static void handle_stripe5(struct stripe_head *sh)
+ 	s.expanded = test_bit(STRIPE_EXPAND_READY, &sh->state);
+ 	/* Now to look around and see what can be done */
+ 
++	/* clean-up completed biofill operations */
++	if (test_bit(STRIPE_OP_BIOFILL, &sh->ops.complete)) {
++		clear_bit(STRIPE_OP_BIOFILL, &sh->ops.pending);
++		clear_bit(STRIPE_OP_BIOFILL, &sh->ops.ack);
++		clear_bit(STRIPE_OP_BIOFILL, &sh->ops.complete);
++	}
++
+ 	rcu_read_lock();
+ 	for (i=disks; i--; ) {
+ 		mdk_rdev_t *rdev;
+diff --git a/drivers/pci/msi.c b/drivers/pci/msi.c
+index be1df85..87e0161 100644
+--- a/drivers/pci/msi.c
++++ b/drivers/pci/msi.c
+@@ -132,7 +132,7 @@ void read_msi_msg(unsigned int irq, struct msi_msg *msg)
+ 			pci_read_config_word(dev, msi_data_reg(pos, 1), &data);
+ 		} else {
+ 			msg->address_hi = 0;
+-			pci_read_config_word(dev, msi_data_reg(pos, 1), &data);
++			pci_read_config_word(dev, msi_data_reg(pos, 0), &data);
+ 		}
+ 		msg->data = data;
+ 		break;
+diff --git a/drivers/scsi/hptiop.c b/drivers/scsi/hptiop.c
+index 0e579ca..ffdd0da 100644
+--- a/drivers/scsi/hptiop.c
++++ b/drivers/scsi/hptiop.c
+@@ -365,8 +365,9 @@ static void hptiop_host_request_callback(struct hptiop_hba *hba, u32 tag)
+ 		scp->result = SAM_STAT_CHECK_CONDITION;
+ 		memset(&scp->sense_buffer,
+ 				0, sizeof(scp->sense_buffer));
+-		memcpy(&scp->sense_buffer,
+-			&req->sg_list, le32_to_cpu(req->dataxfer_length));
++		memcpy(&scp->sense_buffer, &req->sg_list,
++				min(sizeof(scp->sense_buffer),
++					le32_to_cpu(req->dataxfer_length)));
+ 		break;
+ 
+ 	default:
+diff --git a/drivers/usb/core/hcd.h b/drivers/usb/core/hcd.h
+index b5ebb73..6e2382e 100644
+--- a/drivers/usb/core/hcd.h
++++ b/drivers/usb/core/hcd.h
+@@ -19,6 +19,8 @@
+ 
+ #ifdef __KERNEL__
+ 
++#include <linux/rwsem.h>
++
+ /* This file contains declarations of usbcore internals that are mostly
+  * used or exposed by Host Controller Drivers.
+  */
+@@ -454,5 +456,9 @@ static inline void usbmon_urb_complete(struct usb_bus *bus, struct urb *urb) {}
+ 		: (in_interrupt () ? "in_interrupt" : "can sleep"))
+ 
+ 
+-#endif /* __KERNEL__ */
++/* This rwsem is for use only by the hub driver and ehci-hcd.
++ * Nobody else should touch it.
++ */
++extern struct rw_semaphore ehci_cf_port_reset_rwsem;
+ 
++#endif /* __KERNEL__ */
+diff --git a/drivers/usb/core/hub.c b/drivers/usb/core/hub.c
+index f7b337f..c3adffa 100644
+--- a/drivers/usb/core/hub.c
++++ b/drivers/usb/core/hub.c
+@@ -125,6 +125,12 @@ MODULE_PARM_DESC(use_both_schemes,
+ 		"try the other device initialization scheme if the "
+ 		"first one fails");
+ 
++/* Mutual exclusion for EHCI CF initialization.  This interferes with
++ * port reset on some companion controllers.
++ */
++DECLARE_RWSEM(ehci_cf_port_reset_rwsem);
++EXPORT_SYMBOL_GPL(ehci_cf_port_reset_rwsem);
++
+ 
+ static inline char *portspeed(int portstatus)
+ {
+@@ -1460,6 +1466,11 @@ static int hub_port_reset(struct usb_hub *hub, int port1,
+ {
+ 	int i, status;
+ 
++	/* Block EHCI CF initialization during the port reset.
++	 * Some companion controllers don't like it when they mix.
++	 */
++	down_read(&ehci_cf_port_reset_rwsem);
++
+ 	/* Reset the port */
+ 	for (i = 0; i < PORT_RESET_TRIES; i++) {
+ 		status = set_port_feature(hub->hdev,
+@@ -1490,7 +1501,7 @@ static int hub_port_reset(struct usb_hub *hub, int port1,
+ 			usb_set_device_state(udev, status
+ 					? USB_STATE_NOTATTACHED
+ 					: USB_STATE_DEFAULT);
+-			return status;
++			goto done;
+ 		}
+ 
+ 		dev_dbg (hub->intfdev,
+@@ -1503,6 +1514,8 @@ static int hub_port_reset(struct usb_hub *hub, int port1,
+ 		"Cannot enable port %i.  Maybe the USB cable is bad?\n",
+ 		port1);
+ 
++ done:
++	up_read(&ehci_cf_port_reset_rwsem);
+ 	return status;
+ }
+ 
+diff --git a/drivers/usb/core/quirks.c b/drivers/usb/core/quirks.c
+index ebf3dc2..d42c561 100644
+--- a/drivers/usb/core/quirks.c
++++ b/drivers/usb/core/quirks.c
+@@ -32,52 +32,6 @@ static const struct usb_device_id usb_quirk_list[] = {
+ 	{ USB_DEVICE(0x0204, 0x6025), .driver_info = USB_QUIRK_RESET_RESUME },
+ 	/* HP 5300/5370C scanner */
+ 	{ USB_DEVICE(0x03f0, 0x0701), .driver_info = USB_QUIRK_STRING_FETCH_255 },
+-	/* Hewlett-Packard PhotoSmart 720 / PhotoSmart 935 (storage) */
+-	{ USB_DEVICE(0x03f0, 0x4002), .driver_info = USB_QUIRK_NO_AUTOSUSPEND },
+-
+-	/* SGS Thomson Microelectronics 4in1 card reader */
+-	{ USB_DEVICE(0x0483, 0x0321), .driver_info = USB_QUIRK_NO_AUTOSUSPEND },
+-
+-	/* Acer Peripherals Inc. (now BenQ Corp.) Prisa 640BU */
+-	{ USB_DEVICE(0x04a5, 0x207e), .driver_info = USB_QUIRK_NO_AUTOSUSPEND },
+-	/* Benq S2W 3300U */
+-	{ USB_DEVICE(0x04a5, 0x20b0), .driver_info = USB_QUIRK_NO_AUTOSUSPEND },
+-	/* Canon, Inc. CanoScan N1240U/LiDE30 */
+-	{ USB_DEVICE(0x04a9, 0x220e), .driver_info = USB_QUIRK_NO_AUTOSUSPEND },
+-	/* Canon, Inc. CanoScan N650U/N656U */
+-	{ USB_DEVICE(0x04a9, 0x2206), .driver_info = USB_QUIRK_NO_AUTOSUSPEND },
+-	/* Canon, Inc. CanoScan 1220U */
+-	{ USB_DEVICE(0x04a9, 0x2207), .driver_info = USB_QUIRK_NO_AUTOSUSPEND },
+-	/* Canon, Inc. CanoScan N670U/N676U/LiDE 20 */
+-	{ USB_DEVICE(0x04a9, 0x220d), .driver_info = USB_QUIRK_NO_AUTOSUSPEND },
+-	/* old Cannon scanner */
+-	{ USB_DEVICE(0x04a9, 0x2220), .driver_info = USB_QUIRK_NO_AUTOSUSPEND },
+-	/* Seiko Epson Corp. Perfection 1200 */
+-	{ USB_DEVICE(0x04b8, 0x0104), .driver_info = USB_QUIRK_NO_AUTOSUSPEND },
+-	/* Seiko Epson Corp. Perfection 660 */
+-	{ USB_DEVICE(0x04b8, 0x0114), .driver_info = USB_QUIRK_NO_AUTOSUSPEND },
+-	/* Epson Perfection 1260 Photo */
+-	{ USB_DEVICE(0x04b8, 0x011d), .driver_info = USB_QUIRK_NO_AUTOSUSPEND },
+-	/* Seiko Epson Corp - Perfection 1670 */
+-	{ USB_DEVICE(0x04b8, 0x011f), .driver_info = USB_QUIRK_NO_AUTOSUSPEND },
+-	/* EPSON Perfection 2480 */
+-	{ USB_DEVICE(0x04b8, 0x0121), .driver_info = USB_QUIRK_NO_AUTOSUSPEND },
+-	/* Seiko Epson Corp.*/
+-	{ USB_DEVICE(0x04b8, 0x0122), .driver_info = USB_QUIRK_NO_AUTOSUSPEND },
+-	/* Samsung ML-2010 printer */
+-	{ USB_DEVICE(0x04e8, 0x326c), .driver_info = USB_QUIRK_NO_AUTOSUSPEND },
+-	/* Samsung ML-2510 Series printer */
+-	{ USB_DEVICE(0x04e8, 0x327e), .driver_info = USB_QUIRK_NO_AUTOSUSPEND },
+-	/* Elsa MicroLink 56k (V.250) */
+-	{ USB_DEVICE(0x05cc, 0x2267), .driver_info = USB_QUIRK_NO_AUTOSUSPEND },
+-	/* Ultima Electronics Corp.*/
+-	{ USB_DEVICE(0x05d8, 0x4005), .driver_info = USB_QUIRK_NO_AUTOSUSPEND },
+-
+-	/* Genesys USB-to-IDE */
+-	{ USB_DEVICE(0x0503, 0x0702), .driver_info = USB_QUIRK_NO_AUTOSUSPEND },
+-
+-	/* USB Graphical LCD - EEH Datalink GmbH */
+-	{ USB_DEVICE(0x060c, 0x04eb), .driver_info = USB_QUIRK_NO_AUTOSUSPEND },
+ 
+ 	/* INTEL VALUE SSD */
+ 	{ USB_DEVICE(0x8086, 0xf1a5), .driver_info = USB_QUIRK_RESET_RESUME },
+@@ -85,44 +39,15 @@ static const struct usb_device_id usb_quirk_list[] = {
+ 	/* M-Systems Flash Disk Pioneers */
+ 	{ USB_DEVICE(0x08ec, 0x1000), .driver_info = USB_QUIRK_RESET_RESUME },
+ 
+-	/* Agfa Snapscan1212u */
+-	{ USB_DEVICE(0x06bd, 0x2061), .driver_info = USB_QUIRK_NO_AUTOSUSPEND },
+-	/* Seagate RSS LLC */
+-	{ USB_DEVICE(0x0bc2, 0x3000), .driver_info = USB_QUIRK_NO_AUTOSUSPEND },
+-	/* Umax [hex] Astra 3400U */
+-	{ USB_DEVICE(0x1606, 0x0060), .driver_info = USB_QUIRK_NO_AUTOSUSPEND },
+-
+ 	/* Philips PSC805 audio device */
+ 	{ USB_DEVICE(0x0471, 0x0155), .driver_info = USB_QUIRK_RESET_RESUME },
+ 
+-	/* Alcor multi-card reader */
+-	{ USB_DEVICE(0x058f, 0x6366), .driver_info = USB_QUIRK_NO_AUTOSUSPEND },
+-
+-	/* Canon EOS 5D in PC Connection mode */
+-	{ USB_DEVICE(0x04a9, 0x3101), .driver_info = USB_QUIRK_NO_AUTOSUSPEND },
+-
+-	/* RIM Blackberry */
+-	{ USB_DEVICE(0x0fca, 0x0001), .driver_info = USB_QUIRK_NO_AUTOSUSPEND },
+-	{ USB_DEVICE(0x0fca, 0x0004), .driver_info = USB_QUIRK_NO_AUTOSUSPEND },
+-	{ USB_DEVICE(0x0fca, 0x0006), .driver_info = USB_QUIRK_NO_AUTOSUSPEND },
+-
+-	/* Apple iPhone */
+-	{ USB_DEVICE(0x05ac, 0x1290), .driver_info = USB_QUIRK_NO_AUTOSUSPEND },
+-
+ 	/* SKYMEDI USB_DRIVE */
+ 	{ USB_DEVICE(0x1516, 0x8628), .driver_info = USB_QUIRK_RESET_RESUME },
+ 
+ 	{ }  /* terminating entry must be last */
+ };
+ 
+-static void usb_autosuspend_quirk(struct usb_device *udev)
+-{
+-#ifdef	CONFIG_USB_SUSPEND
+-	/* disable autosuspend, but allow the user to re-enable it via sysfs */
+-	udev->autosuspend_disabled = 1;
+-#endif
+-}
+-
+ static const struct usb_device_id *find_id(struct usb_device *udev)
+ {
+ 	const struct usb_device_id *id = usb_quirk_list;
+@@ -149,13 +74,9 @@ void usb_detect_quirks(struct usb_device *udev)
+ 		dev_dbg(&udev->dev, "USB quirks for this device: %x\n",
+ 				udev->quirks);
+ 
+-	/* do any special quirk handling here if needed */
+-	if (udev->quirks & USB_QUIRK_NO_AUTOSUSPEND)
+-		usb_autosuspend_quirk(udev);
+-
+ 	/* By default, disable autosuspend for all non-hubs */
+ #ifdef	CONFIG_USB_SUSPEND
+ 	if (udev->descriptor.bDeviceClass != USB_CLASS_HUB)
+-		udev->autosuspend_delay = -1;
++		udev->autosuspend_disabled = 1;
+ #endif
+ }
+diff --git a/drivers/usb/core/urb.c b/drivers/usb/core/urb.c
+index be63022..3da7979 100644
+--- a/drivers/usb/core/urb.c
++++ b/drivers/usb/core/urb.c
+@@ -358,7 +358,7 @@ int usb_submit_urb(struct urb *urb, gfp_t mem_flags)
+ 
+ 	/* enforce simple/standard policy */
+ 	allowed = (URB_NO_TRANSFER_DMA_MAP | URB_NO_SETUP_DMA_MAP |
+-			URB_NO_INTERRUPT);
++			URB_NO_INTERRUPT | URB_FREE_BUFFER);
+ 	switch (temp) {
+ 	case PIPE_BULK:
+ 		if (is_out)
+diff --git a/drivers/usb/gadget/ether.c b/drivers/usb/gadget/ether.c
+index 593e235..d57de87 100644
+--- a/drivers/usb/gadget/ether.c
++++ b/drivers/usb/gadget/ether.c
+@@ -1989,8 +1989,20 @@ static int eth_start_xmit (struct sk_buff *skb, struct net_device *net)
+ 	}
+ 
+ 	spin_lock_irqsave(&dev->req_lock, flags);
++	/*
++	 * this freelist can be empty if an interrupt triggered disconnect()
++	 * and reconfigured the gadget (shutting down this queue) after the
++	 * network stack decided to xmit but before we got the spinlock.
++	 */
++	if (list_empty(&dev->tx_reqs)) {
++		spin_unlock_irqrestore(&dev->req_lock, flags);
++		return 1;
++	}
++
+ 	req = container_of (dev->tx_reqs.next, struct usb_request, list);
+ 	list_del (&req->list);
++
++	/* temporarily stop TX queue when the freelist empties */
+ 	if (list_empty (&dev->tx_reqs))
+ 		netif_stop_queue (net);
+ 	spin_unlock_irqrestore(&dev->req_lock, flags);
+diff --git a/drivers/usb/host/ehci-hcd.c b/drivers/usb/host/ehci-hcd.c
+index 35cdba1..31310ca 100644
+--- a/drivers/usb/host/ehci-hcd.c
++++ b/drivers/usb/host/ehci-hcd.c
+@@ -570,10 +570,18 @@ static int ehci_run (struct usb_hcd *hcd)
+ 	 * are explicitly handed to companion controller(s), so no TT is
+ 	 * involved with the root hub.  (Except where one is integrated,
+ 	 * and there's no companion controller unless maybe for USB OTG.)
++	 *
++	 * Turning on the CF flag will transfer ownership of all ports
++	 * from the companions to the EHCI controller.  If any of the
++	 * companions are in the middle of a port reset at the time, it
++	 * could cause trouble.  Write-locking ehci_cf_port_reset_rwsem
++	 * guarantees that no resets are in progress.
+ 	 */
++	down_write(&ehci_cf_port_reset_rwsem);
+ 	hcd->state = HC_STATE_RUNNING;
+ 	ehci_writel(ehci, FLAG_CF, &ehci->regs->configured_flag);
+ 	ehci_readl(ehci, &ehci->regs->command);	/* unblock posted writes */
++	up_write(&ehci_cf_port_reset_rwsem);
+ 
+ 	temp = HC_VERSION(ehci_readl(ehci, &ehci->caps->hc_capbase));
+ 	ehci_info (ehci,
+diff --git a/drivers/usb/serial/generic.c b/drivers/usb/serial/generic.c
+index 88a2c7d..9eb4a65 100644
+--- a/drivers/usb/serial/generic.c
++++ b/drivers/usb/serial/generic.c
+@@ -208,14 +208,15 @@ int usb_serial_generic_write(struct usb_serial_port *port, const unsigned char *
+ 
+ 	/* only do something if we have a bulk out endpoint */
+ 	if (serial->num_bulk_out) {
+-		spin_lock_bh(&port->lock);
++		unsigned long flags;
++		spin_lock_irqsave(&port->lock, flags);
+ 		if (port->write_urb_busy) {
+-			spin_unlock_bh(&port->lock);
++			spin_unlock_irqrestore(&port->lock, flags);
+ 			dbg("%s - already writing", __FUNCTION__);
+ 			return 0;
+ 		}
+ 		port->write_urb_busy = 1;
+-		spin_unlock_bh(&port->lock);
++		spin_unlock_irqrestore(&port->lock, flags);
+ 
+ 		count = (count > port->bulk_out_size) ? port->bulk_out_size : count;
+ 
+diff --git a/drivers/video/platinumfb.c b/drivers/video/platinumfb.c
+index 8503e73..cbe71a5 100644
+--- a/drivers/video/platinumfb.c
++++ b/drivers/video/platinumfb.c
+@@ -17,6 +17,8 @@
+  *  more details.
+  */
+ 
++#undef DEBUG
++
+ #include <linux/module.h>
+ #include <linux/kernel.h>
+ #include <linux/errno.h>
+@@ -535,33 +537,35 @@ static int __devinit platinumfb_probe(struct of_device* odev,
+ 	volatile __u8		*fbuffer;
+ 	int			bank0, bank1, bank2, bank3, rc;
+ 
+-	printk(KERN_INFO "platinumfb: Found Apple Platinum video hardware\n");
++	dev_info(&odev->dev, "Found Apple Platinum video hardware\n");
+ 
+ 	info = framebuffer_alloc(sizeof(*pinfo), &odev->dev);
+-	if (info == NULL)
++	if (info == NULL) {
++		dev_err(&odev->dev, "Failed to allocate fbdev !\n");
+ 		return -ENOMEM;
++	}
+ 	pinfo = info->par;
+ 
+ 	if (of_address_to_resource(dp, 0, &pinfo->rsrc_reg) ||
+ 	    of_address_to_resource(dp, 1, &pinfo->rsrc_fb)) {
+-		printk(KERN_ERR "platinumfb: Can't get resources\n");
+-		framebuffer_release(info);
+-		return -ENXIO;
+-	}
+-	if (!request_mem_region(pinfo->rsrc_reg.start,
+-				pinfo->rsrc_reg.start -
+-				pinfo->rsrc_reg.end + 1,
+-				"platinumfb registers")) {
++		dev_err(&odev->dev, "Can't get resources\n");
+ 		framebuffer_release(info);
+ 		return -ENXIO;
+ 	}
++	dev_dbg(&odev->dev, " registers  : 0x%llx...0x%llx\n",
++		(unsigned long long)pinfo->rsrc_reg.start,
++		(unsigned long long)pinfo->rsrc_reg.end);
++	dev_dbg(&odev->dev, " framebuffer: 0x%llx...0x%llx\n",
++		(unsigned long long)pinfo->rsrc_fb.start,
++		(unsigned long long)pinfo->rsrc_fb.end);
++
++	/* Do not try to request register space, they overlap with the
++	 * northbridge and that can fail. Only request framebuffer
++	 */
+ 	if (!request_mem_region(pinfo->rsrc_fb.start,
+-				pinfo->rsrc_fb.start
+-				- pinfo->rsrc_fb.end + 1,
++				pinfo->rsrc_fb.end - pinfo->rsrc_fb.start + 1,
+ 				"platinumfb framebuffer")) {
+-		release_mem_region(pinfo->rsrc_reg.start,
+-				   pinfo->rsrc_reg.end -
+-				   pinfo->rsrc_reg.start + 1);
++		printk(KERN_ERR "platinumfb: Can't request framebuffer !\n");
+ 		framebuffer_release(info);
+ 		return -ENXIO;
+ 	}
+@@ -600,7 +604,8 @@ static int __devinit platinumfb_probe(struct of_device* odev,
+ 	bank2 = fbuffer[0x200000] == 0x56;
+ 	bank3 = fbuffer[0x300000] == 0x78;
+ 	pinfo->total_vram = (bank0 + bank1 + bank2 + bank3) * 0x100000;
+-	printk(KERN_INFO "platinumfb: Total VRAM = %dMB (%d%d%d%d)\n", (int) (pinfo->total_vram / 1024 / 1024),
++	printk(KERN_INFO "platinumfb: Total VRAM = %dMB (%d%d%d%d)\n",
++	       (unsigned int) (pinfo->total_vram / 1024 / 1024),
+ 	       bank3, bank2, bank1, bank0);
+ 
+ 	/*
+@@ -644,16 +649,15 @@ static int __devexit platinumfb_remove(struct of_device* odev)
+         unregister_framebuffer (info);
+ 	
+ 	/* Unmap frame buffer and registers */
++	iounmap(pinfo->frame_buffer);
++	iounmap(pinfo->platinum_regs);
++	iounmap(pinfo->cmap_regs);
++
+ 	release_mem_region(pinfo->rsrc_fb.start,
+ 			   pinfo->rsrc_fb.end -
+ 			   pinfo->rsrc_fb.start + 1);
+-	release_mem_region(pinfo->rsrc_reg.start,
+-			   pinfo->rsrc_reg.end -
+-			   pinfo->rsrc_reg.start + 1);
+-	iounmap(pinfo->frame_buffer);
+-	iounmap(pinfo->platinum_regs);
++
+ 	release_mem_region(pinfo->cmap_regs_phys, 0x1000);
+-	iounmap(pinfo->cmap_regs);
+ 
+ 	framebuffer_release(info);
+ 
+diff --git a/include/linux/ide.h b/include/linux/ide.h
+index b9f66c1..20528c0 100644
+--- a/include/linux/ide.h
++++ b/include/linux/ide.h
+@@ -1437,4 +1437,11 @@ static inline int hwif_to_node(ide_hwif_t *hwif)
+ 	return dev ? pcibus_to_node(dev->bus) : -1;
+ }
+ 
++static inline ide_drive_t *ide_get_paired_drive(ide_drive_t *drive)
++{
++	ide_hwif_t *hwif	= HWIF(drive);
++
++	return &hwif->drives[(drive->dn ^ 1) & 1];
++}
++
+ #endif /* _IDE_H */
+diff --git a/include/linux/libata.h b/include/linux/libata.h
+index a67bb90..9ccca8f 100644
+--- a/include/linux/libata.h
++++ b/include/linux/libata.h
+@@ -177,6 +177,8 @@ enum {
+ 	ATA_FLAG_IGN_SIMPLEX	= (1 << 15), /* ignore SIMPLEX */
+ 	ATA_FLAG_NO_IORDY	= (1 << 16), /* controller lacks iordy */
+ 	ATA_FLAG_ACPI_SATA	= (1 << 17), /* need native SATA ACPI layout */
++	ATA_FLAG_NO_SRST	= (1 << 18),
++	ATA_FLAG_ASSUME_ATA	= (1 << 19),
+ 
+ 	/* The following flag belongs to ap->pflags but is kept in
+ 	 * ap->flags because it's referenced in many LLDs and will be
+diff --git a/include/linux/usb/quirks.h b/include/linux/usb/quirks.h
+index 8da374c..2692ec9 100644
+--- a/include/linux/usb/quirks.h
++++ b/include/linux/usb/quirks.h
+@@ -4,11 +4,8 @@
+  * belong here.
+  */
+ 
+-/* device must not be autosuspended */
+-#define USB_QUIRK_NO_AUTOSUSPEND	0x00000001
+-
+ /* string descriptors must not be fetched using a 255-byte read */
+-#define USB_QUIRK_STRING_FETCH_255	0x00000002
++#define USB_QUIRK_STRING_FETCH_255	0x00000001
+ 
+ /* device can't resume correctly so reset it instead */
+-#define USB_QUIRK_RESET_RESUME		0x00000004
++#define USB_QUIRK_RESET_RESUME		0x00000002
+diff --git a/sound/core/Makefile b/sound/core/Makefile
+index 5a01c76..05f5cdc 100644
+--- a/sound/core/Makefile
++++ b/sound/core/Makefile
+@@ -14,7 +14,8 @@ endif
+ snd-pcm-objs := pcm.o pcm_native.o pcm_lib.o pcm_timer.o pcm_misc.o \
+ 		pcm_memory.o
+ 
+-snd-page-alloc-objs := memalloc.o sgbuf.o
++snd-page-alloc-y := memalloc.o
++snd-page-alloc-$(CONFIG_HAS_DMA) += sgbuf.o
+ 
+ snd-rawmidi-objs  := rawmidi.o
+ snd-timer-objs    := timer.o
+diff --git a/sound/core/memalloc.c b/sound/core/memalloc.c
+index 9b5656d..6f99b6f 100644
+--- a/sound/core/memalloc.c
++++ b/sound/core/memalloc.c
+@@ -206,6 +206,7 @@ void snd_free_pages(void *ptr, size_t size)
+  *
+  */
+ 
++#ifdef CONFIG_HAS_DMA
+ /* allocate the coherent DMA pages */
+ static void *snd_malloc_dev_pages(struct device *dev, size_t size, dma_addr_t *dma)
+ {
+@@ -239,6 +240,7 @@ static void snd_free_dev_pages(struct device *dev, size_t size, void *ptr,
+ 	dec_snd_pages(pg);
+ 	dma_free_coherent(dev, PAGE_SIZE << pg, ptr, dma);
+ }
++#endif /* CONFIG_HAS_DMA */
+ 
+ #ifdef CONFIG_SBUS
+ 
+@@ -312,12 +314,14 @@ int snd_dma_alloc_pages(int type, struct device *device, size_t size,
+ 		dmab->area = snd_malloc_sbus_pages(device, size, &dmab->addr);
+ 		break;
+ #endif
++#ifdef CONFIG_HAS_DMA
+ 	case SNDRV_DMA_TYPE_DEV:
+ 		dmab->area = snd_malloc_dev_pages(device, size, &dmab->addr);
+ 		break;
+ 	case SNDRV_DMA_TYPE_DEV_SG:
+ 		snd_malloc_sgbuf_pages(device, size, dmab, NULL);
+ 		break;
++#endif
+ 	default:
+ 		printk(KERN_ERR "snd-malloc: invalid device type %d\n", type);
+ 		dmab->area = NULL;
+@@ -383,12 +387,14 @@ void snd_dma_free_pages(struct snd_dma_buffer *dmab)
+ 		snd_free_sbus_pages(dmab->dev.dev, dmab->bytes, dmab->area, dmab->addr);
+ 		break;
+ #endif
++#ifdef CONFIG_HAS_DMA
+ 	case SNDRV_DMA_TYPE_DEV:
+ 		snd_free_dev_pages(dmab->dev.dev, dmab->bytes, dmab->area, dmab->addr);
+ 		break;
+ 	case SNDRV_DMA_TYPE_DEV_SG:
+ 		snd_free_sgbuf_pages(dmab);
+ 		break;
++#endif
+ 	default:
+ 		printk(KERN_ERR "snd-malloc: invalid device type %d\n", dmab->dev.type);
+ 	}
+diff --git a/sound/pci/emu10k1/emumixer.c b/sound/pci/emu10k1/emumixer.c
+index 7b2c1dc..5bff700 100644
+--- a/sound/pci/emu10k1/emumixer.c
++++ b/sound/pci/emu10k1/emumixer.c
+@@ -871,7 +871,7 @@ static struct snd_kcontrol_new snd_emu10k1_spdif_mask_control =
+ 	.access =	SNDRV_CTL_ELEM_ACCESS_READ,
+ 	.iface =        SNDRV_CTL_ELEM_IFACE_PCM,
+ 	.name =         SNDRV_CTL_NAME_IEC958("",PLAYBACK,MASK),
+-	.count =	4,
++	.count =	3,
+ 	.info =         snd_emu10k1_spdif_info,
+ 	.get =          snd_emu10k1_spdif_get_mask
+ };
+@@ -880,7 +880,7 @@ static struct snd_kcontrol_new snd_emu10k1_spdif_control =
+ {
+ 	.iface =	SNDRV_CTL_ELEM_IFACE_PCM,
+ 	.name =         SNDRV_CTL_NAME_IEC958("",PLAYBACK,DEFAULT),
+-	.count =	4,
++	.count =	3,
+ 	.info =         snd_emu10k1_spdif_info,
+ 	.get =          snd_emu10k1_spdif_get,
+ 	.put =          snd_emu10k1_spdif_put
+diff --git a/sound/pci/hda/patch_sigmatel.c b/sound/pci/hda/patch_sigmatel.c
+index 3f25de7..d46e7e4 100644
+--- a/sound/pci/hda/patch_sigmatel.c
++++ b/sound/pci/hda/patch_sigmatel.c
+@@ -162,8 +162,9 @@ static hda_nid_t stac925x_dac_nids[1] = {
+         0x02,
+ };
+ 
+-static hda_nid_t stac925x_dmic_nids[1] = {
+-	0x15, 
++#define STAC925X_NUM_DMICS	1
++static hda_nid_t stac925x_dmic_nids[STAC925X_NUM_DMICS + 1] = {
++	0x15, 0
+ };
+ 
+ static hda_nid_t stac922x_adc_nids[2] = {
+@@ -190,8 +191,9 @@ static hda_nid_t stac9205_mux_nids[2] = {
+         0x19, 0x1a
+ };
+ 
+-static hda_nid_t stac9205_dmic_nids[2] = {
+-        0x17, 0x18,
++#define STAC9205_NUM_DMICS	2
++static hda_nid_t stac9205_dmic_nids[STAC9205_NUM_DMICS + 1] = {
++        0x17, 0x18, 0
+ };
+ 
+ static hda_nid_t stac9200_pin_nids[8] = {
+@@ -1182,7 +1184,8 @@ static int stac92xx_add_dyn_out_pins(struct hda_codec *codec, struct auto_pin_cf
+ 	case 3:
+ 		/* add line-in as side */
+ 		if (cfg->input_pins[AUTO_PIN_LINE] && num_dacs > 3) {
+-			cfg->line_out_pins[3] = cfg->input_pins[AUTO_PIN_LINE];
++			cfg->line_out_pins[cfg->line_outs] =
++				cfg->input_pins[AUTO_PIN_LINE];
+ 			spec->line_switch = 1;
+ 			cfg->line_outs++;
+ 		}
+@@ -1190,12 +1193,14 @@ static int stac92xx_add_dyn_out_pins(struct hda_codec *codec, struct auto_pin_cf
+ 	case 2:
+ 		/* add line-in as clfe and mic as side */
+ 		if (cfg->input_pins[AUTO_PIN_LINE] && num_dacs > 2) {
+-			cfg->line_out_pins[2] = cfg->input_pins[AUTO_PIN_LINE];
++			cfg->line_out_pins[cfg->line_outs] =
++				cfg->input_pins[AUTO_PIN_LINE];
+ 			spec->line_switch = 1;
+ 			cfg->line_outs++;
+ 		}
+ 		if (cfg->input_pins[AUTO_PIN_MIC] && num_dacs > 3) {
+-			cfg->line_out_pins[3] = cfg->input_pins[AUTO_PIN_MIC];
++			cfg->line_out_pins[cfg->line_outs] =
++				cfg->input_pins[AUTO_PIN_MIC];
+ 			spec->mic_switch = 1;
+ 			cfg->line_outs++;
+ 		}
+@@ -1203,12 +1208,14 @@ static int stac92xx_add_dyn_out_pins(struct hda_codec *codec, struct auto_pin_cf
+ 	case 1:
+ 		/* add line-in as surr and mic as clfe */
+ 		if (cfg->input_pins[AUTO_PIN_LINE] && num_dacs > 1) {
+-			cfg->line_out_pins[1] = cfg->input_pins[AUTO_PIN_LINE];
++			cfg->line_out_pins[cfg->line_outs] =
++				cfg->input_pins[AUTO_PIN_LINE];
+ 			spec->line_switch = 1;
+ 			cfg->line_outs++;
+ 		}
+ 		if (cfg->input_pins[AUTO_PIN_MIC] && num_dacs > 2) {
+-			cfg->line_out_pins[2] = cfg->input_pins[AUTO_PIN_MIC];
++			cfg->line_out_pins[cfg->line_outs] =
++				cfg->input_pins[AUTO_PIN_MIC];
+ 			spec->mic_switch = 1;
+ 			cfg->line_outs++;
+ 		}
+@@ -2058,7 +2065,7 @@ static int patch_stac925x(struct hda_codec *codec)
+ 	case 0x83847633: /* STAC9202D */
+ 	case 0x83847636: /* STAC9251  */
+ 	case 0x83847637: /* STAC9251D */
+-		spec->num_dmics = 1;
++		spec->num_dmics = STAC925X_NUM_DMICS;
+ 		spec->dmic_nids = stac925x_dmic_nids;
+ 		break;
+ 	default:
+@@ -2302,7 +2309,7 @@ static int patch_stac9205(struct hda_codec *codec)
+ 	spec->mux_nids = stac9205_mux_nids;
+ 	spec->num_muxes = ARRAY_SIZE(stac9205_mux_nids);
+ 	spec->dmic_nids = stac9205_dmic_nids;
+-	spec->num_dmics = ARRAY_SIZE(stac9205_dmic_nids);
++	spec->num_dmics = STAC9205_NUM_DMICS;
+ 	spec->dmux_nid = 0x1d;
+ 
+ 	spec->init = stac9205_core_init;
+diff --git a/sound/pci/rme9652/hdsp.c b/sound/pci/rme9652/hdsp.c
+index 3b3ef65..75dcb9a 100644
+--- a/sound/pci/rme9652/hdsp.c
++++ b/sound/pci/rme9652/hdsp.c
+@@ -3108,6 +3108,9 @@ static int hdsp_dds_offset(struct hdsp *hdsp)
+ 	unsigned int dds_value = hdsp->dds_value;
+ 	int system_sample_rate = hdsp->system_sample_rate;
+ 
++	if (!dds_value)
++		return 0;
++
+ 	n = DDS_NUMERATOR;
+ 	/*
+ 	 * dds_value = n / rate
+diff --git a/sound/usb/usbmixer.c b/sound/usb/usbmixer.c
+index 325d4b6..19776e7 100644
+--- a/sound/usb/usbmixer.c
++++ b/sound/usb/usbmixer.c
+@@ -1483,7 +1483,7 @@ static int parse_audio_selector_unit(struct mixer_build *state, int unitid, unsi
+ 	struct snd_kcontrol *kctl;
+ 	char **namelist;
+ 
+-	if (! num_ins || desc[0] < 6 + num_ins) {
++	if (! num_ins || desc[0] < 5 + num_ins) {
+ 		snd_printk(KERN_ERR "invalid SELECTOR UNIT descriptor %d\n", unitid);
+ 		return -EINVAL;
+ 	}
