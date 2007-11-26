@@ -1,0 +1,1035 @@
+diff --git a/Makefile b/Makefile
+index 435a3d7..2b2a73b 100644
+diff --git a/arch/i386/lib/delay.c b/arch/i386/lib/delay.c
+index f6edb11..66595ed 100644
+--- a/arch/i386/lib/delay.c
++++ b/arch/i386/lib/delay.c
+@@ -12,6 +12,7 @@
+ 
+ #include <linux/module.h>
+ #include <linux/sched.h>
++#include <linux/preempt.h>
+ #include <linux/delay.h>
+ 
+ #include <asm/processor.h>
+@@ -42,11 +43,13 @@ static void delay_tsc(unsigned long loops)
+ {
+ 	unsigned long bclock, now;
+ 
++	preempt_disable();		/* TSC's are per-cpu */
+ 	rdtscl(bclock);
+ 	do {
+ 		rep_nop();
+ 		rdtscl(now);
+ 	} while ((now-bclock) < loops);
++	preempt_enable();
+ }
+ 
+ /*
+diff --git a/arch/i386/mm/pgtable.c b/arch/i386/mm/pgtable.c
+index 01437c4..91faa59 100644
+--- a/arch/i386/mm/pgtable.c
++++ b/arch/i386/mm/pgtable.c
+@@ -97,8 +97,7 @@ static void set_pte_pfn(unsigned long vaddr, unsigned long pfn, pgprot_t flags)
+ 	}
+ 	pte = pte_offset_kernel(pmd, vaddr);
+ 	if (pgprot_val(flags))
+-		/* <pfn,flags> stored as-is, to permit clearing entries */
+-		set_pte(pte, pfn_pte(pfn, flags));
++		set_pte_present(&init_mm, vaddr, pte, pfn_pte(pfn, flags));
+ 	else
+ 		pte_clear(&init_mm, vaddr, pte);
+ 
+diff --git a/arch/x86_64/kernel/entry.S b/arch/x86_64/kernel/entry.S
+index 1d232e5..a6aad39 100644
+--- a/arch/x86_64/kernel/entry.S
++++ b/arch/x86_64/kernel/entry.S
+@@ -989,7 +989,7 @@ child_rip:
+ 	movq %rsi, %rdi
+ 	call *%rax
+ 	# exit
+-	xorl %edi, %edi
++	mov %eax, %edi
+ 	call do_exit
+ 	CFI_ENDPROC
+ ENDPROC(child_rip)
+diff --git a/arch/x86_64/kernel/time.c b/arch/x86_64/kernel/time.c
+index 6d48a4e..4d0d1ac 100644
+--- a/arch/x86_64/kernel/time.c
++++ b/arch/x86_64/kernel/time.c
+@@ -87,18 +87,15 @@ static int set_rtc_mmss(unsigned long nowtime)
+ 	int retval = 0;
+ 	int real_seconds, real_minutes, cmos_minutes;
+ 	unsigned char control, freq_select;
++	unsigned long flags;
+ 
+ /*
+- * IRQs are disabled when we're called from the timer interrupt,
+- * no need for spin_lock_irqsave()
++ * set_rtc_mmss is called when irqs are enabled, so disable irqs here
+  */
+-
+-	spin_lock(&rtc_lock);
+-
++	spin_lock_irqsave(&rtc_lock, flags);
+ /*
+  * Tell the clock it's being set and stop it.
+  */
+-
+ 	control = CMOS_READ(RTC_CONTROL);
+ 	CMOS_WRITE(control | RTC_SET, RTC_CONTROL);
+ 
+@@ -143,7 +140,7 @@ static int set_rtc_mmss(unsigned long nowtime)
+ 	CMOS_WRITE(control, RTC_CONTROL);
+ 	CMOS_WRITE(freq_select, RTC_FREQ_SELECT);
+ 
+-	spin_unlock(&rtc_lock);
++	spin_unlock_irqrestore(&rtc_lock, flags);
+ 
+ 	return retval;
+ }
+diff --git a/arch/x86_64/lib/bitstr.c b/arch/x86_64/lib/bitstr.c
+index 2467660..7445caf 100644
+--- a/arch/x86_64/lib/bitstr.c
++++ b/arch/x86_64/lib/bitstr.c
+@@ -14,7 +14,7 @@ find_next_zero_string(unsigned long *bitmap, long start, long nbits, int len)
+ 	
+ 	/* could test bitsliced, but it's hardly worth it */
+ 	end = n+len;
+-	if (end >= nbits) 
++	if (end > nbits)
+ 		return -1; 
+ 	for (i = n+1; i < end; i++) { 
+ 		if (test_bit(i, bitmap)) {  
+diff --git a/arch/x86_64/lib/delay.c b/arch/x86_64/lib/delay.c
+index 2dbebd3..4d3f1f6 100644
+--- a/arch/x86_64/lib/delay.c
++++ b/arch/x86_64/lib/delay.c
+@@ -10,7 +10,9 @@
+ 
+ #include <linux/module.h>
+ #include <linux/sched.h>
++#include <linux/preempt.h>
+ #include <linux/delay.h>
++
+ #include <asm/delay.h>
+ #include <asm/msr.h>
+ 
+@@ -27,14 +29,15 @@ int read_current_timer(unsigned long *timer_value)
+ void __delay(unsigned long loops)
+ {
+ 	unsigned bclock, now;
+-	
++
++	preempt_disable();		/* TSC's are pre-cpu */
+ 	rdtscl(bclock);
+-	do
+-	{
++	do {
+ 		rep_nop(); 
+ 		rdtscl(now);
+ 	}
+-	while((now-bclock) < loops);
++	while ((now-bclock) < loops);
++	preempt_enable();
+ }
+ EXPORT_SYMBOL(__delay);
+ 
+diff --git a/arch/x86_64/mm/pageattr.c b/arch/x86_64/mm/pageattr.c
+index 0416ffb..eff3b22 100644
+--- a/arch/x86_64/mm/pageattr.c
++++ b/arch/x86_64/mm/pageattr.c
+@@ -148,6 +148,7 @@ __change_page_attr(unsigned long address, unsigned long pfn, pgprot_t prot,
+ 			split = split_large_page(address, prot, ref_prot2);
+ 			if (!split)
+ 				return -ENOMEM;
++			pgprot_val(ref_prot2) &= ~_PAGE_NX;
+ 			set_pte(kpte, mk_pte(split, ref_prot2));
+ 			kpte_page = split;
+ 		}
+diff --git a/drivers/acpi/video.c b/drivers/acpi/video.c
+index d05891f..dad84c0 100644
+--- a/drivers/acpi/video.c
++++ b/drivers/acpi/video.c
+@@ -1633,9 +1633,20 @@ static int
+ acpi_video_get_next_level(struct acpi_video_device *device,
+ 			  u32 level_current, u32 event)
+ {
+-	int min, max, min_above, max_below, i, l;
++	int min, max, min_above, max_below, i, l, delta = 255;
+ 	max = max_below = 0;
+ 	min = min_above = 255;
++	/* Find closest level to level_current */
++	for (i = 0; i < device->brightness->count; i++) {
++		l = device->brightness->levels[i];
++		if (abs(l - level_current) < abs(delta)) {
++			delta = l - level_current;
++			if (!delta)
++				break;
++		}
++	}
++	/* Ajust level_current to closest available level */
++	level_current += delta;
+ 	for (i = 0; i < device->brightness->count; i++) {
+ 		l = device->brightness->levels[i];
+ 		if (l < min)
+diff --git a/drivers/ata/sata_sis.c b/drivers/ata/sata_sis.c
+index 41c1d6e..e203974 100644
+--- a/drivers/ata/sata_sis.c
++++ b/drivers/ata/sata_sis.c
+@@ -92,7 +92,7 @@ static struct scsi_host_template sis_sht = {
+ 	.queuecommand		= ata_scsi_queuecmd,
+ 	.can_queue		= ATA_DEF_QUEUE,
+ 	.this_id		= ATA_SHT_THIS_ID,
+-	.sg_tablesize		= ATA_MAX_PRD,
++	.sg_tablesize		= LIBATA_MAX_PRD,
+ 	.cmd_per_lun		= ATA_SHT_CMD_PER_LUN,
+ 	.emulated		= ATA_SHT_EMULATED,
+ 	.use_clustering		= ATA_SHT_USE_CLUSTERING,
+@@ -168,11 +168,11 @@ static unsigned int get_scr_cfg_addr(struct ata_port *ap, unsigned int sc_reg)
+ 	return addr;
+ }
+ 
+-static u32 sis_scr_cfg_read (struct ata_port *ap, unsigned int sc_reg)
++static u32 sis_scr_cfg_read (struct ata_port *ap, unsigned int sc_reg, u32 *val)
+ {
+ 	struct pci_dev *pdev = to_pci_dev(ap->host->dev);
+ 	unsigned int cfg_addr = get_scr_cfg_addr(ap, sc_reg);
+-	u32 val, val2 = 0;
++	u32 val2 = 0;
+ 	u8 pmr;
+ 
+ 	if (sc_reg == SCR_ERROR) /* doesn't exist in PCI cfg space */
+@@ -180,13 +180,16 @@ static u32 sis_scr_cfg_read (struct ata_port *ap, unsigned int sc_reg)
+ 
+ 	pci_read_config_byte(pdev, SIS_PMR, &pmr);
+ 
+-	pci_read_config_dword(pdev, cfg_addr, &val);
++	pci_read_config_dword(pdev, cfg_addr, val);
+ 
+ 	if ((pdev->device == 0x0182) || (pdev->device == 0x0183) ||
+ 	    (pdev->device == 0x1182) || (pmr & SIS_PMR_COMBINED))
+ 		pci_read_config_dword(pdev, cfg_addr+0x10, &val2);
+ 
+-	return (val|val2) &  0xfffffffb; /* avoid problems with powerdowned ports */
++	*val |= val2;
++	*val &= 0xfffffffb;	/* avoid problems with powerdowned ports */
++
++	return 0;
+ }
+ 
+ static void sis_scr_cfg_write (struct ata_port *ap, unsigned int sc_reg, u32 val)
+@@ -216,7 +219,7 @@ static int sis_scr_read(struct ata_port *ap, unsigned int sc_reg, u32 *val)
+ 		return -EINVAL;
+ 
+ 	if (ap->flags & SIS_FLAG_CFGSCR)
+-		return sis_scr_cfg_read(ap, sc_reg);
++		return sis_scr_cfg_read(ap, sc_reg, val);
+ 
+ 	pci_read_config_byte(pdev, SIS_PMR, &pmr);
+ 
+diff --git a/drivers/crypto/geode-aes.c b/drivers/crypto/geode-aes.c
+index 6a86958..fa4c990 100644
+--- a/drivers/crypto/geode-aes.c
++++ b/drivers/crypto/geode-aes.c
+@@ -110,8 +110,7 @@ geode_aes_crypt(struct geode_aes_op *op)
+ 	 * we don't need to worry
+ 	 */
+ 
+-	if (op->src == op->dst)
+-		flags |= (AES_CTRL_DCA | AES_CTRL_SCA);
++	flags |= (AES_CTRL_DCA | AES_CTRL_SCA);
+ 
+ 	if (op->dir == AES_DIR_ENCRYPT)
+ 		flags |= AES_CTRL_ENCRYPT;
+diff --git a/drivers/dma/dmaengine.c b/drivers/dma/dmaengine.c
+index 8248992..d59b2f4 100644
+--- a/drivers/dma/dmaengine.c
++++ b/drivers/dma/dmaengine.c
+@@ -182,10 +182,9 @@ static void dma_client_chan_alloc(struct dma_client *client)
+ 				/* we are done once this client rejects
+ 				 * an available resource
+ 				 */
+-				if (ack == DMA_ACK) {
++				if (ack == DMA_ACK)
+ 					dma_chan_get(chan);
+-					kref_get(&device->refcount);
+-				} else if (ack == DMA_NAK)
++				else if (ack == DMA_NAK)
+ 					return;
+ 			}
+ 		}
+@@ -272,11 +271,8 @@ static void dma_clients_notify_removed(struct dma_chan *chan)
+ 		/* client was holding resources for this channel so
+ 		 * free it
+ 		 */
+-		if (ack == DMA_ACK) {
++		if (ack == DMA_ACK)
+ 			dma_chan_put(chan);
+-			kref_put(&chan->device->refcount,
+-				dma_async_device_cleanup);
+-		}
+ 	}
+ 
+ 	mutex_unlock(&dma_list_mutex);
+@@ -316,11 +312,8 @@ void dma_async_client_unregister(struct dma_client *client)
+ 			ack = client->event_callback(client, chan,
+ 				DMA_RESOURCE_REMOVED);
+ 
+-			if (ack == DMA_ACK) {
++			if (ack == DMA_ACK)
+ 				dma_chan_put(chan);
+-				kref_put(&chan->device->refcount,
+-					dma_async_device_cleanup);
+-			}
+ 		}
+ 
+ 	list_del(&client->global_node);
+@@ -397,6 +390,8 @@ int dma_async_device_register(struct dma_device *device)
+ 			goto err_out;
+ 		}
+ 
++		/* One for the channel, one of the class device */
++		kref_get(&device->refcount);
+ 		kref_get(&device->refcount);
+ 		kref_init(&chan->refcount);
+ 		chan->slow_ref = 0;
+diff --git a/drivers/i2c/busses/i2c-pasemi.c b/drivers/i2c/busses/i2c-pasemi.c
+index 58e3271..dcf5dec 100644
+--- a/drivers/i2c/busses/i2c-pasemi.c
++++ b/drivers/i2c/busses/i2c-pasemi.c
+@@ -51,6 +51,7 @@ struct pasemi_smbus {
+ #define MRXFIFO_DATA_M	0x000000ff
+ 
+ #define SMSTA_XEN	0x08000000
++#define SMSTA_MTN	0x00200000
+ 
+ #define CTL_MRR		0x00000400
+ #define CTL_MTR		0x00000200
+@@ -98,6 +99,10 @@ static unsigned int pasemi_smb_waitready(struct pasemi_smbus *smbus)
+ 		status = reg_read(smbus, REG_SMSTA);
+ 	}
+ 
++	/* Got NACK? */
++	if (status & SMSTA_MTN)
++		return -ENXIO;
++
+ 	if (timeout < 0) {
+ 		dev_warn(&smbus->dev->dev, "Timeout, status 0x%08x\n", status);
+ 		reg_write(smbus, REG_SMSTA, status);
+diff --git a/drivers/i2c/chips/eeprom.c b/drivers/i2c/chips/eeprom.c
+index d3da1fb..1a7eeeb 100644
+--- a/drivers/i2c/chips/eeprom.c
++++ b/drivers/i2c/chips/eeprom.c
+@@ -128,13 +128,20 @@ static ssize_t eeprom_read(struct kobject *kobj, struct bin_attribute *bin_attr,
+ 	for (slice = off >> 5; slice <= (off + count - 1) >> 5; slice++)
+ 		eeprom_update_client(client, slice);
+ 
+-	/* Hide Vaio security settings to regular users (16 first bytes) */
+-	if (data->nature == VAIO && off < 16 && !capable(CAP_SYS_ADMIN)) {
+-		size_t in_row1 = 16 - off;
+-		in_row1 = min(in_row1, count);
+-		memset(buf, 0, in_row1);
+-		if (count - in_row1 > 0)
+-			memcpy(buf + in_row1, &data->data[16], count - in_row1);
++	/* Hide Vaio private settings to regular users:
++	   - BIOS passwords: bytes 0x00 to 0x0f
++	   - UUID: bytes 0x10 to 0x1f
++	   - Serial number: 0xc0 to 0xdf */
++	if (data->nature == VAIO && !capable(CAP_SYS_ADMIN)) {
++		int i;
++
++		for (i = 0; i < count; i++) {
++			if ((off + i <= 0x1f) ||
++			    (off + i >= 0xc0 && off + i <= 0xdf))
++				buf[i] = 0;
++			else
++				buf[i] = data->data[off + i];
++		}
+ 	} else {
+ 		memcpy(buf, &data->data[off], count);
+ 	}
+@@ -197,14 +204,18 @@ static int eeprom_detect(struct i2c_adapter *adapter, int address, int kind)
+ 		goto exit_kfree;
+ 
+ 	/* Detect the Vaio nature of EEPROMs.
+-	   We use the "PCG-" prefix as the signature. */
++	   We use the "PCG-" or "VGN-" prefix as the signature. */
+ 	if (address == 0x57) {
+-		if (i2c_smbus_read_byte_data(new_client, 0x80) == 'P'
+-		 && i2c_smbus_read_byte(new_client) == 'C'
+-		 && i2c_smbus_read_byte(new_client) == 'G'
+-		 && i2c_smbus_read_byte(new_client) == '-') {
++		char name[4];
++
++		name[0] = i2c_smbus_read_byte_data(new_client, 0x80);
++		name[1] = i2c_smbus_read_byte(new_client);
++		name[2] = i2c_smbus_read_byte(new_client);
++		name[3] = i2c_smbus_read_byte(new_client);
++
++		if (!memcmp(name, "PCG-", 4) || !memcmp(name, "VGN-", 4)) {
+ 			dev_info(&new_client->dev, "Vaio EEPROM detected, "
+-				"enabling password protection\n");
++				 "enabling privacy protection\n");
+ 			data->nature = VAIO;
+ 		}
+ 	}
+diff --git a/drivers/md/raid5.c b/drivers/md/raid5.c
+index 3808f52..e86cacb 100644
+--- a/drivers/md/raid5.c
++++ b/drivers/md/raid5.c
+@@ -689,7 +689,8 @@ ops_run_prexor(struct stripe_head *sh, struct dma_async_tx_descriptor *tx)
+ }
+ 
+ static struct dma_async_tx_descriptor *
+-ops_run_biodrain(struct stripe_head *sh, struct dma_async_tx_descriptor *tx)
++ops_run_biodrain(struct stripe_head *sh, struct dma_async_tx_descriptor *tx,
++		 unsigned long pending)
+ {
+ 	int disks = sh->disks;
+ 	int pd_idx = sh->pd_idx, i;
+@@ -697,7 +698,7 @@ ops_run_biodrain(struct stripe_head *sh, struct dma_async_tx_descriptor *tx)
+ 	/* check if prexor is active which means only process blocks
+ 	 * that are part of a read-modify-write (Wantprexor)
+ 	 */
+-	int prexor = test_bit(STRIPE_OP_PREXOR, &sh->ops.pending);
++	int prexor = test_bit(STRIPE_OP_PREXOR, &pending);
+ 
+ 	pr_debug("%s: stripe %llu\n", __FUNCTION__,
+ 		(unsigned long long)sh->sector);
+@@ -774,7 +775,8 @@ static void ops_complete_write(void *stripe_head_ref)
+ }
+ 
+ static void
+-ops_run_postxor(struct stripe_head *sh, struct dma_async_tx_descriptor *tx)
++ops_run_postxor(struct stripe_head *sh, struct dma_async_tx_descriptor *tx,
++		unsigned long pending)
+ {
+ 	/* kernel stack size limits the total number of disks */
+ 	int disks = sh->disks;
+@@ -782,7 +784,7 @@ ops_run_postxor(struct stripe_head *sh, struct dma_async_tx_descriptor *tx)
+ 
+ 	int count = 0, pd_idx = sh->pd_idx, i;
+ 	struct page *xor_dest;
+-	int prexor = test_bit(STRIPE_OP_PREXOR, &sh->ops.pending);
++	int prexor = test_bit(STRIPE_OP_PREXOR, &pending);
+ 	unsigned long flags;
+ 	dma_async_tx_callback callback;
+ 
+@@ -809,7 +811,7 @@ ops_run_postxor(struct stripe_head *sh, struct dma_async_tx_descriptor *tx)
+ 	}
+ 
+ 	/* check whether this postxor is part of a write */
+-	callback = test_bit(STRIPE_OP_BIODRAIN, &sh->ops.pending) ?
++	callback = test_bit(STRIPE_OP_BIODRAIN, &pending) ?
+ 		ops_complete_write : ops_complete_postxor;
+ 
+ 	/* 1/ if we prexor'd then the dest is reused as a source
+@@ -897,12 +899,12 @@ static void raid5_run_ops(struct stripe_head *sh, unsigned long pending)
+ 		tx = ops_run_prexor(sh, tx);
+ 
+ 	if (test_bit(STRIPE_OP_BIODRAIN, &pending)) {
+-		tx = ops_run_biodrain(sh, tx);
++		tx = ops_run_biodrain(sh, tx, pending);
+ 		overlap_clear++;
+ 	}
+ 
+ 	if (test_bit(STRIPE_OP_POSTXOR, &pending))
+-		ops_run_postxor(sh, tx);
++		ops_run_postxor(sh, tx, pending);
+ 
+ 	if (test_bit(STRIPE_OP_CHECK, &pending))
+ 		ops_run_check(sh);
+diff --git a/drivers/net/wireless/ipw2200.c b/drivers/net/wireless/ipw2200.c
+index 61497c4..da91b3b 100644
+--- a/drivers/net/wireless/ipw2200.c
++++ b/drivers/net/wireless/ipw2200.c
+@@ -1740,8 +1740,10 @@ static int ipw_radio_kill_sw(struct ipw_priv *priv, int disable_radio)
+ 	if (disable_radio) {
+ 		priv->status |= STATUS_RF_KILL_SW;
+ 
+-		if (priv->workqueue)
++		if (priv->workqueue) {
+ 			cancel_delayed_work(&priv->request_scan);
++			cancel_delayed_work(&priv->scan_event);
++		}
+ 		queue_work(priv->workqueue, &priv->down);
+ 	} else {
+ 		priv->status &= ~STATUS_RF_KILL_SW;
+@@ -1992,6 +1994,7 @@ static void ipw_irq_tasklet(struct ipw_priv *priv)
+ 		wake_up_interruptible(&priv->wait_command_queue);
+ 		priv->status &= ~(STATUS_ASSOCIATED | STATUS_ASSOCIATING);
+ 		cancel_delayed_work(&priv->request_scan);
++		cancel_delayed_work(&priv->scan_event);
+ 		schedule_work(&priv->link_down);
+ 		queue_delayed_work(priv->workqueue, &priv->rf_kill, 2 * HZ);
+ 		handled |= IPW_INTA_BIT_RF_KILL_DONE;
+@@ -4341,6 +4344,37 @@ static void ipw_handle_missed_beacon(struct ipw_priv *priv,
+ 	IPW_DEBUG_NOTIF("Missed beacon: %d\n", missed_count);
+ }
+ 
++static void ipw_scan_event(struct work_struct *work)
++{
++	union iwreq_data wrqu;
++
++	struct ipw_priv *priv =
++		container_of(work, struct ipw_priv, scan_event.work);
++
++	wrqu.data.length = 0;
++	wrqu.data.flags = 0;
++	wireless_send_event(priv->net_dev, SIOCGIWSCAN, &wrqu, NULL);
++}
++
++static void handle_scan_event(struct ipw_priv *priv)
++{
++	/* Only userspace-requested scan completion events go out immediately */
++	if (!priv->user_requested_scan) {
++		if (!delayed_work_pending(&priv->scan_event))
++			queue_delayed_work(priv->workqueue, &priv->scan_event,
++					 round_jiffies(msecs_to_jiffies(4000)));
++	} else {
++		union iwreq_data wrqu;
++
++		priv->user_requested_scan = 0;
++		cancel_delayed_work(&priv->scan_event);
++
++		wrqu.data.length = 0;
++		wrqu.data.flags = 0;
++		wireless_send_event(priv->net_dev, SIOCGIWSCAN, &wrqu, NULL);
++	}
++}
++
+ /**
+  * Handle host notification packet.
+  * Called from interrupt routine
+@@ -4702,14 +4736,8 @@ static void ipw_rx_notification(struct ipw_priv *priv,
+ 			 * on how the scan was initiated. User space can just
+ 			 * sync on periodic scan to get fresh data...
+ 			 * Jean II */
+-			if (x->status == SCAN_COMPLETED_STATUS_COMPLETE) {
+-				union iwreq_data wrqu;
+-
+-				wrqu.data.length = 0;
+-				wrqu.data.flags = 0;
+-				wireless_send_event(priv->net_dev, SIOCGIWSCAN,
+-						    &wrqu, NULL);
+-			}
++			if (x->status == SCAN_COMPLETED_STATUS_COMPLETE)
++				handle_scan_event(priv);
+ 			break;
+ 		}
+ 
+@@ -9472,6 +9500,10 @@ static int ipw_wx_set_scan(struct net_device *dev,
+ 	struct ipw_priv *priv = ieee80211_priv(dev);
+ 	struct iw_scan_req *req = (struct iw_scan_req *)extra;
+ 
++	mutex_lock(&priv->mutex);
++	priv->user_requested_scan = 1;
++	mutex_unlock(&priv->mutex);
++
+ 	if (wrqu->data.length == sizeof(struct iw_scan_req)) {
+ 		if (wrqu->data.flags & IW_SCAN_THIS_ESSID) {
+ 			ipw_request_direct_scan(priv, req->essid,
+@@ -10647,6 +10679,7 @@ static void ipw_link_up(struct ipw_priv *priv)
+ 	}
+ 
+ 	cancel_delayed_work(&priv->request_scan);
++	cancel_delayed_work(&priv->scan_event);
+ 	ipw_reset_stats(priv);
+ 	/* Ensure the rate is updated immediately */
+ 	priv->last_rate = ipw_get_current_rate(priv);
+@@ -10684,7 +10717,8 @@ static void ipw_link_down(struct ipw_priv *priv)
+ 	if (!(priv->status & STATUS_EXIT_PENDING)) {
+ 		/* Queue up another scan... */
+ 		queue_delayed_work(priv->workqueue, &priv->request_scan, 0);
+-	}
++	} else
++		cancel_delayed_work(&priv->scan_event);
+ }
+ 
+ static void ipw_bg_link_down(struct work_struct *work)
+@@ -10714,6 +10748,7 @@ static int ipw_setup_deferred_work(struct ipw_priv *priv)
+ 	INIT_WORK(&priv->up, ipw_bg_up);
+ 	INIT_WORK(&priv->down, ipw_bg_down);
+ 	INIT_DELAYED_WORK(&priv->request_scan, ipw_request_scan);
++	INIT_DELAYED_WORK(&priv->scan_event, ipw_scan_event);
+ 	INIT_WORK(&priv->request_passive_scan, ipw_request_passive_scan);
+ 	INIT_DELAYED_WORK(&priv->gather_stats, ipw_bg_gather_stats);
+ 	INIT_WORK(&priv->abort_scan, ipw_bg_abort_scan);
+@@ -11746,6 +11781,7 @@ static void ipw_pci_remove(struct pci_dev *pdev)
+ 	cancel_delayed_work(&priv->adhoc_check);
+ 	cancel_delayed_work(&priv->gather_stats);
+ 	cancel_delayed_work(&priv->request_scan);
++	cancel_delayed_work(&priv->scan_event);
+ 	cancel_delayed_work(&priv->rf_kill);
+ 	cancel_delayed_work(&priv->scan_check);
+ 	destroy_workqueue(priv->workqueue);
+diff --git a/drivers/net/wireless/ipw2200.h b/drivers/net/wireless/ipw2200.h
+index 626a240..58b8fe5 100644
+--- a/drivers/net/wireless/ipw2200.h
++++ b/drivers/net/wireless/ipw2200.h
+@@ -1288,6 +1288,8 @@ struct ipw_priv {
+ 
+ 	struct iw_public_data wireless_data;
+ 
++	int user_requested_scan;
++
+ 	struct workqueue_struct *workqueue;
+ 
+ 	struct delayed_work adhoc_check;
+@@ -1296,6 +1298,7 @@ struct ipw_priv {
+ 	struct work_struct system_config;
+ 	struct work_struct rx_replenish;
+ 	struct delayed_work request_scan;
++	struct delayed_work scan_event;
+   	struct work_struct request_passive_scan;
+ 	struct work_struct adapter_restart;
+ 	struct delayed_work rf_kill;
+diff --git a/drivers/oprofile/cpu_buffer.c b/drivers/oprofile/cpu_buffer.c
+index a83c3db..c93d3d2 100644
+--- a/drivers/oprofile/cpu_buffer.c
++++ b/drivers/oprofile/cpu_buffer.c
+@@ -64,6 +64,8 @@ int alloc_cpu_buffers(void)
+ 		b->head_pos = 0;
+ 		b->sample_received = 0;
+ 		b->sample_lost_overflow = 0;
++		b->backtrace_aborted = 0;
++		b->sample_invalid_eip = 0;
+ 		b->cpu = i;
+ 		INIT_DELAYED_WORK(&b->work, wq_sync_buffer);
+ 	}
+@@ -175,6 +177,11 @@ static int log_sample(struct oprofile_cpu_buffer * cpu_buf, unsigned long pc,
+ 
+ 	cpu_buf->sample_received++;
+ 
++	if (pc == ESCAPE_CODE) {
++		cpu_buf->sample_invalid_eip++;
++		return 0;
++	}
++
+ 	if (nr_available_slots(cpu_buf) < 3) {
+ 		cpu_buf->sample_lost_overflow++;
+ 		return 0;
+diff --git a/drivers/oprofile/cpu_buffer.h b/drivers/oprofile/cpu_buffer.h
+index 49900d9..c66c025 100644
+--- a/drivers/oprofile/cpu_buffer.h
++++ b/drivers/oprofile/cpu_buffer.h
+@@ -42,6 +42,7 @@ struct oprofile_cpu_buffer {
+ 	unsigned long sample_received;
+ 	unsigned long sample_lost_overflow;
+ 	unsigned long backtrace_aborted;
++	unsigned long sample_invalid_eip;
+ 	int cpu;
+ 	struct delayed_work work;
+ } ____cacheline_aligned;
+diff --git a/drivers/oprofile/oprofile_stats.c b/drivers/oprofile/oprofile_stats.c
+index f0acb66..d1f6d77 100644
+--- a/drivers/oprofile/oprofile_stats.c
++++ b/drivers/oprofile/oprofile_stats.c
+@@ -26,6 +26,8 @@ void oprofile_reset_stats(void)
+ 		cpu_buf = &cpu_buffer[i]; 
+ 		cpu_buf->sample_received = 0;
+ 		cpu_buf->sample_lost_overflow = 0;
++		cpu_buf->backtrace_aborted = 0;
++		cpu_buf->sample_invalid_eip = 0;
+ 	}
+  
+ 	atomic_set(&oprofile_stats.sample_lost_no_mm, 0);
+@@ -61,6 +63,8 @@ void oprofile_create_stats_files(struct super_block * sb, struct dentry * root)
+ 			&cpu_buf->sample_lost_overflow);
+ 		oprofilefs_create_ro_ulong(sb, cpudir, "backtrace_aborted",
+ 			&cpu_buf->backtrace_aborted);
++		oprofilefs_create_ro_ulong(sb, cpudir, "sample_invalid_eip",
++			&cpu_buf->sample_invalid_eip);
+ 	}
+  
+ 	oprofilefs_create_ro_atomic(sb, dir, "sample_lost_no_mm",
+diff --git a/drivers/usb/storage/unusual_devs.h b/drivers/usb/storage/unusual_devs.h
+index c6b78ba..b2b6405 100644
+--- a/drivers/usb/storage/unusual_devs.h
++++ b/drivers/usb/storage/unusual_devs.h
+@@ -341,6 +341,13 @@ UNUSUAL_DEV(  0x04b0, 0x040d, 0x0100, 0x0100,
+ 		US_SC_DEVICE, US_PR_DEVICE, NULL,
+ 		US_FL_FIX_CAPACITY),
+ 
++/* Reported by Graber and Mike Pagano <mpagano-kernel@mpagano.com> */
++UNUSUAL_DEV(  0x04b0, 0x040f, 0x0200, 0x0200,
++       "NIKON",
++       "NIKON DSC D200",
++       US_SC_DEVICE, US_PR_DEVICE, NULL,
++       US_FL_FIX_CAPACITY),
++
+ /* Reported by Emil Larsson <emil@swip.net> */
+ UNUSUAL_DEV(  0x04b0, 0x0411, 0x0100, 0x0101,
+ 		"NIKON",
+@@ -355,6 +362,13 @@ UNUSUAL_DEV(  0x04b0, 0x0413, 0x0110, 0x0110,
+ 		US_SC_DEVICE, US_PR_DEVICE, NULL,
+ 		US_FL_FIX_CAPACITY),
+ 
++/* Reported by Shan Destromp (shansan@gmail.com) */
++UNUSUAL_DEV(  0x04b0, 0x0417, 0x0100, 0x0100,
++		"NIKON",
++		"NIKON DSC D40X",
++		US_SC_DEVICE, US_PR_DEVICE, NULL,
++		US_FL_FIX_CAPACITY),
++
+ /* BENQ DC5330
+  * Reported by Manuel Fombuena <mfombuena@ya.com> and
+  * Frank Copeland <fjc@thingy.apana.org.au> */
+diff --git a/drivers/video/ps3fb.c b/drivers/video/ps3fb.c
+index 646ec82..0f2a7ba 100644
+--- a/drivers/video/ps3fb.c
++++ b/drivers/video/ps3fb.c
+@@ -659,7 +659,7 @@ static int ps3fb_blank(int blank, struct fb_info *info)
+ 
+ static int ps3fb_get_vblank(struct fb_vblank *vblank)
+ {
+-	memset(vblank, 0, sizeof(&vblank));
++	memset(vblank, 0, sizeof(*vblank));
+ 	vblank->flags = FB_VBLANK_HAVE_VSYNC;
+ 	return 0;
+ }
+diff --git a/fs/nfsd/nfs2acl.c b/fs/nfsd/nfs2acl.c
+index b617428..0e5fa11 100644
+--- a/fs/nfsd/nfs2acl.c
++++ b/fs/nfsd/nfs2acl.c
+@@ -41,7 +41,7 @@ static __be32 nfsacld_proc_getacl(struct svc_rqst * rqstp,
+ 
+ 	fh = fh_copy(&resp->fh, &argp->fh);
+ 	if ((nfserr = fh_verify(rqstp, &resp->fh, 0, MAY_NOP)))
+-		RETURN_STATUS(nfserr_inval);
++		RETURN_STATUS(nfserr);
+ 
+ 	if (argp->mask & ~(NFS_ACL|NFS_ACLCNT|NFS_DFACL|NFS_DFACLCNT))
+ 		RETURN_STATUS(nfserr_inval);
+diff --git a/fs/nfsd/nfs3acl.c b/fs/nfsd/nfs3acl.c
+index 3e3f2de..b647f2f 100644
+--- a/fs/nfsd/nfs3acl.c
++++ b/fs/nfsd/nfs3acl.c
+@@ -37,7 +37,7 @@ static __be32 nfsd3_proc_getacl(struct svc_rqst * rqstp,
+ 
+ 	fh = fh_copy(&resp->fh, &argp->fh);
+ 	if ((nfserr = fh_verify(rqstp, &resp->fh, 0, MAY_NOP)))
+-		RETURN_STATUS(nfserr_inval);
++		RETURN_STATUS(nfserr);
+ 
+ 	if (argp->mask & ~(NFS_ACL|NFS_ACLCNT|NFS_DFACL|NFS_DFACLCNT))
+ 		RETURN_STATUS(nfserr_inval);
+diff --git a/fs/nfsd/nfsfh.c b/fs/nfsd/nfsfh.c
+index 7011d62..51221be 100644
+--- a/fs/nfsd/nfsfh.c
++++ b/fs/nfsd/nfsfh.c
+@@ -95,6 +95,22 @@ nfsd_mode_check(struct svc_rqst *rqstp, umode_t mode, int type)
+ 	return 0;
+ }
+ 
++static __be32 nfsd_setuser_and_check_port(struct svc_rqst *rqstp,
++					  struct svc_export *exp)
++{
++	/* Check if the request originated from a secure port. */
++	if (!rqstp->rq_secure && EX_SECURE(exp)) {
++		char buf[RPC_MAX_ADDRBUFLEN];
++		dprintk(KERN_WARNING
++		       "nfsd: request from insecure port %s!\n",
++		       svc_print_addr(rqstp, buf, sizeof(buf)));
++		return nfserr_perm;
++	}
++
++	/* Set user creds for this exportpoint */
++	return nfserrno(nfsd_setuser(rqstp, exp));
++}
++
+ /*
+  * Perform sanity checks on the dentry in a client's file handle.
+  *
+@@ -167,18 +183,7 @@ fh_verify(struct svc_rqst *rqstp, struct svc_fh *fhp, int type, int access)
+ 			goto out;
+ 		}
+ 
+-		/* Check if the request originated from a secure port. */
+-		error = nfserr_perm;
+-		if (!rqstp->rq_secure && EX_SECURE(exp)) {
+-			char buf[RPC_MAX_ADDRBUFLEN];
+-			printk(KERN_WARNING
+-			       "nfsd: request from insecure port %s!\n",
+-			       svc_print_addr(rqstp, buf, sizeof(buf)));
+-			goto out;
+-		}
+-
+-		/* Set user creds for this exportpoint */
+-		error = nfserrno(nfsd_setuser(rqstp, exp));
++		error = nfsd_setuser_and_check_port(rqstp, exp);
+ 		if (error)
+ 			goto out;
+ 
+@@ -227,18 +232,22 @@ fh_verify(struct svc_rqst *rqstp, struct svc_fh *fhp, int type, int access)
+ 		fhp->fh_export = exp;
+ 		nfsd_nr_verified++;
+ 	} else {
+-		/* just rechecking permissions
+-		 * (e.g. nfsproc_create calls fh_verify, then nfsd_create does as well)
++		/*
++		 * just rechecking permissions
++		 * (e.g. nfsproc_create calls fh_verify, then nfsd_create
++		 * does as well)
+ 		 */
+ 		dprintk("nfsd: fh_verify - just checking\n");
+ 		dentry = fhp->fh_dentry;
+ 		exp = fhp->fh_export;
+-		/* Set user creds for this exportpoint; necessary even
++		/*
++		 * Set user creds for this exportpoint; necessary even
+ 		 * in the "just checking" case because this may be a
+ 		 * filehandle that was created by fh_compose, and that
+ 		 * is about to be used in another nfsv4 compound
+-		 * operation */
+-		error = nfserrno(nfsd_setuser(rqstp, exp));
++		 * operation.
++		 */
++		error = nfsd_setuser_and_check_port(rqstp, exp);
+ 		if (error)
+ 			goto out;
+ 	}
+diff --git a/fs/reiserfs/stree.c b/fs/reiserfs/stree.c
+index 981027d..ce3c937 100644
+--- a/fs/reiserfs/stree.c
++++ b/fs/reiserfs/stree.c
+@@ -1458,9 +1458,6 @@ static void unmap_buffers(struct page *page, loff_t pos)
+ 				}
+ 				bh = next;
+ 			} while (bh != head);
+-			if (PAGE_SIZE == bh->b_size) {
+-				cancel_dirty_page(page, PAGE_CACHE_SIZE);
+-			}
+ 		}
+ 	}
+ }
+diff --git a/include/asm-i386/system.h b/include/asm-i386/system.h
+index d69ba93..b104655 100644
+--- a/include/asm-i386/system.h
++++ b/include/asm-i386/system.h
+@@ -141,7 +141,7 @@ static inline unsigned long native_read_cr4_safe(void)
+ {
+ 	unsigned long val;
+ 	/* This could fault if %cr4 does not exist */
+-	asm("1: movl %%cr4, %0		\n"
++	asm volatile("1: movl %%cr4, %0		\n"
+ 		"2:				\n"
+ 		".section __ex_table,\"a\"	\n"
+ 		".long 1b,2b			\n"
+diff --git a/include/asm-x86_64/system.h b/include/asm-x86_64/system.h
+index 02175aa..47682a6 100644
+--- a/include/asm-x86_64/system.h
++++ b/include/asm-x86_64/system.h
+@@ -85,7 +85,7 @@ static inline void write_cr0(unsigned long val)
+ static inline unsigned long read_cr2(void)
+ {
+ 	unsigned long cr2;
+-	asm("movq %%cr2,%0" : "=r" (cr2));
++	asm volatile("movq %%cr2,%0" : "=r" (cr2));
+ 	return cr2;
+ }
+ 
+@@ -97,7 +97,7 @@ static inline void write_cr2(unsigned long val)
+ static inline unsigned long read_cr3(void)
+ { 
+ 	unsigned long cr3;
+-	asm("movq %%cr3,%0" : "=r" (cr3));
++	asm volatile("movq %%cr3,%0" : "=r" (cr3));
+ 	return cr3;
+ }
+ 
+@@ -109,7 +109,7 @@ static inline void write_cr3(unsigned long val)
+ static inline unsigned long read_cr4(void)
+ { 
+ 	unsigned long cr4;
+-	asm("movq %%cr4,%0" : "=r" (cr4));
++	asm volatile("movq %%cr4,%0" : "=r" (cr4));
+ 	return cr4;
+ }
+ 
+@@ -121,7 +121,7 @@ static inline void write_cr4(unsigned long val)
+ static inline unsigned long read_cr8(void)
+ {
+ 	unsigned long cr8;
+-	asm("movq %%cr8,%0" : "=r" (cr8));
++	asm volatile("movq %%cr8,%0" : "=r" (cr8));
+ 	return cr8;
+ }
+ 
+diff --git a/kernel/sched_fair.c b/kernel/sched_fair.c
+index 67c67a8..2f592fe 100644
+--- a/kernel/sched_fair.c
++++ b/kernel/sched_fair.c
+@@ -93,7 +93,7 @@ unsigned int sysctl_sched_features __read_mostly =
+ 		SCHED_FEAT_FAIR_SLEEPERS	*1 |
+ 		SCHED_FEAT_SLEEPER_AVG		*0 |
+ 		SCHED_FEAT_SLEEPER_LOAD_AVG	*1 |
+-		SCHED_FEAT_PRECISE_CPU_LOAD	*1 |
++		SCHED_FEAT_PRECISE_CPU_LOAD	*0 |
+ 		SCHED_FEAT_START_DEBIT		*1 |
+ 		SCHED_FEAT_SKIP_INITIAL		*0;
+ 
+diff --git a/kernel/softlockup.c b/kernel/softlockup.c
+index e557c44..d857bb0 100644
+--- a/kernel/softlockup.c
++++ b/kernel/softlockup.c
+@@ -15,13 +15,16 @@
+ #include <linux/notifier.h>
+ #include <linux/module.h>
+ 
++#include <asm/irq_regs.h>
++
+ static DEFINE_SPINLOCK(print_lock);
+ 
+ static DEFINE_PER_CPU(unsigned long, touch_timestamp);
+ static DEFINE_PER_CPU(unsigned long, print_timestamp);
+ static DEFINE_PER_CPU(struct task_struct *, watchdog_task);
+ 
+-static int did_panic = 0;
++static int did_panic;
++int softlockup_thresh = 10;
+ 
+ static int
+ softlock_panic(struct notifier_block *this, unsigned long event, void *ptr)
+@@ -40,14 +43,16 @@ static struct notifier_block panic_block = {
+  * resolution, and we don't need to waste time with a big divide when
+  * 2^30ns == 1.074s.
+  */
+-static unsigned long get_timestamp(void)
++static unsigned long get_timestamp(int this_cpu)
+ {
+-	return sched_clock() >> 30;  /* 2^30 ~= 10^9 */
++	return cpu_clock(this_cpu) >> 30;  /* 2^30 ~= 10^9 */
+ }
+ 
+ void touch_softlockup_watchdog(void)
+ {
+-	__raw_get_cpu_var(touch_timestamp) = get_timestamp();
++	int this_cpu = raw_smp_processor_id();
++
++	__raw_get_cpu_var(touch_timestamp) = get_timestamp(this_cpu);
+ }
+ EXPORT_SYMBOL(touch_softlockup_watchdog);
+ 
+@@ -70,6 +75,7 @@ void softlockup_tick(void)
+ 	int this_cpu = smp_processor_id();
+ 	unsigned long touch_timestamp = per_cpu(touch_timestamp, this_cpu);
+ 	unsigned long print_timestamp;
++	struct pt_regs *regs = get_irq_regs();
+ 	unsigned long now;
+ 
+ 	if (touch_timestamp == 0) {
+@@ -92,28 +98,33 @@ void softlockup_tick(void)
+ 		return;
+ 	}
+ 
+-	now = get_timestamp();
++	now = get_timestamp(this_cpu);
+ 
+ 	/* Wake up the high-prio watchdog task every second: */
+ 	if (now > (touch_timestamp + 1))
+ 		wake_up_process(per_cpu(watchdog_task, this_cpu));
+ 
+ 	/* Warn about unreasonable 10+ seconds delays: */
+-	if (now > (touch_timestamp + 10)) {
+-		per_cpu(print_timestamp, this_cpu) = touch_timestamp;
++	if (now <= (touch_timestamp + softlockup_thresh))
++		return;
++
++	per_cpu(print_timestamp, this_cpu) = touch_timestamp;
+ 
+-		spin_lock(&print_lock);
+-		printk(KERN_ERR "BUG: soft lockup detected on CPU#%d!\n",
+-			this_cpu);
++	spin_lock(&print_lock);
++	printk(KERN_ERR "BUG: soft lockup - CPU#%d stuck for %lus! [%s:%d]\n",
++			this_cpu, now - touch_timestamp,
++			current->comm, current->pid);
++	if (regs)
++		show_regs(regs);
++	else
+ 		dump_stack();
+-		spin_unlock(&print_lock);
+-	}
++	spin_unlock(&print_lock);
+ }
+ 
+ /*
+  * The watchdog thread - runs every second and touches the timestamp.
+  */
+-static int watchdog(void * __bind_cpu)
++static int watchdog(void *__bind_cpu)
+ {
+ 	struct sched_param param = { .sched_priority = MAX_RT_PRIO-1 };
+ 
+@@ -151,13 +162,13 @@ cpu_callback(struct notifier_block *nfb, unsigned long action, void *hcpu)
+ 		BUG_ON(per_cpu(watchdog_task, hotcpu));
+ 		p = kthread_create(watchdog, hcpu, "watchdog/%d", hotcpu);
+ 		if (IS_ERR(p)) {
+-			printk("watchdog for %i failed\n", hotcpu);
++			printk(KERN_ERR "watchdog for %i failed\n", hotcpu);
+ 			return NOTIFY_BAD;
+ 		}
+-  		per_cpu(touch_timestamp, hotcpu) = 0;
+-  		per_cpu(watchdog_task, hotcpu) = p;
++		per_cpu(touch_timestamp, hotcpu) = 0;
++		per_cpu(watchdog_task, hotcpu) = p;
+ 		kthread_bind(p, hotcpu);
+- 		break;
++		break;
+ 	case CPU_ONLINE:
+ 	case CPU_ONLINE_FROZEN:
+ 		wake_up_process(per_cpu(watchdog_task, hotcpu));
+@@ -177,7 +188,7 @@ cpu_callback(struct notifier_block *nfb, unsigned long action, void *hcpu)
+ 		kthread_stop(p);
+ 		break;
+ #endif /* CONFIG_HOTPLUG_CPU */
+- 	}
++	}
+ 	return NOTIFY_OK;
+ }
+ 
+diff --git a/kernel/time/ntp.c b/kernel/time/ntp.c
+index de6a2d6..14a2ecf 100644
+--- a/kernel/time/ntp.c
++++ b/kernel/time/ntp.c
+@@ -205,7 +205,7 @@ static void sync_cmos_clock(unsigned long dummy)
+ 		return;
+ 
+ 	getnstimeofday(&now);
+-	if (abs(xtime.tv_nsec - (NSEC_PER_SEC / 2)) <= tick_nsec / 2)
++	if (abs(now.tv_nsec - (NSEC_PER_SEC / 2)) <= tick_nsec / 2)
+ 		fail = update_persistent_clock(now);
+ 
+ 	next.tv_nsec = (NSEC_PER_SEC / 2) - now.tv_nsec;
+diff --git a/lib/libcrc32c.c b/lib/libcrc32c.c
+index 60f4680..1f3a52e 100644
+--- a/lib/libcrc32c.c
++++ b/lib/libcrc32c.c
+@@ -33,7 +33,6 @@
+ #include <linux/crc32c.h>
+ #include <linux/compiler.h>
+ #include <linux/module.h>
+-#include <asm/byteorder.h>
+ 
+ MODULE_AUTHOR("Clay Haapala <chaapala@cisco.com>");
+ MODULE_DESCRIPTION("CRC32c (Castagnoli) calculations");
+@@ -161,15 +160,13 @@ static const u32 crc32c_table[256] = {
+  */
+ 
+ u32 __attribute_pure__
+-crc32c_le(u32 seed, unsigned char const *data, size_t length)
++crc32c_le(u32 crc, unsigned char const *data, size_t length)
+ {
+-	u32 crc = __cpu_to_le32(seed);
+-	
+ 	while (length--)
+ 		crc =
+ 		    crc32c_table[(crc ^ *data++) & 0xFFL] ^ (crc >> 8);
+ 
+-	return __le32_to_cpu(crc);
++	return crc;
+ }
+ 
+ #endif	/* CRC_LE_BITS == 8 */
