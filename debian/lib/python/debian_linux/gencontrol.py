@@ -69,8 +69,9 @@ class MakeFlags(dict):
 class Gencontrol(object):
     makefile_targets = ('binary-arch', 'build', 'setup', 'source')
 
-    def __init__(self, config, templates):
+    def __init__(self, config, templates, version = Version):
         self.config, self.templates = config, templates
+        self.changelog = Changelog(version = version)
 
     def __call__(self):
         packages = PackagesList()

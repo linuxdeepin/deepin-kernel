@@ -10,7 +10,7 @@ from debian_linux.utils import Templates
 
 class Gencontrol(Base):
     def __init__(self, config_dirs = ["debian/config"], template_dirs = ["debian/templates"]):
-        super(Gencontrol, self).__init__(ConfigCoreHierarchy(config_dirs), Templates(template_dirs))
+        super(Gencontrol, self).__init__(ConfigCoreHierarchy(config_dirs), Templates(template_dirs), VersionLinux)
         self.process_changelog()
         self.config_dirs = config_dirs
 
@@ -243,7 +243,7 @@ class Gencontrol(Base):
 
         vars = {
             'home': '/usr/src/kernel-patches/all/%s/debian' % self.version.linux_upstream,
-            'revisions': ' '.join([i.version.debian for i in self.changelog[::-1]]),
+            'revisions': ' '.join([i.debian for i in self.versions[::-1]]),
             'source': "%(linux_upstream)s-%(debian)s" % self.version.__dict__,
             'upstream': self.version.linux_upstream,
         }
@@ -255,14 +255,13 @@ class Gencontrol(Base):
         file('debian/bin/patch.unpatch', 'w').write(unpatch)
 
     def process_changelog(self):
-        in_changelog = Changelog(version = VersionLinux)
-        act_upstream = in_changelog[0].version.linux_upstream
-        changelog = []
-        for i in in_changelog:
+        act_upstream = self.changelog[0].version.linux_upstream
+        versions = []
+        for i in self.changelog:
             if i.version.linux_upstream != act_upstream:
                 break
-            changelog.append(i)
-        self.changelog = changelog
+            versions.append(i.version)
+        self.versions = versions
         self.version = self.changelog[0].version
         if self.version.linux_modifier is not None:
             self.abiname = ''
@@ -285,16 +284,15 @@ class Gencontrol(Base):
 
     def process_real_tree(self, in_entry, vars):
         entry = self.process_package(in_entry, vars)
-        versions = [i.version for i in self.changelog[::-1]]
         for i in (('Depends', 'Provides')):
             value = PackageRelation()
             value.extend(entry.get(i, []))
             if i == 'Depends':
                 v = self.changelog[0].version
                 value.append("linux-patch-debian-%s (= %s)" % (v.linux_version, v.complete))
-                value.append(' | '.join(["linux-source-%s (= %s)" % (v.linux_version, v.complete) for v in versions]))
+                value.append(' | '.join(["linux-source-%s (= %s)" % (v.linux_version, v.complete) for v in self.versions]))
             elif i == 'Provides':
-                value.extend(["linux-tree-%s" % v.complete.replace('~', '-') for v in versions])
+                value.extend(["linux-tree-%s" % v.complete.replace('~', '-') for v in self.versions])
             entry[i] = value
         return entry
 
