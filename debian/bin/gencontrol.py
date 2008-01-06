@@ -30,10 +30,7 @@ class Gencontrol(Base):
         config_base = self.config.get(('base', arch), {})
         vars.update(self.config.get(('image', arch), {}))
         config_libc_dev = self.config.get(('libc-dev', arch), {})
-        arch = config_libc_dev.get('arch', None)
-        if arch is None:
-            arch = config_base.get('kernel-arch')
-        makeflags['LIBC_DEV_ARCH'] = arch
+        makeflags['LIBC_DEV_ARCH'] = config_libc_dev.get('arch', config_base.get('kernel-arch'))
 
     def do_arch_packages(self, packages, makefile, arch, vars, makeflags, extra):
         headers_arch = self.templates["control.headers.arch"]
@@ -60,13 +57,8 @@ class Gencontrol(Base):
 
     def do_featureset_setup(self, vars, makeflags, arch, featureset, extra):
         vars.update(self.config.get(('image', arch, featureset), {}))
-        vars['localversion_headers'] = vars['localversion']
-        for i in (
-            ('kernel-header-dirs', 'KERNEL_HEADER_DIRS'),
-            ('localversion_headers', 'LOCALVERSION_HEADERS'),
-        ):
-            if vars.has_key(i[0]):
-                makeflags[i[1]] = vars[i[0]]
+        makeflags['LOCALVERSION_HEADERS'] = vars['localversion_headers'] = vars['localversion']
+        makeflags['KERNEL_HEADER_DIRS'] = vars.get('kernel-header-dirs', vars.get('kernel-arch'))
 
     def do_featureset_packages(self, packages, makefile, arch, featureset, vars, makeflags, extra):
         headers_featureset = self.templates["control.headers.featureset"]
@@ -92,7 +84,6 @@ class Gencontrol(Base):
             ('compiler', 'COMPILER'),
             ('initramfs', 'INITRAMFS',),
             ('kernel-arch', 'KERNEL_ARCH'),
-            ('kernel-header-dirs', 'KERNEL_HEADER_DIRS'),
             ('kpkg-arch', 'KPKG_ARCH'),
             ('kpkg-subarch', 'KPKG_SUBARCH'),
             ('localversion', 'LOCALVERSION'),
@@ -101,6 +92,7 @@ class Gencontrol(Base):
         ):
             if vars.has_key(i[0]):
                 makeflags[i[1]] = vars[i[0]]
+        makeflags['KERNEL_HEADER_DIRS'] = vars.get('kernel-header-dirs', vars.get('kernel-arch'))
 
     def do_flavour_packages(self, packages, makefile, arch, featureset, flavour, vars, makeflags, extra):
         headers = self.templates["control.headers"]
