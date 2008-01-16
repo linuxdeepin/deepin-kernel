@@ -124,6 +124,77 @@ index 79c711e..2340cfb 100644
  L:	netdev@vger.kernel.org
  S:	Supported
  
+diff --git a/arch/arm/Kconfig b/arch/arm/Kconfig
+index c4de2d4..3a75a0b 100644
+--- a/arch/arm/Kconfig
++++ b/arch/arm/Kconfig
+@@ -1076,7 +1076,7 @@ endmenu
+ 
+ source "fs/Kconfig"
+ 
+-source "kernel/Kconfig.instrumentation"
++source "arch/arm/Kconfig.instrumentation"
+ 
+ source "arch/arm/Kconfig.debug"
+ 
+diff --git a/arch/arm/Kconfig.instrumentation b/arch/arm/Kconfig.instrumentation
+new file mode 100644
+index 0000000..63b8c6d
+--- /dev/null
++++ b/arch/arm/Kconfig.instrumentation
+@@ -0,0 +1,52 @@
++menuconfig INSTRUMENTATION
++	bool "Instrumentation Support"
++	default y
++	---help---
++	  Say Y here to get to see options related to performance measurement,
++	  system-wide debugging, and testing. This option alone does not add any
++	  kernel code.
++
++	  If you say N, all options in this submenu will be skipped and
++	  disabled. If you're trying to debug the kernel itself, go see the
++	  Kernel Hacking menu.
++
++if INSTRUMENTATION
++
++config PROFILING
++	bool "Profiling support (EXPERIMENTAL)"
++	help
++	  Say Y here to enable the extended profiling support mechanisms used
++	  by profilers such as OProfile.
++
++config OPROFILE
++	tristate "OProfile system profiling (EXPERIMENTAL)"
++	depends on PROFILING && !UML
++	help
++	  OProfile is a profiling system capable of profiling the
++	  whole system, include the kernel, kernel modules, libraries,
++	  and applications.
++
++	  If unsure, say N.
++
++config OPROFILE_ARMV6
++	bool
++	depends on OPROFILE && CPU_V6 && !SMP
++	default y
++	select OPROFILE_ARM11_CORE
++
++config OPROFILE_MPCORE
++	bool
++	depends on OPROFILE && CPU_V6 && SMP
++	default y
++	select OPROFILE_ARM11_CORE
++
++config OPROFILE_ARM11_CORE
++	bool
++
++config MARKERS
++	bool "Activate markers"
++	help
++	  Place an empty function call at each marker site. Can be
++	  dynamically changed for a probe function.
++
++endif # INSTRUMENTATION
 diff --git a/arch/arm/mach-at91/board-ek.c b/arch/arm/mach-at91/board-ek.c
 index d05b1b2..53a5ef9 100644
 --- a/arch/arm/mach-at91/board-ek.c
@@ -1431,6 +1502,56 @@ index 77febd6..89a71f4 100644
  	return platform_device_register(&uart8250_device);
  }
  
+diff --git a/arch/powerpc/kernel/iommu.c b/arch/powerpc/kernel/iommu.c
+index 2d0c9ef..79a85d6 100644
+--- a/arch/powerpc/kernel/iommu.c
++++ b/arch/powerpc/kernel/iommu.c
+@@ -278,6 +278,7 @@ int iommu_map_sg(struct iommu_table *tbl, struct scatterlist *sglist,
+ 	unsigned long flags;
+ 	struct scatterlist *s, *outs, *segstart;
+ 	int outcount, incount, i;
++	unsigned int align;
+ 	unsigned long handle;
+ 
+ 	BUG_ON(direction == DMA_NONE);
+@@ -309,7 +310,12 @@ int iommu_map_sg(struct iommu_table *tbl, struct scatterlist *sglist,
+ 		/* Allocate iommu entries for that segment */
+ 		vaddr = (unsigned long) sg_virt(s);
+ 		npages = iommu_num_pages(vaddr, slen);
+-		entry = iommu_range_alloc(tbl, npages, &handle, mask >> IOMMU_PAGE_SHIFT, 0);
++		align = 0;
++		if (IOMMU_PAGE_SHIFT < PAGE_SHIFT && slen >= PAGE_SIZE &&
++		    (vaddr & ~PAGE_MASK) == 0)
++			align = PAGE_SHIFT - IOMMU_PAGE_SHIFT;
++		entry = iommu_range_alloc(tbl, npages, &handle,
++					  mask >> IOMMU_PAGE_SHIFT, align);
+ 
+ 		DBG("  - vaddr: %lx, size: %lx\n", vaddr, slen);
+ 
+@@ -572,7 +578,7 @@ dma_addr_t iommu_map_single(struct iommu_table *tbl, void *vaddr,
+ {
+ 	dma_addr_t dma_handle = DMA_ERROR_CODE;
+ 	unsigned long uaddr;
+-	unsigned int npages;
++	unsigned int npages, align;
+ 
+ 	BUG_ON(direction == DMA_NONE);
+ 
+@@ -580,8 +586,13 @@ dma_addr_t iommu_map_single(struct iommu_table *tbl, void *vaddr,
+ 	npages = iommu_num_pages(uaddr, size);
+ 
+ 	if (tbl) {
++		align = 0;
++		if (IOMMU_PAGE_SHIFT < PAGE_SHIFT && size >= PAGE_SIZE &&
++		    ((unsigned long)vaddr & ~PAGE_MASK) == 0)
++			align = PAGE_SHIFT - IOMMU_PAGE_SHIFT;
++
+ 		dma_handle = iommu_alloc(tbl, vaddr, npages, direction,
+-					 mask >> IOMMU_PAGE_SHIFT, 0);
++					 mask >> IOMMU_PAGE_SHIFT, align);
+ 		if (dma_handle == DMA_ERROR_CODE) {
+ 			if (printk_ratelimit())  {
+ 				printk(KERN_INFO "iommu_alloc failed, "
 diff --git a/arch/powerpc/kernel/prom_init.c b/arch/powerpc/kernel/prom_init.c
 index 1add6ef..5d89a21 100644
 --- a/arch/powerpc/kernel/prom_init.c
@@ -1482,24 +1603,18 @@ index 1add6ef..5d89a21 100644
  #else
  #define fixup_device_tree_efika()
 diff --git a/arch/powerpc/mm/slb.c b/arch/powerpc/mm/slb.c
-index 27922df..a282bc2 100644
+index 27922df..50d7372 100644
 --- a/arch/powerpc/mm/slb.c
 +++ b/arch/powerpc/mm/slb.c
-@@ -82,6 +82,14 @@ static inline void slb_shadow_clear(unsigned long entry)
- 	get_slb_shadow()->save_area[entry].esid = 0;
- }
+@@ -292,6 +292,8 @@ void slb_initialize(void)
  
-+void slb_shadow_clear_all(void)
-+{
-+	int i;
+ 	create_shadowed_slbe(VMALLOC_START, mmu_kernel_ssize, vflags, 1);
+ 
++	slb_shadow_clear(2);
 +
-+	for (i = 0; i < SLB_NUM_BOLTED; i++)
-+		slb_shadow_clear(i);
-+}
-+
- static inline void create_shadowed_slbe(unsigned long ea, int ssize,
- 					unsigned long flags,
- 					unsigned long entry)
+ 	/* We don't bolt the stack for the time being - we're in boot,
+ 	 * so the stack is in the bolted segment.  By the time it goes
+ 	 * elsewhere, we'll call _switch() which will bolt in the new
 diff --git a/arch/powerpc/platforms/pseries/hotplug-cpu.c b/arch/powerpc/platforms/pseries/hotplug-cpu.c
 index fc48b96..412e6b4 100644
 --- a/arch/powerpc/platforms/pseries/hotplug-cpu.c
@@ -1520,18 +1635,69 @@ index fc48b96..412e6b4 100644
  	rtas_stop_self();
  	/* Should never get here... */
  	BUG();
-diff --git a/arch/powerpc/platforms/pseries/lpar.c b/arch/powerpc/platforms/pseries/lpar.c
-index 9a455d4..34317aa 100644
---- a/arch/powerpc/platforms/pseries/lpar.c
-+++ b/arch/powerpc/platforms/pseries/lpar.c
-@@ -272,6 +272,7 @@ void vpa_init(int cpu)
- 	 */
- 	addr = __pa(&slb_shadow[cpu]);
- 	if (firmware_has_feature(FW_FEATURE_SPLPAR)) {
-+		slb_shadow_clear_all();
- 		ret = register_slb_shadow(hwcpu, addr);
- 		if (ret)
- 			printk(KERN_ERR
+diff --git a/arch/sparc/kernel/time.c b/arch/sparc/kernel/time.c
+index 45cb7c5..00b393c 100644
+--- a/arch/sparc/kernel/time.c
++++ b/arch/sparc/kernel/time.c
+@@ -436,7 +436,14 @@ void __init time_init(void)
+ 
+ static inline unsigned long do_gettimeoffset(void)
+ {
+-	return (*master_l10_counter >> 10) & 0x1fffff;
++	unsigned long val = *master_l10_counter;
++	unsigned long usec = (val >> 10) & 0x1fffff;
++
++	/* Limit hit?  */
++	if (val & 0x80000000)
++		usec += 1000000 / HZ;
++
++	return usec;
+ }
+ 
+ /* Ok, my cute asm atomicity trick doesn't work anymore.
+diff --git a/arch/sparc64/kernel/ktlb.S b/arch/sparc64/kernel/ktlb.S
+index 964527d..cef8def 100644
+--- a/arch/sparc64/kernel/ktlb.S
++++ b/arch/sparc64/kernel/ktlb.S
+@@ -1,6 +1,6 @@
+ /* arch/sparc64/kernel/ktlb.S: Kernel mapping TLB miss handling.
+  *
+- * Copyright (C) 1995, 1997, 2005 David S. Miller <davem@davemloft.net>
++ * Copyright (C) 1995, 1997, 2005, 2008 David S. Miller <davem@davemloft.net>
+  * Copyright (C) 1996 Eddie C. Dost        (ecd@brainaid.de)
+  * Copyright (C) 1996 Miguel de Icaza      (miguel@nuclecu.unam.mx)
+  * Copyright (C) 1996,98,99 Jakub Jelinek  (jj@sunsite.mff.cuni.cz)
+@@ -226,6 +226,7 @@ kvmap_dtlb_load:
+ 	ba,pt		%xcc, sun4v_dtlb_load
+ 	 mov		%g5, %g3
+ 
++#ifdef CONFIG_SPARSEMEM_VMEMMAP
+ kvmap_vmemmap:
+ 	sub		%g4, %g5, %g5
+ 	srlx		%g5, 22, %g5
+@@ -234,6 +235,7 @@ kvmap_vmemmap:
+ 	or		%g1, %lo(vmemmap_table), %g1
+ 	ba,pt		%xcc, kvmap_dtlb_load
+ 	 ldx		[%g1 + %g5], %g5
++#endif
+ 
+ kvmap_dtlb_nonlinear:
+ 	/* Catch kernel NULL pointer derefs.  */
+@@ -242,12 +244,14 @@ kvmap_dtlb_nonlinear:
+ 	bleu,pn		%xcc, kvmap_dtlb_longpath
+ 	 nop
+ 
++#ifdef CONFIG_SPARSEMEM_VMEMMAP
+ 	/* Do not use the TSB for vmemmap.  */
+ 	mov		(VMEMMAP_BASE >> 24), %g5
+ 	sllx		%g5, 24, %g5
+ 	cmp		%g4,%g5
+ 	bgeu,pn		%xcc, kvmap_vmemmap
+ 	 nop
++#endif
+ 
+ 	KERN_TSB_LOOKUP_TL1(%g4, %g6, %g5, %g1, %g2, %g3, kvmap_dtlb_load)
+ 
 diff --git a/arch/x86/kernel/apm_32.c b/arch/x86/kernel/apm_32.c
 index 17089a0..af045ca 100644
 --- a/arch/x86/kernel/apm_32.c
@@ -1564,6 +1730,19 @@ index 17089a0..af045ca 100644
  }
  
  module_init(apm_init);
+diff --git a/arch/x86/kernel/hpet.c b/arch/x86/kernel/hpet.c
+index 4a86ffd..2f99ee2 100644
+--- a/arch/x86/kernel/hpet.c
++++ b/arch/x86/kernel/hpet.c
+@@ -657,7 +657,7 @@ irqreturn_t hpet_rtc_interrupt(int irq, void *dev_id)
+ 		hpet_pie_count = 0;
+ 	}
+ 
+-	if (hpet_rtc_flags & RTC_PIE &&
++	if (hpet_rtc_flags & RTC_AIE &&
+ 	    (curr_time.tm_sec == hpet_alarm_time.tm_sec) &&
+ 	    (curr_time.tm_min == hpet_alarm_time.tm_min) &&
+ 	    (curr_time.tm_hour == hpet_alarm_time.tm_hour))
 diff --git a/arch/x86/kernel/process_32.c b/arch/x86/kernel/process_32.c
 index 9663c2a..46d391d 100644
 --- a/arch/x86/kernel/process_32.c
@@ -1635,6 +1814,26 @@ index 500670c..aaf4e12 100644
  {
  	struct create_idle *c_idle =
  		container_of(work, struct create_idle, work);
+diff --git a/arch/x86/mm/init_32.c b/arch/x86/mm/init_32.c
+index c7d1947..3c76d19 100644
+--- a/arch/x86/mm/init_32.c
++++ b/arch/x86/mm/init_32.c
+@@ -321,8 +321,13 @@ extern void set_highmem_pages_init(int);
+ static void __init set_highmem_pages_init(int bad_ppro)
+ {
+ 	int pfn;
+-	for (pfn = highstart_pfn; pfn < highend_pfn; pfn++)
+-		add_one_highpage_init(pfn_to_page(pfn), pfn, bad_ppro);
++	for (pfn = highstart_pfn; pfn < highend_pfn; pfn++) {
++		/*
++		 * Holes under sparsemem might not have no mem_map[]:
++		 */
++		if (pfn_valid(pfn))
++			add_one_highpage_init(pfn_to_page(pfn), pfn, bad_ppro);
++	}
+ 	totalram_pages += totalhigh_pages;
+ }
+ #endif /* CONFIG_FLATMEM */
 diff --git a/block/blktrace.c b/block/blktrace.c
 index 498a0a5..9b4da4a 100644
 --- a/block/blktrace.c
@@ -2748,6 +2947,48 @@ index 56e2304..b8af22e 100644
  	if (!bio)
  		return -ENOMEM;
  	init_completion(&w.wait);
+diff --git a/drivers/bluetooth/hci_ll.c b/drivers/bluetooth/hci_ll.c
+index 8c3e62a..b91d45a 100644
+--- a/drivers/bluetooth/hci_ll.c
++++ b/drivers/bluetooth/hci_ll.c
+@@ -204,6 +204,19 @@ static void ll_device_want_to_wakeup(struct hci_uart *hu)
+ 	spin_lock_irqsave(&ll->hcill_lock, flags);
+ 
+ 	switch (ll->hcill_state) {
++	case HCILL_ASLEEP_TO_AWAKE:
++		/*
++		 * This state means that both the host and the BRF chip
++		 * have simultaneously sent a wake-up-indication packet.
++		 * Traditionaly, in this case, receiving a wake-up-indication
++		 * was enough and an additional wake-up-ack wasn't needed.
++		 * This has changed with the BRF6350, which does require an
++		 * explicit wake-up-ack. Other BRF versions, which do not
++		 * require an explicit ack here, do accept it, thus it is
++		 * perfectly safe to always send one.
++		 */
++		BT_DBG("dual wake-up-indication");
++		/* deliberate fall-through - do not add break */
+ 	case HCILL_ASLEEP:
+ 		/* acknowledge device wake up */
+ 		if (send_hcill_cmd(HCILL_WAKE_UP_ACK, hu) < 0) {
+@@ -211,16 +224,8 @@ static void ll_device_want_to_wakeup(struct hci_uart *hu)
+ 			goto out;
+ 		}
+ 		break;
+-	case HCILL_ASLEEP_TO_AWAKE:
+-		/*
+-		 * this state means that a wake-up-indication
+-		 * is already on its way to the device,
+-		 * and will serve as the required wake-up-ack
+-		 */
+-		BT_DBG("dual wake-up-indication");
+-		break;
+ 	default:
+-		/* any other state are illegal */
++		/* any other state is illegal */
+ 		BT_ERR("received HCILL_WAKE_UP_IND in state %ld", ll->hcill_state);
+ 		break;
+ 	}
 diff --git a/drivers/char/tpm/tpm.c b/drivers/char/tpm/tpm.c
 index 39564b7..c88424a 100644
 --- a/drivers/char/tpm/tpm.c
@@ -3824,6 +4065,24 @@ index 662b8d1..fa147cd 100644
  	dev->ethtool_ops	= &loopback_ethtool_ops;
  	dev->header_ops		= &eth_header_ops;
  	dev->init = loopback_dev_init;
+diff --git a/drivers/net/macvlan.c b/drivers/net/macvlan.c
+index 2e4bcd5..e8dc2f4 100644
+--- a/drivers/net/macvlan.c
++++ b/drivers/net/macvlan.c
+@@ -384,6 +384,13 @@ static int macvlan_newlink(struct net_device *dev,
+ 	if (lowerdev == NULL)
+ 		return -ENODEV;
+ 
++	/* Don't allow macvlans on top of other macvlans - its not really
++	 * wrong, but lockdep can't handle it and its not useful for anything
++	 * you couldn't do directly on top of the real device.
++	 */
++	if (lowerdev->rtnl_link_ops == dev->rtnl_link_ops)
++		return -ENODEV;
++
+ 	if (!tb[IFLA_MTU])
+ 		dev->mtu = lowerdev->mtu;
+ 	else if (dev->mtu > lowerdev->mtu)
 diff --git a/drivers/net/meth.c b/drivers/net/meth.c
 index 0c89b02..cdaa8fc 100644
 --- a/drivers/net/meth.c
@@ -4249,7 +4508,7 @@ index 5b9e1b3..d04ecb7 100644
  	return 0;
  }
 diff --git a/drivers/net/niu.c b/drivers/net/niu.c
-index abfc61c..9a0c6d3 100644
+index abfc61c..3bbcea1 100644
 --- a/drivers/net/niu.c
 +++ b/drivers/net/niu.c
 @@ -33,8 +33,8 @@
@@ -4263,7 +4522,263 @@ index abfc61c..9a0c6d3 100644
  
  static char version[] __devinitdata =
  	DRV_MODULE_NAME ".c:v" DRV_MODULE_VERSION " (" DRV_MODULE_RELDATE ")\n";
-@@ -2241,6 +2241,8 @@ static int niu_process_rx_pkt(struct niu *np, struct rx_ring_info *rp)
+@@ -801,22 +801,90 @@ static int bcm8704_init_user_dev3(struct niu *np)
+ 	return 0;
+ }
+ 
+-static int xcvr_init_10g(struct niu *np)
++static int mrvl88x2011_act_led(struct niu *np, int val)
++{
++	int	err;
++
++	err  = mdio_read(np, np->phy_addr, MRVL88X2011_USER_DEV2_ADDR,
++		MRVL88X2011_LED_8_TO_11_CTL);
++	if (err < 0)
++		return err;
++
++	err &= ~MRVL88X2011_LED(MRVL88X2011_LED_ACT,MRVL88X2011_LED_CTL_MASK);
++	err |=  MRVL88X2011_LED(MRVL88X2011_LED_ACT,val);
++
++	return mdio_write(np, np->phy_addr, MRVL88X2011_USER_DEV2_ADDR,
++			  MRVL88X2011_LED_8_TO_11_CTL, err);
++}
++
++static int mrvl88x2011_led_blink_rate(struct niu *np, int rate)
++{
++	int	err;
++
++	err = mdio_read(np, np->phy_addr, MRVL88X2011_USER_DEV2_ADDR,
++			MRVL88X2011_LED_BLINK_CTL);
++	if (err >= 0) {
++		err &= ~MRVL88X2011_LED_BLKRATE_MASK;
++		err |= (rate << 4);
++
++		err = mdio_write(np, np->phy_addr, MRVL88X2011_USER_DEV2_ADDR,
++				 MRVL88X2011_LED_BLINK_CTL, err);
++	}
++
++	return err;
++}
++
++static int xcvr_init_10g_mrvl88x2011(struct niu *np)
++{
++	int	err;
++
++	/* Set LED functions */
++	err = mrvl88x2011_led_blink_rate(np, MRVL88X2011_LED_BLKRATE_134MS);
++	if (err)
++		return err;
++
++	/* led activity */
++	err = mrvl88x2011_act_led(np, MRVL88X2011_LED_CTL_OFF);
++	if (err)
++		return err;
++
++	err = mdio_read(np, np->phy_addr, MRVL88X2011_USER_DEV3_ADDR,
++			MRVL88X2011_GENERAL_CTL);
++	if (err < 0)
++		return err;
++
++	err |= MRVL88X2011_ENA_XFPREFCLK;
++
++	err = mdio_write(np, np->phy_addr, MRVL88X2011_USER_DEV3_ADDR,
++			 MRVL88X2011_GENERAL_CTL, err);
++	if (err < 0)
++		return err;
++
++	err = mdio_read(np, np->phy_addr, MRVL88X2011_USER_DEV1_ADDR,
++			MRVL88X2011_PMA_PMD_CTL_1);
++	if (err < 0)
++		return err;
++
++	if (np->link_config.loopback_mode == LOOPBACK_MAC)
++		err |= MRVL88X2011_LOOPBACK;
++	else
++		err &= ~MRVL88X2011_LOOPBACK;
++
++	err = mdio_write(np, np->phy_addr, MRVL88X2011_USER_DEV1_ADDR,
++			 MRVL88X2011_PMA_PMD_CTL_1, err);
++	if (err < 0)
++		return err;
++
++	/* Enable PMD  */
++	return mdio_write(np, np->phy_addr, MRVL88X2011_USER_DEV1_ADDR,
++			  MRVL88X2011_10G_PMD_TX_DIS, MRVL88X2011_ENA_PMDTX);
++}
++
++static int xcvr_init_10g_bcm8704(struct niu *np)
+ {
+ 	struct niu_link_config *lp = &np->link_config;
+ 	u16 analog_stat0, tx_alarm_status;
+ 	int err;
+-	u64 val;
+-
+-	val = nr64_mac(XMAC_CONFIG);
+-	val &= ~XMAC_CONFIG_LED_POLARITY;
+-	val |= XMAC_CONFIG_FORCE_LED_ON;
+-	nw64_mac(XMAC_CONFIG, val);
+-
+-	/* XXX shared resource, lock parent XXX */
+-	val = nr64(MIF_CONFIG);
+-	val |= MIF_CONFIG_INDIRECT_MODE;
+-	nw64(MIF_CONFIG, val);
+ 
+ 	err = bcm8704_reset(np);
+ 	if (err)
+@@ -896,6 +964,38 @@ static int xcvr_init_10g(struct niu *np)
+ 	return 0;
+ }
+ 
++static int xcvr_init_10g(struct niu *np)
++{
++	int phy_id, err;
++	u64 val;
++
++	val = nr64_mac(XMAC_CONFIG);
++	val &= ~XMAC_CONFIG_LED_POLARITY;
++	val |= XMAC_CONFIG_FORCE_LED_ON;
++	nw64_mac(XMAC_CONFIG, val);
++
++	/* XXX shared resource, lock parent XXX */
++	val = nr64(MIF_CONFIG);
++	val |= MIF_CONFIG_INDIRECT_MODE;
++	nw64(MIF_CONFIG, val);
++
++	phy_id = phy_decode(np->parent->port_phy, np->port);
++	phy_id = np->parent->phy_probe_info.phy_id[phy_id][np->port];
++
++	/* handle different phy types */
++	switch (phy_id & NIU_PHY_ID_MASK) {
++	case NIU_PHY_ID_MRVL88X2011:
++		err = xcvr_init_10g_mrvl88x2011(np);
++		break;
++
++	default: /* bcom 8704 */
++		err = xcvr_init_10g_bcm8704(np);
++		break;
++	}
++
++	return 0;
++}
++
+ static int mii_reset(struct niu *np)
+ {
+ 	int limit, err;
+@@ -1082,19 +1182,68 @@ static int niu_link_status_common(struct niu *np, int link_up)
+ 	return 0;
+ }
+ 
+-static int link_status_10g(struct niu *np, int *link_up_p)
++static int link_status_10g_mrvl(struct niu *np, int *link_up_p)
+ {
+-	unsigned long flags;
+-	int err, link_up;
++	int err, link_up, pma_status, pcs_status;
+ 
+ 	link_up = 0;
+ 
+-	spin_lock_irqsave(&np->lock, flags);
++	err = mdio_read(np, np->phy_addr, MRVL88X2011_USER_DEV1_ADDR,
++			MRVL88X2011_10G_PMD_STATUS_2);
++	if (err < 0)
++		goto out;
+ 
+-	err = -EINVAL;
+-	if (np->link_config.loopback_mode != LOOPBACK_DISABLED)
++	/* Check PMA/PMD Register: 1.0001.2 == 1 */
++	err = mdio_read(np, np->phy_addr, MRVL88X2011_USER_DEV1_ADDR,
++			MRVL88X2011_PMA_PMD_STATUS_1);
++	if (err < 0)
+ 		goto out;
+ 
++	pma_status = ((err & MRVL88X2011_LNK_STATUS_OK) ? 1 : 0);
++
++        /* Check PMC Register : 3.0001.2 == 1: read twice */
++	err = mdio_read(np, np->phy_addr, MRVL88X2011_USER_DEV3_ADDR,
++			MRVL88X2011_PMA_PMD_STATUS_1);
++	if (err < 0)
++		goto out;
++
++	err = mdio_read(np, np->phy_addr, MRVL88X2011_USER_DEV3_ADDR,
++			MRVL88X2011_PMA_PMD_STATUS_1);
++	if (err < 0)
++		goto out;
++
++	pcs_status = ((err & MRVL88X2011_LNK_STATUS_OK) ? 1 : 0);
++
++        /* Check XGXS Register : 4.0018.[0-3,12] */
++	err = mdio_read(np, np->phy_addr, MRVL88X2011_USER_DEV4_ADDR,
++			MRVL88X2011_10G_XGXS_LANE_STAT);
++	if (err < 0)
++		goto out;
++
++	if (err == (PHYXS_XGXS_LANE_STAT_ALINGED | PHYXS_XGXS_LANE_STAT_LANE3 |
++		    PHYXS_XGXS_LANE_STAT_LANE2 | PHYXS_XGXS_LANE_STAT_LANE1 |
++		    PHYXS_XGXS_LANE_STAT_LANE0 | PHYXS_XGXS_LANE_STAT_MAGIC |
++		    0x800))
++		link_up = (pma_status && pcs_status) ? 1 : 0;
++
++	np->link_config.active_speed = SPEED_10000;
++	np->link_config.active_duplex = DUPLEX_FULL;
++	err = 0;
++out:
++	mrvl88x2011_act_led(np, (link_up ?
++				 MRVL88X2011_LED_CTL_PCS_ACT :
++				 MRVL88X2011_LED_CTL_OFF));
++
++	*link_up_p = link_up;
++	return err;
++}
++
++static int link_status_10g_bcom(struct niu *np, int *link_up_p)
++{
++	int err, link_up;
++
++	link_up = 0;
++
+ 	err = mdio_read(np, np->phy_addr, BCM8704_PMA_PMD_DEV_ADDR,
+ 			BCM8704_PMD_RCV_SIGDET);
+ 	if (err < 0)
+@@ -1134,9 +1283,37 @@ static int link_status_10g(struct niu *np, int *link_up_p)
+ 	err = 0;
+ 
+ out:
++	*link_up_p = link_up;
++	return err;
++}
++
++static int link_status_10g(struct niu *np, int *link_up_p)
++{
++	unsigned long flags;
++	int err = -EINVAL;
++
++	spin_lock_irqsave(&np->lock, flags);
++
++	if (np->link_config.loopback_mode == LOOPBACK_DISABLED) {
++		int phy_id;
++
++		phy_id = phy_decode(np->parent->port_phy, np->port);
++		phy_id = np->parent->phy_probe_info.phy_id[phy_id][np->port];
++
++		/* handle different phy types */
++		switch (phy_id & NIU_PHY_ID_MASK) {
++		case NIU_PHY_ID_MRVL88X2011:
++			err = link_status_10g_mrvl(np, link_up_p);
++			break;
++
++		default: /* bcom 8704 */
++			err = link_status_10g_bcom(np, link_up_p);
++			break;
++		}
++	}
++
+ 	spin_unlock_irqrestore(&np->lock, flags);
+ 
+-	*link_up_p = link_up;
+ 	return err;
+ }
+ 
+@@ -2241,6 +2418,8 @@ static int niu_process_rx_pkt(struct niu *np, struct rx_ring_info *rp)
  	skb->protocol = eth_type_trans(skb, np->dev);
  	netif_receive_skb(skb);
  
@@ -4272,7 +4787,7 @@ index abfc61c..9a0c6d3 100644
  	return num_rcr;
  }
  
-@@ -2508,15 +2510,19 @@ static int niu_rx_error(struct niu *np, struct rx_ring_info *rp)
+@@ -2508,15 +2687,19 @@ static int niu_rx_error(struct niu *np, struct rx_ring_info *rp)
  	u64 stat = nr64(RX_DMA_CTL_STAT(rp->rx_channel));
  	int err = 0;
  
@@ -4296,7 +4811,7 @@ index abfc61c..9a0c6d3 100644
  	nw64(RX_DMA_CTL_STAT(rp->rx_channel),
  	     stat & RX_DMA_CTL_WRITE_CLEAR_ERRS);
  
-@@ -2749,13 +2755,16 @@ static int niu_device_error(struct niu *np)
+@@ -2749,13 +2932,16 @@ static int niu_device_error(struct niu *np)
  	return -ENODEV;
  }
  
@@ -4317,7 +4832,7 @@ index abfc61c..9a0c6d3 100644
  	if (v1 & 0x00000000ffffffffULL) {
  		u32 rx_vec = (v1 & 0xffffffff);
  
-@@ -2764,8 +2773,13 @@ static int niu_slowpath_interrupt(struct niu *np, struct niu_ldg *lp)
+@@ -2764,8 +2950,13 @@ static int niu_slowpath_interrupt(struct niu *np, struct niu_ldg *lp)
  
  			if (rx_vec & (1 << rp->rx_channel)) {
  				int r = niu_rx_error(np, rp);
@@ -4332,7 +4847,7 @@ index abfc61c..9a0c6d3 100644
  			}
  		}
  	}
-@@ -2803,7 +2817,7 @@ static int niu_slowpath_interrupt(struct niu *np, struct niu_ldg *lp)
+@@ -2803,7 +2994,7 @@ static int niu_slowpath_interrupt(struct niu *np, struct niu_ldg *lp)
  	if (err)
  		niu_enable_interrupts(np, 0);
  
@@ -4341,7 +4856,7 @@ index abfc61c..9a0c6d3 100644
  }
  
  static void niu_rxchan_intr(struct niu *np, struct rx_ring_info *rp,
-@@ -2905,7 +2919,7 @@ static irqreturn_t niu_interrupt(int irq, void *dev_id)
+@@ -2905,7 +3096,7 @@ static irqreturn_t niu_interrupt(int irq, void *dev_id)
  	}
  
  	if (unlikely((v0 & ((u64)1 << LDN_MIF)) || v1 || v2)) {
@@ -4350,7 +4865,7 @@ index abfc61c..9a0c6d3 100644
  		if (err)
  			goto out;
  	}
-@@ -5194,7 +5208,8 @@ static int niu_start_xmit(struct sk_buff *skb, struct net_device *dev)
+@@ -5194,7 +5385,8 @@ static int niu_start_xmit(struct sk_buff *skb, struct net_device *dev)
  		}
  		kfree_skb(skb);
  		skb = skb_new;
@@ -4360,6 +4875,60 @@ index abfc61c..9a0c6d3 100644
  
  	align = ((unsigned long) skb->data & (16 - 1));
  	headroom = align + sizeof(struct tx_pkt_hdr);
+@@ -6282,7 +6474,8 @@ static int __devinit phy_record(struct niu_parent *parent,
+ 	if (dev_id_1 < 0 || dev_id_2 < 0)
+ 		return 0;
+ 	if (type == PHY_TYPE_PMA_PMD || type == PHY_TYPE_PCS) {
+-		if ((id & NIU_PHY_ID_MASK) != NIU_PHY_ID_BCM8704)
++		if (((id & NIU_PHY_ID_MASK) != NIU_PHY_ID_BCM8704) &&
++		    ((id & NIU_PHY_ID_MASK) != NIU_PHY_ID_MRVL88X2011))
+ 			return 0;
+ 	} else {
+ 		if ((id & NIU_PHY_ID_MASK) != NIU_PHY_ID_BCM5464R)
+diff --git a/drivers/net/niu.h b/drivers/net/niu.h
+index 10e3f11..0e8626a 100644
+--- a/drivers/net/niu.h
++++ b/drivers/net/niu.h
+@@ -2538,6 +2538,39 @@ struct fcram_hash_ipv6 {
+ #define NIU_PHY_ID_MASK			0xfffff0f0
+ #define NIU_PHY_ID_BCM8704		0x00206030
+ #define NIU_PHY_ID_BCM5464R		0x002060b0
++#define NIU_PHY_ID_MRVL88X2011		0x01410020
++
++/* MRVL88X2011 register addresses */
++#define MRVL88X2011_USER_DEV1_ADDR	1
++#define MRVL88X2011_USER_DEV2_ADDR	2
++#define MRVL88X2011_USER_DEV3_ADDR	3
++#define MRVL88X2011_USER_DEV4_ADDR	4
++#define MRVL88X2011_PMA_PMD_CTL_1	0x0000
++#define MRVL88X2011_PMA_PMD_STATUS_1	0x0001
++#define MRVL88X2011_10G_PMD_STATUS_2	0x0008
++#define MRVL88X2011_10G_PMD_TX_DIS	0x0009
++#define MRVL88X2011_10G_XGXS_LANE_STAT	0x0018
++#define MRVL88X2011_GENERAL_CTL		0x8300
++#define MRVL88X2011_LED_BLINK_CTL	0x8303
++#define MRVL88X2011_LED_8_TO_11_CTL	0x8306
++
++/* MRVL88X2011 register control */
++#define MRVL88X2011_ENA_XFPREFCLK	0x0001
++#define MRVL88X2011_ENA_PMDTX		0x0000
++#define MRVL88X2011_LOOPBACK            0x1
++#define MRVL88X2011_LED_ACT		0x1
++#define MRVL88X2011_LNK_STATUS_OK	0x4
++#define MRVL88X2011_LED_BLKRATE_MASK	0x70
++#define MRVL88X2011_LED_BLKRATE_034MS	0x0
++#define MRVL88X2011_LED_BLKRATE_067MS	0x1
++#define MRVL88X2011_LED_BLKRATE_134MS	0x2
++#define MRVL88X2011_LED_BLKRATE_269MS	0x3
++#define MRVL88X2011_LED_BLKRATE_538MS	0x4
++#define MRVL88X2011_LED_CTL_OFF		0x0
++#define MRVL88X2011_LED_CTL_PCS_ACT	0x5
++#define MRVL88X2011_LED_CTL_MASK	0x7
++#define MRVL88X2011_LED(n,v)		((v)<<((n)*4))
++#define MRVL88X2011_LED_STAT(n,v)	((v)>>((n)*4))
+ 
+ #define BCM8704_PMA_PMD_DEV_ADDR	1
+ #define BCM8704_PCS_DEV_ADDR		2
 diff --git a/drivers/net/pcnet32.c b/drivers/net/pcnet32.c
 index ff92aca..90498ff 100644
 --- a/drivers/net/pcnet32.c
@@ -6332,18 +6901,6 @@ index df7f2de..256ad2c 100644
   *
   * Cacheops 0x02, 0x06, 0x0a, 0x0c-0x0e, 0x16, 0x1a and 0x1e are unused.
   * Most of the _S cacheops are identical to the R4000SC _SD cacheops.
-diff --git a/include/asm-powerpc/mmu-hash64.h b/include/asm-powerpc/mmu-hash64.h
-index 82328de..951e248 100644
---- a/include/asm-powerpc/mmu-hash64.h
-+++ b/include/asm-powerpc/mmu-hash64.h
-@@ -286,6 +286,7 @@ extern void hpte_init_iSeries(void);
- extern void hpte_init_beat(void);
- extern void hpte_init_beat_v3(void);
- 
-+extern void slb_shadow_clear_all(void);
- extern void stabs_alloc(void);
- extern void slb_initialize(void);
- extern void slb_flush_and_rebolt(void);
 diff --git a/include/asm-sh/cacheflush.h b/include/asm-sh/cacheflush.h
 index 9d528ad..e034c36 100644
 --- a/include/asm-sh/cacheflush.h
@@ -6419,6 +6976,21 @@ index f18a1a5..77c391f 100644
  }
  #endif /* CONFIG_MMU */
  
+diff --git a/include/asm-x86/msr.h b/include/asm-x86/msr.h
+index 664a2fa..80b0270 100644
+--- a/include/asm-x86/msr.h
++++ b/include/asm-x86/msr.h
+@@ -3,6 +3,10 @@
+ 
+ #include <asm/msr-index.h>
+ 
++#ifndef __ASSEMBLY__
++# include <linux/types.h>
++#endif
++
+ #ifdef __i386__
+ 
+ #ifdef __KERNEL__
 diff --git a/include/linux/i2c-id.h b/include/linux/i2c-id.h
 index 88c8140..e18017d 100644
 --- a/include/linux/i2c-id.h
@@ -7140,6 +7712,44 @@ index ae8189c..3f703f7 100644
  	max = node_free_pages / FRACTION_OF_NODE_MEM;
  	return max(max, min_pages);
  }
+diff --git a/net/802/tr.c b/net/802/tr.c
+index a2bd0f2..1e115e5 100644
+--- a/net/802/tr.c
++++ b/net/802/tr.c
+@@ -642,7 +642,7 @@ struct net_device *alloc_trdev(int sizeof_priv)
+ static int __init rif_init(void)
+ {
+ 	init_timer(&rif_timer);
+-	rif_timer.expires  = sysctl_tr_rif_timeout;
++	rif_timer.expires  = jiffies + sysctl_tr_rif_timeout;
+ 	rif_timer.data     = 0L;
+ 	rif_timer.function = rif_check_expire;
+ 	add_timer(&rif_timer);
+diff --git a/net/8021q/vlan.c b/net/8021q/vlan.c
+index 4add9bd..032bf44 100644
+--- a/net/8021q/vlan.c
++++ b/net/8021q/vlan.c
+@@ -323,6 +323,7 @@ static const struct header_ops vlan_header_ops = {
+ static int vlan_dev_init(struct net_device *dev)
+ {
+ 	struct net_device *real_dev = VLAN_DEV_INFO(dev)->real_dev;
++	int subclass = 0;
+ 
+ 	/* IFF_BROADCAST|IFF_MULTICAST; ??? */
+ 	dev->flags  = real_dev->flags & ~IFF_UP;
+@@ -349,7 +350,11 @@ static int vlan_dev_init(struct net_device *dev)
+ 		dev->hard_start_xmit = vlan_dev_hard_start_xmit;
+ 	}
+ 
+-	lockdep_set_class(&dev->_xmit_lock, &vlan_netdev_xmit_lock_key);
++	if (real_dev->priv_flags & IFF_802_1Q_VLAN)
++		subclass = 1;
++
++	lockdep_set_class_and_subclass(&dev->_xmit_lock,
++				&vlan_netdev_xmit_lock_key, subclass);
+ 	return 0;
+ }
+ 
 diff --git a/net/atm/mpc.c b/net/atm/mpc.c
 index 2086396..9c7f712 100644
 --- a/net/atm/mpc.c
@@ -7158,6 +7768,180 @@ index 2086396..9c7f712 100644
  	while (i < mpc->number_of_mps_macs) {
  		if (!compare_ether_addr(eth->h_dest, (mpc->mps_macs + i*ETH_ALEN)))
  			if ( send_via_shortcut(skb, mpc) == 0 )           /* try shortcut */
+diff --git a/net/ax25/af_ax25.c b/net/ax25/af_ax25.c
+index 8378afd..b4725ff 100644
+--- a/net/ax25/af_ax25.c
++++ b/net/ax25/af_ax25.c
+@@ -87,10 +87,22 @@ static void ax25_kill_by_device(struct net_device *dev)
+ 		return;
+ 
+ 	spin_lock_bh(&ax25_list_lock);
++again:
+ 	ax25_for_each(s, node, &ax25_list) {
+ 		if (s->ax25_dev == ax25_dev) {
+ 			s->ax25_dev = NULL;
++			spin_unlock_bh(&ax25_list_lock);
+ 			ax25_disconnect(s, ENETUNREACH);
++			spin_lock_bh(&ax25_list_lock);
++
++			/* The entry could have been deleted from the
++			 * list meanwhile and thus the next pointer is
++			 * no longer valid.  Play it safe and restart
++			 * the scan.  Forward progress is ensured
++			 * because we set s->ax25_dev to NULL and we
++			 * are never passed a NULL 'dev' argument.
++			 */
++			goto again;
+ 		}
+ 	}
+ 	spin_unlock_bh(&ax25_list_lock);
+@@ -1109,21 +1121,19 @@ static int __must_check ax25_connect(struct socket *sock,
+ 	 * some sanity checks. code further down depends on this
+ 	 */
+ 
+-	if (addr_len == sizeof(struct sockaddr_ax25)) {
+-		/* support for this will go away in early 2.5.x */
+-		printk(KERN_WARNING "ax25_connect(): %s uses obsolete socket structure\n",
+-			current->comm);
+-	}
+-	else if (addr_len != sizeof(struct full_sockaddr_ax25)) {
+-		/* support for old structure may go away some time */
++	if (addr_len == sizeof(struct sockaddr_ax25))
++		/* support for this will go away in early 2.5.x
++		 * ax25_connect(): uses obsolete socket structure
++		 */
++		;
++	else if (addr_len != sizeof(struct full_sockaddr_ax25))
++		/* support for old structure may go away some time
++		 * ax25_connect(): uses old (6 digipeater) socket structure.
++		 */
+ 		if ((addr_len < sizeof(struct sockaddr_ax25) + sizeof(ax25_address) * 6) ||
+-		    (addr_len > sizeof(struct full_sockaddr_ax25))) {
++		    (addr_len > sizeof(struct full_sockaddr_ax25)))
+ 			return -EINVAL;
+-		}
+ 
+-		printk(KERN_WARNING "ax25_connect(): %s uses old (6 digipeater) socket structure.\n",
+-			current->comm);
+-	}
+ 
+ 	if (fsa->fsa_ax25.sax25_family != AF_AX25)
+ 		return -EINVAL;
+@@ -1467,21 +1477,20 @@ static int ax25_sendmsg(struct kiocb *iocb, struct socket *sock,
+ 			goto out;
+ 		}
+ 
+-		if (addr_len == sizeof(struct sockaddr_ax25)) {
+-			printk(KERN_WARNING "ax25_sendmsg(): %s uses obsolete socket structure\n",
+-				current->comm);
+-		}
+-		else if (addr_len != sizeof(struct full_sockaddr_ax25)) {
+-			/* support for old structure may go away some time */
++		if (addr_len == sizeof(struct sockaddr_ax25))
++			/* ax25_sendmsg(): uses obsolete socket structure */
++			;
++		else if (addr_len != sizeof(struct full_sockaddr_ax25))
++			/* support for old structure may go away some time
++			 * ax25_sendmsg(): uses old (6 digipeater)
++			 * socket structure.
++			 */
+ 			if ((addr_len < sizeof(struct sockaddr_ax25) + sizeof(ax25_address) * 6) ||
+ 			    (addr_len > sizeof(struct full_sockaddr_ax25))) {
+ 				err = -EINVAL;
+ 				goto out;
+ 			}
+ 
+-			printk(KERN_WARNING "ax25_sendmsg(): %s uses old (6 digipeater) socket structure.\n",
+-				current->comm);
+-		}
+ 
+ 		if (addr_len > sizeof(struct sockaddr_ax25) && usax->sax25_ndigis != 0) {
+ 			int ct           = 0;
+diff --git a/net/bluetooth/rfcomm/tty.c b/net/bluetooth/rfcomm/tty.c
+index e447651..a6a758d 100644
+--- a/net/bluetooth/rfcomm/tty.c
++++ b/net/bluetooth/rfcomm/tty.c
+@@ -95,9 +95,10 @@ static void rfcomm_dev_destruct(struct rfcomm_dev *dev)
+ 
+ 	BT_DBG("dev %p dlc %p", dev, dlc);
+ 
+-	write_lock_bh(&rfcomm_dev_lock);
+-	list_del_init(&dev->list);
+-	write_unlock_bh(&rfcomm_dev_lock);
++	/* Refcount should only hit zero when called from rfcomm_dev_del()
++	   which will have taken us off the list. Everything else are
++	   refcounting bugs. */
++	BUG_ON(!list_empty(&dev->list));
+ 
+ 	rfcomm_dlc_lock(dlc);
+ 	/* Detach DLC if it's owned by this dev */
+@@ -109,11 +110,6 @@ static void rfcomm_dev_destruct(struct rfcomm_dev *dev)
+ 
+ 	tty_unregister_device(rfcomm_tty_driver, dev->id);
+ 
+-	/* Refcount should only hit zero when called from rfcomm_dev_del()
+-	   which will have taken us off the list. Everything else are
+-	   refcounting bugs. */
+-	BUG_ON(!list_empty(&dev->list));
+-
+ 	kfree(dev);
+ 
+ 	/* It's safe to call module_put() here because socket still
+@@ -313,7 +309,15 @@ static void rfcomm_dev_del(struct rfcomm_dev *dev)
+ {
+ 	BT_DBG("dev %p", dev);
+ 
+-	set_bit(RFCOMM_TTY_RELEASED, &dev->flags);
++	if (test_bit(RFCOMM_TTY_RELEASED, &dev->flags))
++		BUG_ON(1);
++	else
++		set_bit(RFCOMM_TTY_RELEASED, &dev->flags);
++
++	write_lock_bh(&rfcomm_dev_lock);
++	list_del_init(&dev->list);
++	write_unlock_bh(&rfcomm_dev_lock);
++
+ 	rfcomm_dev_put(dev);
+ }
+ 
+diff --git a/net/bridge/br_netfilter.c b/net/bridge/br_netfilter.c
+index c1757c7..5d8b939 100644
+--- a/net/bridge/br_netfilter.c
++++ b/net/bridge/br_netfilter.c
+@@ -247,8 +247,9 @@ static void __br_dnat_complain(void)
+  * Let us first consider the case that ip_route_input() succeeds:
+  *
+  * If skb->dst->dev equals the logical bridge device the packet
+- * came in on, we can consider this bridging. We then call
+- * skb->dst->output() which will make the packet enter br_nf_local_out()
++ * came in on, we can consider this bridging. The packet is passed
++ * through the neighbour output function to build a new destination
++ * MAC address, which will make the packet enter br_nf_local_out()
+  * not much later. In that function it is assured that the iptables
+  * FORWARD chain is traversed for the packet.
+  *
+@@ -285,12 +286,17 @@ static int br_nf_pre_routing_finish_bridge(struct sk_buff *skb)
+ 	skb->nf_bridge->mask ^= BRNF_NF_BRIDGE_PREROUTING;
+ 
+ 	skb->dev = bridge_parent(skb->dev);
+-	if (!skb->dev)
+-		kfree_skb(skb);
+-	else {
++	if (skb->dev) {
++		struct dst_entry *dst = skb->dst;
++
+ 		nf_bridge_pull_encap_header(skb);
+-		skb->dst->output(skb);
++
++		if (dst->hh)
++			return neigh_hh_output(dst->hh, skb);
++		else if (dst->neighbour)
++			return dst->neighbour->output(skb);
+ 	}
++	kfree_skb(skb);
+ 	return 0;
+ }
+ 
 diff --git a/net/core/dev.c b/net/core/dev.c
 index be9d301..0879f52 100644
 --- a/net/core/dev.c
@@ -7177,6 +7961,28 @@ index be9d301..0879f52 100644
  
  		netpoll_poll_unlock(have);
  	}
+diff --git a/net/core/neighbour.c b/net/core/neighbour.c
+index 29b8ee4..cc8a2f1 100644
+--- a/net/core/neighbour.c
++++ b/net/core/neighbour.c
+@@ -1316,8 +1316,6 @@ void neigh_parms_release(struct neigh_table *tbl, struct neigh_parms *parms)
+ 			*p = parms->next;
+ 			parms->dead = 1;
+ 			write_unlock_bh(&tbl->lock);
+-			if (parms->dev)
+-				dev_put(parms->dev);
+ 			call_rcu(&parms->rcu_head, neigh_rcu_free_parms);
+ 			return;
+ 		}
+@@ -1328,6 +1326,8 @@ void neigh_parms_release(struct neigh_table *tbl, struct neigh_parms *parms)
+ 
+ void neigh_parms_destroy(struct neigh_parms *parms)
+ {
++	if (parms->dev)
++		dev_put(parms->dev);
+ 	kfree(parms);
+ }
+ 
 diff --git a/net/core/skbuff.c b/net/core/skbuff.c
 index 5b4ce9b..b628377 100644
 --- a/net/core/skbuff.c
@@ -7204,6 +8010,34 @@ index 5b4ce9b..b628377 100644
  
  	atomic_inc(&(skb_shinfo(skb)->dataref));
  	skb->cloned = 1;
+diff --git a/net/decnet/dn_route.c b/net/decnet/dn_route.c
+index 66663e5..0e10ff2 100644
+--- a/net/decnet/dn_route.c
++++ b/net/decnet/dn_route.c
+@@ -1665,12 +1665,12 @@ static struct dn_route *dn_rt_cache_get_first(struct seq_file *seq)
+ 			break;
+ 		rcu_read_unlock_bh();
+ 	}
+-	return rt;
++	return rcu_dereference(rt);
+ }
+ 
+ static struct dn_route *dn_rt_cache_get_next(struct seq_file *seq, struct dn_route *rt)
+ {
+-	struct dn_rt_cache_iter_state *s = rcu_dereference(seq->private);
++	struct dn_rt_cache_iter_state *s = seq->private;
+ 
+ 	rt = rt->u.dst.dn_next;
+ 	while(!rt) {
+@@ -1680,7 +1680,7 @@ static struct dn_route *dn_rt_cache_get_next(struct seq_file *seq, struct dn_rou
+ 		rcu_read_lock_bh();
+ 		rt = dn_rt_hash_table[s->bucket].chain;
+ 	}
+-	return rt;
++	return rcu_dereference(rt);
+ }
+ 
+ static void *dn_rt_cache_seq_start(struct seq_file *seq, loff_t *pos)
 diff --git a/net/ipv4/inet_lro.c b/net/ipv4/inet_lro.c
 index 9a96c27..4a4d49f 100644
 --- a/net/ipv4/inet_lro.c
@@ -7353,9 +8187,33 @@ index 66b42f5..e7050f8 100644
  			iph->saddr = rt->rt_src;
  		iph->check   = 0;
 diff --git a/net/ipv4/route.c b/net/ipv4/route.c
-index d2bc614..d337706 100644
+index d2bc614..28484f3 100644
 --- a/net/ipv4/route.c
 +++ b/net/ipv4/route.c
+@@ -283,12 +283,12 @@ static struct rtable *rt_cache_get_first(struct seq_file *seq)
+ 			break;
+ 		rcu_read_unlock_bh();
+ 	}
+-	return r;
++	return rcu_dereference(r);
+ }
+ 
+ static struct rtable *rt_cache_get_next(struct seq_file *seq, struct rtable *r)
+ {
+-	struct rt_cache_iter_state *st = rcu_dereference(seq->private);
++	struct rt_cache_iter_state *st = seq->private;
+ 
+ 	r = r->u.dst.rt_next;
+ 	while (!r) {
+@@ -298,7 +298,7 @@ static struct rtable *rt_cache_get_next(struct seq_file *seq, struct rtable *r)
+ 		rcu_read_lock_bh();
+ 		r = rt_hash_table[st->bucket].chain;
+ 	}
+-	return r;
++	return rcu_dereference(r);
+ }
+ 
+ static struct rtable *rt_cache_get_idx(struct seq_file *seq, loff_t pos)
 @@ -2626,11 +2626,10 @@ int ip_rt_dump(struct sk_buff *skb,  struct netlink_callback *cb)
  	int idx, s_idx;
  
@@ -7398,6 +8256,19 @@ index 2ed689a..5d4245a 100644
  		/* Connect to link-local address requires an interface */
  		if (!sk->sk_bound_dev_if) {
  			err = -EINVAL;
+diff --git a/net/ipv6/netfilter/ip6t_eui64.c b/net/ipv6/netfilter/ip6t_eui64.c
+index 34ba150..41df9a5 100644
+--- a/net/ipv6/netfilter/ip6t_eui64.c
++++ b/net/ipv6/netfilter/ip6t_eui64.c
+@@ -47,7 +47,7 @@ match(const struct sk_buff *skb,
+ 			memcpy(eui64 + 5, eth_hdr(skb)->h_source + 3, 3);
+ 			eui64[3] = 0xff;
+ 			eui64[4] = 0xfe;
+-			eui64[0] |= 0x02;
++			eui64[0] ^= 0x02;
+ 
+ 			i = 0;
+ 			while (ipv6_hdr(skb)->saddr.s6_addr[8 + i] == eui64[i]
 diff --git a/net/irda/af_irda.c b/net/irda/af_irda.c
 index 48ce59a..d5e4dd7 100644
 --- a/net/irda/af_irda.c
@@ -7437,6 +8308,21 @@ index 7027eed..308bbe4 100644
  }
  
  static int ieee80211_ioctl_giwrate(struct net_device *dev,
+diff --git a/net/netfilter/xt_helper.c b/net/netfilter/xt_helper.c
+index 0a1f4c6..d842c4a 100644
+--- a/net/netfilter/xt_helper.c
++++ b/net/netfilter/xt_helper.c
+@@ -56,8 +56,8 @@ match(const struct sk_buff *skb,
+ 	if (info->name[0] == '\0')
+ 		ret = !ret;
+ 	else
+-		ret ^= !strncmp(master_help->helper->name, info->name,
+-				strlen(master_help->helper->name));
++		ret ^= !strncmp(helper->name, info->name,
++				strlen(helper->name));
+ 	return ret;
+ }
+ 
 diff --git a/net/sctp/sm_make_chunk.c b/net/sctp/sm_make_chunk.c
 index ed7c9e3..3cc629d 100644
 --- a/net/sctp/sm_make_chunk.c
