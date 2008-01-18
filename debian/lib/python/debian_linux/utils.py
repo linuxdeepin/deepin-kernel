@@ -1,5 +1,7 @@
 import debian, re, os, textwrap
 
+_marker = object
+
 class SortedDict(dict):
     __slots__ = '_list',
 
@@ -36,12 +38,7 @@ class Templates(dict):
         self.dirs = dirs
 
     def __getitem__(self, key):
-        try:
-            return super(Templates, self).__getitem__(key)
-        except KeyError: pass
-        value = self._read(key)
-        super(Templates, self).__setitem__(key, value)
-        return value
+        return self.get(key)
 
     def __setitem__(self, key, value):
         raise NotImplemented()
@@ -56,7 +53,6 @@ class Templates(dict):
                 if prefix == 'control':
                     return self._read_control(f)
                 return f.read()
-        raise KeyError(name)
 
     def _read_control(self, f):
         entries = []
@@ -92,6 +88,18 @@ class Templates(dict):
             entries.append(e)
 
         return entries
+
+    def get(self, key, default = _marker):
+        ret = super(Templates, self).get(key, _marker)
+        if ret is not _marker:
+            return ret
+        value = self._read(key)
+        if value is None:
+            if default is _marker:
+                raise KeyError(key)
+            return default
+        super(Templates, self).__setitem__(key, value)
+        return value
 
 class TextWrapper(textwrap.TextWrapper):
     wordsep_re = re.compile(
