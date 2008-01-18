@@ -19,6 +19,10 @@ class Makefile(object):
             self.rules[name].add(deps, cmds)
         else:
             self.rules[name] = self.Rule(name, deps, cmds)
+        if deps is not None:
+            for i in deps:
+                if i not in self.rules:
+                    self.rules[i] = self.Rule(i)
 
     def write(self, out):
         r = self.rules.keys()
@@ -118,9 +122,8 @@ class Gencontrol(object):
         pass
 
     def do_extra(self, packages, makefile):
-        try:
-            templates_extra = self.templates["control.extra"]
-        except IOError:
+        templates_extra = self.templates.get("control.extra", None)
+        if templates_extra is None:
             return
 
         packages.extend(self.process_packages(templates_extra, {}))
@@ -161,10 +164,10 @@ class Gencontrol(object):
     def do_arch_makefile(self, makefile, arch, makeflags, extra):
         for i in self.makefile_targets:
             target1 = i
-            target2 = "%s_%s" % (i, arch)
+            target2 = '_'.join((target1, arch))
+            target3 = '_'.join((target2, 'real'))
             makefile.add(target1, [target2])
-            makefile.add(target2, ['%s_real' % target2])
-            makefile.add('%s_real' % target2)
+            makefile.add(target2, [target3])
 
     def do_arch_packages(self, packages, makefile, arch, vars, makeflags, extra):
         pass
@@ -196,11 +199,11 @@ class Gencontrol(object):
 
     def do_featureset_makefile(self, makefile, arch, featureset, makeflags, extra):
         for i in self.makefile_targets:
-            target1 = "%s_%s" % (i, arch)
-            target2 = "%s_%s_%s" % (i, arch, featureset)
+            target1 = '_'.join((i, arch))
+            target2 = '_'.join((target1, featureset))
+            target3 = '_'.join((target2, 'real'))
             makefile.add(target1, [target2])
-            makefile.add(target2, ['%s_real' % target2])
-            makefile.add('%s_real' % target2)
+            makefile.add(target2, [target3])
 
     def do_featureset_packages(self, packages, makefile, arch, featureset, vars, makeflags, extra):
         pass
@@ -233,11 +236,11 @@ class Gencontrol(object):
 
     def do_flavour_makefile(self, makefile, arch, featureset, flavour, makeflags, extra):
         for i in self.makefile_targets:
-            target1 = "%s_%s_%s" % (i, arch, featureset)
-            target2 = "%s_%s_%s_%s" % (i, arch, featureset, flavour)
+            target1 = '_'.join((i, arch, featureset))
+            target2 = '_'.join((target1, flavour))
+            target3 = '_'.join((target2, 'real'))
             makefile.add(target1, [target2])
-            makefile.add(target2, ['%s_real' % target2])
-            makefile.add('%s_real' % target2)
+            makefile.add(target2, [target3])
 
     def do_flavour_packages(self, packages, makefile, arch, featureset, flavour, vars, makeflags, extra):
         pass
