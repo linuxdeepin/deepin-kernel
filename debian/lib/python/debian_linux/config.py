@@ -212,9 +212,6 @@ class ConfigParser(object):
         def __init__(self, data):
             super(ConfigParser.Section, self).__init__(data)
 
-        def __str__(self):
-            return '<%s(%s)>' % (self.__class__.__name__, self._data)
-
     class SectionSchema(Section):
         __slots__ = ()
 
