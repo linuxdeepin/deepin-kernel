@@ -1,0 +1,62 @@
+From: Stefan Richter <stefanr@s5r6.in-berlin.de>
+Date: Sun, 20 Jan 2008 00:25:31 +0000 (+0100)
+Subject: firewire: fw-sbp2: try to increase reconnect_hold (speed up reconnection)
+X-Git-Url: http://git.eu.kernel.org/?p=linux%2Fkernel%2Fgit%2Fieee1394%2Flinux1394-2.6.git;a=commitdiff_plain;h=b6fdd2a6c4d905c9343153e6c385518edaaf6727
+
+firewire: fw-sbp2: try to increase reconnect_hold (speed up reconnection)
+
+Ask the target to grant 4 seconds instead of the standard and minimum of
+1 second window after bus reset for reconnection.  This accelerates
+reconnection if there are more than one targets on the bus:  If a login
+and inquiry to one target blocks the fw-sbp2 workqueue for more than 1s
+after bus reset, we now still can reconnect to the other target.
+
+Before that, fw-sbp2's reconnect attempts would be rejected with "error
+status: 0:9" (function rejected), and fw-sbp2 would finally re-login.
+All those futile reconnect attemps cost extra time until the target
+which needs re-login is ready for I/O again.
+
+The reconnect timeout field in the login ORB doesn't have to be honored
+by the target though.  I found that we could get up to
+  - allegedly 32768s from an old OXFW911 firmware
+  - 256s from LSI bridges
+  - 4s from OXUF922 and OXFW912 bridges,
+  - 2s from TI bridges,
+  - only the standard 1s from Initio and Prolific bridges and from
+    Apple OpenFirmware in target mode.
+
+We just try to get 4 seconds which already covers the case of a few
+HDDs on the same bus quite nicely.
+
+A minor drawback occurs in the following (rare and impractical) border
+case:
+  - two initiators are there, initiator 1 holds an exclusive login to
+    a target,
+  - initiator 1 goes off the bus,
+  - target refuses login attempts from initiator 2 until reconnect_hold
+    seconds after bus reset.
+
+An alternative approach to the issue at hand would be to parallelize
+fw-sbp2's reconnect and login work.
+
+Signed-off-by: Stefan Richter <stefanr@s5r6.in-berlin.de>
+Acked-by: Jarod Wilson <jwilson@redhat.com>
+---
+
+diff --git a/drivers/firewire/fw-sbp2.c b/drivers/firewire/fw-sbp2.c
+index b5e9a64..21122e5 100644
+--- a/drivers/firewire/fw-sbp2.c
++++ b/drivers/firewire/fw-sbp2.c
+@@ -522,9 +522,10 @@ sbp2_send_management_orb(struct sbp2_logical_unit *lu, int node_id,
+ 	orb->request.status_fifo.low  = lu->address_handler.offset;
+ 
+ 	if (function == SBP2_LOGIN_REQUEST) {
++		/* Ask for 2^2 == 4 seconds reconnect grace period */
+ 		orb->request.misc |=
+-			MANAGEMENT_ORB_EXCLUSIVE(sbp2_param_exclusive_login) |
+-			MANAGEMENT_ORB_RECONNECT(0);
++			MANAGEMENT_ORB_RECONNECT(2) |
++			MANAGEMENT_ORB_EXCLUSIVE(sbp2_param_exclusive_login);
+ 		timeout = SBP2_LOGIN_ORB_TIMEOUT;
+ 	} else {
+ 		timeout = SBP2_ORB_TIMEOUT;
