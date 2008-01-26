@@ -49,8 +49,7 @@ class main(object):
 
         local_config = ConfigCoreDump(fp = file("debian/config.defines.dump"))
 
-        self.abiname = local_config['abi',]['abiname']
-        self.version_abi = self.version + '-' + self.abiname
+        self.version_abi = self.version + '-' + local_config['abi',]['abiname']
 
     def __call__(self):
         self.dir = tempfile.mkdtemp(prefix = 'abiupdate')
@@ -103,7 +102,7 @@ class main(object):
         return filename_out
 
     def save_abi(self, symbols, arch, featureset, flavour):
-        dir = "debian/abi/%s" % self.abiname
+        dir = "debian/abi/%s" % self.version_abi
         if not os.path.exists(dir):
             os.makedirs(dir)
         out = "%s/%s_%s_%s" % (dir, arch, featureset, flavour)

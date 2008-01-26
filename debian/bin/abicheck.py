@@ -5,14 +5,18 @@ sys.path.append('debian/lib/python')
 
 from debian_linux.abi import *
 from debian_linux.config import ConfigCoreDump
+from debian_linux.debian import *
 
 class checker(object):
     def __init__(self, dir, arch, featureset, flavour):
         self.arch, self.featureset, self.flavour = arch, featureset, flavour
         self.config = ConfigCoreDump(fp = file("debian/config.defines.dump"))
         self.filename_new = "%s/Module.symvers" % dir
+
+        changelog = Changelog(version = VersionLinux)[0]
+        version = changelog.version.linux_version
         abiname = self.config['abi',]['abiname']
-        self.filename_ref = "debian/abi/%s/%s_%s_%s" % (abiname, arch, featureset, flavour)
+        self.filename_ref = "debian/abi/%s-%s/%s_%s_%s" % (version, abiname, arch, featureset, flavour)
 
     def __call__(self, out):
         ret = 0
