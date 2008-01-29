@@ -80,15 +80,18 @@ class Gencontrol(Base):
     def do_flavour_setup(self, vars, makeflags, arch, featureset, flavour, extra):
         vars.update(self.config.merge('image', arch, featureset, flavour))
         for i in (
-            ('cflags', 'CFLAGS'),
             ('compiler', 'COMPILER'),
-            ('initramfs', 'INITRAMFS',),
             ('kernel-arch', 'KERNEL_ARCH'),
+            ('localversion', 'LOCALVERSION'),
+            ('type', 'TYPE'),
+        ):
+            makeflags[i[1]] = vars[i[0]]
+        for i in (
+            ('cflags', 'CFLAGS'),
+            ('initramfs', 'INITRAMFS'),
             ('kpkg-arch', 'KPKG_ARCH'),
             ('kpkg-subarch', 'KPKG_SUBARCH'),
-            ('localversion', 'LOCALVERSION'),
             ('override-host-type', 'OVERRIDE_HOST_TYPE'),
-            ('type', 'TYPE'),
         ):
             if vars.has_key(i[0]):
                 makeflags[i[1]] = vars[i[0]]
