@@ -18,6 +18,10 @@ class Gencontrol(Base):
         super(Gencontrol, self).do_main_setup(vars, makeflags, extra)
         vars.update(self.config['image',])
         makeflags.update({
+            'MAJOR': self.version.linux_major,
+            'VERSION': self.version.linux_version,
+            'UPSTREAMVERSION': self.version.linux_upstream,
+            'ABINAME': self.abiname,
             'SOURCEVERSION': self.version.complete,
         })
 
@@ -262,7 +266,13 @@ class Gencontrol(Base):
             self.abiname = ''
         else:
             self.abiname = '-%s' % self.config['abi',]['abiname']
-        self.vars = self.process_version_linux(self.version, self.abiname)
+        self.vars = {
+            'upstreamversion': self.version.linux_upstream,
+            'version': self.version.linux_version,
+            'source_upstream': self.version.upstream,
+            'major': self.version.linux_major,
+            'abiname': self.abiname,
+        }
         self.config['version',] = {'source': self.version.complete, 'abiname': self.abiname}
 
     def process_real_image(self, in_entry, relations, config, vars):

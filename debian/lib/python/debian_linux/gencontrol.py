@@ -108,12 +108,7 @@ class Gencontrol(object):
             self.do_arch(packages, makefile, arch, vars.copy(), makeflags.copy(), extra)
 
     def do_main_setup(self, vars, makeflags, extra):
-        makeflags.update({
-            'MAJOR': self.version.linux_major,
-            'VERSION': self.version.linux_version,
-            'UPSTREAMVERSION': self.version.linux_upstream,
-            'ABINAME': self.abiname,
-        })
+        pass
 
     def do_main_makefile(self, makefile, makeflags, extra):
         makefile.add('binary-indep', cmds = ["$(MAKE) -f debian/rules.real binary-indep %s" % makeflags])
@@ -279,15 +274,6 @@ class Gencontrol(object):
         for i in in_entries:
             entries.append(self.process_package(i, vars))
         return entries
-
-    def process_version_linux(self, version, abiname):
-        return {
-            'upstreamversion': version.linux_upstream,
-            'version': version.linux_version,
-            'source_upstream': version.upstream,
-            'major': version.linux_major,
-            'abiname': abiname,
-        }
 
     def substitute(self, s, vars):
         if isinstance(s, (list, tuple)):
