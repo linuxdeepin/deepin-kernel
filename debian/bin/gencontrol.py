@@ -27,9 +27,9 @@ class Gencontrol(Base):
         packages.extend(self.process_packages(self.templates["control.support"], self.vars))
 
     def do_arch_setup(self, vars, makeflags, arch, extra):
-        config_base = self.config.get(('base', arch), {})
-        vars.update(self.config.get(('image', arch), {}))
-        config_libc_dev = self.config.get(('libc-dev', arch), {})
+        config_base = self.config.merge('base', arch)
+        vars.update(self.config.merge('image', arch))
+        config_libc_dev = self.config.merge('libc-dev', arch)
         makeflags['LIBC_DEV_ARCH'] = config_libc_dev.get('arch', config_base.get('kernel-arch'))
 
     def do_arch_packages(self, packages, makefile, arch, vars, makeflags, extra):
@@ -56,7 +56,7 @@ class Gencontrol(Base):
         makefile.add('source_%s_real' % arch, cmds = cmds_source)
 
     def do_featureset_setup(self, vars, makeflags, arch, featureset, extra):
-        vars.update(self.config.get(('image', arch, featureset), {}))
+        vars.update(self.config.merge('image', arch, featureset))
         makeflags['LOCALVERSION_HEADERS'] = vars['localversion_headers'] = vars['localversion']
         makeflags['KERNEL_HEADER_DIRS'] = vars.get('kernel-header-dirs', vars.get('kernel-arch'))
 
@@ -78,7 +78,7 @@ class Gencontrol(Base):
         makefile.add('source_%s_%s_real' % (arch, featureset), cmds = cmds_source)
 
     def do_flavour_setup(self, vars, makeflags, arch, featureset, flavour, extra):
-        vars.update(self.config.get(('image', arch, featureset, flavour), {}))
+        vars.update(self.config.merge('image', arch, featureset, flavour))
         for i in (
             ('cflags', 'CFLAGS'),
             ('compiler', 'COMPILER'),

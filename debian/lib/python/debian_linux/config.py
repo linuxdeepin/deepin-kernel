@@ -224,7 +224,7 @@ class ConfigParser(object):
 
 if __name__ == '__main__':
     import sys
-    config = ConfigReaderCore(['debian/config'])
+    config = ConfigCoreHierarchy(['debian/config'])
     sections = config.keys()
     sections.sort()
     for section in sections:
