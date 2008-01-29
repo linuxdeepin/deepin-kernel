@@ -102,9 +102,9 @@ class Main(object):
             raise
 
 if __name__ == '__main__':
-    from optparse import OptionParser                                                                                           
-    parser = OptionParser(usage = "%prog [OPTION]... TAR [PATCH]")                                                              
-    parser.add_option("-V", "--override-version", dest = "override_version", help = "Override version", metavar = "VERSION")    
+    from optparse import OptionParser
+    parser = OptionParser(usage = "%prog [OPTION]... TAR [PATCH]")
+    parser.add_option("-V", "--override-version", dest = "override_version", help = "Override version", metavar = "VERSION")
     options, args = parser.parse_args()
 
     input_tar = args[0]
