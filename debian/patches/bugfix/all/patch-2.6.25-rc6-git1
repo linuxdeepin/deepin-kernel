@@ -1,0 +1,566 @@
+diff --git a/drivers/ata/ahci.c b/drivers/ata/ahci.c
+index 6978469..17ee6ed 100644
+--- a/drivers/ata/ahci.c
++++ b/drivers/ata/ahci.c
+@@ -49,6 +49,10 @@
+ #define DRV_NAME	"ahci"
+ #define DRV_VERSION	"3.0"
+ 
++static int ahci_skip_host_reset;
++module_param_named(skip_host_reset, ahci_skip_host_reset, int, 0444);
++MODULE_PARM_DESC(skip_host_reset, "skip global host reset (0=don't skip, 1=skip)");
++
+ static int ahci_enable_alpm(struct ata_port *ap,
+ 		enum link_pm policy);
+ static void ahci_disable_alpm(struct ata_port *ap);
+@@ -587,6 +591,7 @@ static const struct pci_device_id ahci_pci_tbl[] = {
+ 
+ 	/* Marvell */
+ 	{ PCI_VDEVICE(MARVELL, 0x6145), board_ahci_mv },	/* 6145 */
++	{ PCI_VDEVICE(MARVELL, 0x6121), board_ahci_mv },	/* 6121 */
+ 
+ 	/* Generic, PCI class code for AHCI */
+ 	{ PCI_ANY_ID, PCI_ANY_ID, PCI_ANY_ID, PCI_ANY_ID,
+@@ -661,6 +666,7 @@ static void ahci_save_initial_config(struct pci_dev *pdev,
+ 	void __iomem *mmio = pcim_iomap_table(pdev)[AHCI_PCI_BAR];
+ 	u32 cap, port_map;
+ 	int i;
++	int mv;
+ 
+ 	/* make sure AHCI mode is enabled before accessing CAP */
+ 	ahci_enable_ahci(mmio);
+@@ -696,12 +702,16 @@ static void ahci_save_initial_config(struct pci_dev *pdev,
+ 	 * presence register, as bit 4 (counting from 0)
+ 	 */
+ 	if (hpriv->flags & AHCI_HFLAG_MV_PATA) {
++		if (pdev->device == 0x6121)
++			mv = 0x3;
++		else
++			mv = 0xf;
+ 		dev_printk(KERN_ERR, &pdev->dev,
+ 			   "MV_AHCI HACK: port_map %x -> %x\n",
+-			   hpriv->port_map,
+-			   hpriv->port_map & 0xf);
++			   port_map,
++			   port_map & mv);
+ 
+-		port_map &= 0xf;
++		port_map &= mv;
+ 	}
+ 
+ 	/* cross check port_map and cap.n_ports */
+@@ -1088,29 +1098,35 @@ static int ahci_reset_controller(struct ata_host *host)
+ 	ahci_enable_ahci(mmio);
+ 
+ 	/* global controller reset */
+-	tmp = readl(mmio + HOST_CTL);
+-	if ((tmp & HOST_RESET) == 0) {
+-		writel(tmp | HOST_RESET, mmio + HOST_CTL);
+-		readl(mmio + HOST_CTL); /* flush */
+-	}
++	if (!ahci_skip_host_reset) {
++		tmp = readl(mmio + HOST_CTL);
++		if ((tmp & HOST_RESET) == 0) {
++			writel(tmp | HOST_RESET, mmio + HOST_CTL);
++			readl(mmio + HOST_CTL); /* flush */
++		}
+ 
+-	/* reset must complete within 1 second, or
+-	 * the hardware should be considered fried.
+-	 */
+-	ssleep(1);
++		/* reset must complete within 1 second, or
++		 * the hardware should be considered fried.
++		 */
++		ssleep(1);
+ 
+-	tmp = readl(mmio + HOST_CTL);
+-	if (tmp & HOST_RESET) {
+-		dev_printk(KERN_ERR, host->dev,
+-			   "controller reset failed (0x%x)\n", tmp);
+-		return -EIO;
+-	}
++		tmp = readl(mmio + HOST_CTL);
++		if (tmp & HOST_RESET) {
++			dev_printk(KERN_ERR, host->dev,
++				   "controller reset failed (0x%x)\n", tmp);
++			return -EIO;
++		}
+ 
+-	/* turn on AHCI mode */
+-	ahci_enable_ahci(mmio);
++		/* turn on AHCI mode */
++		ahci_enable_ahci(mmio);
+ 
+-	/* some registers might be cleared on reset.  restore initial values */
+-	ahci_restore_initial_config(host);
++		/* Some registers might be cleared on reset.  Restore
++		 * initial values.
++		 */
++		ahci_restore_initial_config(host);
++	} else
++		dev_printk(KERN_INFO, host->dev,
++			   "skipping global host reset\n");
+ 
+ 	if (pdev->vendor == PCI_VENDOR_ID_INTEL) {
+ 		u16 tmp16;
+@@ -1162,9 +1178,14 @@ static void ahci_init_controller(struct ata_host *host)
+ 	int i;
+ 	void __iomem *port_mmio;
+ 	u32 tmp;
++	int mv;
+ 
+ 	if (hpriv->flags & AHCI_HFLAG_MV_PATA) {
+-		port_mmio = __ahci_port_base(host, 4);
++		if (pdev->device == 0x6121)
++			mv = 2;
++		else
++			mv = 4;
++		port_mmio = __ahci_port_base(host, mv);
+ 
+ 		writel(0, port_mmio + PORT_IRQ_MASK);
+ 
+@@ -2241,7 +2262,10 @@ static int ahci_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
+ 	if (rc)
+ 		return rc;
+ 
+-	rc = pcim_iomap_regions(pdev, 1 << AHCI_PCI_BAR, DRV_NAME);
++	/* AHCI controllers often implement SFF compatible interface.
++	 * Grab all PCI BARs just in case.
++	 */
++	rc = pcim_iomap_regions_request_all(pdev, 1 << AHCI_PCI_BAR, DRV_NAME);
+ 	if (rc == -EBUSY)
+ 		pcim_pin_device(pdev);
+ 	if (rc)
+diff --git a/drivers/ata/libata-acpi.c b/drivers/ata/libata-acpi.c
+index 0770cb7..bf98a56 100644
+--- a/drivers/ata/libata-acpi.c
++++ b/drivers/ata/libata-acpi.c
+@@ -118,45 +118,77 @@ static void ata_acpi_associate_ide_port(struct ata_port *ap)
+ 		ap->pflags |= ATA_PFLAG_INIT_GTM_VALID;
+ }
+ 
+-static void ata_acpi_handle_hotplug(struct ata_port *ap, struct kobject *kobj,
++static void ata_acpi_handle_hotplug(struct ata_port *ap, struct ata_device *dev,
+ 				    u32 event)
+ {
+ 	char event_string[12];
+ 	char *envp[] = { event_string, NULL };
+-	struct ata_eh_info *ehi = &ap->link.eh_info;
+-
+-	if (event == 0 || event == 1) {
+-	       unsigned long flags;
+-	       spin_lock_irqsave(ap->lock, flags);
+-	       ata_ehi_clear_desc(ehi);
+-	       ata_ehi_push_desc(ehi, "ACPI event");
+-	       ata_ehi_hotplugged(ehi);
+-	       ata_port_freeze(ap);
+-	       spin_unlock_irqrestore(ap->lock, flags);
++	struct ata_eh_info *ehi;
++	struct kobject *kobj = NULL;
++	int wait = 0;
++	unsigned long flags;
++
++	if (!ap)
++		ap = dev->link->ap;
++	ehi = &ap->link.eh_info;
++
++	spin_lock_irqsave(ap->lock, flags);
++
++	switch (event) {
++	case ACPI_NOTIFY_BUS_CHECK:
++	case ACPI_NOTIFY_DEVICE_CHECK:
++		ata_ehi_push_desc(ehi, "ACPI event");
++		ata_ehi_hotplugged(ehi);
++		ata_port_freeze(ap);
++		break;
++
++	case ACPI_NOTIFY_EJECT_REQUEST:
++		ata_ehi_push_desc(ehi, "ACPI event");
++		if (dev)
++			dev->flags |= ATA_DFLAG_DETACH;
++		else {
++			struct ata_link *tlink;
++			struct ata_device *tdev;
++
++			ata_port_for_each_link(tlink, ap)
++				ata_link_for_each_dev(tdev, tlink)
++					tdev->flags |= ATA_DFLAG_DETACH;
++		}
++
++		ata_port_schedule_eh(ap);
++		wait = 1;
++		break;
+ 	}
+ 
++	if (dev) {
++		if (dev->sdev)
++			kobj = &dev->sdev->sdev_gendev.kobj;
++	} else
++		kobj = &ap->dev->kobj;
++
+ 	if (kobj) {
+ 		sprintf(event_string, "BAY_EVENT=%d", event);
+ 		kobject_uevent_env(kobj, KOBJ_CHANGE, envp);
+ 	}
++
++	spin_unlock_irqrestore(ap->lock, flags);
++
++	if (wait)
++		ata_port_wait_eh(ap);
+ }
+ 
+ static void ata_acpi_dev_notify(acpi_handle handle, u32 event, void *data)
+ {
+ 	struct ata_device *dev = data;
+-	struct kobject *kobj = NULL;
+ 
+-	if (dev->sdev)
+-		kobj = &dev->sdev->sdev_gendev.kobj;
+-
+-	ata_acpi_handle_hotplug(dev->link->ap, kobj, event);
++	ata_acpi_handle_hotplug(NULL, dev, event);
+ }
+ 
+ static void ata_acpi_ap_notify(acpi_handle handle, u32 event, void *data)
+ {
+ 	struct ata_port *ap = data;
+ 
+-	ata_acpi_handle_hotplug(ap, &ap->dev->kobj, event);
++	ata_acpi_handle_hotplug(ap, NULL, event);
+ }
+ 
+ /**
+@@ -191,20 +223,30 @@ void ata_acpi_associate(struct ata_host *host)
+ 		else
+ 			ata_acpi_associate_ide_port(ap);
+ 
+-		if (ap->acpi_handle)
+-			acpi_install_notify_handler (ap->acpi_handle,
+-						     ACPI_SYSTEM_NOTIFY,
+-						     ata_acpi_ap_notify,
+-						     ap);
++		if (ap->acpi_handle) {
++			acpi_install_notify_handler(ap->acpi_handle,
++						    ACPI_SYSTEM_NOTIFY,
++						    ata_acpi_ap_notify, ap);
++#if defined(CONFIG_ACPI_DOCK) || defined(CONFIG_ACPI_DOCK_MODULE)
++			/* we might be on a docking station */
++			register_hotplug_dock_device(ap->acpi_handle,
++						     ata_acpi_ap_notify, ap);
++#endif
++		}
+ 
+ 		for (j = 0; j < ata_link_max_devices(&ap->link); j++) {
+ 			struct ata_device *dev = &ap->link.device[j];
+ 
+-			if (dev->acpi_handle)
+-				acpi_install_notify_handler (dev->acpi_handle,
+-							     ACPI_SYSTEM_NOTIFY,
+-							     ata_acpi_dev_notify,
+-							     dev);
++			if (dev->acpi_handle) {
++				acpi_install_notify_handler(dev->acpi_handle,
++						ACPI_SYSTEM_NOTIFY,
++						ata_acpi_dev_notify, dev);
++#if defined(CONFIG_ACPI_DOCK) || defined(CONFIG_ACPI_DOCK_MODULE)
++				/* we might be on a docking station */
++				register_hotplug_dock_device(dev->acpi_handle,
++						ata_acpi_dev_notify, dev);
++#endif
++			}
+ 		}
+ 	}
+ }
+diff --git a/drivers/ata/pata_ali.c b/drivers/ata/pata_ali.c
+index 7e68edf..8786455 100644
+--- a/drivers/ata/pata_ali.c
++++ b/drivers/ata/pata_ali.c
+@@ -295,7 +295,7 @@ static void ali_lock_sectors(struct ata_device *adev)
+ static int ali_check_atapi_dma(struct ata_queued_cmd *qc)
+ {
+ 	/* If its not a media command, its not worth it */
+-	if (qc->nbytes < 2048)
++	if (atapi_cmd_type(qc->cdb[0]) == ATAPI_MISC)
+ 		return -EOPNOTSUPP;
+ 	return 0;
+ }
+diff --git a/drivers/block/virtio_blk.c b/drivers/block/virtio_blk.c
+index 3b1a68d..0cfbe8c 100644
+--- a/drivers/block/virtio_blk.c
++++ b/drivers/block/virtio_blk.c
+@@ -238,6 +238,7 @@ static int virtblk_probe(struct virtio_device *vdev)
+ 	vblk->disk->first_minor = index_to_minor(index);
+ 	vblk->disk->private_data = vblk;
+ 	vblk->disk->fops = &virtblk_fops;
++	vblk->disk->driverfs_dev = &vdev->dev;
+ 	index++;
+ 
+ 	/* If barriers are supported, tell block layer that queue is ordered */
+diff --git a/drivers/net/virtio_net.c b/drivers/net/virtio_net.c
+index 19fd4cb..b58472c 100644
+--- a/drivers/net/virtio_net.c
++++ b/drivers/net/virtio_net.c
+@@ -203,8 +203,11 @@ again:
+ 	if (received < budget) {
+ 		netif_rx_complete(vi->dev, napi);
+ 		if (unlikely(!vi->rvq->vq_ops->enable_cb(vi->rvq))
+-		    && netif_rx_reschedule(vi->dev, napi))
++		    && napi_schedule_prep(napi)) {
++			vi->rvq->vq_ops->disable_cb(vi->rvq);
++			__netif_rx_schedule(vi->dev, napi);
+ 			goto again;
++		}
+ 	}
+ 
+ 	return received;
+@@ -278,10 +281,11 @@ again:
+ 		pr_debug("%s: virtio not prepared to send\n", dev->name);
+ 		netif_stop_queue(dev);
+ 
+-		/* Activate callback for using skbs: if this fails it
++		/* Activate callback for using skbs: if this returns false it
+ 		 * means some were used in the meantime. */
+ 		if (unlikely(!vi->svq->vq_ops->enable_cb(vi->svq))) {
+-			printk("Unlikely: restart svq failed\n");
++			printk("Unlikely: restart svq race\n");
++			vi->svq->vq_ops->disable_cb(vi->svq);
+ 			netif_start_queue(dev);
+ 			goto again;
+ 		}
+@@ -294,6 +298,15 @@ again:
+ 	return 0;
+ }
+ 
++#ifdef CONFIG_NET_POLL_CONTROLLER
++static void virtnet_netpoll(struct net_device *dev)
++{
++	struct virtnet_info *vi = netdev_priv(dev);
++
++	napi_schedule(&vi->napi);
++}
++#endif
++
+ static int virtnet_open(struct net_device *dev)
+ {
+ 	struct virtnet_info *vi = netdev_priv(dev);
+@@ -336,6 +349,9 @@ static int virtnet_probe(struct virtio_device *vdev)
+ 	dev->stop = virtnet_close;
+ 	dev->hard_start_xmit = start_xmit;
+ 	dev->features = NETIF_F_HIGHDMA;
++#ifdef CONFIG_NET_POLL_CONTROLLER
++	dev->poll_controller = virtnet_netpoll;
++#endif
+ 	SET_NETDEV_DEV(dev, &vdev->dev);
+ 
+ 	/* Do we support "hardware" checksums? */
+diff --git a/drivers/virtio/virtio_balloon.c b/drivers/virtio/virtio_balloon.c
+index c8a4332..0b3efc3 100644
+--- a/drivers/virtio/virtio_balloon.c
++++ b/drivers/virtio/virtio_balloon.c
+@@ -152,7 +152,7 @@ static void virtballoon_changed(struct virtio_device *vdev)
+ 	wake_up(&vb->config_change);
+ }
+ 
+-static inline int towards_target(struct virtio_balloon *vb)
++static inline s64 towards_target(struct virtio_balloon *vb)
+ {
+ 	u32 v;
+ 	__virtio_config_val(vb->vdev,
+@@ -176,7 +176,7 @@ static int balloon(void *_vballoon)
+ 
+ 	set_freezable();
+ 	while (!kthread_should_stop()) {
+-		int diff;
++		s64 diff;
+ 
+ 		try_to_freeze();
+ 		wait_event_interruptible(vb->config_change,
+diff --git a/drivers/virtio/virtio_pci.c b/drivers/virtio/virtio_pci.c
+index 26f787d..59a8f73 100644
+--- a/drivers/virtio/virtio_pci.c
++++ b/drivers/virtio/virtio_pci.c
+@@ -177,6 +177,7 @@ static irqreturn_t vp_interrupt(int irq, void *opaque)
+ 	struct virtio_pci_device *vp_dev = opaque;
+ 	struct virtio_pci_vq_info *info;
+ 	irqreturn_t ret = IRQ_NONE;
++	unsigned long flags;
+ 	u8 isr;
+ 
+ 	/* reading the ISR has the effect of also clearing it so it's very
+@@ -197,12 +198,12 @@ static irqreturn_t vp_interrupt(int irq, void *opaque)
+ 			drv->config_changed(&vp_dev->vdev);
+ 	}
+ 
+-	spin_lock(&vp_dev->lock);
++	spin_lock_irqsave(&vp_dev->lock, flags);
+ 	list_for_each_entry(info, &vp_dev->virtqueues, node) {
+ 		if (vring_interrupt(irq, info->vq) == IRQ_HANDLED)
+ 			ret = IRQ_HANDLED;
+ 	}
+-	spin_unlock(&vp_dev->lock);
++	spin_unlock_irqrestore(&vp_dev->lock, flags);
+ 
+ 	return ret;
+ }
+@@ -214,6 +215,7 @@ static struct virtqueue *vp_find_vq(struct virtio_device *vdev, unsigned index,
+ 	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
+ 	struct virtio_pci_vq_info *info;
+ 	struct virtqueue *vq;
++	unsigned long flags;
+ 	u16 num;
+ 	int err;
+ 
+@@ -255,9 +257,9 @@ static struct virtqueue *vp_find_vq(struct virtio_device *vdev, unsigned index,
+ 	vq->priv = info;
+ 	info->vq = vq;
+ 
+-	spin_lock(&vp_dev->lock);
++	spin_lock_irqsave(&vp_dev->lock, flags);
+ 	list_add(&info->node, &vp_dev->virtqueues);
+-	spin_unlock(&vp_dev->lock);
++	spin_unlock_irqrestore(&vp_dev->lock, flags);
+ 
+ 	return vq;
+ 
+@@ -274,10 +276,11 @@ static void vp_del_vq(struct virtqueue *vq)
+ {
+ 	struct virtio_pci_device *vp_dev = to_vp_device(vq->vdev);
+ 	struct virtio_pci_vq_info *info = vq->priv;
++	unsigned long flags;
+ 
+-	spin_lock(&vp_dev->lock);
++	spin_lock_irqsave(&vp_dev->lock, flags);
+ 	list_del(&info->node);
+-	spin_unlock(&vp_dev->lock);
++	spin_unlock_irqrestore(&vp_dev->lock, flags);
+ 
+ 	vring_del_virtqueue(vq);
+ 
+diff --git a/drivers/virtio/virtio_ring.c b/drivers/virtio/virtio_ring.c
+index 3a28c13..aa71402 100644
+--- a/drivers/virtio/virtio_ring.c
++++ b/drivers/virtio/virtio_ring.c
+@@ -232,7 +232,6 @@ static bool vring_enable_cb(struct virtqueue *_vq)
+ 	vq->vring.avail->flags &= ~VRING_AVAIL_F_NO_INTERRUPT;
+ 	mb();
+ 	if (unlikely(more_used(vq))) {
+-		vq->vring.avail->flags |= VRING_AVAIL_F_NO_INTERRUPT;
+ 		END_USE(vq);
+ 		return false;
+ 	}
+diff --git a/fs/hfs/brec.c b/fs/hfs/brec.c
+index 878bf25..92fb358 100644
+--- a/fs/hfs/brec.c
++++ b/fs/hfs/brec.c
+@@ -229,7 +229,7 @@ skip:
+ static struct hfs_bnode *hfs_bnode_split(struct hfs_find_data *fd)
+ {
+ 	struct hfs_btree *tree;
+-	struct hfs_bnode *node, *new_node;
++	struct hfs_bnode *node, *new_node, *next_node;
+ 	struct hfs_bnode_desc node_desc;
+ 	int num_recs, new_rec_off, new_off, old_rec_off;
+ 	int data_start, data_end, size;
+@@ -248,6 +248,17 @@ static struct hfs_bnode *hfs_bnode_split(struct hfs_find_data *fd)
+ 	new_node->type = node->type;
+ 	new_node->height = node->height;
+ 
++	if (node->next)
++		next_node = hfs_bnode_find(tree, node->next);
++	else
++		next_node = NULL;
++
++	if (IS_ERR(next_node)) {
++		hfs_bnode_put(node);
++		hfs_bnode_put(new_node);
++		return next_node;
++	}
++
+ 	size = tree->node_size / 2 - node->num_recs * 2 - 14;
+ 	old_rec_off = tree->node_size - 4;
+ 	num_recs = 1;
+@@ -261,6 +272,8 @@ static struct hfs_bnode *hfs_bnode_split(struct hfs_find_data *fd)
+ 		/* panic? */
+ 		hfs_bnode_put(node);
+ 		hfs_bnode_put(new_node);
++		if (next_node)
++			hfs_bnode_put(next_node);
+ 		return ERR_PTR(-ENOSPC);
+ 	}
+ 
+@@ -315,8 +328,7 @@ static struct hfs_bnode *hfs_bnode_split(struct hfs_find_data *fd)
+ 	hfs_bnode_write(node, &node_desc, 0, sizeof(node_desc));
+ 
+ 	/* update next bnode header */
+-	if (new_node->next) {
+-		struct hfs_bnode *next_node = hfs_bnode_find(tree, new_node->next);
++	if (next_node) {
+ 		next_node->prev = new_node->this;
+ 		hfs_bnode_read(next_node, &node_desc, 0, sizeof(node_desc));
+ 		node_desc.prev = cpu_to_be32(next_node->prev);
+diff --git a/include/linux/pci.h b/include/linux/pci.h
+index 9010f54..b7e4b63 100644
+--- a/include/linux/pci.h
++++ b/include/linux/pci.h
+@@ -1045,6 +1045,8 @@ void __iomem *pcim_iomap(struct pci_dev *pdev, int bar, unsigned long maxlen);
+ void pcim_iounmap(struct pci_dev *pdev, void __iomem *addr);
+ void __iomem * const *pcim_iomap_table(struct pci_dev *pdev);
+ int pcim_iomap_regions(struct pci_dev *pdev, u16 mask, const char *name);
++int pcim_iomap_regions_request_all(struct pci_dev *pdev, u16 mask,
++				   const char *name);
+ void pcim_iounmap_regions(struct pci_dev *pdev, u16 mask);
+ 
+ extern int pci_pci_problems;
+diff --git a/include/linux/virtio.h b/include/linux/virtio.h
+index 260d1fc..12c18ac 100644
+--- a/include/linux/virtio.h
++++ b/include/linux/virtio.h
+@@ -43,8 +43,9 @@ struct virtqueue
+  *	vq: the struct virtqueue we're talking about.
+  * @enable_cb: restart callbacks after disable_cb.
+  *	vq: the struct virtqueue we're talking about.
+- *	This returns "false" (and doesn't re-enable) if there are pending
+- *	buffers in the queue, to avoid a race.
++ *	This re-enables callbacks; it returns "false" if there are pending
++ *	buffers in the queue, to detect a possible race between the driver
++ *	checking for more work, and enabling callbacks.
+  *
+  * Locking rules are straightforward: the driver is responsible for
+  * locking.  No two operations may be invoked simultaneously.
+diff --git a/lib/devres.c b/lib/devres.c
+index b1d336c..edc27a5 100644
+--- a/lib/devres.c
++++ b/lib/devres.c
+@@ -298,6 +298,31 @@ int pcim_iomap_regions(struct pci_dev *pdev, u16 mask, const char *name)
+ EXPORT_SYMBOL(pcim_iomap_regions);
+ 
+ /**
++ * pcim_iomap_regions_request_all - Request all BARs and iomap specified ones
++ * @pdev: PCI device to map IO resources for
++ * @mask: Mask of BARs to iomap
++ * @name: Name used when requesting regions
++ *
++ * Request all PCI BARs and iomap regions specified by @mask.
++ */
++int pcim_iomap_regions_request_all(struct pci_dev *pdev, u16 mask,
++				   const char *name)
++{
++	int request_mask = ((1 << 6) - 1) & ~mask;
++	int rc;
++
++	rc = pci_request_selected_regions(pdev, request_mask, name);
++	if (rc)
++		return rc;
++
++	rc = pcim_iomap_regions(pdev, mask, name);
++	if (rc)
++		pci_release_selected_regions(pdev, request_mask);
++	return rc;
++}
++EXPORT_SYMBOL(pcim_iomap_regions_request_all);
++
++/**
+  * pcim_iounmap_regions - Unmap and release PCI BARs
+  * @pdev: PCI device to map IO resources for
+  * @mask: Mask of BARs to unmap and release
