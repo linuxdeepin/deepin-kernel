@@ -148,7 +148,7 @@ class PatchSeries(list):
 
             items = line.split(' ')
             operation, filename = items[:2]
-            data = dict(i.split('=', 1) for i in items[2:])
+            data = items[2:]
 
             if operation in self.operations:
                 f = os.path.join(self.root, filename)
