@@ -1,0 +1,479 @@
+From 3d2cf09ed8275e0888edd89820bfa85988f1318c Mon Sep 17 00:00:00 2001
+From: Mark McLoughlin <markmc@redhat.com>
+Date: Thu, 7 Feb 2008 15:32:28 +0000
+Subject: [PATCH] xen: Add Xen's /sys/hypervisor interface
+
+Hook up Xen's /sys/hypervisor interface:
+
+  /sys/hypervisor/
+    -> type
+    -> uuid
+    -> compilation
+         -> compile_date
+         -> compiled_by
+         -> compiler
+    -> properties
+         -> capabilities
+         -> changeset
+         -> pagesize
+         -> virtual_start
+         -> writable_pt
+    -> version
+         -> extra
+         -> major
+         -> minor
+
+Note: the hypervisor subsys hook requires that
+SYS_HYPERVISOR is selected to enabled it, which in
+turns means that the subsys will be registered by
+a pv-ops kernel with Xen support, even on bare
+metal. This hook needs to be changed to be runtime
+enabled.
+
+Signed-off-by: Mark McLoughlin <markmc@redhat.com>
+---
+ arch/x86/xen/Kconfig            |    3 +-
+ drivers/xen/xenctrl/Makefile    |    1 +
+ drivers/xen/xenctrl/main.c      |    6 +
+ drivers/xen/xenctrl/sysfs.c     |  349 +++++++++++++++++++++++++++++++++++++++
+ drivers/xen/xenctrl/xenctrl.h   |    6 +
+ include/xen/interface/version.h |    6 +
+ 6 files changed, 370 insertions(+), 1 deletions(-)
+ create mode 100644 drivers/xen/xenctrl/sysfs.c
+
+diff --git a/arch/x86/xen/Kconfig b/arch/x86/xen/Kconfig
+index 4723bc1..ff6a56a 100644
+--- a/arch/x86/xen/Kconfig
++++ b/arch/x86/xen/Kconfig
+@@ -14,7 +14,8 @@ config XEN
+ 
+ config XENCTRL
+ 	tristate "Xen's user space control interfaces"
+-	depends on XEN && PROC_FS
++	depends on XEN && PROC_FS && SYSFS
+ 	default y if XEN
++	select SYS_HYPERVISOR
+ 	help
+ 	  This is the /proc/xen interface used by Xen's libxc.
+diff --git a/drivers/xen/xenctrl/Makefile b/drivers/xen/xenctrl/Makefile
+index 23dafa3..e126e76 100644
+--- a/drivers/xen/xenctrl/Makefile
++++ b/drivers/xen/xenctrl/Makefile
+@@ -5,3 +5,4 @@ xenctrl-objs += main.o
+ xenctrl-objs += capabilities.o
+ xenctrl-objs += privcmd.o
+ xenctrl-objs += xenbus.o
++xenctrl-objs += sysfs.o
+diff --git a/drivers/xen/xenctrl/main.c b/drivers/xen/xenctrl/main.c
+index b0cf61b..87d0dba 100644
+--- a/drivers/xen/xenctrl/main.c
++++ b/drivers/xen/xenctrl/main.c
+@@ -63,8 +63,13 @@ static int __init xenctrl_init(void)
+ 	if (ret)
+ 		goto fail3;
+ 
++	ret = sys_hypervisor_init();
++	if (ret)
++		goto fail4;
++
+ 	return 0;
+ 
++ fail4: xenbus_remove_proc_entry();
+  fail3: privcmd_remove_proc_entry();
+  fail2: capabilities_remove_proc_entry();
+  fail1:	remove_proc_entry("xen", NULL);
+@@ -73,6 +78,7 @@ static int __init xenctrl_init(void)
+ 
+ static void __exit xenctrl_exit(void)
+ {
++	sys_hypervisor_exit();
+ 	xenbus_remove_proc_entry();
+ 	privcmd_remove_proc_entry();
+ 	capabilities_remove_proc_entry();
+diff --git a/drivers/xen/xenctrl/sysfs.c b/drivers/xen/xenctrl/sysfs.c
+new file mode 100644
+index 0000000..8cbf4d6
+--- /dev/null
++++ b/drivers/xen/xenctrl/sysfs.c
+@@ -0,0 +1,349 @@
++/*
++ *  copyright (c) 2006 IBM Corporation
++ *  Authored by: Mike D. Day <ncmike@us.ibm.com>
++ *
++ *  This program is free software; you can redistribute it and/or modify
++ *  it under the terms of the GNU General Public License version 2 as
++ *  published by the Free Software Foundation.
++ */
++
++#include <linux/kobject.h>
++#include <linux/sysfs.h>
++#include <linux/err.h>
++#include <asm/xen/hypervisor.h>
++#include <xen/xenbus.h>
++#include "xenctrl.h"
++
++#define HYPERVISOR_ATTR_RO(_name) \
++static struct kobj_attribute _name##_attr = __ATTR_RO(_name)
++
++#define HYPERVISOR_ATTR_RW(_name) \
++static struct kobj_attribute _name##_attr = \
++	__ATTR(_name, 0644, _name##_show, _name##_store)
++
++static ssize_t type_show(struct kobject *kobj, struct kobj_attribute *attr, char *buffer)
++{
++	return sprintf(buffer, "xen\n");
++}
++
++HYPERVISOR_ATTR_RO(type);
++
++static int __init xen_sysfs_type_init(void)
++{
++	return sysfs_create_file(hypervisor_kobj, &type_attr.attr);
++}
++
++static void xen_sysfs_type_destroy(void)
++{
++	sysfs_remove_file(hypervisor_kobj, &type_attr.attr);
++}
++
++static ssize_t major_show(struct kobject *kobj, struct kobj_attribute *attr, char *buffer)
++{
++	int version;
++
++	version = HYPERVISOR_xen_version(XENVER_version, NULL);
++	if (!version)
++		return -ENODEV;
++
++	return sprintf(buffer, "%d\n", version >> 16);
++}
++
++HYPERVISOR_ATTR_RO(major);
++
++static ssize_t minor_show(struct kobject *kobj, struct kobj_attribute *attr, char *buffer)
++{
++	int version;
++
++	version = HYPERVISOR_xen_version(XENVER_version, NULL);
++	if (!version)
++		return -ENODEV;
++
++	return sprintf(buffer, "%d\n", version & 0xff);
++}
++
++HYPERVISOR_ATTR_RO(minor);
++
++static ssize_t extra_show(struct kobject *kobj, struct kobj_attribute *attr, char *buffer)
++{
++	int ret;
++	struct xen_extraversion extra;
++
++	ret = HYPERVISOR_xen_version(XENVER_extraversion, &extra);
++	if (ret)
++		return ret;
++
++	return sprintf(buffer, "%s\n", extra.extraversion);
++}
++
++HYPERVISOR_ATTR_RO(extra);
++
++static struct attribute *version_attrs[] = {
++	&major_attr.attr,
++	&minor_attr.attr,
++	&extra_attr.attr,
++	NULL
++};
++
++static struct attribute_group version_group = {
++	.name = "version",
++	.attrs = version_attrs,
++};
++
++static int __init xen_sysfs_version_init(void)
++{
++	return sysfs_create_group(hypervisor_kobj, &version_group);
++}
++
++static void xen_sysfs_version_destroy(void)
++{
++	sysfs_remove_group(hypervisor_kobj, &version_group);
++}
++
++static ssize_t uuid_show(struct kobject *kobj, struct kobj_attribute *attr, char *buffer)
++{
++	char *vm, *val;
++	int ret;
++
++	vm = xenbus_read(XBT_NIL, "vm", "", NULL);
++	if (IS_ERR(vm))
++		return PTR_ERR(vm);
++
++	val = xenbus_read(XBT_NIL, vm, "uuid", NULL);
++	if (IS_ERR(val)) {
++		ret = PTR_ERR(val);
++		goto out;
++	}
++
++	ret = sprintf(buffer, "%s\n", val);
++
++	kfree(val);
++out:	kfree(vm);
++
++	return ret;
++}
++
++HYPERVISOR_ATTR_RO(uuid);
++
++static int __init xen_sysfs_uuid_init(void)
++{
++	return sysfs_create_file(hypervisor_kobj, &uuid_attr.attr);
++}
++
++static void xen_sysfs_uuid_destroy(void)
++{
++	sysfs_remove_file(hypervisor_kobj, &uuid_attr.attr);
++}
++
++static ssize_t compiler_show(struct kobject *kobj, struct kobj_attribute *attr, char *buffer)
++{
++	struct xen_compile_info info;
++	int ret;
++
++	ret = HYPERVISOR_xen_version(XENVER_compile_info, &info);
++	if (ret)
++		return ret;
++
++	return sprintf(buffer, "%s\n", info.compiler);
++}
++
++HYPERVISOR_ATTR_RO(compiler);
++
++static ssize_t compiled_by_show(struct kobject *kobj, struct kobj_attribute *attr, char *buffer)
++{
++	struct xen_compile_info info;
++	int ret;
++
++	ret = HYPERVISOR_xen_version(XENVER_compile_info, &info);
++	if (ret)
++		return ret;
++
++	return sprintf(buffer, "%s\n", info.compile_by);
++}
++
++HYPERVISOR_ATTR_RO(compiled_by);
++
++static ssize_t compile_date_show(struct kobject *kobj, struct kobj_attribute *attr, char *buffer)
++{
++	struct xen_compile_info info;
++	int ret;
++
++	ret = HYPERVISOR_xen_version(XENVER_compile_info, &info);
++	if (ret)
++		return ret;
++
++	return sprintf(buffer, "%s\n", info.compile_date);
++}
++
++HYPERVISOR_ATTR_RO(compile_date);
++
++static struct attribute *xen_compile_attrs[] = {
++	&compiler_attr.attr,
++	&compiled_by_attr.attr,
++	&compile_date_attr.attr,
++	NULL
++};
++
++static struct attribute_group xen_compilation_group = {
++	.name = "compilation",
++	.attrs = xen_compile_attrs,
++};
++
++static int __init xen_compilation_init(void)
++{
++	return sysfs_create_group(hypervisor_kobj,
++				  &xen_compilation_group);
++}
++
++static void xen_compilation_destroy(void)
++{
++	sysfs_remove_group(hypervisor_kobj,
++			   &xen_compilation_group);
++}
++
++static ssize_t capabilities_show(struct kobject *kobj, struct kobj_attribute *attr, char *buffer)
++{
++	struct xen_capabilities_info *caps;
++	int ret;
++
++	caps = kmalloc(sizeof(struct xen_capabilities_info), GFP_KERNEL);
++	if (!caps)
++		return -ENOMEM;
++
++	ret = HYPERVISOR_xen_version(XENVER_capabilities, caps);
++	if (ret)
++		goto out;
++
++	ret = sprintf(buffer, "%s\n", caps->info);
++
++out:	kfree(caps);
++
++	return ret;
++}
++
++HYPERVISOR_ATTR_RO(capabilities);
++
++static ssize_t changeset_show(struct kobject *kobj, struct kobj_attribute *attr, char *buffer)
++{
++	struct xen_changeset_info cset;
++	int ret;
++
++	ret = HYPERVISOR_xen_version(XENVER_changeset, &cset);
++	if (ret)
++		return ret;
++
++	return sprintf(buffer, "%s\n", cset.info);
++}
++
++HYPERVISOR_ATTR_RO(changeset);
++
++static ssize_t virtual_start_show(struct kobject *kobj, struct kobj_attribute *attr, char *buffer)
++{
++	struct xen_platform_parameters parms;
++	int ret;
++
++	ret = HYPERVISOR_xen_version(XENVER_platform_parameters, &parms);
++	if (ret)
++		return ret;
++
++	return sprintf(buffer, "%lx\n", parms.virt_start);
++}
++
++HYPERVISOR_ATTR_RO(virtual_start);
++
++static ssize_t pagesize_show(struct kobject *kobj, struct kobj_attribute *attr, char *buffer)
++{
++	int ret;
++
++	ret = HYPERVISOR_xen_version(XENVER_pagesize, NULL);
++	if (ret < 0)
++		return ret;
++
++	return sprintf(buffer, "%x\n", ret);
++}
++
++HYPERVISOR_ATTR_RO(pagesize);
++
++static ssize_t writable_pt_show(struct kobject *kobj, struct kobj_attribute *attr, char *buffer)
++{
++	struct xen_feature_info info;
++	int ret;
++
++	info.submap_idx = XENFEAT_writable_page_tables;
++
++	ret = HYPERVISOR_xen_version(XENVER_get_features, &info);
++	if (ret)
++		return ret;
++
++	return sprintf(buffer, "%d\n", info.submap);
++}
++
++HYPERVISOR_ATTR_RO(writable_pt);
++
++static struct attribute *xen_properties_attrs[] = {
++	&capabilities_attr.attr,
++	&changeset_attr.attr,
++	&virtual_start_attr.attr,
++	&pagesize_attr.attr,
++	&writable_pt_attr.attr,
++	NULL
++};
++
++static struct attribute_group xen_properties_group = {
++	.name = "properties",
++	.attrs = xen_properties_attrs,
++};
++
++static int __init xen_properties_init(void)
++{
++	return sysfs_create_group(hypervisor_kobj,
++				  &xen_properties_group);
++}
++
++static void xen_properties_destroy(void)
++{
++	sysfs_remove_group(hypervisor_kobj, &xen_properties_group);
++}
++
++int __init sys_hypervisor_init(void)
++{
++	int ret;
++
++	if (!is_running_on_xen())
++		return -ENODEV;
++
++	ret = xen_sysfs_type_init();
++	if (ret)
++		goto out;
++	ret = xen_sysfs_version_init();
++	if (ret)
++		goto version_out;
++	ret = xen_compilation_init();
++	if (ret)
++		goto comp_out;
++	ret = xen_sysfs_uuid_init();
++	if (ret)
++		goto uuid_out;
++	ret = xen_properties_init();
++	if (!ret)
++		goto out;
++
++	xen_sysfs_uuid_destroy();
++uuid_out:
++	xen_compilation_destroy();
++comp_out:
++	xen_sysfs_version_destroy();
++version_out:
++	xen_sysfs_type_destroy();
++out:
++	return ret;
++}
++
++void __exit sys_hypervisor_exit(void)
++{
++	xen_properties_destroy();
++	xen_compilation_destroy();
++	xen_sysfs_uuid_destroy();
++	xen_sysfs_version_destroy();
++	xen_sysfs_type_destroy();
++}
+diff --git a/drivers/xen/xenctrl/xenctrl.h b/drivers/xen/xenctrl/xenctrl.h
+index e585c4b..1afbdfb 100644
+--- a/drivers/xen/xenctrl/xenctrl.h
++++ b/drivers/xen/xenctrl/xenctrl.h
+@@ -49,3 +49,9 @@ void privcmd_remove_proc_entry(void) __exit;
+  */
+ int xenbus_create_proc_entry(void) __init;
+ void xenbus_remove_proc_entry(void) __exit;
++
++/*
++ * sysfs.c
++ */
++int sys_hypervisor_init(void) __init;
++void sys_hypervisor_exit(void) __exit;
+diff --git a/include/xen/interface/version.h b/include/xen/interface/version.h
+index 453235e..dd58cf5 100644
+--- a/include/xen/interface/version.h
++++ b/include/xen/interface/version.h
+@@ -57,4 +57,10 @@ struct xen_feature_info {
+ /* Declares the features reported by XENVER_get_features. */
+ #include "features.h"
+ 
++/* arg == NULL; returns host memory page size. */
++#define XENVER_pagesize 7
++
++/* arg == xen_domain_handle_t. */
++#define XENVER_guest_handle 8
++
+ #endif /* __XEN_PUBLIC_VERSION_H__ */
+-- 
+1.5.4.1
+

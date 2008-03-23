@@ -1,0 +1,313 @@
+From bc7c490a7b069ae8bbe182ecafe3afe14f1f5d2c Mon Sep 17 00:00:00 2001
+From: Mark McLoughlin <markmc@redhat.com>
+Date: Mon, 4 Feb 2008 08:24:57 +0000
+Subject: [PATCH] xen: Add /proc/xen/privcmd
+
+/proc/xen/privcmd is an ioctl() interface which allows
+userspace apps to invoke hypercalls.
+
+There should also be an ioctl (IOCTL_PRIVCMD_MMAP)
+which is used to map foreign pages into a processes
+address space, but we leave this unimplemented for
+now pending further work on foreign page support.
+
+Signed-off-by: Mark McLoughlin <markmc@redhat.com>
+---
+ drivers/xen/xenctrl/Makefile    |    1 +
+ drivers/xen/xenctrl/main.c      |    6 +++
+ drivers/xen/xenctrl/privcmd.c   |   81 +++++++++++++++++++++++++++++++++++++++
+ drivers/xen/xenctrl/xenctrl.h   |    6 +++
+ include/asm-x86/xen/hypercall.h |   56 +++++++++++++++++++++++++++
+ include/xen/sys/privcmd.h       |   79 ++++++++++++++++++++++++++++++++++++++
+ 6 files changed, 229 insertions(+), 0 deletions(-)
+ create mode 100644 drivers/xen/xenctrl/privcmd.c
+ create mode 100644 include/xen/sys/privcmd.h
+
+diff --git a/drivers/xen/xenctrl/Makefile b/drivers/xen/xenctrl/Makefile
+index 631f535..8a706cb 100644
+--- a/drivers/xen/xenctrl/Makefile
++++ b/drivers/xen/xenctrl/Makefile
+@@ -3,3 +3,4 @@ obj-$(CONFIG_XENCTRL) += xenctrl.o
+ xenctrl-objs  =
+ xenctrl-objs += main.o
+ xenctrl-objs += capabilities.o
++xenctrl-objs += privcmd.o
+diff --git a/drivers/xen/xenctrl/main.c b/drivers/xen/xenctrl/main.c
+index 0e42f7e..d1fe6ef 100644
+--- a/drivers/xen/xenctrl/main.c
++++ b/drivers/xen/xenctrl/main.c
+@@ -55,14 +55,20 @@ static int __init xenctrl_init(void)
+ 	if (ret)
+ 		goto fail1;
+ 
++	ret = privcmd_create_proc_entry();
++	if (ret)
++		goto fail2;
++
+ 	return 0;
+ 
++ fail2: capabilities_remove_proc_entry();
+  fail1:	remove_proc_entry("xen", NULL);
+ 	return ret;
+ }
+ 
+ static void __exit xenctrl_exit(void)
+ {
++	privcmd_remove_proc_entry();
+ 	capabilities_remove_proc_entry();
+ 	remove_proc_entry("xen", NULL);
+ }
+diff --git a/drivers/xen/xenctrl/privcmd.c b/drivers/xen/xenctrl/privcmd.c
+new file mode 100644
+index 0000000..58c4b83
+--- /dev/null
++++ b/drivers/xen/xenctrl/privcmd.c
+@@ -0,0 +1,81 @@
++/******************************************************************************
++ * privcmd.c
++ * 
++ * Interface to privileged domain-0 commands.
++ * 
++ * Copyright (c) 2002-2004, K A Fraser, B Dragovic
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License version 2
++ * as published by the Free Software Foundation; or, when distributed
++ * separately from the Linux kernel or incorporated into other
++ * software packages, subject to the following license:
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this source file (the "Software"), to deal in the Software without
++ * restriction, including without limitation the rights to use, copy, modify,
++ * merge, publish, distribute, sublicense, and/or sell copies of the Software,
++ * and to permit persons to whom the Software is furnished to do so, subject to
++ * the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ */
++
++#include <linux/proc_fs.h>
++#include <linux/module.h>
++#include <linux/uaccess.h>
++#include <asm/xen/hypervisor.h>
++#include <xen/sys/privcmd.h>
++
++static long privcmd_ioctl(struct file *file, unsigned int cmd,
++			  unsigned long arg)
++{
++	switch (cmd) {
++	case IOCTL_PRIVCMD_HYPERCALL: {
++		privcmd_hypercall_t cmd;
++  
++		if (copy_from_user(&cmd, (void __user *)arg, sizeof(cmd)))
++			return -EFAULT;
++
++		return privcmd_hypercall(&cmd);
++	}
++
++	case IOCTL_PRIVCMD_MMAP:
++	case IOCTL_PRIVCMD_MMAPBATCH:
++		printk(KERN_WARNING "IOCTL_PRIVCMD_MMAP ioctl not yet implemented\n");
++	default:
++		return -EINVAL;
++	}
++}
++
++static const struct file_operations privcmd_file_ops = {
++	.unlocked_ioctl = privcmd_ioctl,
++};
++
++int __init privcmd_create_proc_entry(void)
++{
++	static struct proc_dir_entry *entry;
++
++	entry = create_proc_entry("xen/privcmd", 0400, NULL);
++	if (!entry)
++		return -ENOMEM;
++
++	entry->owner = THIS_MODULE;
++	entry->proc_fops = &privcmd_file_ops;
++
++	return 0;
++}
++
++void __exit privcmd_remove_proc_entry(void)
++{
++	remove_proc_entry("xen/privcmd", NULL);
++}
+diff --git a/drivers/xen/xenctrl/xenctrl.h b/drivers/xen/xenctrl/xenctrl.h
+index 7378dde..a35209a 100644
+--- a/drivers/xen/xenctrl/xenctrl.h
++++ b/drivers/xen/xenctrl/xenctrl.h
+@@ -37,3 +37,9 @@
+  */
+ int capabilities_create_proc_entry(void) __init;
+ void capabilities_remove_proc_entry(void) __exit;
++
++/*
++ * privcmd.c
++ */
++int privcmd_create_proc_entry(void) __init;
++void privcmd_remove_proc_entry(void) __exit;
+diff --git a/include/asm-x86/xen/hypercall.h b/include/asm-x86/xen/hypercall.h
+index bc0ee7d..b0c518c 100644
+--- a/include/asm-x86/xen/hypercall.h
++++ b/include/asm-x86/xen/hypercall.h
+@@ -410,4 +410,60 @@ MULTI_stack_switch(struct multicall_entry *mcl,
+ 	mcl->args[1] = esp;
+ }
+ 
++#include <xen/sys/privcmd.h>
++
++#ifdef CONFIG_X86_32
++static inline int privcmd_hypercall(privcmd_hypercall_t *hypercall)
++{
++	int ret;
++
++	if (hypercall->op >= (PAGE_SIZE >> 5))
++		return -EINVAL;
++
++	__asm__ __volatile__ (
++		"pushl %%ebx; pushl %%ecx; pushl %%edx; "
++		"pushl %%esi; pushl %%edi; "
++		"movl  8(%%eax),%%ebx ;"
++		"movl 16(%%eax),%%ecx ;"
++		"movl 24(%%eax),%%edx ;"
++		"movl 32(%%eax),%%esi ;"
++		"movl 40(%%eax),%%edi ;"
++		"movl   (%%eax),%%eax ;"
++		"shll $5,%%eax ;"
++		"addl $hypercall_page,%%eax ;"
++		"call *%%eax ;"
++		"popl %%edi; popl %%esi; popl %%edx; "
++		"popl %%ecx; popl %%ebx"
++		: "=a" (ret) : "0" (hypercall) : "memory" );
++
++	return ret;
++}
++#else /* CONFIG_X86_32 */
++static inline int privcmd_hypercall(privcmd_hypercall_t *hypercall)
++{
++	int ret;
++        long ign1, ign2, ign3;
++
++	if (hypercall->op >= (PAGE_SIZE >> 5))
++		return -EINVAL;
++
++        __asm__ __volatile__ (
++		"movq %8,%%r10; movq %9,%%r8;"
++                "shll $5,%%eax ;"
++                "addq $hypercall_page,%%rax ;"
++                "call *%%rax"
++                : "=a" (ret), "=D" (ign1),
++                  "=S" (ign2), "=d" (ign3)
++                : "0" ((unsigned int)hypercall->op),
++                  "1" (hypercall->arg[0]),
++                  "2" (hypercall->arg[1]),
++                  "3" (hypercall->arg[2]),
++                  "g" (hypercall->arg[3]),
++                  "g" (hypercall->arg[4])
++                : "r8", "r10", "memory" );
++
++	return ret;
++}
++#endif /* CONFIG_X86_32 */
++
+ #endif /* __HYPERCALL_H__ */
+diff --git a/include/xen/sys/privcmd.h b/include/xen/sys/privcmd.h
+new file mode 100644
+index 0000000..9cfa9d7
+--- /dev/null
++++ b/include/xen/sys/privcmd.h
+@@ -0,0 +1,79 @@
++/******************************************************************************
++ * privcmd.h
++ * 
++ * Interface to /proc/xen/privcmd.
++ * 
++ * Copyright (c) 2003-2005, K A Fraser
++ * 
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License version 2
++ * as published by the Free Software Foundation; or, when distributed
++ * separately from the Linux kernel or incorporated into other
++ * software packages, subject to the following license:
++ * 
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this source file (the "Software"), to deal in the Software without
++ * restriction, including without limitation the rights to use, copy, modify,
++ * merge, publish, distribute, sublicense, and/or sell copies of the Software,
++ * and to permit persons to whom the Software is furnished to do so, subject to
++ * the following conditions:
++ * 
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ * 
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ */
++
++#ifndef __LINUX_PUBLIC_PRIVCMD_H__
++#define __LINUX_PUBLIC_PRIVCMD_H__
++
++#include <linux/types.h>
++
++#ifndef __user
++#define __user
++#endif
++
++typedef struct privcmd_hypercall
++{
++	__u64 op;
++	__u64 arg[5];
++} privcmd_hypercall_t;
++
++typedef struct privcmd_mmap_entry {
++	__u64 va;
++	__u64 mfn;
++	__u64 npages;
++} privcmd_mmap_entry_t; 
++
++typedef struct privcmd_mmap {
++	int num;
++	domid_t dom; /* target domain */
++	privcmd_mmap_entry_t __user *entry;
++} privcmd_mmap_t; 
++
++typedef struct privcmd_mmapbatch {
++	int num;     /* number of pages to populate */
++	domid_t dom; /* target domain */
++	__u64 addr;  /* virtual address */
++	ulong __user *arr; /* array of mfns - top nibble set on err */
++} privcmd_mmapbatch_t; 
++
++/*
++ * @cmd: IOCTL_PRIVCMD_HYPERCALL
++ * @arg: &privcmd_hypercall_t
++ * Return: Value returned from execution of the specified hypercall.
++ */
++#define IOCTL_PRIVCMD_HYPERCALL					\
++	_IOC(_IOC_NONE, 'P', 0, sizeof(privcmd_hypercall_t))
++#define IOCTL_PRIVCMD_MMAP					\
++	_IOC(_IOC_NONE, 'P', 2, sizeof(privcmd_mmap_t))
++#define IOCTL_PRIVCMD_MMAPBATCH					\
++	_IOC(_IOC_NONE, 'P', 3, sizeof(privcmd_mmapbatch_t))
++
++#endif /* __LINUX_PUBLIC_PRIVCMD_H__ */
+-- 
+1.5.4.1
+
