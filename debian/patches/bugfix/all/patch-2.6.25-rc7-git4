@@ -11,6 +11,280 @@ index f951666..30b4c71 100644
  the PCI chipset. Most cards issue INTA, this creates optimal distribution
  between the PIRQ lines. (distributing IRQ sources properly is not a
  necessity, PCI IRQs can be shared at will, but it's a good for performance
+diff --git a/Documentation/lguest/lguest.c b/Documentation/lguest/lguest.c
+index bec5a32..4c1fc65 100644
+--- a/Documentation/lguest/lguest.c
++++ b/Documentation/lguest/lguest.c
+@@ -1,7 +1,7 @@
+ /*P:100 This is the Launcher code, a simple program which lays out the
+- * "physical" memory for the new Guest by mapping the kernel image and the
+- * virtual devices, then reads repeatedly from /dev/lguest to run the Guest.
+-:*/
++ * "physical" memory for the new Guest by mapping the kernel image and
++ * the virtual devices, then opens /dev/lguest to tell the kernel
++ * about the Guest and control it. :*/
+ #define _LARGEFILE64_SOURCE
+ #define _GNU_SOURCE
+ #include <stdio.h>
+@@ -43,7 +43,7 @@
+ #include "linux/virtio_console.h"
+ #include "linux/virtio_ring.h"
+ #include "asm-x86/bootparam.h"
+-/*L:110 We can ignore the 38 include files we need for this program, but I do
++/*L:110 We can ignore the 39 include files we need for this program, but I do
+  * want to draw attention to the use of kernel-style types.
+  *
+  * As Linus said, "C is a Spartan language, and so should your naming be."  I
+@@ -320,7 +320,7 @@ static unsigned long map_elf(int elf_fd, const Elf32_Ehdr *ehdr)
+ 		err(1, "Reading program headers");
+ 
+ 	/* Try all the headers: there are usually only three.  A read-only one,
+-	 * a read-write one, and a "note" section which isn't loadable. */
++	 * a read-write one, and a "note" section which we don't load. */
+ 	for (i = 0; i < ehdr->e_phnum; i++) {
+ 		/* If this isn't a loadable segment, we ignore it */
+ 		if (phdr[i].p_type != PT_LOAD)
+@@ -387,7 +387,7 @@ static unsigned long load_kernel(int fd)
+ 	if (memcmp(hdr.e_ident, ELFMAG, SELFMAG) == 0)
+ 		return map_elf(fd, &hdr);
+ 
+-	/* Otherwise we assume it's a bzImage, and try to unpack it */
++	/* Otherwise we assume it's a bzImage, and try to load it. */
+ 	return load_bzimage(fd);
+ }
+ 
+@@ -433,12 +433,12 @@ static unsigned long load_initrd(const char *name, unsigned long mem)
+ 	return len;
+ }
+ 
+-/* Once we know how much memory we have, we can construct simple linear page
++/* Once we know how much memory we have we can construct simple linear page
+  * tables which set virtual == physical which will get the Guest far enough
+  * into the boot to create its own.
+  *
+  * We lay them out of the way, just below the initrd (which is why we need to
+- * know its size). */
++ * know its size here). */
+ static unsigned long setup_pagetables(unsigned long mem,
+ 				      unsigned long initrd_size)
+ {
+@@ -850,7 +850,8 @@ static void handle_console_output(int fd, struct virtqueue *vq)
+  *
+  * Handling output for network is also simple: we get all the output buffers
+  * and write them (ignoring the first element) to this device's file descriptor
+- * (stdout). */
++ * (/dev/net/tun).
++ */
+ static void handle_net_output(int fd, struct virtqueue *vq)
+ {
+ 	unsigned int head, out, in;
+@@ -924,7 +925,7 @@ static void enable_fd(int fd, struct virtqueue *vq)
+ 	write(waker_fd, &vq->dev->fd, sizeof(vq->dev->fd));
+ }
+ 
+-/* Resetting a device is fairly easy. */
++/* When the Guest asks us to reset a device, it's is fairly easy. */
+ static void reset_device(struct device *dev)
+ {
+ 	struct virtqueue *vq;
+@@ -1003,8 +1004,8 @@ static void handle_input(int fd)
+ 		if (select(devices.max_infd+1, &fds, NULL, NULL, &poll) == 0)
+ 			break;
+ 
+-		/* Otherwise, call the device(s) which have readable
+-		 * file descriptors and a method of handling them.  */
++		/* Otherwise, call the device(s) which have readable file
++		 * descriptors and a method of handling them.  */
+ 		for (i = devices.dev; i; i = i->next) {
+ 			if (i->handle_input && FD_ISSET(i->fd, &fds)) {
+ 				int dev_fd;
+@@ -1015,8 +1016,7 @@ static void handle_input(int fd)
+ 				 * should no longer service it.  Networking and
+ 				 * console do this when there's no input
+ 				 * buffers to deliver into.  Console also uses
+-				 * it when it discovers that stdin is
+-				 * closed. */
++				 * it when it discovers that stdin is closed. */
+ 				FD_CLR(i->fd, &devices.infds);
+ 				/* Tell waker to ignore it too, by sending a
+ 				 * negative fd number (-1, since 0 is a valid
+@@ -1033,7 +1033,8 @@ static void handle_input(int fd)
+  *
+  * All devices need a descriptor so the Guest knows it exists, and a "struct
+  * device" so the Launcher can keep track of it.  We have common helper
+- * routines to allocate and manage them. */
++ * routines to allocate and manage them.
++ */
+ 
+ /* The layout of the device page is a "struct lguest_device_desc" followed by a
+  * number of virtqueue descriptors, then two sets of feature bits, then an
+@@ -1078,7 +1079,7 @@ static void add_virtqueue(struct device *dev, unsigned int num_descs,
+ 	struct virtqueue **i, *vq = malloc(sizeof(*vq));
+ 	void *p;
+ 
+-	/* First we need some pages for this virtqueue. */
++	/* First we need some memory for this virtqueue. */
+ 	pages = (vring_size(num_descs, getpagesize()) + getpagesize() - 1)
+ 		/ getpagesize();
+ 	p = get_pages(pages);
+@@ -1122,7 +1123,7 @@ static void add_virtqueue(struct device *dev, unsigned int num_descs,
+ }
+ 
+ /* The first half of the feature bitmask is for us to advertise features.  The
+- * second half if for the Guest to accept features. */
++ * second half is for the Guest to accept features. */
+ static void add_feature(struct device *dev, unsigned bit)
+ {
+ 	u8 *features = get_feature_bits(dev);
+@@ -1151,7 +1152,9 @@ static void set_config(struct device *dev, unsigned len, const void *conf)
+ }
+ 
+ /* This routine does all the creation and setup of a new device, including
+- * calling new_dev_desc() to allocate the descriptor and device memory. */
++ * calling new_dev_desc() to allocate the descriptor and device memory.
++ *
++ * See what I mean about userspace being boring? */
+ static struct device *new_device(const char *name, u16 type, int fd,
+ 				 bool (*handle_input)(int, struct device *))
+ {
+@@ -1383,7 +1386,6 @@ struct vblk_info
+ 	 * Launcher triggers interrupt to Guest. */
+ 	int done_fd;
+ };
+-/*:*/
+ 
+ /*L:210
+  * The Disk
+@@ -1493,7 +1495,10 @@ static int io_thread(void *_dev)
+ 	while (read(vblk->workpipe[0], &c, 1) == 1) {
+ 		/* We acknowledge each request immediately to reduce latency,
+ 		 * rather than waiting until we've done them all.  I haven't
+-		 * measured to see if it makes any difference. */
++		 * measured to see if it makes any difference.
++		 *
++		 * That would be an interesting test, wouldn't it?  You could
++		 * also try having more than one I/O thread. */
+ 		while (service_io(dev))
+ 			write(vblk->done_fd, &c, 1);
+ 	}
+@@ -1501,7 +1506,7 @@ static int io_thread(void *_dev)
+ }
+ 
+ /* Now we've seen the I/O thread, we return to the Launcher to see what happens
+- * when the thread tells us it's completed some I/O. */
++ * when that thread tells us it's completed some I/O. */
+ static bool handle_io_finish(int fd, struct device *dev)
+ {
+ 	char c;
+@@ -1573,11 +1578,12 @@ static void setup_block_file(const char *filename)
+ 	 * more work. */
+ 	pipe(vblk->workpipe);
+ 
+-	/* Create stack for thread and run it */
++	/* Create stack for thread and run it.  Since stack grows upwards, we
++	 * point the stack pointer to the end of this region. */
+ 	stack = malloc(32768);
+ 	/* SIGCHLD - We dont "wait" for our cloned thread, so prevent it from
+ 	 * becoming a zombie. */
+-	if (clone(io_thread, stack + 32768,  CLONE_VM | SIGCHLD, dev) == -1)
++	if (clone(io_thread, stack + 32768, CLONE_VM | SIGCHLD, dev) == -1)
+ 		err(1, "Creating clone");
+ 
+ 	/* We don't need to keep the I/O thread's end of the pipes open. */
+@@ -1587,14 +1593,14 @@ static void setup_block_file(const char *filename)
+ 	verbose("device %u: virtblock %llu sectors\n",
+ 		devices.device_num, le64_to_cpu(conf.capacity));
+ }
+-/* That's the end of device setup. :*/
++/* That's the end of device setup. */
+ 
+-/* Reboot */
++/*L:230 Reboot is pretty easy: clean up and exec() the Launcher afresh. */
+ static void __attribute__((noreturn)) restart_guest(void)
+ {
+ 	unsigned int i;
+ 
+-	/* Closing pipes causes the waker thread and io_threads to die, and
++	/* Closing pipes causes the Waker thread and io_threads to die, and
+ 	 * closing /dev/lguest cleans up the Guest.  Since we don't track all
+ 	 * open fds, we simply close everything beyond stderr. */
+ 	for (i = 3; i < FD_SETSIZE; i++)
+@@ -1603,7 +1609,7 @@ static void __attribute__((noreturn)) restart_guest(void)
+ 	err(1, "Could not exec %s", main_args[0]);
+ }
+ 
+-/*L:220 Finally we reach the core of the Launcher, which runs the Guest, serves
++/*L:220 Finally we reach the core of the Launcher which runs the Guest, serves
+  * its input and output, and finally, lays it to rest. */
+ static void __attribute__((noreturn)) run_guest(int lguest_fd)
+ {
+@@ -1644,7 +1650,7 @@ static void __attribute__((noreturn)) run_guest(int lguest_fd)
+ 			err(1, "Resetting break");
+ 	}
+ }
+-/*
++/*L:240
+  * This is the end of the Launcher.  The good news: we are over halfway
+  * through!  The bad news: the most fiendish part of the code still lies ahead
+  * of us.
+@@ -1691,8 +1697,8 @@ int main(int argc, char *argv[])
+ 	 * device receive input from a file descriptor, we keep an fdset
+ 	 * (infds) and the maximum fd number (max_infd) with the head of the
+ 	 * list.  We also keep a pointer to the last device.  Finally, we keep
+-	 * the next interrupt number to hand out (1: remember that 0 is used by
+-	 * the timer). */
++	 * the next interrupt number to use for devices (1: remember that 0 is
++	 * used by the timer). */
+ 	FD_ZERO(&devices.infds);
+ 	devices.max_infd = -1;
+ 	devices.lastdev = NULL;
+@@ -1793,8 +1799,8 @@ int main(int argc, char *argv[])
+ 	lguest_fd = tell_kernel(pgdir, start);
+ 
+ 	/* We fork off a child process, which wakes the Launcher whenever one
+-	 * of the input file descriptors needs attention.  Otherwise we would
+-	 * run the Guest until it tries to output something. */
++	 * of the input file descriptors needs attention.  We call this the
++	 * Waker, and we'll cover it in a moment. */
+ 	waker_fd = setup_waker(lguest_fd);
+ 
+ 	/* Finally, run the Guest.  This doesn't return. */
+diff --git a/Documentation/lguest/lguest.txt b/Documentation/lguest/lguest.txt
+index 722d4e7..29510dc 100644
+--- a/Documentation/lguest/lguest.txt
++++ b/Documentation/lguest/lguest.txt
+@@ -1,6 +1,7 @@
+-Rusty's Remarkably Unreliable Guide to Lguest
+-	- or, A Young Coder's Illustrated Hypervisor
+-http://lguest.ozlabs.org
++      __
++ (___()'`;  Rusty's Remarkably Unreliable Guide to Lguest
++ /,    /`      - or, A Young Coder's Illustrated Hypervisor
++ \\"--\\    http://lguest.ozlabs.org
+ 
+ Lguest is designed to be a minimal hypervisor for the Linux kernel, for
+ Linux developers and users to experiment with virtualization with the
+@@ -41,12 +42,16 @@ Running Lguest:
+          CONFIG_PHYSICAL_ALIGN=0x100000)
+ 
+   "Device Drivers":
++     "Block devices"
++        "Virtio block driver (EXPERIMENTAL)" = M/Y
+      "Network device support"
+         "Universal TUN/TAP device driver support" = M/Y
+-           (CONFIG_TUN=m)
+-     "Virtualization"
+-        "Linux hypervisor example code" = M/Y
+-           (CONFIG_LGUEST=m)
++        "Virtio network driver (EXPERIMENTAL)" = M/Y
++           (CONFIG_VIRTIO_BLK=m, CONFIG_VIRTIO_NET=m and CONFIG_TUN=m)
++
++  "Virtualization"
++     "Linux hypervisor example code" = M/Y
++        (CONFIG_LGUEST=m)
+ 
+ - A tool called "lguest" is available in this directory: type "make"
+   to build it.  If you didn't build your kernel in-tree, use "make
 diff --git a/Documentation/nmi_watchdog.txt b/Documentation/nmi_watchdog.txt
 index c025a45..757c729 100644
 --- a/Documentation/nmi_watchdog.txt
@@ -95,6 +369,625 @@ index cf6f686..b835c4c 100644
  
  	local_irq_enable();
  
+diff --git a/arch/powerpc/configs/pasemi_defconfig b/arch/powerpc/configs/pasemi_defconfig
+index 797f0df..09f3062 100644
+--- a/arch/powerpc/configs/pasemi_defconfig
++++ b/arch/powerpc/configs/pasemi_defconfig
+@@ -1,7 +1,7 @@
+ #
+ # Automatically generated make config: don't edit
+-# Linux kernel version: 2.6.24-rc6
+-# Tue Jan 15 10:26:10 2008
++# Linux kernel version: 2.6.25-rc6
++# Tue Mar 25 10:25:48 2008
+ #
+ CONFIG_PPC64=y
+ 
+@@ -27,6 +27,7 @@ CONFIG_GENERIC_TIME=y
+ CONFIG_GENERIC_TIME_VSYSCALL=y
+ CONFIG_GENERIC_CLOCKEVENTS=y
+ CONFIG_GENERIC_HARDIRQS=y
++CONFIG_HAVE_SETUP_PER_CPU_AREA=y
+ CONFIG_IRQ_PER_CPU=y
+ CONFIG_RWSEM_XCHGADD_ALGORITHM=y
+ CONFIG_ARCH_HAS_ILOG2_U32=y
+@@ -67,17 +68,19 @@ CONFIG_SYSVIPC_SYSCTL=y
+ # CONFIG_POSIX_MQUEUE is not set
+ # CONFIG_BSD_PROCESS_ACCT is not set
+ # CONFIG_TASKSTATS is not set
+-# CONFIG_USER_NS is not set
+-# CONFIG_PID_NS is not set
+ # CONFIG_AUDIT is not set
+ # CONFIG_IKCONFIG is not set
+ CONFIG_LOG_BUF_SHIFT=17
+ # CONFIG_CGROUPS is not set
+-CONFIG_FAIR_GROUP_SCHED=y
+-CONFIG_FAIR_USER_SCHED=y
+-# CONFIG_FAIR_CGROUP_SCHED is not set
++# CONFIG_GROUP_SCHED is not set
+ CONFIG_SYSFS_DEPRECATED=y
++CONFIG_SYSFS_DEPRECATED_V2=y
+ # CONFIG_RELAY is not set
++CONFIG_NAMESPACES=y
++# CONFIG_UTS_NS is not set
++# CONFIG_IPC_NS is not set
++# CONFIG_USER_NS is not set
++# CONFIG_PID_NS is not set
+ CONFIG_BLK_DEV_INITRD=y
+ CONFIG_INITRAMFS_SOURCE=""
+ # CONFIG_CC_OPTIMIZE_FOR_SIZE is not set
+@@ -91,11 +94,13 @@ CONFIG_HOTPLUG=y
+ CONFIG_PRINTK=y
+ CONFIG_BUG=y
+ CONFIG_ELF_CORE=y
++CONFIG_COMPAT_BRK=y
+ CONFIG_BASE_FULL=y
+ CONFIG_FUTEX=y
+ CONFIG_ANON_INODES=y
+ CONFIG_EPOLL=y
+ CONFIG_SIGNALFD=y
++CONFIG_TIMERFD=y
+ CONFIG_EVENTFD=y
+ CONFIG_SHMEM=y
+ CONFIG_VM_EVENT_COUNTERS=y
+@@ -103,6 +108,15 @@ CONFIG_SLUB_DEBUG=y
+ # CONFIG_SLAB is not set
+ CONFIG_SLUB=y
+ # CONFIG_SLOB is not set
++CONFIG_PROFILING=y
++# CONFIG_MARKERS is not set
++CONFIG_OPROFILE=y
++CONFIG_HAVE_OPROFILE=y
++# CONFIG_KPROBES is not set
++CONFIG_HAVE_KPROBES=y
++CONFIG_HAVE_KRETPROBES=y
++CONFIG_PROC_PAGE_MONITOR=y
++CONFIG_SLABINFO=y
+ CONFIG_RT_MUTEXES=y
+ # CONFIG_TINY_SHMEM is not set
+ CONFIG_BASE_SMALL=0
+@@ -130,6 +144,7 @@ CONFIG_DEFAULT_AS=y
+ # CONFIG_DEFAULT_CFQ is not set
+ # CONFIG_DEFAULT_NOOP is not set
+ CONFIG_DEFAULT_IOSCHED="anticipatory"
++CONFIG_CLASSIC_RCU=y
+ 
+ #
+ # Platform support
+@@ -140,8 +155,8 @@ CONFIG_PPC_MULTIPLATFORM=y
+ # CONFIG_PPC_86xx is not set
+ # CONFIG_PPC_PSERIES is not set
+ # CONFIG_PPC_ISERIES is not set
+-# CONFIG_PPC_MPC52xx is not set
+-# CONFIG_PPC_MPC5200 is not set
++# CONFIG_PPC_MPC512x is not set
++# CONFIG_PPC_MPC5121 is not set
+ # CONFIG_PPC_PMAC is not set
+ # CONFIG_PPC_MAPLE is not set
+ CONFIG_PPC_PASEMI=y
+@@ -159,6 +174,7 @@ CONFIG_PPC_PASEMI_MDIO=y
+ # CONFIG_PPC_IBM_CELL_BLADE is not set
+ # CONFIG_PQ2ADS is not set
+ CONFIG_PPC_NATIVE=y
++# CONFIG_IPIC is not set
+ CONFIG_MPIC=y
+ # CONFIG_MPIC_WEIRD is not set
+ # CONFIG_PPC_I8259 is not set
+@@ -189,7 +205,6 @@ CONFIG_CPU_FREQ_GOV_ONDEMAND=y
+ # CPU Frequency drivers
+ #
+ CONFIG_PPC_PASEMI_CPUFREQ=y
+-# CONFIG_CPM2 is not set
+ # CONFIG_FSL_ULI1575 is not set
+ 
+ #
+@@ -204,16 +219,20 @@ CONFIG_GENERIC_CLOCKEVENTS_BUILD=y
+ # CONFIG_HZ_300 is not set
+ CONFIG_HZ_1000=y
+ CONFIG_HZ=1000
++# CONFIG_SCHED_HRTICK is not set
+ CONFIG_PREEMPT_NONE=y
+ # CONFIG_PREEMPT_VOLUNTARY is not set
+ # CONFIG_PREEMPT is not set
+-# CONFIG_PREEMPT_BKL is not set
+ CONFIG_BINFMT_ELF=y
++CONFIG_COMPAT_BINFMT_ELF=y
+ # CONFIG_BINFMT_MISC is not set
+ CONFIG_FORCE_MAX_ZONEORDER=9
+ CONFIG_HUGETLB_PAGE_SIZE_VARIABLE=y
+ CONFIG_IOMMU_VMERGE=y
++CONFIG_IOMMU_HELPER=y
+ CONFIG_ARCH_ENABLE_MEMORY_HOTPLUG=y
++CONFIG_ARCH_HAS_WALK_MEMORY=y
++CONFIG_ARCH_ENABLE_MEMORY_HOTREMOVE=y
+ # CONFIG_KEXEC is not set
+ # CONFIG_CRASH_DUMP is not set
+ # CONFIG_IRQ_ALL_CPUS is not set
+@@ -236,12 +255,12 @@ CONFIG_ZONE_DMA_FLAG=1
+ CONFIG_BOUNCE=y
+ CONFIG_PPC_HAS_HASH_64K=y
+ CONFIG_PPC_64K_PAGES=y
++# CONFIG_PPC_SUBPAGE_PROT is not set
+ # CONFIG_SCHED_SMT is not set
+ CONFIG_PROC_DEVICETREE=y
+ # CONFIG_CMDLINE_BOOL is not set
+ # CONFIG_PM is not set
+ # CONFIG_SECCOMP is not set
+-# CONFIG_WANT_DEVICE_TREE is not set
+ CONFIG_ISA_DMA_API=y
+ 
+ #
+@@ -290,6 +309,7 @@ CONFIG_XFRM=y
+ CONFIG_XFRM_USER=y
+ # CONFIG_XFRM_SUB_POLICY is not set
+ # CONFIG_XFRM_MIGRATE is not set
++# CONFIG_XFRM_STATISTICS is not set
+ CONFIG_NET_KEY=y
+ # CONFIG_NET_KEY_MIGRATE is not set
+ CONFIG_INET=y
+@@ -346,6 +366,7 @@ CONFIG_DEFAULT_TCP_CONG="cubic"
+ #
+ # CONFIG_NET_PKTGEN is not set
+ # CONFIG_HAMRADIO is not set
++# CONFIG_CAN is not set
+ # CONFIG_IRDA is not set
+ # CONFIG_BT is not set
+ # CONFIG_AF_RXRPC is not set
+@@ -441,8 +462,10 @@ CONFIG_MTD_NAND=y
+ CONFIG_MTD_NAND_IDS=y
+ # CONFIG_MTD_NAND_DISKONCHIP is not set
+ # CONFIG_MTD_NAND_CAFE is not set
++CONFIG_MTD_NAND_PASEMI=y
+ # CONFIG_MTD_NAND_PLATFORM is not set
+ # CONFIG_MTD_ALAUDA is not set
++# CONFIG_MTD_NAND_FSL_ELBC is not set
+ # CONFIG_MTD_ONENAND is not set
+ 
+ #
+@@ -465,7 +488,7 @@ CONFIG_BLK_DEV_LOOP=y
+ CONFIG_BLK_DEV_RAM=y
+ CONFIG_BLK_DEV_RAM_COUNT=16
+ CONFIG_BLK_DEV_RAM_SIZE=16384
+-CONFIG_BLK_DEV_RAM_BLOCKSIZE=1024
++# CONFIG_BLK_DEV_XIP is not set
+ # CONFIG_CDROM_PKTCDVD is not set
+ # CONFIG_ATA_OVER_ETH is not set
+ CONFIG_MISC_DEVICES=y
+@@ -473,11 +496,13 @@ CONFIG_MISC_DEVICES=y
+ # CONFIG_EEPROM_93CX6 is not set
+ # CONFIG_SGI_IOC4 is not set
+ # CONFIG_TIFM_CORE is not set
++# CONFIG_ENCLOSURE_SERVICES is not set
++CONFIG_HAVE_IDE=y
+ CONFIG_IDE=y
+ CONFIG_BLK_DEV_IDE=y
+ 
+ #
+-# Please see Documentation/ide.txt for help/info on IDE drives
++# Please see Documentation/ide/ide.txt for help/info on IDE drives
+ #
+ # CONFIG_BLK_DEV_IDE_SATA is not set
+ CONFIG_BLK_DEV_IDEDISK=y
+@@ -485,6 +510,7 @@ CONFIG_IDEDISK_MULTI_MODE=y
+ # CONFIG_BLK_DEV_IDECS is not set
+ # CONFIG_BLK_DEV_DELKIN is not set
+ CONFIG_BLK_DEV_IDECD=y
++CONFIG_BLK_DEV_IDECD_VERBOSE_ERRORS=y
+ # CONFIG_BLK_DEV_IDETAPE is not set
+ # CONFIG_BLK_DEV_IDEFLOPPY is not set
+ CONFIG_BLK_DEV_IDESCSI=y
+@@ -500,7 +526,6 @@ CONFIG_IDE_PROC_FS=y
+ #
+ # PCI IDE chipsets support
+ #
+-# CONFIG_IDEPCI_PCIBUS_ORDER is not set
+ # CONFIG_BLK_DEV_GENERIC is not set
+ # CONFIG_BLK_DEV_OPTI621 is not set
+ # CONFIG_BLK_DEV_AEC62XX is not set
+@@ -528,7 +553,6 @@ CONFIG_IDE_PROC_FS=y
+ # CONFIG_BLK_DEV_TRM290 is not set
+ # CONFIG_BLK_DEV_VIA82CXXX is not set
+ # CONFIG_BLK_DEV_TC86C001 is not set
+-# CONFIG_IDE_ARM is not set
+ # CONFIG_BLK_DEV_IDEDMA is not set
+ CONFIG_IDE_ARCH_OBSOLETE_INIT=y
+ # CONFIG_BLK_DEV_HD is not set
+@@ -593,6 +617,7 @@ CONFIG_SCSI_LOWLEVEL=y
+ # CONFIG_SCSI_IPS is not set
+ # CONFIG_SCSI_INITIO is not set
+ # CONFIG_SCSI_INIA100 is not set
++# CONFIG_SCSI_MVSAS is not set
+ # CONFIG_SCSI_STEX is not set
+ # CONFIG_SCSI_SYM53C8XX_2 is not set
+ # CONFIG_SCSI_IPR is not set
+@@ -646,6 +671,7 @@ CONFIG_ATA_GENERIC=y
+ # CONFIG_PATA_MPIIX is not set
+ # CONFIG_PATA_OLDPIIX is not set
+ # CONFIG_PATA_NETCELL is not set
++# CONFIG_PATA_NINJA32 is not set
+ # CONFIG_PATA_NS87410 is not set
+ # CONFIG_PATA_NS87415 is not set
+ # CONFIG_PATA_OPTI is not set
+@@ -699,7 +725,6 @@ CONFIG_DUMMY=y
+ # CONFIG_EQUALIZER is not set
+ # CONFIG_TUN is not set
+ # CONFIG_VETH is not set
+-# CONFIG_IP1000 is not set
+ # CONFIG_ARCNET is not set
+ CONFIG_PHYLIB=y
+ 
+@@ -715,6 +740,7 @@ CONFIG_MARVELL_PHY=y
+ # CONFIG_SMSC_PHY is not set
+ # CONFIG_BROADCOM_PHY is not set
+ # CONFIG_ICPLUS_PHY is not set
++# CONFIG_REALTEK_PHY is not set
+ # CONFIG_FIXED_PHY is not set
+ # CONFIG_MDIO_BITBANG is not set
+ CONFIG_NET_ETHERNET=y
+@@ -742,6 +768,7 @@ CONFIG_NET_PCI=y
+ # CONFIG_NE2K_PCI is not set
+ # CONFIG_8139CP is not set
+ # CONFIG_8139TOO is not set
++# CONFIG_R6040 is not set
+ # CONFIG_SIS900 is not set
+ # CONFIG_EPIC100 is not set
+ # CONFIG_SUNDANCE is not set
+@@ -754,6 +781,9 @@ CONFIG_E1000=y
+ CONFIG_E1000_NAPI=y
+ # CONFIG_E1000_DISABLE_PACKET_SPLIT is not set
+ # CONFIG_E1000E is not set
++# CONFIG_E1000E_ENABLED is not set
++# CONFIG_IP1000 is not set
++# CONFIG_IGB is not set
+ # CONFIG_NS83820 is not set
+ # CONFIG_HAMACHI is not set
+ # CONFIG_YELLOWFIN is not set
+@@ -779,6 +809,7 @@ CONFIG_NETDEV_10000=y
+ CONFIG_PASEMI_MAC=y
+ # CONFIG_MLX4_CORE is not set
+ # CONFIG_TEHUTI is not set
++# CONFIG_BNX2X is not set
+ # CONFIG_TR is not set
+ 
+ #
+@@ -802,7 +833,6 @@ CONFIG_PASEMI_MAC=y
+ # CONFIG_PPP is not set
+ # CONFIG_SLIP is not set
+ # CONFIG_NET_FC is not set
+-# CONFIG_SHAPER is not set
+ # CONFIG_NETCONSOLE is not set
+ # CONFIG_NETPOLL is not set
+ # CONFIG_NET_POLL_CONTROLLER is not set
+@@ -861,6 +891,7 @@ CONFIG_VT_CONSOLE=y
+ CONFIG_HW_CONSOLE=y
+ # CONFIG_VT_HW_CONSOLE_BINDING is not set
+ # CONFIG_SERIAL_NONSTANDARD is not set
++# CONFIG_NOZOMI is not set
+ 
+ #
+ # Serial drivers
+@@ -886,8 +917,7 @@ CONFIG_LEGACY_PTY_COUNT=4
+ # CONFIG_IPMI_HANDLER is not set
+ CONFIG_HW_RANDOM=y
+ CONFIG_HW_RANDOM_PASEMI=y
+-CONFIG_GEN_RTC=y
+-CONFIG_GEN_RTC_X=y
++# CONFIG_GEN_RTC is not set
+ # CONFIG_R3964 is not set
+ # CONFIG_APPLICOM is not set
+ 
+@@ -897,6 +927,7 @@ CONFIG_GEN_RTC_X=y
+ # CONFIG_SYNCLINK_CS is not set
+ # CONFIG_CARDMAN_4000 is not set
+ # CONFIG_CARDMAN_4040 is not set
++# CONFIG_IPWIRELESS is not set
+ CONFIG_RAW_DRIVER=y
+ CONFIG_MAX_RAW_DEVS=256
+ # CONFIG_HANGCHECK_TIMER is not set
+@@ -944,13 +975,12 @@ CONFIG_I2C_PASEMI=y
+ #
+ # Miscellaneous I2C Chip support
+ #
+-# CONFIG_SENSORS_DS1337 is not set
+-# CONFIG_SENSORS_DS1374 is not set
+ # CONFIG_DS1682 is not set
+ CONFIG_SENSORS_EEPROM=y
+ # CONFIG_SENSORS_PCF8574 is not set
+-# CONFIG_SENSORS_PCA9539 is not set
++# CONFIG_PCF8575 is not set
+ # CONFIG_SENSORS_PCF8591 is not set
++# CONFIG_TPS65010 is not set
+ # CONFIG_SENSORS_MAX6875 is not set
+ # CONFIG_SENSORS_TSL2550 is not set
+ # CONFIG_I2C_DEBUG_CORE is not set
+@@ -975,6 +1005,7 @@ CONFIG_HWMON_VID=y
+ # CONFIG_SENSORS_ADM1031 is not set
+ # CONFIG_SENSORS_ADM9240 is not set
+ # CONFIG_SENSORS_ADT7470 is not set
++# CONFIG_SENSORS_ADT7473 is not set
+ # CONFIG_SENSORS_ATXP1 is not set
+ # CONFIG_SENSORS_DS1621 is not set
+ # CONFIG_SENSORS_I5K_AMB is not set
+@@ -1004,6 +1035,7 @@ CONFIG_SENSORS_LM90=y
+ # CONFIG_SENSORS_SMSC47M1 is not set
+ # CONFIG_SENSORS_SMSC47M192 is not set
+ # CONFIG_SENSORS_SMSC47B397 is not set
++# CONFIG_SENSORS_ADS7828 is not set
+ # CONFIG_SENSORS_THMC50 is not set
+ # CONFIG_SENSORS_VIA686A is not set
+ # CONFIG_SENSORS_VT1211 is not set
+@@ -1013,9 +1045,11 @@ CONFIG_SENSORS_LM90=y
+ # CONFIG_SENSORS_W83792D is not set
+ # CONFIG_SENSORS_W83793 is not set
+ # CONFIG_SENSORS_W83L785TS is not set
++# CONFIG_SENSORS_W83L786NG is not set
+ # CONFIG_SENSORS_W83627HF is not set
+ # CONFIG_SENSORS_W83627EHF is not set
+ # CONFIG_HWMON_DEBUG_CHIP is not set
++# CONFIG_THERMAL is not set
+ # CONFIG_WATCHDOG is not set
+ 
+ #
+@@ -1183,6 +1217,7 @@ CONFIG_SND_VERBOSE_PROCFS=y
+ # CONFIG_SND_BT87X is not set
+ # CONFIG_SND_CA0106 is not set
+ # CONFIG_SND_CMIPCI is not set
++# CONFIG_SND_OXYGEN is not set
+ # CONFIG_SND_CS4281 is not set
+ # CONFIG_SND_CS46XX is not set
+ # CONFIG_SND_CS5530 is not set
+@@ -1208,6 +1243,7 @@ CONFIG_SND_VERBOSE_PROCFS=y
+ # CONFIG_SND_HDA_INTEL is not set
+ # CONFIG_SND_HDSP is not set
+ # CONFIG_SND_HDSPM is not set
++# CONFIG_SND_HIFIER is not set
+ # CONFIG_SND_ICE1712 is not set
+ # CONFIG_SND_ICE1724 is not set
+ # CONFIG_SND_INTEL8X0 is not set
+@@ -1225,6 +1261,7 @@ CONFIG_SND_VERBOSE_PROCFS=y
+ # CONFIG_SND_TRIDENT is not set
+ # CONFIG_SND_VIA82XX is not set
+ # CONFIG_SND_VIA82XX_MODEM is not set
++# CONFIG_SND_VIRTUOSO is not set
+ # CONFIG_SND_VX222 is not set
+ # CONFIG_SND_YMFPCI is not set
+ 
+@@ -1259,6 +1296,10 @@ CONFIG_SND_USB_USX2Y=y
+ #
+ 
+ #
++# ALSA SoC audio for Freescale SOCs
++#
++
++#
+ # Open Sound System
+ #
+ # CONFIG_SOUND_PRIME is not set
+@@ -1280,6 +1321,7 @@ CONFIG_USB_ARCH_HAS_OHCI=y
+ CONFIG_USB_ARCH_HAS_EHCI=y
+ CONFIG_USB=y
+ # CONFIG_USB_DEBUG is not set
++# CONFIG_USB_ANNOUNCE_NEW_DEVICES is not set
+ 
+ #
+ # Miscellaneous USB options
+@@ -1293,17 +1335,14 @@ CONFIG_USB_DEVICEFS=y
+ # USB Host Controller Drivers
+ #
+ CONFIG_USB_EHCI_HCD=y
+-# CONFIG_USB_EHCI_SPLIT_ISO is not set
+ # CONFIG_USB_EHCI_ROOT_HUB_TT is not set
+ # CONFIG_USB_EHCI_TT_NEWSCHED is not set
++CONFIG_USB_EHCI_HCD_PPC_OF=y
+ # CONFIG_USB_ISP116X_HCD is not set
+ CONFIG_USB_OHCI_HCD=y
+-CONFIG_USB_OHCI_HCD_PPC_OF=y
+-CONFIG_USB_OHCI_HCD_PPC_OF_BE=y
+-# CONFIG_USB_OHCI_HCD_PPC_OF_LE is not set
+-CONFIG_USB_OHCI_HCD_PCI=y
+-CONFIG_USB_OHCI_BIG_ENDIAN_DESC=y
+-CONFIG_USB_OHCI_BIG_ENDIAN_MMIO=y
++# CONFIG_USB_OHCI_HCD_PPC_OF is not set
++# CONFIG_USB_OHCI_BIG_ENDIAN_DESC is not set
++# CONFIG_USB_OHCI_BIG_ENDIAN_MMIO is not set
+ CONFIG_USB_OHCI_LITTLE_ENDIAN=y
+ CONFIG_USB_UHCI_HCD=y
+ CONFIG_USB_SL811_HCD=y
+@@ -1348,10 +1387,6 @@ CONFIG_USB_LIBUSUAL=y
+ #
+ # USB port drivers
+ #
+-
+-#
+-# USB Serial Converter support
+-#
+ # CONFIG_USB_SERIAL is not set
+ 
+ #
+@@ -1377,16 +1412,9 @@ CONFIG_USB_LIBUSUAL=y
+ # CONFIG_USB_TRANCEVIBRATOR is not set
+ # CONFIG_USB_IOWARRIOR is not set
+ # CONFIG_USB_TEST is not set
+-
+-#
+-# USB DSL modem support
+-#
+-
+-#
+-# USB Gadget Support
+-#
+ # CONFIG_USB_GADGET is not set
+ # CONFIG_MMC is not set
++# CONFIG_MEMSTICK is not set
+ # CONFIG_NEW_LEDS is not set
+ # CONFIG_INFINIBAND is not set
+ CONFIG_EDAC=y
+@@ -1425,6 +1453,7 @@ CONFIG_RTC_DRV_DS1307=y
+ # CONFIG_RTC_DRV_PCF8563 is not set
+ # CONFIG_RTC_DRV_PCF8583 is not set
+ # CONFIG_RTC_DRV_M41T80 is not set
++# CONFIG_RTC_DRV_S35390A is not set
+ 
+ #
+ # SPI RTC drivers
+@@ -1434,9 +1463,10 @@ CONFIG_RTC_DRV_DS1307=y
+ # Platform RTC drivers
+ #
+ # CONFIG_RTC_DRV_CMOS is not set
++# CONFIG_RTC_DRV_DS1511 is not set
+ # CONFIG_RTC_DRV_DS1553 is not set
+-# CONFIG_RTC_DRV_STK17TA8 is not set
+ # CONFIG_RTC_DRV_DS1742 is not set
++# CONFIG_RTC_DRV_STK17TA8 is not set
+ # CONFIG_RTC_DRV_M48T86 is not set
+ # CONFIG_RTC_DRV_M48T59 is not set
+ # CONFIG_RTC_DRV_V3020 is not set
+@@ -1444,6 +1474,7 @@ CONFIG_RTC_DRV_DS1307=y
+ #
+ # on-CPU RTC drivers
+ #
++# CONFIG_DMADEVICES is not set
+ 
+ #
+ # Userspace I/O
+@@ -1471,12 +1502,10 @@ CONFIG_FS_POSIX_ACL=y
+ # CONFIG_XFS_FS is not set
+ # CONFIG_GFS2_FS is not set
+ # CONFIG_OCFS2_FS is not set
+-# CONFIG_MINIX_FS is not set
+-# CONFIG_ROMFS_FS is not set
++CONFIG_DNOTIFY=y
+ CONFIG_INOTIFY=y
+ CONFIG_INOTIFY_USER=y
+ # CONFIG_QUOTA is not set
+-CONFIG_DNOTIFY=y
+ CONFIG_AUTOFS_FS=y
+ CONFIG_AUTOFS4_FS=y
+ # CONFIG_FUSE_FS is not set
+@@ -1536,8 +1565,10 @@ CONFIG_JFFS2_RTIME=y
+ # CONFIG_JFFS2_RUBIN is not set
+ # CONFIG_CRAMFS is not set
+ # CONFIG_VXFS_FS is not set
++# CONFIG_MINIX_FS is not set
+ # CONFIG_HPFS_FS is not set
+ # CONFIG_QNX4FS_FS is not set
++# CONFIG_ROMFS_FS is not set
+ # CONFIG_SYSV_FS is not set
+ # CONFIG_UFS_FS is not set
+ CONFIG_NETWORK_FILESYSTEMS=y
+@@ -1629,7 +1660,6 @@ CONFIG_NLS_ISO8859_1=y
+ # CONFIG_NLS_KOI8_U is not set
+ # CONFIG_NLS_UTF8 is not set
+ # CONFIG_DLM is not set
+-# CONFIG_UCC_SLOW is not set
+ 
+ #
+ # Library routines
+@@ -1647,11 +1677,6 @@ CONFIG_PLIST=y
+ CONFIG_HAS_IOMEM=y
+ CONFIG_HAS_IOPORT=y
+ CONFIG_HAS_DMA=y
+-CONFIG_INSTRUMENTATION=y
+-CONFIG_PROFILING=y
+-CONFIG_OPROFILE=y
+-# CONFIG_KPROBES is not set
+-# CONFIG_MARKERS is not set
+ 
+ #
+ # Kernel hacking
+@@ -1670,6 +1695,7 @@ CONFIG_DETECT_SOFTLOCKUP=y
+ # CONFIG_SCHEDSTATS is not set
+ # CONFIG_TIMER_STATS is not set
+ # CONFIG_SLUB_DEBUG_ON is not set
++# CONFIG_SLUB_STATS is not set
+ # CONFIG_DEBUG_RT_MUTEXES is not set
+ # CONFIG_RT_MUTEX_TESTER is not set
+ # CONFIG_DEBUG_SPINLOCK is not set
+@@ -1682,9 +1708,9 @@ CONFIG_DEBUG_BUGVERBOSE=y
+ # CONFIG_DEBUG_VM is not set
+ # CONFIG_DEBUG_LIST is not set
+ # CONFIG_DEBUG_SG is not set
+-# CONFIG_FORCED_INLINING is not set
+ # CONFIG_BOOT_PRINTK_DELAY is not set
+ # CONFIG_RCU_TORTURE_TEST is not set
++# CONFIG_BACKTRACE_SELF_TEST is not set
+ # CONFIG_FAULT_INJECTION is not set
+ # CONFIG_SAMPLES is not set
+ # CONFIG_DEBUG_STACKOVERFLOW is not set
+@@ -1710,7 +1736,9 @@ CONFIG_ASYNC_MEMCPY=y
+ CONFIG_ASYNC_XOR=y
+ CONFIG_CRYPTO=y
+ CONFIG_CRYPTO_ALGAPI=y
++CONFIG_CRYPTO_AEAD=y
+ CONFIG_CRYPTO_BLKCIPHER=y
++# CONFIG_CRYPTO_SEQIV is not set
+ CONFIG_CRYPTO_HASH=y
+ CONFIG_CRYPTO_MANAGER=y
+ CONFIG_CRYPTO_HMAC=y
+@@ -1729,6 +1757,9 @@ CONFIG_CRYPTO_CBC=y
+ # CONFIG_CRYPTO_PCBC is not set
+ # CONFIG_CRYPTO_LRW is not set
+ # CONFIG_CRYPTO_XTS is not set
++# CONFIG_CRYPTO_CTR is not set
++# CONFIG_CRYPTO_GCM is not set
++# CONFIG_CRYPTO_CCM is not set
+ # CONFIG_CRYPTO_CRYPTD is not set
+ CONFIG_CRYPTO_DES=y
+ # CONFIG_CRYPTO_FCRYPT is not set
+@@ -1743,11 +1774,14 @@ CONFIG_CRYPTO_AES=y
+ # CONFIG_CRYPTO_KHAZAD is not set
+ # CONFIG_CRYPTO_ANUBIS is not set
+ # CONFIG_CRYPTO_SEED is not set
++# CONFIG_CRYPTO_SALSA20 is not set
+ # CONFIG_CRYPTO_DEFLATE is not set
+ # CONFIG_CRYPTO_MICHAEL_MIC is not set
+ # CONFIG_CRYPTO_CRC32C is not set
+ # CONFIG_CRYPTO_CAMELLIA is not set
+ # CONFIG_CRYPTO_TEST is not set
+-# CONFIG_CRYPTO_AUTHENC is not set
++CONFIG_CRYPTO_AUTHENC=y
++# CONFIG_CRYPTO_LZO is not set
+ CONFIG_CRYPTO_HW=y
++# CONFIG_CRYPTO_DEV_HIFN_795X is not set
+ # CONFIG_PPC_CLOCK is not set
+diff --git a/arch/powerpc/kernel/process.c b/arch/powerpc/kernel/process.c
+index 59311ec..4ec6055 100644
+--- a/arch/powerpc/kernel/process.c
++++ b/arch/powerpc/kernel/process.c
+@@ -241,8 +241,12 @@ void discard_lazy_cpu_state(void)
+ }
+ #endif /* CONFIG_SMP */
+ 
++static DEFINE_PER_CPU(unsigned long, current_dabr);
++
+ int set_dabr(unsigned long dabr)
+ {
++	__get_cpu_var(current_dabr) = dabr;
++
+ #ifdef CONFIG_PPC_MERGE		/* XXX for now */
+ 	if (ppc_md.set_dabr)
+ 		return ppc_md.set_dabr(dabr);
+@@ -259,8 +263,6 @@ int set_dabr(unsigned long dabr)
+ DEFINE_PER_CPU(struct cpu_usage, cpu_usage_array);
+ #endif
+ 
+-static DEFINE_PER_CPU(unsigned long, current_dabr);
+-
+ struct task_struct *__switch_to(struct task_struct *prev,
+ 	struct task_struct *new)
+ {
+@@ -325,10 +327,8 @@ struct task_struct *__switch_to(struct task_struct *prev,
+ 
+ #endif /* CONFIG_SMP */
+ 
+-	if (unlikely(__get_cpu_var(current_dabr) != new->thread.dabr)) {
++	if (unlikely(__get_cpu_var(current_dabr) != new->thread.dabr))
+ 		set_dabr(new->thread.dabr);
+-		__get_cpu_var(current_dabr) = new->thread.dabr;
+-	}
+ 
+ 	new_thread = &new->thread;
+ 	old_thread = &current->thread;
 diff --git a/arch/sparc64/defconfig b/arch/sparc64/defconfig
 index 250958d..9d4bd22 100644
 --- a/arch/sparc64/defconfig
@@ -1477,6 +2370,305 @@ index 7637dc9..f4f7ecf 100644
  		node = first_node(node_online_map);
  	numa_set_node(cpu, node);
  
+diff --git a/arch/x86/lguest/boot.c b/arch/x86/lguest/boot.c
+index a104c53..3335b45 100644
+--- a/arch/x86/lguest/boot.c
++++ b/arch/x86/lguest/boot.c
+@@ -10,21 +10,19 @@
+  * (such as the example in Documentation/lguest/lguest.c) is called the
+  * Launcher.
+  *
+- * Secondly, we only run specially modified Guests, not normal kernels.  When
+- * you set CONFIG_LGUEST to 'y' or 'm', this automatically sets
+- * CONFIG_LGUEST_GUEST=y, which compiles this file into the kernel so it knows
+- * how to be a Guest.  This means that you can use the same kernel you boot
+- * normally (ie. as a Host) as a Guest.
++ * Secondly, we only run specially modified Guests, not normal kernels: setting
++ * CONFIG_LGUEST_GUEST to "y" compiles this file into the kernel so it knows
++ * how to be a Guest at boot time.  This means that you can use the same kernel
++ * you boot normally (ie. as a Host) as a Guest.
+  *
+  * These Guests know that they cannot do privileged operations, such as disable
+  * interrupts, and that they have to ask the Host to do such things explicitly.
+  * This file consists of all the replacements for such low-level native
+  * hardware operations: these special Guest versions call the Host.
+  *
+- * So how does the kernel know it's a Guest?  The Guest starts at a special
+- * entry point marked with a magic string, which sets up a few things then
+- * calls here.  We replace the native functions various "paravirt" structures
+- * with our Guest versions, then boot like normal. :*/
++ * So how does the kernel know it's a Guest?  We'll see that later, but let's
++ * just say that we end up here where we replace the native functions various
++ * "paravirt" structures with our Guest versions, then boot like normal. :*/
+ 
+ /*
+  * Copyright (C) 2006, Rusty Russell <rusty@rustcorp.com.au> IBM Corporation.
+@@ -134,7 +132,7 @@ static void async_hcall(unsigned long call, unsigned long arg1,
+  * lguest_leave_lazy_mode().
+  *
+  * So, when we're in lazy mode, we call async_hcall() to store the call for
+- * future processing. */
++ * future processing: */
+ static void lazy_hcall(unsigned long call,
+ 		       unsigned long arg1,
+ 		       unsigned long arg2,
+@@ -147,7 +145,7 @@ static void lazy_hcall(unsigned long call,
+ }
+ 
+ /* When lazy mode is turned off reset the per-cpu lazy mode variable and then
+- * issue a hypercall to flush any stored calls. */
++ * issue the do-nothing hypercall to flush any stored calls. */
+ static void lguest_leave_lazy_mode(void)
+ {
+ 	paravirt_leave_lazy(paravirt_get_lazy_mode());
+@@ -164,7 +162,7 @@ static void lguest_leave_lazy_mode(void)
+  *
+  * So instead we keep an "irq_enabled" field inside our "struct lguest_data",
+  * which the Guest can update with a single instruction.  The Host knows to
+- * check there when it wants to deliver an interrupt.
++ * check there before it tries to deliver an interrupt.
+  */
+ 
+ /* save_flags() is expected to return the processor state (ie. "flags").  The
+@@ -196,10 +194,15 @@ static void irq_enable(void)
+ /*M:003 Note that we don't check for outstanding interrupts when we re-enable
+  * them (or when we unmask an interrupt).  This seems to work for the moment,
+  * since interrupts are rare and we'll just get the interrupt on the next timer
+- * tick, but when we turn on CONFIG_NO_HZ, we should revisit this.  One way
++ * tick, but now we can run with CONFIG_NO_HZ, we should revisit this.  One way
+  * would be to put the "irq_enabled" field in a page by itself, and have the
+  * Host write-protect it when an interrupt comes in when irqs are disabled.
+- * There will then be a page fault as soon as interrupts are re-enabled. :*/
++ * There will then be a page fault as soon as interrupts are re-enabled.
++ *
++ * A better method is to implement soft interrupt disable generally for x86:
++ * instead of disabling interrupts, we set a flag.  If an interrupt does come
++ * in, we then disable them for real.  This is uncommon, so we could simply use
++ * a hypercall for interrupt control and not worry about efficiency. :*/
+ 
+ /*G:034
+  * The Interrupt Descriptor Table (IDT).
+@@ -212,6 +215,10 @@ static void irq_enable(void)
+ static void lguest_write_idt_entry(gate_desc *dt,
+ 				   int entrynum, const gate_desc *g)
+ {
++	/* The gate_desc structure is 8 bytes long: we hand it to the Host in
++	 * two 32-bit chunks.  The whole 32-bit kernel used to hand descriptors
++	 * around like this; typesafety wasn't a big concern in Linux's early
++	 * years. */
+ 	u32 *desc = (u32 *)g;
+ 	/* Keep the local copy up to date. */
+ 	native_write_idt_entry(dt, entrynum, g);
+@@ -243,7 +250,8 @@ static void lguest_load_idt(const struct desc_ptr *desc)
+  *
+  * This is the opposite of the IDT code where we have a LOAD_IDT_ENTRY
+  * hypercall and use that repeatedly to load a new IDT.  I don't think it
+- * really matters, but wouldn't it be nice if they were the same?
++ * really matters, but wouldn't it be nice if they were the same?  Wouldn't
++ * it be even better if you were the one to send the patch to fix it?
+  */
+ static void lguest_load_gdt(const struct desc_ptr *desc)
+ {
+@@ -298,9 +306,9 @@ static void lguest_load_tr_desc(void)
+ 
+ /* The "cpuid" instruction is a way of querying both the CPU identity
+  * (manufacturer, model, etc) and its features.  It was introduced before the
+- * Pentium in 1993 and keeps getting extended by both Intel and AMD.  As you
+- * might imagine, after a decade and a half this treatment, it is now a giant
+- * ball of hair.  Its entry in the current Intel manual runs to 28 pages.
++ * Pentium in 1993 and keeps getting extended by both Intel, AMD and others.
++ * As you might imagine, after a decade and a half this treatment, it is now a
++ * giant ball of hair.  Its entry in the current Intel manual runs to 28 pages.
+  *
+  * This instruction even it has its own Wikipedia entry.  The Wikipedia entry
+  * has been translated into 4 languages.  I am not making this up!
+@@ -594,17 +602,17 @@ static unsigned long lguest_get_wallclock(void)
+ 	return lguest_data.time.tv_sec;
+ }
+ 
+-/* The TSC is a Time Stamp Counter.  The Host tells us what speed it runs at,
+- * or 0 if it's unusable as a reliable clock source.  This matches what we want
+- * here: if we return 0 from this function, the x86 TSC clock will not register
+- * itself. */
++/* The TSC is an Intel thing called the Time Stamp Counter.  The Host tells us
++ * what speed it runs at, or 0 if it's unusable as a reliable clock source.
++ * This matches what we want here: if we return 0 from this function, the x86
++ * TSC clock will give up and not register itself. */
+ static unsigned long lguest_cpu_khz(void)
+ {
+ 	return lguest_data.tsc_khz;
+ }
+ 
+-/* If we can't use the TSC, the kernel falls back to our "lguest_clock", where
+- * we read the time value given to us by the Host. */
++/* If we can't use the TSC, the kernel falls back to our lower-priority
++ * "lguest_clock", where we read the time value given to us by the Host. */
+ static cycle_t lguest_clock_read(void)
+ {
+ 	unsigned long sec, nsec;
+@@ -648,12 +656,16 @@ static struct clocksource lguest_clock = {
+ static int lguest_clockevent_set_next_event(unsigned long delta,
+                                            struct clock_event_device *evt)
+ {
++	/* FIXME: I don't think this can ever happen, but James tells me he had
++	 * to put this code in.  Maybe we should remove it now.  Anyone? */
+ 	if (delta < LG_CLOCK_MIN_DELTA) {
+ 		if (printk_ratelimit())
+ 			printk(KERN_DEBUG "%s: small delta %lu ns\n",
+ 			       __FUNCTION__, delta);
+ 		return -ETIME;
+ 	}
++
++	/* Please wake us this far in the future. */
+ 	hcall(LHCALL_SET_CLOCKEVENT, delta, 0, 0);
+ 	return 0;
+ }
+@@ -738,7 +750,7 @@ static void lguest_time_init(void)
+  * will not tolerate us trying to use that), the stack pointer, and the number
+  * of pages in the stack. */
+ static void lguest_load_sp0(struct tss_struct *tss,
+-				     struct thread_struct *thread)
++			    struct thread_struct *thread)
+ {
+ 	lazy_hcall(LHCALL_SET_STACK, __KERNEL_DS|0x1, thread->sp0,
+ 		   THREAD_SIZE/PAGE_SIZE);
+@@ -786,9 +798,8 @@ static void lguest_safe_halt(void)
+ 	hcall(LHCALL_HALT, 0, 0, 0);
+ }
+ 
+-/* Perhaps CRASH isn't the best name for this hypercall, but we use it to get a
+- * message out when we're crashing as well as elegant termination like powering
+- * off.
++/* The SHUTDOWN hypercall takes a string to describe what's happening, and
++ * an argument which says whether this to restart (reboot) the Guest or not.
+  *
+  * Note that the Host always prefers that the Guest speak in physical addresses
+  * rather than virtual addresses, so we use __pa() here. */
+@@ -816,8 +827,9 @@ static struct notifier_block paniced = {
+ /* Setting up memory is fairly easy. */
+ static __init char *lguest_memory_setup(void)
+ {
+-	/* We do this here and not earlier because lockcheck barfs if we do it
+-	 * before start_kernel() */
++	/* We do this here and not earlier because lockcheck used to barf if we
++	 * did it before start_kernel().  I think we fixed that, so it'd be
++	 * nice to move it back to lguest_init.  Patch welcome... */
+ 	atomic_notifier_chain_register(&panic_notifier_list, &paniced);
+ 
+ 	/* The Linux bootloader header contains an "e820" memory map: the
+@@ -850,12 +862,19 @@ static __init int early_put_chars(u32 vtermno, const char *buf, int count)
+ 	return len;
+ }
+ 
++/* Rebooting also tells the Host we're finished, but the RESTART flag tells the
++ * Launcher to reboot us. */
++static void lguest_restart(char *reason)
++{
++	hcall(LHCALL_SHUTDOWN, __pa(reason), LGUEST_SHUTDOWN_RESTART, 0);
++}
++
+ /*G:050
+  * Patching (Powerfully Placating Performance Pedants)
+  *
+- * We have already seen that pv_ops structures let us replace simple
+- * native instructions with calls to the appropriate back end all throughout
+- * the kernel.  This allows the same kernel to run as a Guest and as a native
++ * We have already seen that pv_ops structures let us replace simple native
++ * instructions with calls to the appropriate back end all throughout the
++ * kernel.  This allows the same kernel to run as a Guest and as a native
+  * kernel, but it's slow because of all the indirect branches.
+  *
+  * Remember that David Wheeler quote about "Any problem in computer science can
+@@ -908,14 +927,9 @@ static unsigned lguest_patch(u8 type, u16 clobber, void *ibuf,
+ 	return insn_len;
+ }
+ 
+-static void lguest_restart(char *reason)
+-{
+-	hcall(LHCALL_SHUTDOWN, __pa(reason), LGUEST_SHUTDOWN_RESTART, 0);
+-}
+-
+-/*G:030 Once we get to lguest_init(), we know we're a Guest.  The pv_ops
+- * structures in the kernel provide points for (almost) every routine we have
+- * to override to avoid privileged instructions. */
++/*G:030 Once we get to lguest_init(), we know we're a Guest.  The various
++ * pv_ops structures in the kernel provide points for (almost) every routine we
++ * have to override to avoid privileged instructions. */
+ __init void lguest_init(void)
+ {
+ 	/* We're under lguest, paravirt is enabled, and we're running at
+@@ -1003,9 +1017,9 @@ __init void lguest_init(void)
+ 	 * the normal data segment to get through booting. */
+ 	asm volatile ("mov %0, %%fs" : : "r" (__KERNEL_DS) : "memory");
+ 
+-	/* The Host uses the top of the Guest's virtual address space for the
+-	 * Host<->Guest Switcher, and it tells us how big that is in
+-	 * lguest_data.reserve_mem, set up on the LGUEST_INIT hypercall. */
++	/* The Host<->Guest Switcher lives at the top of our address space, and
++	 * the Host told us how big it is when we made LGUEST_INIT hypercall:
++	 * it put the answer in lguest_data.reserve_mem  */
+ 	reserve_top_address(lguest_data.reserve_mem);
+ 
+ 	/* If we don't initialize the lock dependency checker now, it crashes
+@@ -1027,6 +1041,7 @@ __init void lguest_init(void)
+ 	/* Math is always hard! */
+ 	new_cpu_data.hard_math = 1;
+ 
++	/* We don't have features.  We have puppies!  Puppies! */
+ #ifdef CONFIG_X86_MCE
+ 	mce_disabled = 1;
+ #endif
+@@ -1044,10 +1059,11 @@ __init void lguest_init(void)
+ 	virtio_cons_early_init(early_put_chars);
+ 
+ 	/* Last of all, we set the power management poweroff hook to point to
+-	 * the Guest routine to power off. */
++	 * the Guest routine to power off, and the reboot hook to our restart
++	 * routine. */
+ 	pm_power_off = lguest_power_off;
+-
+ 	machine_ops.restart = lguest_restart;
++
+ 	/* Now we're set up, call start_kernel() in init/main.c and we proceed
+ 	 * to boot as normal.  It never returns. */
+ 	start_kernel();
+diff --git a/arch/x86/lguest/i386_head.S b/arch/x86/lguest/i386_head.S
+index 95b6fbc..5c7cef3 100644
+--- a/arch/x86/lguest/i386_head.S
++++ b/arch/x86/lguest/i386_head.S
+@@ -5,13 +5,20 @@
+ #include <asm/thread_info.h>
+ #include <asm/processor-flags.h>
+ 
+-/*G:020 This is where we begin: head.S notes that the boot header's platform
+- * type field is "1" (lguest), so calls us here.
++/*G:020 Our story starts with the kernel booting into startup_32 in
++ * arch/x86/kernel/head_32.S.  It expects a boot header, which is created by
++ * the bootloader (the Launcher in our case).
++ *
++ * The startup_32 function does very little: it clears the uninitialized global
++ * C variables which we expect to be zero (ie. BSS) and then copies the boot
++ * header and kernel command line somewhere safe.  Finally it checks the
++ * 'hardware_subarch' field.  This was introduced in 2.6.24 for lguest and Xen:
++ * if it's set to '1' (lguest's assigned number), then it calls us here.
+  *
+  * WARNING: be very careful here!  We're running at addresses equal to physical
+  * addesses (around 0), not above PAGE_OFFSET as most code expectes
+  * (eg. 0xC0000000).  Jumps are relative, so they're OK, but we can't touch any
+- * data.
++ * data without remembering to subtract __PAGE_OFFSET!
+  *
+  * The .section line puts this code in .init.text so it will be discarded after
+  * boot. */
+@@ -24,7 +31,7 @@ ENTRY(lguest_entry)
+ 	int $LGUEST_TRAP_ENTRY
+ 
+ 	/* The Host put the toplevel pagetable in lguest_data.pgdir.  The movsl
+-	 * instruction uses %esi implicitly as the source for the copy we'
++	 * instruction uses %esi implicitly as the source for the copy we're
+ 	 * about to do. */
+ 	movl lguest_data - __PAGE_OFFSET + LGUEST_DATA_pgdir, %esi
+ 
 diff --git a/arch/x86/mach-rdc321x/gpio.c b/arch/x86/mach-rdc321x/gpio.c
 index 0312691..247f33d 100644
 --- a/arch/x86/mach-rdc321x/gpio.c
@@ -1932,92 +3124,6 @@ index 1a43b60..6b71904 100644
  2:	call check_events
  1:
  ENDPATCH(xen_irq_enable_direct)
-diff --git a/drivers/acpi/fan.c b/drivers/acpi/fan.c
-index c8e3cba..4d535c5 100644
---- a/drivers/acpi/fan.c
-+++ b/drivers/acpi/fan.c
-@@ -260,24 +260,22 @@ static int acpi_fan_add(struct acpi_device *device)
- 		result = PTR_ERR(cdev);
- 		goto end;
- 	}
--	if (cdev) {
--		printk(KERN_INFO PREFIX
--			"%s is registered as cooling_device%d\n",
--			device->dev.bus_id, cdev->id);
--
--		acpi_driver_data(device) = cdev;
--		result = sysfs_create_link(&device->dev.kobj,
--					   &cdev->device.kobj,
--					   "thermal_cooling");
--		if (result)
--			return result;
--
--		result = sysfs_create_link(&cdev->device.kobj,
--					   &device->dev.kobj,
--					   "device");
--		if (result)
--			return result;
--	}
-+	printk(KERN_INFO PREFIX
-+		"%s is registered as cooling_device%d\n",
-+		device->dev.bus_id, cdev->id);
-+
-+	acpi_driver_data(device) = cdev;
-+	result = sysfs_create_link(&device->dev.kobj,
-+				   &cdev->device.kobj,
-+				   "thermal_cooling");
-+	if (result)
-+		return result;
-+
-+	result = sysfs_create_link(&cdev->device.kobj,
-+				   &device->dev.kobj,
-+				   "device");
-+	if (result)
-+		return result;
- 
- 	result = acpi_fan_add_fs(device);
- 	if (result)
-diff --git a/drivers/acpi/processor_core.c b/drivers/acpi/processor_core.c
-index 36a68fa..3a136f6 100644
---- a/drivers/acpi/processor_core.c
-+++ b/drivers/acpi/processor_core.c
-@@ -674,22 +674,20 @@ static int __cpuinit acpi_processor_start(struct acpi_device *device)
- 		result = PTR_ERR(pr->cdev);
- 		goto end;
- 	}
--	if (pr->cdev) {
--		printk(KERN_INFO PREFIX
--			"%s is registered as cooling_device%d\n",
--			device->dev.bus_id, pr->cdev->id);
--
--		result = sysfs_create_link(&device->dev.kobj,
--					   &pr->cdev->device.kobj,
--					   "thermal_cooling");
--		if (result)
--			return result;
--		result = sysfs_create_link(&pr->cdev->device.kobj,
--					   &device->dev.kobj,
--					   "device");
--		if (result)
--			return result;
--	}
-+	printk(KERN_INFO PREFIX
-+		"%s is registered as cooling_device%d\n",
-+		device->dev.bus_id, pr->cdev->id);
-+
-+	result = sysfs_create_link(&device->dev.kobj,
-+				   &pr->cdev->device.kobj,
-+				   "thermal_cooling");
-+	if (result)
-+		return result;
-+	result = sysfs_create_link(&pr->cdev->device.kobj,
-+				   &device->dev.kobj,
-+				   "device");
-+	if (result)
-+		return result;
- 
- 	if (pr->flags.throttling) {
- 		printk(KERN_INFO PREFIX "%s [%s] (supports",
 diff --git a/drivers/acpi/processor_idle.c b/drivers/acpi/processor_idle.c
 index e8e2d88..788da97 100644
 --- a/drivers/acpi/processor_idle.c
@@ -2099,45 +3205,6 @@ index 57570ac..e6ce262 100644
  
  		cid_list = acpi_dev->pnp.cid_list;
  		for (i = 0; i < cid_list->count; i++) {
-diff --git a/drivers/acpi/video.c b/drivers/acpi/video.c
-index 12fb44f..fe09b57 100644
---- a/drivers/acpi/video.c
-+++ b/drivers/acpi/video.c
-@@ -734,21 +734,19 @@ static void acpi_video_device_find_cap(struct acpi_video_device *device)
- 		if (IS_ERR(device->cdev))
- 			return;
- 
--		if (device->cdev) {
--			printk(KERN_INFO PREFIX
--				"%s is registered as cooling_device%d\n",
--				device->dev->dev.bus_id, device->cdev->id);
--			result = sysfs_create_link(&device->dev->dev.kobj,
--					  &device->cdev->device.kobj,
--					  "thermal_cooling");
--			if (result)
--				printk(KERN_ERR PREFIX "Create sysfs link\n");
--			result = sysfs_create_link(&device->cdev->device.kobj,
--					  &device->dev->dev.kobj,
--					  "device");
--                        if (result)
--				printk(KERN_ERR PREFIX "Create sysfs link\n");
--		}
-+		printk(KERN_INFO PREFIX
-+			"%s is registered as cooling_device%d\n",
-+			device->dev->dev.bus_id, device->cdev->id);
-+		result = sysfs_create_link(&device->dev->dev.kobj,
-+				  &device->cdev->device.kobj,
-+				  "thermal_cooling");
-+		if (result)
-+			printk(KERN_ERR PREFIX "Create sysfs link\n");
-+		result = sysfs_create_link(&device->cdev->device.kobj,
-+				  &device->dev->dev.kobj,
-+				  "device");
-+		if (result)
-+			printk(KERN_ERR PREFIX "Create sysfs link\n");
- 	}
- 	if (device->cap._DCS && device->cap._DSS){
- 		static int count = 0;
 diff --git a/drivers/cpuidle/cpuidle.c b/drivers/cpuidle/cpuidle.c
 index d73663a..fc555a9 100644
 --- a/drivers/cpuidle/cpuidle.c
@@ -2188,6 +3255,505 @@ index 69102ca..e949618 100644
  define_show_state_str_function(name)
  define_show_state_str_function(desc)
  
+diff --git a/drivers/infiniband/hw/cxgb3/iwch_cm.c b/drivers/infiniband/hw/cxgb3/iwch_cm.c
+index 320f2b6..99f2f2a 100644
+--- a/drivers/infiniband/hw/cxgb3/iwch_cm.c
++++ b/drivers/infiniband/hw/cxgb3/iwch_cm.c
+@@ -1745,7 +1745,7 @@ int iwch_accept_cr(struct iw_cm_id *cm_id, struct iw_cm_conn_param *conn_param)
+ 
+ 	/* bind QP to EP and move to RTS */
+ 	attrs.mpa_attr = ep->mpa_attr;
+-	attrs.max_ird = ep->ord;
++	attrs.max_ird = ep->ird;
+ 	attrs.max_ord = ep->ord;
+ 	attrs.llp_stream_handle = ep;
+ 	attrs.next_state = IWCH_QP_STATE_RTS;
+diff --git a/drivers/lguest/Makefile b/drivers/lguest/Makefile
+index 5e8272d..7d463c2 100644
+--- a/drivers/lguest/Makefile
++++ b/drivers/lguest/Makefile
+@@ -19,3 +19,11 @@ Beer:
+ 	@for f in Preparation Guest Drivers Launcher Host Switcher Mastery; do echo "{==- $$f -==}"; make -s $$f; done; echo "{==-==}"
+ Preparation Preparation! Guest Drivers Launcher Host Switcher Mastery:
+ 	@sh ../../Documentation/lguest/extract $(PREFIX) `find ../../* -name '*.[chS]' -wholename '*lguest*'`
++Puppy:
++	@clear
++	@printf "      __  \n (___()'\`;\n /,    /\`\n \\\\\\\"--\\\\\\   \n"
++	@sleep 2; clear; printf "\n\n   Sit!\n\n"; sleep 1; clear
++	@printf "    __    \n   ()'\`;  \n   /\\|\` \n  /  |  \n(/_)_|_   \n"
++	@sleep 2; clear; printf "\n\n  Stand!\n\n"; sleep 1; clear
++	@printf "    __    \n   ()'\`;  \n   /\\|\` \n  /._.= \n /| /     \n(_\_)_    \n"
++	@sleep 2; clear; printf "\n\n  Good puppy!\n\n"; sleep 1; clear
+diff --git a/drivers/lguest/core.c b/drivers/lguest/core.c
+index c632c08..5eea435 100644
+--- a/drivers/lguest/core.c
++++ b/drivers/lguest/core.c
+@@ -1,8 +1,6 @@
+ /*P:400 This contains run_guest() which actually calls into the Host<->Guest
+  * Switcher and analyzes the return, such as determining if the Guest wants the
+- * Host to do something.  This file also contains useful helper routines, and a
+- * couple of non-obvious setup and teardown pieces which were implemented after
+- * days of debugging pain. :*/
++ * Host to do something.  This file also contains useful helper routines. :*/
+ #include <linux/module.h>
+ #include <linux/stringify.h>
+ #include <linux/stddef.h>
+@@ -49,8 +47,8 @@ static __init int map_switcher(void)
+ 	 * easy.
+ 	 */
+ 
+-	/* We allocate an array of "struct page"s.  map_vm_area() wants the
+-	 * pages in this form, rather than just an array of pointers. */
++	/* We allocate an array of struct page pointers.  map_vm_area() wants
++	 * this, rather than just an array of pages. */
+ 	switcher_page = kmalloc(sizeof(switcher_page[0])*TOTAL_SWITCHER_PAGES,
+ 				GFP_KERNEL);
+ 	if (!switcher_page) {
+@@ -172,7 +170,7 @@ void __lgread(struct lg_cpu *cpu, void *b, unsigned long addr, unsigned bytes)
+ 	}
+ }
+ 
+-/* This is the write (copy into guest) version. */
++/* This is the write (copy into Guest) version. */
+ void __lgwrite(struct lg_cpu *cpu, unsigned long addr, const void *b,
+ 	       unsigned bytes)
+ {
+@@ -209,9 +207,9 @@ int run_guest(struct lg_cpu *cpu, unsigned long __user *user)
+ 		if (cpu->break_out)
+ 			return -EAGAIN;
+ 
+-		/* Check if there are any interrupts which can be delivered
+-		 * now: if so, this sets up the hander to be executed when we
+-		 * next run the Guest. */
++		/* Check if there are any interrupts which can be delivered now:
++		 * if so, this sets up the hander to be executed when we next
++		 * run the Guest. */
+ 		maybe_do_interrupt(cpu);
+ 
+ 		/* All long-lived kernel loops need to check with this horrible
+@@ -246,8 +244,10 @@ int run_guest(struct lg_cpu *cpu, unsigned long __user *user)
+ 		lguest_arch_handle_trap(cpu);
+ 	}
+ 
++	/* Special case: Guest is 'dead' but wants a reboot. */
+ 	if (cpu->lg->dead == ERR_PTR(-ERESTART))
+ 		return -ERESTART;
++
+ 	/* The Guest is dead => "No such file or directory" */
+ 	return -ENOENT;
+ }
+diff --git a/drivers/lguest/hypercalls.c b/drivers/lguest/hypercalls.c
+index 0f2cb4f..54d66f0 100644
+--- a/drivers/lguest/hypercalls.c
++++ b/drivers/lguest/hypercalls.c
+@@ -29,7 +29,7 @@
+ #include "lg.h"
+ 
+ /*H:120 This is the core hypercall routine: where the Guest gets what it wants.
+- * Or gets killed.  Or, in the case of LHCALL_CRASH, both. */
++ * Or gets killed.  Or, in the case of LHCALL_SHUTDOWN, both. */
+ static void do_hcall(struct lg_cpu *cpu, struct hcall_args *args)
+ {
+ 	switch (args->arg0) {
+@@ -190,6 +190,13 @@ static void initialize(struct lg_cpu *cpu)
+ 	 * pagetable. */
+ 	guest_pagetable_clear_all(cpu);
+ }
++/*:*/
++
++/*M:013 If a Guest reads from a page (so creates a mapping) that it has never
++ * written to, and then the Launcher writes to it (ie. the output of a virtual
++ * device), the Guest will still see the old page.  In practice, this never
++ * happens: why would the Guest read a page which it has never written to?  But
++ * a similar scenario might one day bite us, so it's worth mentioning. :*/
+ 
+ /*H:100
+  * Hypercalls
+@@ -227,7 +234,7 @@ void do_hypercalls(struct lg_cpu *cpu)
+ 		 * However, if we are signalled or the Guest sends I/O to the
+ 		 * Launcher, the run_guest() loop will exit without running the
+ 		 * Guest.  When it comes back it would try to re-run the
+-		 * hypercall. */
++		 * hypercall.  Finding that bug sucked. */
+ 		cpu->hcall = NULL;
+ 	}
+ }
+diff --git a/drivers/lguest/interrupts_and_traps.c b/drivers/lguest/interrupts_and_traps.c
+index 32e97c1..0414ddf 100644
+--- a/drivers/lguest/interrupts_and_traps.c
++++ b/drivers/lguest/interrupts_and_traps.c
+@@ -144,7 +144,6 @@ void maybe_do_interrupt(struct lg_cpu *cpu)
+ 	if (copy_from_user(&blk, cpu->lg->lguest_data->blocked_interrupts,
+ 			   sizeof(blk)))
+ 		return;
+-
+ 	bitmap_andnot(blk, cpu->irqs_pending, blk, LGUEST_IRQS);
+ 
+ 	/* Find the first interrupt. */
+@@ -237,9 +236,9 @@ void free_interrupts(void)
+ 		clear_bit(syscall_vector, used_vectors);
+ }
+ 
+-/*H:220 Now we've got the routines to deliver interrupts, delivering traps
+- * like page fault is easy.  The only trick is that Intel decided that some
+- * traps should have error codes: */
++/*H:220 Now we've got the routines to deliver interrupts, delivering traps like
++ * page fault is easy.  The only trick is that Intel decided that some traps
++ * should have error codes: */
+ static int has_err(unsigned int trap)
+ {
+ 	return (trap == 8 || (trap >= 10 && trap <= 14) || trap == 17);
+diff --git a/drivers/lguest/lguest_device.c b/drivers/lguest/lguest_device.c
+index 1b2ec0b..2bc9bf7 100644
+--- a/drivers/lguest/lguest_device.c
++++ b/drivers/lguest/lguest_device.c
+@@ -1,10 +1,10 @@
+ /*P:050 Lguest guests use a very simple method to describe devices.  It's a
+- * series of device descriptors contained just above the top of normal
++ * series of device descriptors contained just above the top of normal Guest
+  * memory.
+  *
+  * We use the standard "virtio" device infrastructure, which provides us with a
+  * console, a network and a block driver.  Each one expects some configuration
+- * information and a "virtqueue" mechanism to send and receive data. :*/
++ * information and a "virtqueue" or two to send and receive data. :*/
+ #include <linux/init.h>
+ #include <linux/bootmem.h>
+ #include <linux/lguest_launcher.h>
+@@ -53,7 +53,7 @@ struct lguest_device {
+  * Device configurations
+  *
+  * The configuration information for a device consists of one or more
+- * virtqueues, a feature bitmaks, and some configuration bytes.  The
++ * virtqueues, a feature bitmap, and some configuration bytes.  The
+  * configuration bytes don't really matter to us: the Launcher sets them up, and
+  * the driver will look at them during setup.
+  *
+@@ -179,7 +179,7 @@ struct lguest_vq_info
+ };
+ 
+ /* When the virtio_ring code wants to prod the Host, it calls us here and we
+- * make a hypercall.  We hand the page number of the virtqueue so the Host
++ * make a hypercall.  We hand the physical address of the virtqueue so the Host
+  * knows which virtqueue we're talking about. */
+ static void lg_notify(struct virtqueue *vq)
+ {
+@@ -199,7 +199,8 @@ static void lg_notify(struct virtqueue *vq)
+  * allocate its own pages and tell the Host where they are, but for lguest it's
+  * simpler for the Host to simply tell us where the pages are.
+  *
+- * So we provide devices with a "find virtqueue and set it up" function. */
++ * So we provide drivers with a "find the Nth virtqueue and set it up"
++ * function. */
+ static struct virtqueue *lg_find_vq(struct virtio_device *vdev,
+ 				    unsigned index,
+ 				    void (*callback)(struct virtqueue *vq))
+diff --git a/drivers/lguest/lguest_user.c b/drivers/lguest/lguest_user.c
+index 2221485..564e425 100644
+--- a/drivers/lguest/lguest_user.c
++++ b/drivers/lguest/lguest_user.c
+@@ -73,7 +73,7 @@ static ssize_t read(struct file *file, char __user *user, size_t size,loff_t*o)
+ 	if (current != cpu->tsk)
+ 		return -EPERM;
+ 
+-	/* If the guest is already dead, we indicate why */
++	/* If the Guest is already dead, we indicate why */
+ 	if (lg->dead) {
+ 		size_t len;
+ 
+@@ -88,7 +88,7 @@ static ssize_t read(struct file *file, char __user *user, size_t size,loff_t*o)
+ 		return len;
+ 	}
+ 
+-	/* If we returned from read() last time because the Guest notified,
++	/* If we returned from read() last time because the Guest sent I/O,
+ 	 * clear the flag. */
+ 	if (cpu->pending_notify)
+ 		cpu->pending_notify = 0;
+@@ -97,14 +97,20 @@ static ssize_t read(struct file *file, char __user *user, size_t size,loff_t*o)
+ 	return run_guest(cpu, (unsigned long __user *)user);
+ }
+ 
++/*L:025 This actually initializes a CPU.  For the moment, a Guest is only
++ * uniprocessor, so "id" is always 0. */
+ static int lg_cpu_start(struct lg_cpu *cpu, unsigned id, unsigned long start_ip)
+ {
++	/* We have a limited number the number of CPUs in the lguest struct. */
+ 	if (id >= NR_CPUS)
+ 		return -EINVAL;
+ 
++	/* Set up this CPU's id, and pointer back to the lguest struct. */
+ 	cpu->id = id;
+ 	cpu->lg = container_of((cpu - id), struct lguest, cpus[0]);
+ 	cpu->lg->nr_cpus++;
++
++	/* Each CPU has a timer it can set. */
+ 	init_clockdev(cpu);
+ 
+ 	/* We need a complete page for the Guest registers: they are accessible
+@@ -120,11 +126,11 @@ static int lg_cpu_start(struct lg_cpu *cpu, unsigned id, unsigned long start_ip)
+ 	 * address. */
+ 	lguest_arch_setup_regs(cpu, start_ip);
+ 
+-	/* Initialize the queue for the waker to wait on */
++	/* Initialize the queue for the Waker to wait on */
+ 	init_waitqueue_head(&cpu->break_wq);
+ 
+ 	/* We keep a pointer to the Launcher task (ie. current task) for when
+-	 * other Guests want to wake this one (inter-Guest I/O). */
++	 * other Guests want to wake this one (eg. console input). */
+ 	cpu->tsk = current;
+ 
+ 	/* We need to keep a pointer to the Launcher's memory map, because if
+@@ -136,6 +142,7 @@ static int lg_cpu_start(struct lg_cpu *cpu, unsigned id, unsigned long start_ip)
+ 	 * when the same Guest runs on the same CPU twice. */
+ 	cpu->last_pages = NULL;
+ 
++	/* No error == success. */
+ 	return 0;
+ }
+ 
+@@ -185,14 +192,13 @@ static int initialize(struct file *file, const unsigned long __user *input)
+ 	lg->mem_base = (void __user *)(long)args[0];
+ 	lg->pfn_limit = args[1];
+ 
+-	/* This is the first cpu */
++	/* This is the first cpu (cpu 0) and it will start booting at args[3] */
+ 	err = lg_cpu_start(&lg->cpus[0], 0, args[3]);
+ 	if (err)
+ 		goto release_guest;
+ 
+ 	/* Initialize the Guest's shadow page tables, using the toplevel
+-	 * address the Launcher gave us.  This allocates memory, so can
+-	 * fail. */
++	 * address the Launcher gave us.  This allocates memory, so can fail. */
+ 	err = init_guest_pagetable(lg, args[2]);
+ 	if (err)
+ 		goto free_regs;
+@@ -218,11 +224,16 @@ unlock:
+ /*L:010 The first operation the Launcher does must be a write.  All writes
+  * start with an unsigned long number: for the first write this must be
+  * LHREQ_INITIALIZE to set up the Guest.  After that the Launcher can use
+- * writes of other values to send interrupts. */
++ * writes of other values to send interrupts.
++ *
++ * Note that we overload the "offset" in the /dev/lguest file to indicate what
++ * CPU number we're dealing with.  Currently this is always 0, since we only
++ * support uniprocessor Guests, but you can see the beginnings of SMP support
++ * here. */
+ static ssize_t write(struct file *file, const char __user *in,
+ 		     size_t size, loff_t *off)
+ {
+-	/* Once the guest is initialized, we hold the "struct lguest" in the
++	/* Once the Guest is initialized, we hold the "struct lguest" in the
+ 	 * file private data. */
+ 	struct lguest *lg = file->private_data;
+ 	const unsigned long __user *input = (const unsigned long __user *)in;
+@@ -230,6 +241,7 @@ static ssize_t write(struct file *file, const char __user *in,
+ 	struct lg_cpu *uninitialized_var(cpu);
+ 	unsigned int cpu_id = *off;
+ 
++	/* The first value tells us what this request is. */
+ 	if (get_user(req, input) != 0)
+ 		return -EFAULT;
+ 	input++;
+diff --git a/drivers/lguest/page_tables.c b/drivers/lguest/page_tables.c
+index a7f64a9..d93500f 100644
+--- a/drivers/lguest/page_tables.c
++++ b/drivers/lguest/page_tables.c
+@@ -2,8 +2,8 @@
+  * previous encounters.  It's functional, and as neat as it can be in the
+  * circumstances, but be wary, for these things are subtle and break easily.
+  * The Guest provides a virtual to physical mapping, but we can neither trust
+- * it nor use it: we verify and convert it here to point the hardware to the
+- * actual Guest pages when running the Guest. :*/
++ * it nor use it: we verify and convert it here then point the CPU to the
++ * converted Guest pages when running the Guest. :*/
+ 
+ /* Copyright (C) Rusty Russell IBM Corporation 2006.
+  * GPL v2 and any later version */
+@@ -106,6 +106,11 @@ static unsigned long gpte_addr(pgd_t gpgd, unsigned long vaddr)
+ 	BUG_ON(!(pgd_flags(gpgd) & _PAGE_PRESENT));
+ 	return gpage + ((vaddr>>PAGE_SHIFT) % PTRS_PER_PTE) * sizeof(pte_t);
+ }
++/*:*/
++
++/*M:014 get_pfn is slow; it takes the mmap sem and calls get_user_pages.  We
++ * could probably try to grab batches of pages here as an optimization
++ * (ie. pre-faulting). :*/
+ 
+ /*H:350 This routine takes a page number given by the Guest and converts it to
+  * an actual, physical page number.  It can fail for several reasons: the
+@@ -113,8 +118,8 @@ static unsigned long gpte_addr(pgd_t gpgd, unsigned long vaddr)
+  * and the page is read-only, or the write flag was set and the page was
+  * shared so had to be copied, but we ran out of memory.
+  *
+- * This holds a reference to the page, so release_pte() is careful to
+- * put that back. */
++ * This holds a reference to the page, so release_pte() is careful to put that
++ * back. */
+ static unsigned long get_pfn(unsigned long virtpfn, int write)
+ {
+ 	struct page *page;
+@@ -532,13 +537,13 @@ static void do_set_pte(struct lg_cpu *cpu, int idx,
+  * all processes.  So when the page table above that address changes, we update
+  * all the page tables, not just the current one.  This is rare.
+  *
+- * The benefit is that when we have to track a new page table, we can copy keep
+- * all the kernel mappings.  This speeds up context switch immensely. */
++ * The benefit is that when we have to track a new page table, we can keep all
++ * the kernel mappings.  This speeds up context switch immensely. */
+ void guest_set_pte(struct lg_cpu *cpu,
+ 		   unsigned long gpgdir, unsigned long vaddr, pte_t gpte)
+ {
+-	/* Kernel mappings must be changed on all top levels.  Slow, but
+-	 * doesn't happen often. */
++	/* Kernel mappings must be changed on all top levels.  Slow, but doesn't
++	 * happen often. */
+ 	if (vaddr >= cpu->lg->kernel_address) {
+ 		unsigned int i;
+ 		for (i = 0; i < ARRAY_SIZE(cpu->lg->pgdirs); i++)
+@@ -704,12 +709,11 @@ static __init void populate_switcher_pte_page(unsigned int cpu,
+ /* We've made it through the page table code.  Perhaps our tired brains are
+  * still processing the details, or perhaps we're simply glad it's over.
+  *
+- * If nothing else, note that all this complexity in juggling shadow page
+- * tables in sync with the Guest's page tables is for one reason: for most
+- * Guests this page table dance determines how bad performance will be.  This
+- * is why Xen uses exotic direct Guest pagetable manipulation, and why both
+- * Intel and AMD have implemented shadow page table support directly into
+- * hardware.
++ * If nothing else, note that all this complexity in juggling shadow page tables
++ * in sync with the Guest's page tables is for one reason: for most Guests this
++ * page table dance determines how bad performance will be.  This is why Xen
++ * uses exotic direct Guest pagetable manipulation, and why both Intel and AMD
++ * have implemented shadow page table support directly into hardware.
+  *
+  * There is just one file remaining in the Host. */
+ 
+diff --git a/drivers/lguest/x86/core.c b/drivers/lguest/x86/core.c
+index 6351878..5126d5d 100644
+--- a/drivers/lguest/x86/core.c
++++ b/drivers/lguest/x86/core.c
+@@ -17,6 +17,13 @@
+  * along with this program; if not, write to the Free Software
+  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+  */
++/*P:450 This file contains the x86-specific lguest code.  It used to be all
++ * mixed in with drivers/lguest/core.c but several foolhardy code slashers
++ * wrestled most of the dependencies out to here in preparation for porting
++ * lguest to other architectures (see what I mean by foolhardy?).
++ *
++ * This also contains a couple of non-obvious setup and teardown pieces which
++ * were implemented after days of debugging pain. :*/
+ #include <linux/kernel.h>
+ #include <linux/start_kernel.h>
+ #include <linux/string.h>
+@@ -157,6 +164,8 @@ static void run_guest_once(struct lg_cpu *cpu, struct lguest_pages *pages)
+  * also simplify copy_in_guest_info().  Note that we'd still need to restore
+  * things when we exit to Launcher userspace, but that's fairly easy.
+  *
++ * We could also try using this hooks for PGE, but that might be too expensive.
++ *
+  * The hooks were designed for KVM, but we can also put them to good use. :*/
+ 
+ /*H:040 This is the i386-specific code to setup and run the Guest.  Interrupts
+@@ -182,7 +191,7 @@ void lguest_arch_run_guest(struct lg_cpu *cpu)
+ 	 * was doing. */
+ 	run_guest_once(cpu, lguest_pages(raw_smp_processor_id()));
+ 
+-	/* Note that the "regs" pointer contains two extra entries which are
++	/* Note that the "regs" structure contains two extra entries which are
+ 	 * not really registers: a trap number which says what interrupt or
+ 	 * trap made the switcher code come back, and an error code which some
+ 	 * traps set.  */
+@@ -293,11 +302,10 @@ void lguest_arch_handle_trap(struct lg_cpu *cpu)
+ 		break;
+ 	case 14: /* We've intercepted a Page Fault. */
+ 		/* The Guest accessed a virtual address that wasn't mapped.
+-		 * This happens a lot: we don't actually set up most of the
+-		 * page tables for the Guest at all when we start: as it runs
+-		 * it asks for more and more, and we set them up as
+-		 * required. In this case, we don't even tell the Guest that
+-		 * the fault happened.
++		 * This happens a lot: we don't actually set up most of the page
++		 * tables for the Guest at all when we start: as it runs it asks
++		 * for more and more, and we set them up as required. In this
++		 * case, we don't even tell the Guest that the fault happened.
+ 		 *
+ 		 * The errcode tells whether this was a read or a write, and
+ 		 * whether kernel or userspace code. */
+@@ -342,7 +350,7 @@ void lguest_arch_handle_trap(struct lg_cpu *cpu)
+ 	if (!deliver_trap(cpu, cpu->regs->trapnum))
+ 		/* If the Guest doesn't have a handler (either it hasn't
+ 		 * registered any yet, or it's one of the faults we don't let
+-		 * it handle), it dies with a cryptic error message. */
++		 * it handle), it dies with this cryptic error message. */
+ 		kill_guest(cpu, "unhandled trap %li at %#lx (%#lx)",
+ 			   cpu->regs->trapnum, cpu->regs->eip,
+ 			   cpu->regs->trapnum == 14 ? cpu->arch.last_pagefault
+@@ -375,8 +383,8 @@ void __init lguest_arch_host_init(void)
+ 	 * The only exception is the interrupt handlers in switcher.S: their
+ 	 * addresses are placed in a table (default_idt_entries), so we need to
+ 	 * update the table with the new addresses.  switcher_offset() is a
+-	 * convenience function which returns the distance between the builtin
+-	 * switcher code and the high-mapped copy we just made. */
++	 * convenience function which returns the distance between the
++	 * compiled-in switcher code and the high-mapped copy we just made. */
+ 	for (i = 0; i < IDT_ENTRIES; i++)
+ 		default_idt_entries[i] += switcher_offset();
+ 
+@@ -416,7 +424,7 @@ void __init lguest_arch_host_init(void)
+ 		state->guest_gdt_desc.address = (long)&state->guest_gdt;
+ 
+ 		/* We know where we want the stack to be when the Guest enters
+-		 * the switcher: in pages->regs.  The stack grows upwards, so
++		 * the Switcher: in pages->regs.  The stack grows upwards, so
+ 		 * we start it at the end of that structure. */
+ 		state->guest_tss.sp0 = (long)(&pages->regs + 1);
+ 		/* And this is the GDT entry to use for the stack: we keep a
+@@ -513,8 +521,8 @@ int lguest_arch_init_hypercalls(struct lg_cpu *cpu)
+ {
+ 	u32 tsc_speed;
+ 
+-	/* The pointer to the Guest's "struct lguest_data" is the only
+-	 * argument.  We check that address now. */
++	/* The pointer to the Guest's "struct lguest_data" is the only argument.
++	 * We check that address now. */
+ 	if (!lguest_address_ok(cpu->lg, cpu->hcall->arg1,
+ 			       sizeof(*cpu->lg->lguest_data)))
+ 		return -EFAULT;
+@@ -546,6 +554,7 @@ int lguest_arch_init_hypercalls(struct lg_cpu *cpu)
+ 
+ 	return 0;
+ }
++/*:*/
+ 
+ /*L:030 lguest_arch_setup_regs()
+  *
+diff --git a/drivers/lguest/x86/switcher_32.S b/drivers/lguest/x86/switcher_32.S
+index 0af8baa..3fc1531 100644
+--- a/drivers/lguest/x86/switcher_32.S
++++ b/drivers/lguest/x86/switcher_32.S
+@@ -1,6 +1,6 @@
+-/*P:900 This is the Switcher: code which sits at 0xFFC00000 to do the low-level
+- * Guest<->Host switch.  It is as simple as it can be made, but it's naturally
+- * very specific to x86.
++/*P:900 This is the Switcher: code which sits at 0xFFC00000 astride both the
++ * Host and Guest to do the low-level Guest<->Host switch.  It is as simple as
++ * it can be made, but it's naturally very specific to x86.
+  *
+  * You have now completed Preparation.  If this has whet your appetite; if you
+  * are feeling invigorated and refreshed then the next, more challenging stage
+@@ -189,7 +189,7 @@ ENTRY(switch_to_guest)
+ 	// Interrupts are turned back on: we are Guest.
+ 	iret
+ 
+-// We treat two paths to switch back to the Host
++// We tread two paths to switch back to the Host
+ // Yet both must save Guest state and restore Host
+ // So we put the routine in a macro.
+ #define SWITCH_TO_HOST							\
 diff --git a/drivers/net/b44.c b/drivers/net/b44.c
 index ea2a2b5..25f1337 100644
 --- a/drivers/net/b44.c
@@ -4473,6 +6039,18 @@ index 6aa231e..2dcd196 100644
  				"resources: %d\n", PNP_MAX_MEM);
  		warned = 1;
  	}
+diff --git a/drivers/virtio/virtio_pci.c b/drivers/virtio/virtio_pci.c
+index 59a8f73..6c8ecde 100644
+--- a/drivers/virtio/virtio_pci.c
++++ b/drivers/virtio/virtio_pci.c
+@@ -388,6 +388,7 @@ static void __devexit virtio_pci_remove(struct pci_dev *pci_dev)
+ {
+ 	struct virtio_pci_device *vp_dev = pci_get_drvdata(pci_dev);
+ 
++	unregister_virtio_device(&vp_dev->vdev);
+ 	free_irq(pci_dev->irq, vp_dev);
+ 	pci_set_drvdata(pci_dev, NULL);
+ 	pci_iounmap(pci_dev, vp_dev->ioaddr);
 diff --git a/include/asm-avr32/byteorder.h b/include/asm-avr32/byteorder.h
 index 402ff41..d77b48b 100644
 --- a/include/asm-avr32/byteorder.h
@@ -4662,6 +6240,19 @@ index ccbd694..5b779fd 100644
 +extern void __init time_init(void);
  
  #endif /* _SPARC64_TIMER_H */
+diff --git a/include/asm-x86/lguest_hcall.h b/include/asm-x86/lguest_hcall.h
+index 758b9a5..f239e70 100644
+--- a/include/asm-x86/lguest_hcall.h
++++ b/include/asm-x86/lguest_hcall.h
+@@ -27,7 +27,7 @@
+ #ifndef __ASSEMBLY__
+ #include <asm/hw_irq.h>
+ 
+-/*G:031 First, how does our Guest contact the Host to ask for privileged
++/*G:031 But first, how does our Guest contact the Host to ask for privileged
+  * operations?  There are two ways: the direct way is to make a "hypercall",
+  * to make requests of the Host Itself.
+  *
 diff --git a/include/asm-x86/mach-rdc321x/gpio.h b/include/asm-x86/mach-rdc321x/gpio.h
 index db31b92..acce0b7 100644
 --- a/include/asm-x86/mach-rdc321x/gpio.h
@@ -4742,6 +6333,30 @@ index 6b72a45..51e6b1e 100644
  
  	int (*enter)	(struct cpuidle_device *dev,
  			 struct cpuidle_state *state);
+diff --git a/include/linux/lguest_launcher.h b/include/linux/lguest_launcher.h
+index 589be3e..e7217dc 100644
+--- a/include/linux/lguest_launcher.h
++++ b/include/linux/lguest_launcher.h
+@@ -16,6 +16,10 @@
+  * a new device, we simply need to write a new virtio driver and create support
+  * for it in the Launcher: this code won't need to change.
+  *
++ * Virtio devices are also used by kvm, so we can simply reuse their optimized
++ * device drivers.  And one day when everyone uses virtio, my plan will be
++ * complete.  Bwahahahah!
++ *
+  * Devices are described by a simplified ID, a status byte, and some "config"
+  * bytes which describe this device's configuration.  This is placed by the
+  * Launcher just above the top of physical memory:
+@@ -26,7 +30,7 @@ struct lguest_device_desc {
+ 	/* The number of virtqueues (first in config array) */
+ 	__u8 num_vq;
+ 	/* The number of bytes of feature bits.  Multiply by 2: one for host
+-	 * features and one for guest acknowledgements. */
++	 * features and one for Guest acknowledgements. */
+ 	__u8 feature_len;
+ 	/* The number of bytes of the config array after virtqueues. */
+ 	__u8 config_len;
 diff --git a/include/linux/sched.h b/include/linux/sched.h
 index fed07d0..6a1e7af 100644
 --- a/include/linux/sched.h
@@ -5055,10 +6670,20 @@ index bb4070e..04b308c 100644
  			init_list(malloc_sizes[INDEX_AC].cs_cachep,
  				  &initkmem_list3[SIZE_AC + nid], nid);
 diff --git a/mm/slub.c b/mm/slub.c
-index ca71d5b..b72bc98 100644
+index ca71d5b..84ed734 100644
 --- a/mm/slub.c
 +++ b/mm/slub.c
-@@ -2685,6 +2685,7 @@ void kfree(const void *x)
+@@ -1470,6 +1470,9 @@ static void *__slab_alloc(struct kmem_cache *s,
+ 	void **object;
+ 	struct page *new;
+ 
++	/* We handle __GFP_ZERO in the caller */
++	gfpflags &= ~__GFP_ZERO;
++
+ 	if (!c->page)
+ 		goto new_slab;
+ 
+@@ -2685,6 +2688,7 @@ void kfree(const void *x)
  }
  EXPORT_SYMBOL(kfree);
  
@@ -5066,7 +6691,7 @@ index ca71d5b..b72bc98 100644
  static unsigned long count_partial(struct kmem_cache_node *n)
  {
  	unsigned long flags;
-@@ -2697,6 +2698,7 @@ static unsigned long count_partial(struct kmem_cache_node *n)
+@@ -2697,6 +2701,7 @@ static unsigned long count_partial(struct kmem_cache_node *n)
  	spin_unlock_irqrestore(&n->list_lock, flags);
  	return x;
  }
