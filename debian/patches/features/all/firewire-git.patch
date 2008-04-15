@@ -1,56 +1,30 @@
-git diff in linux1394-2.6.git vs. v2.6.25-rc8, April 02, 2008
+git diff in linux1394-2.6.git vs. v2.6.25-rc9, April 12, 2008
 
- Documentation/debugging-via-ohci1394.txt |   13 +-
- drivers/firewire/Kconfig                 |    5 +
- drivers/firewire/fw-card.c               |   52 +----
- drivers/firewire/fw-cdev.c               |   13 +-
- drivers/firewire/fw-device.c             |  263 +++++++++++++++++++-----
- drivers/firewire/fw-device.h             |   38 +++-
- drivers/firewire/fw-iso.c                |    5 -
- drivers/firewire/fw-ohci.c               |  338 ++++++++++++++++++++++++------
- drivers/firewire/fw-ohci.h               |    1 +
- drivers/firewire/fw-sbp2.c               |  150 ++++++-------
- drivers/firewire/fw-topology.c           |   22 ++-
- drivers/firewire/fw-topology.h           |   11 +-
- drivers/firewire/fw-transaction.c        |   75 ++++----
- drivers/firewire/fw-transaction.h        |   17 +-
- drivers/ieee1394/csr.c                   |    6 +-
- drivers/ieee1394/dv1394.c                |    4 +-
- drivers/ieee1394/highlevel.c             |    6 +-
- drivers/ieee1394/ieee1394_core.c         |    2 +-
- drivers/ieee1394/nodemgr.c               |    6 +-
- drivers/ieee1394/ohci1394.c              |  229 ++++++++++----------
- drivers/ieee1394/pcilynx.c               |   15 +-
- drivers/ieee1394/raw1394.c               |    2 -
- drivers/ieee1394/sbp2.c                  |   11 +-
- drivers/ieee1394/video1394.c             |    4 +-
- lib/Kconfig.debug                        |   10 +
- 25 files changed, 835 insertions(+), 463 deletions(-)
+ drivers/firewire/Kconfig          |    5 +
+ drivers/firewire/fw-card.c        |   52 +-----
+ drivers/firewire/fw-cdev.c        |   13 +-
+ drivers/firewire/fw-device.c      |  263 +++++++++++++++++++++-----
+ drivers/firewire/fw-device.h      |   38 +++-
+ drivers/firewire/fw-iso.c         |    5 -
+ drivers/firewire/fw-ohci.c        |  383 ++++++++++++++++++++++++++++++-------
+ drivers/firewire/fw-ohci.h        |    2 +
+ drivers/firewire/fw-sbp2.c        |  150 +++++++--------
+ drivers/firewire/fw-topology.c    |   22 ++-
+ drivers/firewire/fw-topology.h    |   11 +-
+ drivers/firewire/fw-transaction.c |   75 ++++----
+ drivers/firewire/fw-transaction.h |   17 +-
+ drivers/ieee1394/csr.c            |    6 +-
+ drivers/ieee1394/dv1394.c         |    4 +-
+ drivers/ieee1394/highlevel.c      |    6 +-
+ drivers/ieee1394/ieee1394_core.c  |    2 +-
+ drivers/ieee1394/nodemgr.c        |    6 +-
+ drivers/ieee1394/ohci1394.c       |  229 +++++++++++-----------
+ drivers/ieee1394/pcilynx.c        |   15 +-
+ drivers/ieee1394/raw1394.c        |    2 -
+ drivers/ieee1394/sbp2.c           |   11 +-
+ drivers/ieee1394/video1394.c      |    4 +-
+ 23 files changed, 859 insertions(+), 462 deletions(-)
 
-diff --git a/Documentation/debugging-via-ohci1394.txt b/Documentation/debugging-via-ohci1394.txt
-index c360d4e..371ba27 100644
---- a/Documentation/debugging-via-ohci1394.txt
-+++ b/Documentation/debugging-via-ohci1394.txt
-@@ -41,11 +41,14 @@ to a working state and enables physical DMA by default for all remote nodes.
- This can be turned off by ohci1394's module parameter phys_dma=0.
- 
- The alternative firewire-ohci driver in drivers/firewire uses filtered physical
--DMA, hence is not yet suitable for remote debugging.
--
--Because ohci1394 depends on the PCI enumeration to be completed, an
--initialization routine which runs pretty early (long before console_init()
--which makes the printk buffer appear on the console can be called) was written.
-+DMA by default, which is more secure but not suitable for remote debugging.
-+Compile the driver with CONFIG_FIREWIRE_OHCI_REMOTE_DMA to get unfiltered
-+physical DMA.
-+
-+Because ohci1394 and firewire-ohci depend on the PCI enumeration to be
-+completed, an initialization routine which runs pretty early has been
-+implemented for x86.  This routine runs long before console_init() can be
-+called, i.e. before the printk buffer appears on the console.
- 
- To activate it, enable CONFIG_PROVIDE_OHCI1394_DMA_INIT (Kernel hacking menu:
- Provide code for enabling DMA over FireWire early on boot) and pass the
 diff --git a/drivers/firewire/Kconfig b/drivers/firewire/Kconfig
 index 25bdc2d..fb4d391 100644
 --- a/drivers/firewire/Kconfig
@@ -867,7 +841,7 @@ index 2b640e9..bcbe794 100644
  }
 -EXPORT_SYMBOL(fw_iso_context_stop);
 diff --git a/drivers/firewire/fw-ohci.c b/drivers/firewire/fw-ohci.c
-index ca6d51e..3d4ef3f 100644
+index ca6d51e..67a8797 100644
 --- a/drivers/firewire/fw-ohci.c
 +++ b/drivers/firewire/fw-ohci.c
 @@ -27,6 +27,7 @@
@@ -887,30 +861,38 @@ index ca6d51e..3d4ef3f 100644
  	u32 bus_seconds;
  	bool old_uninorth;
  
-@@ -237,6 +238,179 @@ static inline struct fw_ohci *fw_ohci(struct fw_card *card)
+@@ -237,6 +238,196 @@ static inline struct fw_ohci *fw_ohci(struct fw_card *card)
  
  static char ohci_driver_name[] = KBUILD_MODNAME;
  
 +#ifdef CONFIG_FIREWIRE_OHCI_DEBUG
 +
-+#define OHCI_PARAM_DEBUG_IRQS		1
++#define OHCI_PARAM_DEBUG_AT_AR		1
 +#define OHCI_PARAM_DEBUG_SELFIDS	2
-+#define OHCI_PARAM_DEBUG_AT_AR		4
++#define OHCI_PARAM_DEBUG_IRQS		4
++#define OHCI_PARAM_DEBUG_BUSRESETS	8 /* only effective before chip init */
 +
 +static int param_debug;
 +module_param_named(debug, param_debug, int, 0644);
 +MODULE_PARM_DESC(debug, "Verbose logging (default = 0"
-+	", IRQs = "		__stringify(OHCI_PARAM_DEBUG_IRQS)
-+	", self-IDs = "		__stringify(OHCI_PARAM_DEBUG_SELFIDS)
 +	", AT/AR events = "	__stringify(OHCI_PARAM_DEBUG_AT_AR)
++	", self-IDs = "		__stringify(OHCI_PARAM_DEBUG_SELFIDS)
++	", IRQs = "		__stringify(OHCI_PARAM_DEBUG_IRQS)
++	", busReset events = "	__stringify(OHCI_PARAM_DEBUG_BUSRESETS)
 +	", or a combination, or all = -1)");
 +
 +static void log_irqs(u32 evt)
 +{
-+	if (likely(!(param_debug & OHCI_PARAM_DEBUG_IRQS)))
++	if (likely(!(param_debug &
++			(OHCI_PARAM_DEBUG_IRQS | OHCI_PARAM_DEBUG_BUSRESETS))))
 +		return;
 +
-+	printk(KERN_DEBUG KBUILD_MODNAME ": IRQ %08x%s%s%s%s%s%s%s%s%s%s%s\n",
++	if (!(param_debug & OHCI_PARAM_DEBUG_IRQS) &&
++	    !(evt & OHCI1394_busReset))
++		return;
++
++	printk(KERN_DEBUG KBUILD_MODNAME ": IRQ "
++	       "%08x%s%s%s%s%s%s%s%s%s%s%s%s%s\n",
 +	       evt,
 +	       evt & OHCI1394_selfIDComplete	? " selfID"		: "",
 +	       evt & OHCI1394_RQPkt		? " AR_req"		: "",
@@ -922,11 +904,14 @@ index ca6d51e..3d4ef3f 100644
 +	       evt & OHCI1394_postedWriteErr	? " postedWriteErr"	: "",
 +	       evt & OHCI1394_cycleTooLong	? " cycleTooLong"	: "",
 +	       evt & OHCI1394_cycle64Seconds	? " cycle64Seconds"	: "",
++	       evt & OHCI1394_regAccessFail	? " regAccessFail"	: "",
++	       evt & OHCI1394_busReset		? " busReset"		: "",
 +	       evt & ~(OHCI1394_selfIDComplete | OHCI1394_RQPkt |
 +		       OHCI1394_RSPkt | OHCI1394_reqTxComplete |
 +		       OHCI1394_respTxComplete | OHCI1394_isochRx |
 +		       OHCI1394_isochTx | OHCI1394_postedWriteErr |
-+		       OHCI1394_cycleTooLong | OHCI1394_cycle64Seconds)
++		       OHCI1394_cycleTooLong | OHCI1394_cycle64Seconds |
++		       OHCI1394_regAccessFail | OHCI1394_busReset)
 +						? " ?"			: "");
 +}
 +
@@ -944,13 +929,13 @@ index ca6d51e..3d4ef3f 100644
 +	return port[*s >> shift & 3];
 +}
 +
-+static void log_selfids(int generation, int self_id_count, u32 *s)
++static void log_selfids(int node_id, int generation, int self_id_count, u32 *s)
 +{
 +	if (likely(!(param_debug & OHCI_PARAM_DEBUG_SELFIDS)))
 +		return;
 +
-+	printk(KERN_DEBUG KBUILD_MODNAME ": %d selfIDs, generation %d\n",
-+	       self_id_count, generation);
++	printk(KERN_DEBUG KBUILD_MODNAME ": %d selfIDs, generation %d, "
++	       "local node ID %04x\n", self_id_count, generation, node_id);
 +
 +	for (; self_id_count--; ++s)
 +		if ((*s & 1 << 23) == 0)
@@ -1013,6 +998,12 @@ index ca6d51e..3d4ef3f 100644
 +	if (unlikely(evt >= ARRAY_SIZE(evts)))
 +			evt = 0x1f;
 +
++	if (evt == OHCI1394_evt_bus_reset) {
++		printk(KERN_DEBUG "A%c evt_bus_reset, generation %d\n",
++		       dir, (header[2] >> 16) & 0xff);
++		return;
++	}
++
 +	if (header[0] == ~header[1]) {
 +		printk(KERN_DEBUG "A%c %s, %s, %08x\n",
 +		       dir, evts[evt], phys[header[0] >> 30 & 0x3],
@@ -1059,7 +1050,7 @@ index ca6d51e..3d4ef3f 100644
 +#else
 +
 +#define log_irqs(evt)
-+#define log_selfids(generation, self_id_count, sid)
++#define log_selfids(node_id, generation, self_id_count, sid)
 +#define log_ar_at_event(dir, speed, header, evt)
 +
 +#endif /* CONFIG_FIREWIRE_OHCI_DEBUG */
@@ -1067,7 +1058,7 @@ index ca6d51e..3d4ef3f 100644
  static inline void reg_write(const struct fw_ohci *ohci, int offset, u32 data)
  {
  	writel(data, ohci->registers + offset);
-@@ -320,6 +494,7 @@ static __le32 *handle_ar_packet(struct ar_context *ctx, __le32 *buffer)
+@@ -320,6 +511,7 @@ static __le32 *handle_ar_packet(struct ar_context *ctx, __le32 *buffer)
  	struct fw_ohci *ohci = ctx->ohci;
  	struct fw_packet p;
  	u32 status, length, tcode;
@@ -1075,7 +1066,7 @@ index ca6d51e..3d4ef3f 100644
  
  	p.header[0] = cond_le32_to_cpu(buffer[0]);
  	p.header[1] = cond_le32_to_cpu(buffer[1]);
-@@ -362,12 +537,15 @@ static __le32 *handle_ar_packet(struct ar_context *ctx, __le32 *buffer)
+@@ -362,12 +554,15 @@ static __le32 *handle_ar_packet(struct ar_context *ctx, __le32 *buffer)
  	/* FIXME: What to do about evt_* errors? */
  	length = (p.header_length + p.payload_length + 3) / 4;
  	status = cond_le32_to_cpu(buffer[length]);
@@ -1092,7 +1083,7 @@ index ca6d51e..3d4ef3f 100644
  	/*
  	 * The OHCI bus reset handler synthesizes a phy packet with
  	 * the new generation number when a bus reset happens (see
-@@ -378,7 +556,7 @@ static __le32 *handle_ar_packet(struct ar_context *ctx, __le32 *buffer)
+@@ -378,7 +573,7 @@ static __le32 *handle_ar_packet(struct ar_context *ctx, __le32 *buffer)
  	 * request.
  	 */
  
@@ -1101,7 +1092,29 @@ index ca6d51e..3d4ef3f 100644
  		ohci->request_generation = (p.header[2] >> 16) & 0xff;
  	else if (ctx == &ohci->ar_request_ctx)
  		fw_core_handle_request(&ohci->card, &p);
-@@ -817,6 +995,8 @@ static int handle_at_packet(struct context *context,
+@@ -770,8 +965,19 @@ at_context_queue_packet(struct context *ctx, struct fw_packet *packet)
+ 				     DESCRIPTOR_IRQ_ALWAYS |
+ 				     DESCRIPTOR_BRANCH_ALWAYS);
+ 
+-	/* FIXME: Document how the locking works. */
+-	if (ohci->generation != packet->generation) {
++	/*
++	 * If the controller and packet generations don't match, we need to
++	 * bail out and try again.  If IntEvent.busReset is set, the AT context
++	 * is halted, so appending to the context and trying to run it is
++	 * futile.  Most controllers do the right thing and just flush the AT
++	 * queue (per section 7.2.3.2 of the OHCI 1.1 specification), but
++	 * some controllers (like a JMicron JMB381 PCI-e) misbehave and wind
++	 * up stalling out.  So we just bail out in software and try again
++	 * later, and everyone is happy.
++	 * FIXME: Document how the locking works.
++	 */
++	if (ohci->generation != packet->generation ||
++	    reg_read(ohci, OHCI1394_IntEventSet) & OHCI1394_busReset) {
+ 		if (packet->payload_length > 0)
+ 			dma_unmap_single(ohci->card.device, payload_bus,
+ 					 packet->payload_length, DMA_TO_DEVICE);
+@@ -817,6 +1023,8 @@ static int handle_at_packet(struct context *context,
  	evt = le16_to_cpu(last->transfer_status) & 0x1f;
  	packet->timestamp = le16_to_cpu(last->res_count);
  
@@ -1110,7 +1123,7 @@ index ca6d51e..3d4ef3f 100644
  	switch (evt) {
  	case OHCI1394_evt_timeout:
  		/* Async response transmit timed out. */
-@@ -1019,20 +1199,30 @@ static void bus_reset_tasklet(unsigned long data)
+@@ -1019,20 +1227,30 @@ static void bus_reset_tasklet(unsigned long data)
  	ohci->node_id = reg & (OHCI1394_NodeID_busNumber |
  			       OHCI1394_NodeID_nodeNumber);
  
@@ -1145,7 +1158,7 @@ index ca6d51e..3d4ef3f 100644
  		ohci->self_id_buffer[j] =
  				cond_le32_to_cpu(ohci->self_id_cpu[i]);
  	}
-@@ -1097,12 +1287,19 @@ static void bus_reset_tasklet(unsigned long data)
+@@ -1097,12 +1315,20 @@ static void bus_reset_tasklet(unsigned long data)
  		reg_write(ohci, OHCI1394_ConfigROMhdr, ohci->next_header);
  	}
  
@@ -1160,20 +1173,35 @@ index ca6d51e..3d4ef3f 100644
  		dma_free_coherent(ohci->card.device, CONFIG_ROM_SIZE,
  				  free_rom, free_rom_bus);
  
-+	log_selfids(generation, self_id_count, ohci->self_id_buffer);
++	log_selfids(ohci->node_id, generation,
++		    self_id_count, ohci->self_id_buffer);
 +
  	fw_core_handle_bus_reset(&ohci->card, ohci->node_id, generation,
  				 self_id_count, ohci->self_id_buffer);
  }
-@@ -1119,6 +1316,7 @@ static irqreturn_t irq_handler(int irq, void *data)
+@@ -1118,7 +1344,9 @@ static irqreturn_t irq_handler(int irq, void *data)
+ 	if (!event || !~event)
  		return IRQ_NONE;
  
- 	reg_write(ohci, OHCI1394_IntEventClear, event);
+-	reg_write(ohci, OHCI1394_IntEventClear, event);
++	/* busReset must not be cleared yet, see OHCI 1.1 clause 7.2.3.2 */
++	reg_write(ohci, OHCI1394_IntEventClear, event & ~OHCI1394_busReset);
 +	log_irqs(event);
  
  	if (event & OHCI1394_selfIDComplete)
  		tasklet_schedule(&ohci->bus_reset_tasklet);
-@@ -1192,6 +1390,8 @@ static int ohci_enable(struct fw_card *card, u32 *config_rom, size_t length)
+@@ -1153,6 +1381,10 @@ static irqreturn_t irq_handler(int irq, void *data)
+ 		iso_event &= ~(1 << i);
+ 	}
+ 
++	if (unlikely(event & OHCI1394_regAccessFail))
++		fw_error("Register access failure - "
++			 "please notify linux1394-devel@lists.sf.net\n");
++
+ 	if (unlikely(event & OHCI1394_postedWriteErr))
+ 		fw_error("PCI posted write error\n");
+ 
+@@ -1192,6 +1424,8 @@ static int ohci_enable(struct fw_card *card, u32 *config_rom, size_t length)
  {
  	struct fw_ohci *ohci = fw_ohci(card);
  	struct pci_dev *dev = to_pci_dev(card->device);
@@ -1182,7 +1210,7 @@ index ca6d51e..3d4ef3f 100644
  
  	if (software_reset(ohci)) {
  		fw_error("Failed to reset ohci card.\n");
-@@ -1203,13 +1403,24 @@ static int ohci_enable(struct fw_card *card, u32 *config_rom, size_t length)
+@@ -1203,13 +1437,24 @@ static int ohci_enable(struct fw_card *card, u32 *config_rom, size_t length)
  	 * most of the registers.  In fact, on some cards (ALI M5251),
  	 * accessing registers in the SClk domain without LPS enabled
  	 * will lock up the machine.  Wait 50msec to make sure we have
@@ -1209,7 +1237,19 @@ index ca6d51e..3d4ef3f 100644
  
  	reg_write(ohci, OHCI1394_HCControlClear,
  		  OHCI1394_HCControl_noByteSwapData);
-@@ -1421,6 +1632,7 @@ static int ohci_cancel_packet(struct fw_card *card, struct fw_packet *packet)
+@@ -1237,7 +1482,10 @@ static int ohci_enable(struct fw_card *card, u32 *config_rom, size_t length)
+ 		  OHCI1394_reqTxComplete | OHCI1394_respTxComplete |
+ 		  OHCI1394_isochRx | OHCI1394_isochTx |
+ 		  OHCI1394_postedWriteErr | OHCI1394_cycleTooLong |
+-		  OHCI1394_cycle64Seconds | OHCI1394_masterIntEnable);
++		  OHCI1394_cycle64Seconds | OHCI1394_regAccessFail |
++		  OHCI1394_masterIntEnable);
++	if (param_debug & OHCI_PARAM_DEBUG_BUSRESETS)
++		reg_write(ohci, OHCI1394_IntMaskSet, OHCI1394_busReset);
+ 
+ 	/* Activate link_on bit and contender bit in our self ID packets.*/
+ 	if (ohci_update_phy_reg(card, 4, 0,
+@@ -1421,6 +1669,7 @@ static int ohci_cancel_packet(struct fw_card *card, struct fw_packet *packet)
  	if (packet->ack != 0)
  		goto out;
  
@@ -1217,7 +1257,7 @@ index ca6d51e..3d4ef3f 100644
  	driver_data->packet = NULL;
  	packet->ack = RCODE_CANCELLED;
  	packet->callback(packet, &ohci->card, packet->ack);
-@@ -1435,6 +1647,9 @@ static int ohci_cancel_packet(struct fw_card *card, struct fw_packet *packet)
+@@ -1435,6 +1684,9 @@ static int ohci_cancel_packet(struct fw_card *card, struct fw_packet *packet)
  static int
  ohci_enable_phys_dma(struct fw_card *card, int node_id, int generation)
  {
@@ -1227,7 +1267,7 @@ index ca6d51e..3d4ef3f 100644
  	struct fw_ohci *ohci = fw_ohci(card);
  	unsigned long flags;
  	int n, retval = 0;
-@@ -1466,6 +1681,7 @@ ohci_enable_phys_dma(struct fw_card *card, int node_id, int generation)
+@@ -1466,6 +1718,7 @@ ohci_enable_phys_dma(struct fw_card *card, int node_id, int generation)
   out:
  	spin_unlock_irqrestore(&ohci->lock, flags);
  	return retval;
@@ -1235,7 +1275,7 @@ index ca6d51e..3d4ef3f 100644
  }
  
  static u64
-@@ -2045,17 +2261,9 @@ static const struct fw_card_driver ohci_driver = {
+@@ -2045,17 +2298,9 @@ static const struct fw_card_driver ohci_driver = {
  	.stop_iso		= ohci_stop_iso,
  };
  
@@ -1255,7 +1295,7 @@ index ca6d51e..3d4ef3f 100644
  	if (machine_is(powermac)) {
  		struct device_node *ofn = pci_device_to_OF_node(dev);
  
-@@ -2064,8 +2272,33 @@ pci_probe(struct pci_dev *dev, const struct pci_device_id *ent)
+@@ -2064,8 +2309,33 @@ pci_probe(struct pci_dev *dev, const struct pci_device_id *ent)
  			pmac_call_feature(PMAC_FTR_1394_ENABLE, ofn, 0, 1);
  		}
  	}
@@ -1289,7 +1329,7 @@ index ca6d51e..3d4ef3f 100644
  	ohci = kzalloc(sizeof(*ohci), GFP_KERNEL);
  	if (ohci == NULL) {
  		fw_error("Could not malloc fw_ohci data.\n");
-@@ -2074,10 +2307,12 @@ pci_probe(struct pci_dev *dev, const struct pci_device_id *ent)
+@@ -2074,10 +2344,12 @@ pci_probe(struct pci_dev *dev, const struct pci_device_id *ent)
  
  	fw_card_initialize(&ohci->card, &ohci_driver, &dev->dev);
  
@@ -1303,7 +1343,7 @@ index ca6d51e..3d4ef3f 100644
  	}
  
  	pci_set_master(dev);
-@@ -2173,8 +2408,9 @@ pci_probe(struct pci_dev *dev, const struct pci_device_id *ent)
+@@ -2173,8 +2445,9 @@ pci_probe(struct pci_dev *dev, const struct pci_device_id *ent)
  	pci_release_region(dev, 0);
   fail_disable:
  	pci_disable_device(dev);
@@ -1315,7 +1355,7 @@ index ca6d51e..3d4ef3f 100644
  
  	return err;
  }
-@@ -2202,72 +2438,42 @@ static void pci_remove(struct pci_dev *dev)
+@@ -2202,72 +2475,42 @@ static void pci_remove(struct pci_dev *dev)
  	pci_iounmap(dev, ohci->registers);
  	pci_release_region(dev, 0);
  	pci_disable_device(dev);
@@ -1403,7 +1443,7 @@ index ca6d51e..3d4ef3f 100644
  		fw_error("pci_enable_device failed\n");
  		return err;
 diff --git a/drivers/firewire/fw-ohci.h b/drivers/firewire/fw-ohci.h
-index dec4f04..5754c6e 100644
+index dec4f04..a2fbb62 100644
 --- a/drivers/firewire/fw-ohci.h
 +++ b/drivers/firewire/fw-ohci.h
 @@ -30,6 +30,7 @@
@@ -1414,6 +1454,14 @@ index dec4f04..5754c6e 100644
  #define OHCI1394_IRMultiChanMaskHiSet         0x070
  #define OHCI1394_IRMultiChanMaskHiClear       0x074
  #define OHCI1394_IRMultiChanMaskLoSet         0x078
+@@ -124,6 +125,7 @@
+ #define OHCI1394_lockRespErr		0x00000200
+ #define OHCI1394_selfIDComplete		0x00010000
+ #define OHCI1394_busReset		0x00020000
++#define OHCI1394_regAccessFail		0x00040000
+ #define OHCI1394_phy			0x00080000
+ #define OHCI1394_cycleSynch		0x00100000
+ #define OHCI1394_cycle64Seconds		0x00200000
 diff --git a/drivers/firewire/fw-sbp2.c b/drivers/firewire/fw-sbp2.c
 index 62b4e47..2a99937 100644
 --- a/drivers/firewire/fw-sbp2.c
@@ -2750,24 +2798,3 @@ index bd28adf..e03024e 100644
  	ret = cdev_add(&video1394_cdev, IEEE1394_VIDEO1394_DEV, 16);
  	if (ret) {
  		PRINT_G(KERN_ERR, "video1394: unable to get minor device block");
-diff --git a/lib/Kconfig.debug b/lib/Kconfig.debug
-index 0796c1a..4e370e1 100644
---- a/lib/Kconfig.debug
-+++ b/lib/Kconfig.debug
-@@ -592,6 +592,16 @@ config LATENCYTOP
- 	  Enable this option if you want to use the LatencyTOP tool
- 	  to find out which userspace is blocking on what kernel operations.
- 
-+config FIREWIRE_OHCI_REMOTE_DMA
-+	bool "Remote debugging via firewire-ohci"
-+	depends on FIREWIRE_OHCI
-+	help
-+	  This option lets you use the FireWire bus for remote debugging.
-+	  It enables unfiltered remote DMA in the firewire-ohci driver.
-+	  See Documentation/debugging-via-ohci1394.txt for more information.
-+
-+	  If unsure, say N.
-+
- config PROVIDE_OHCI1394_DMA_INIT
- 	bool "Provide code for enabling DMA over FireWire early on boot"
- 	depends on PCI && X86
