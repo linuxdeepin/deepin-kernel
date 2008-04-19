@@ -3,14 +3,13 @@
 import os, os.path, re, sys
 from warnings import warn
 
-sys.path.append("/usr/src/linux-support-@upstream@@abiname@/lib/python")
+sys.path.append("/usr/src/linux-support-@linux_upstream@@abiname@/lib/python")
 
-from debian_linux.debian import VersionLinux
 from debian_linux.patches import PatchSeries, PatchSeriesList
 
-_default_home = "@home@"
-_default_revisions = "@revisions@"
-_default_source = "@source@"
+_default_home = "/usr/src/kernel-patches/all/@linux_upstream@/debian"
+revisions = "@revisions@".split()
+upstream = "@upstream@"
 
 class MatchExtra(object):
     def __init__(self, arch, featureset):
@@ -72,34 +71,33 @@ class version_file(object):
     extra = None
     in_progress = False
 
-    def __init__(self, ver = None, overwrite = False):
-        if overwrite:
-            self._read(ver)
-        elif os.path.exists(self._file):
+    def __init__(self, upstream = None):
+        if os.path.exists(self._file):
             s = file(self._file).readline().strip()
             self._read(s)
-        elif ver:
-            warn('No %s file, assuming pristine Linux %s' % (self._file, ver.upstream))
-            self.version = VersionLinux(ver.upstream + '-0')
+        elif upstream:
+            warn('No %s file, assuming Debian Linux %s' % (self._file, upstream))
+            self.upstream = upstream
+            self.revision = 'orig'
         else:
             raise RuntimeError, "Not possible to determine version"
 
     def __str__(self):
         if self.in_progress:
             return "unstable"
+        ret = [self.upstream, self.revision]
         if self.extra is not None:
-            return ' '.join([str(self.version)] +  self.extra.info())
-        return str(self.version)
+            ret.extend(self.extra.info())
+        return ' '.join(ret)
 
     def _read(self, s):
+        if s == 'unstable':
+            raise RuntimeError("Tree is in an unstable condition. Can't continue!")
         list = s.split()
-        try:
-            self.version = VersionLinux(list[0])
-        except ValueError:
-            raise RuntimeError, 'Can\'t read version in %s: "%s"' % (self._file, list[0])
+        self.upstream, self.revision = list[0:2]
 
         arch = featureset = None
-        for i in list[1:]:
+        for i in list[2:]:
             if i.startswith("arch="):
                 arch = i[5:]
             elif i.startswith("featureset="):
@@ -117,9 +115,9 @@ class version_file(object):
         self.in_progress = True
         self._write()
 
-    def commit(self, version, extra = _marker):
+    def commit(self, revision, extra = _marker):
         self.in_progress = False
-        self.version = version
+        self.revision = revision
         if extra is not _marker:
             self.extra = extra
         self._write()
@@ -132,63 +130,59 @@ def main():
         return
 
     home = options.home
-    revisions = ['0'] + options.revisions.split()
-    source = VersionLinux(options.source)
-    if len(args) == 1:
-        target = VersionLinux(args[0])
-    else:
-        target = source
 
-    if options.current is not None:
-        vfile = version_file(options.current, True)
-    else:
-        vfile = version_file(source)
-    current = vfile.version
+    vfile = version_file(upstream)
+    current_revision = vfile.revision
     current_extra = vfile.extra
 
+    if len(args) == 1:
+        target_revision = args[0]
+    else:
+        target_revision = revisions[-1]
     target_extra = MatchExtra(options.arch, options.featureset)
 
-    if current.debian not in revisions:
+    if vfile.upstream != upstream:
+        raise RuntimeError("Upstream version differs between tree (%s) and package (%s)" % (vfile.upstream, upstream))
+    if current_revision not in revisions:
         raise RuntimeError, "Current revision is not in our list of revisions"
-    if target.debian not in revisions:
+    if target_revision not in revisions:
         raise RuntimeError, "Target revision is not in our list of revisions"
 
-    if current.debian == target.debian and current_extra == target_extra:
+    if current_revision == target_revision and current_extra == target_extra:
         print "Nothing to do"
         return
 
-    current_index = revisions.index(current.debian)
-    source_index = revisions.index(source.debian)
-    target_index = revisions.index(target.debian)
+    current_index = revisions.index(current_revision)
+    target_index = revisions.index(target_revision)
 
     if current_extra:
-        if current_index != source_index:
+        if current_revision != revisions[-1]:
             raise RuntimeError, "Can't patch from %s with options %s" % (current, ' '.join(current_extra))
         consider = ['%s-extra' % i for i in revisions[1:current_index + 1]]
         s = PatchSeriesList.read(home, consider)
         vfile.begin()
         s(cond = current_extra, reverse = True)
-        vfile.commit(current, None)
+        vfile.commit(current_revision, None)
 
     if current_index < target_index:
         consider = revisions[current_index + 1:target_index + 1]
         s = PatchSeriesList.read(home, consider)
         vfile.begin()
         s()
-        vfile.commit(target)
+        vfile.commit(target_revision)
     elif current_index > target_index:
         consider = revisions[target_index + 1:current_index + 1]
         s = PatchSeriesList.read(home, consider)
         vfile.begin()
         s(reverse = True)
-        vfile.commit(target)
+        vfile.commit(target_revision)
 
     if target_extra:
         consider = ['%s-extra' % i for i in revisions[1:target_index + 1]]
         s = PatchSeriesList.read(home, consider)
         vfile.begin()
         s(cond = target_extra)
-        vfile.commit(target, target_extra)
+        vfile.commit(target_revision, target_extra)
 
 def parse_options():
     from optparse import OptionParser
@@ -206,24 +200,9 @@ def parse_options():
         help = "featureset",
     )
     parser.add_option(
-        '-C', '--overwrite-current',
-        dest = 'current',
-        help = "overwrite current",
-    )
-    parser.add_option(
         '-H', '--overwrite-home',
         default = _default_home, dest = 'home',
         help = "overwrite home [default: %default]",
-    )
-    parser.add_option(
-        '-R', '--overwrite-revisions',
-        default = _default_revisions, dest = 'revisions',
-        help = "overwrite revisions [default: %default]",
-    )
-    parser.add_option(
-        '-S', '--overwrite-source',
-        default = _default_source, dest = 'source',
-        help = "overwrite source [default: %default]",
     )
 
     options, args = parser.parse_args()
