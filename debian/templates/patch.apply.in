@@ -3,7 +3,8 @@
 import os, os.path, re, sys
 from warnings import warn
 
-from debian_linux.patches import PatchSeries
+from debian_linux.debian import VersionLinux
+from debian_linux.patches import PatchSeries, PatchSeriesList
 
 _default_home = "@home@"
 _default_revisions = "@revisions@"
@@ -16,6 +17,9 @@ class MatchExtra(object):
         self.matched_arch = self.matched_featureset = False
 
     def __call__(self, obj):
+        if not self:
+            return False
+
         data = obj.data
 
         match_arch = []
@@ -28,24 +32,23 @@ class MatchExtra(object):
 
         ret_arch = ret_featureset = False
 
-        if self.arch is not None:
-            if match_arch:
+        if match_arch:
+            if self.arch is not None:
                 if self.arch in match_arch:
                     self.matched_arch = True
                     ret_arch = True
-            else:
-                ret_arch = True
 
-            if not match_featureset:
-                ret_featureset = ret_arch
+        else:
+            ret_arch = True
 
-        if self.featureset is not None:
-            if match_featureset:
+        if match_featureset:
+            if self.featureset is not None:
                 if self.featureset in match_featureset:
                     self.matched_featureset = True
                     ret_featureset = True
-            else:
-                ret_featureset = True
+
+        else:
+            ret_featureset = True
 
         return ret_arch and ret_featureset
 
@@ -60,58 +63,7 @@ class MatchExtra(object):
             ret.append("featureset=%s" % self.featureset)
         return ret
 
-class SeriesList(list):
-    def __call__(self, cond = bool, reverse = False):
-        for i in self:
-            i(cond = cond, reverse = reverse)
-            if reverse:
-                print "--> %s fully unapplied." % i.name
-            else:
-                print "--> %s fully applied." % i.name
-
-    @classmethod
-    def read(cls, revisions, home):
-        ret = cls()
-        for i in revisions:
-            try:
-                fp = file(os.path.join(home, 'series', i))
-                ret.append(PatchSeries(i, home, fp))
-            except IOError:
-                pass
-        return ret
-
-    @classmethod
-    def read_extra(cls, revisions, home):
-        return cls.read((i + '-extra' for i in revisions), home)
-
-class version(object):
-    __slots__ = "upstream", "revision"
-
-    def __init__(self, string = None):
-        if string is not None:
-            self.upstream, self.revision = self.parse(string)
-
-    def __str__(self):
-        return "%s-%s" % (self.upstream, self.revision)
-
-    _re = r"""
-^
-(
-    \d+\.\d+\.\d+
-    (?:
-        -.+?
-    )?
-)
--
-([^-]+)
-$
-"""
-
-    def parse(self, version):
-        match = re.match(self._re, version, re.X)
-        if match is None:
-            raise ValueError
-        return match.groups()
+_marker = object()
 
 class version_file(object):
     _file = 'version.Debian'
@@ -126,9 +78,7 @@ class version_file(object):
             self._read(s)
         elif ver:
             warn('No %s file, assuming pristine Linux %s' % (self._file, ver.upstream))
-            self.version = version()
-            self.version.upstream = ver.upstream
-            self.version.revision = '0'
+            self.version = VersionLinux(ver.upstream + '-0')
         else:
             raise RuntimeError, "Not possible to determine version"
 
@@ -142,7 +92,7 @@ class version_file(object):
     def _read(self, s):
         list = s.split()
         try:
-            self.version = version(list[0])
+            self.version = VersionLinux(list[0])
         except ValueError:
             raise RuntimeError, 'Can\'t read version in %s: "%s"' % (self._file, list[0])
 
@@ -165,11 +115,10 @@ class version_file(object):
         self.in_progress = True
         self._write()
 
-    def commit(self, version = None, extra = None):
+    def commit(self, version, extra = _marker):
         self.in_progress = False
-        if version is not None:
-            self.version = version
-        if extra is not None:
+        self.version = version
+        if extra is not _marker:
             self.extra = extra
         self._write()
 
@@ -182,9 +131,9 @@ def main():
 
     home = options.home
     revisions = ['0'] + options.revisions.split()
-    source = version(options.source)
+    source = VersionLinux(options.source)
     if len(args) == 1:
-        target = version(args[0])
+        target = VersionLinux(args[0])
     else:
         target = source
 
@@ -197,44 +146,44 @@ def main():
 
     target_extra = MatchExtra(options.arch, options.featureset)
 
-    if current.revision not in revisions:
+    if current.debian not in revisions:
         raise RuntimeError, "Current revision is not in our list of revisions"
-    if target.revision not in revisions:
+    if target.debian not in revisions:
         raise RuntimeError, "Target revision is not in our list of revisions"
 
-    if current.revision == target.revision and current_extra == target_extra:
+    if current.debian == target.debian and current_extra == target_extra:
         print "Nothing to do"
         return
 
-    current_index = revisions.index(current.revision)
-    source_index = revisions.index(source.revision)
-    target_index = revisions.index(target.revision)
+    current_index = revisions.index(current.debian)
+    source_index = revisions.index(source.debian)
+    target_index = revisions.index(target.debian)
 
     if current_extra:
         if current_index != source_index:
             raise RuntimeError, "Can't patch from %s with options %s" % (current, ' '.join(current_extra))
-        consider = revisions[1:current_index + 1]
-        s = SeriesList.read_extra(consider, home)
+        consider = ['%s-extra' % i for i in revisions[1:current_index + 1]]
+        s = PatchSeriesList.read(home, consider)
         vfile.begin()
         s(cond = current_extra, reverse = True)
-        vfile.commit(current)
+        vfile.commit(current, None)
 
     if current_index < target_index:
         consider = revisions[current_index + 1:target_index + 1]
-        s = SeriesList.read(consider, home)
+        s = PatchSeriesList.read(home, consider)
         vfile.begin()
         s()
         vfile.commit(target)
     elif current_index > target_index:
-        consider = revisions[current_index + 1:target_index + 1]
-        s = SeriesList.read(consider, home)
+        consider = revisions[target_index + 1:current_index + 1]
+        s = PatchSeriesList.read(home, consider)
         vfile.begin()
         s(reverse = True)
         vfile.commit(target)
 
     if target_extra:
-        consider = revisions[1:target_index + 1]
-        s = SeriesList.read_extra(consider, home)
+        consider = ['%s-extra' % i for i in revisions[1:target_index + 1]]
+        s = PatchSeriesList.read(home, consider)
         vfile.begin()
         s(cond = target_extra)
         vfile.commit(target, target_extra)

@@ -166,14 +166,41 @@ class PatchSeries(list):
 
     def __call__(self, cond = bool, dir = '.', reverse = False):
         if not reverse:
-            for i in self:
-                if cond(i):
-                    i(dir = dir, reverse = False)
+            l = self
         else:
-            for i in self[::-1]:
-                if cond(i):
-                    i(dir = dir, reverse = True)
+            l = self[::-1]
+        for i in l:
+            if cond(i):
+                i(dir = dir, reverse = reverse)
 
     def __repr__(self):
         return '<%s object for %s>' % (self.__class__.__name__, self.name)
+
+class PatchSeriesList(list):
+    def __call__(self, cond = bool, reverse = False):
+        if not reverse:
+            l = self
+        else:
+            l = self[::-1]
+        for i in self:
+            if reverse:
+                print "--> Try to unapply %s." % i.name
+            else:
+                print "--> Try to apply %s." % i.name
+            i(cond = cond, reverse = reverse)
+            if reverse:
+                print "--> %s fully unapplied." % i.name
+            else:
+                print "--> %s fully applied." % i.name
+
+    @classmethod
+    def read(cls, home, files):
+        ret = cls()
+        for i in files:
+            try:
+                fp = file(os.path.join(home, 'series', i))
+                ret.append(PatchSeries(i, home, fp))
+            except IOError:
+                pass
+        return ret
 
