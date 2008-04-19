@@ -254,6 +254,7 @@ class Gencontrol(Base):
             'revisions': ' '.join([i.debian for i in self.versions[::-1]]),
             'source': "%(linux_upstream)s-%(debian)s" % self.version.__dict__,
             'upstream': self.version.linux_upstream,
+            'abiname': self.abiname,
         }
 
         apply = self.substitute(apply, vars)
