@@ -247,7 +247,6 @@ class Gencontrol(Base):
 
     def do_extra(self, packages, makefile):
         apply = self.templates['patch.apply']
-        unpatch = self.templates['patch.unpatch']
 
         vars = {
             'revisions': 'orig ' + ' '.join([i.debian for i in self.versions[::-1]]),
@@ -257,10 +256,8 @@ class Gencontrol(Base):
         }
 
         apply = self.substitute(apply, vars)
-        unpatch = self.substitute(unpatch, vars)
 
         file('debian/bin/patch.apply', 'w').write(apply)
-        file('debian/bin/patch.unpatch', 'w').write(unpatch)
 
     def process_changelog(self):
         act_upstream = self.changelog[0].version.linux_upstream
