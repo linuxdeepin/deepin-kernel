@@ -59,7 +59,7 @@ class Version(object):
 )   
 (?:
     -
-    (?P<debian>[^-]+)
+    (?P<revision>[^-]+)
 )?
 $
 """
@@ -73,7 +73,7 @@ $
         if match.group("epoch") is not None:
             self.epoch = int(match.group("epoch"))
         self.upstream = match.group("upstream")
-        self.debian = match.group("debian")
+        self.revision = match.group("revision")
 
     def __str__(self):
         return self.complete
@@ -86,9 +86,15 @@ $
 
     @property
     def complete_noepoch(self):
-        if self.debian is not None:
-            return "%s-%s" % (self.upstream, self.debian)
+        if self.revision is not None:
+            return "%s-%s" % (self.upstream, self.revision)
         return self.upstream
+
+    @property
+    def debian(self):
+        from warnings import warn
+        warn("debian argument was replaced by revision", DeprecationWarning, stacklevel = 2)
+        return self.revision
 
 class VersionLinux(Version):
     _version_linux_rules = ur"""
