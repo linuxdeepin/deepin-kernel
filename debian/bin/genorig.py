@@ -38,7 +38,7 @@ class Main(object):
 
     def upstream_extract(self):
         self.log("Extracting tarball %s\n" % self.input_tar)
-        match = re.match(r'(^|.*/)(?P<dir>linux-\d+\.\d+\.\d+(-\S+)?)\.tar(\.(?P<extension>(bz2|gz)))?$', self.input_tar)
+        match = re.match(r'(^|.*/)(?P<dir>linux-[\d.]+(-\S+)?)\.tar(\.(?P<extension>(bz2|gz)))?$', self.input_tar)
         if not match:
             raise RuntimeError("Can't identify name of tarball")
         cmdline = ['tar -xf', self.input_tar, '-C', self.dir]
