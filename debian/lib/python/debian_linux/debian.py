@@ -99,6 +99,8 @@ class VersionLinux(Version):
     \d+
 )
 (?:
+    (\.\d+)
+    |
     ~
     (?P<modifier>
         .+?
