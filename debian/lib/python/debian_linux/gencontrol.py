@@ -275,6 +275,15 @@ class Gencontrol(object):
             entries.append(self.process_package(i, vars))
         return entries
 
+    def process_version_linux(self, version, abiname):
+    	return {
+	    'upstreamversion': version.linux_upstream,
+	    'version': version.linux_version,
+	    'source_upstream': version.upstream,
+	    'major': version.linux_major,
+	    'abiname': abiname,
+	}
+
     def substitute(self, s, vars):
         if isinstance(s, (list, tuple)):
             for i in xrange(len(s)):
