@@ -1,0 +1,6045 @@
+diff --git a/Documentation/DocBook/kgdb.tmpl b/Documentation/DocBook/kgdb.tmpl
+index 97618be..028a844 100644
+--- a/Documentation/DocBook/kgdb.tmpl
++++ b/Documentation/DocBook/kgdb.tmpl
+@@ -72,7 +72,7 @@
+     kgdb is a source level debugger for linux kernel. It is used along
+     with gdb to debug a linux kernel.  The expectation is that gdb can
+     be used to "break in" to the kernel to inspect memory, variables
+-    and look through a cal stack information similar to what an
++    and look through call stack information similar to what an
+     application developer would use gdb for.  It is possible to place
+     breakpoints in kernel code and perform some limited execution
+     stepping.
+@@ -93,8 +93,10 @@
+   <chapter id="CompilingAKernel">
+     <title>Compiling a kernel</title>
+     <para>
+-    To enable <symbol>CONFIG_KGDB</symbol>, look under the "Kernel debugging"
+-    and then select "KGDB: kernel debugging with remote gdb".
++    To enable <symbol>CONFIG_KGDB</symbol> you should first turn on
++    "Prompt for development and/or incomplete code/drivers"
++    (CONFIG_EXPERIMENTAL) in  "General setup", then under the
++    "Kernel debugging" select "KGDB: kernel debugging with remote gdb".
+     </para>
+     <para>
+     Next you should choose one of more I/O drivers to interconnect debugging
+diff --git a/Documentation/kbuild/kconfig-language.txt b/Documentation/kbuild/kconfig-language.txt
+index 00b950d..c412c24 100644
+--- a/Documentation/kbuild/kconfig-language.txt
++++ b/Documentation/kbuild/kconfig-language.txt
+@@ -377,27 +377,3 @@ config FOO
+ 
+ limits FOO to module (=m) or disabled (=n).
+ 
+-
+-Build limited by a third config symbol which may be =y or =m
+-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-A common idiom that we see (and sometimes have problems with) is this:
+-
+-When option C in B (module or subsystem) uses interfaces from A (module
+-or subsystem), and both A and B are tristate (could be =y or =m if they
+-were independent of each other, but they aren't), then we need to limit
+-C such that it cannot be built statically if A is built as a loadable
+-module.  (C already depends on B, so there is no dependency issue to
+-take care of here.)
+-
+-If A is linked statically into the kernel image, C can be built
+-statically or as loadable module(s).  However, if A is built as loadable
+-module(s), then C must be restricted to loadable module(s) also.  This
+-can be expressed in kconfig language as:
+-
+-config C
+-	depends on A = y || A = B
+-
+-or for real examples, use this command in a kernel tree:
+-
+-$ find . -name Kconfig\* | xargs grep -ns "depends on.*=.*||.*=" | grep -v orig
+-
+diff --git a/Documentation/kernel-parameters.txt b/Documentation/kernel-parameters.txt
+index a3c3544..cdd5b93 100644
+--- a/Documentation/kernel-parameters.txt
++++ b/Documentation/kernel-parameters.txt
+@@ -1094,9 +1094,6 @@ and is between 256 and 4096 characters. It is defined in the file
+ 	mac5380=	[HW,SCSI] Format:
+ 			<can_queue>,<cmd_per_lun>,<sg_tablesize>,<hostid>,<use_tags>
+ 
+-	mac53c9x=	[HW,SCSI] Format:
+-			<num_esps>,<disconnect>,<nosync>,<can_queue>,<cmd_per_lun>,<sg_tablesize>,<hostid>,<use_tags>
+-
+ 	machvec=	[IA64] Force the use of a particular machine-vector
+ 			(machvec) in a generic kernel.
+ 			Example: machvec=hpzx1_swiotlb
+@@ -1525,6 +1522,8 @@ and is between 256 and 4096 characters. It is defined in the file
+ 				This is normally done in pci_enable_device(),
+ 				so this option is a temporary workaround
+ 				for broken drivers that don't call it.
++		skip_isa_align	[X86] do not align io start addr, so can
++				handle more pci cards
+ 		firmware	[ARM] Do not re-enumerate the bus but instead
+ 				just use the configuration from the
+ 				bootloader. This is currently used on
+diff --git a/Documentation/scheduler/sched-design.txt b/Documentation/scheduler/sched-design.txt
+deleted file mode 100644
+index 1605bf0..0000000
+--- a/Documentation/scheduler/sched-design.txt
++++ /dev/null
+@@ -1,165 +0,0 @@
+-		   Goals, Design and Implementation of the
+-		      new ultra-scalable O(1) scheduler
+-
+-
+-  This is an edited version of an email Ingo Molnar sent to
+-  lkml on 4 Jan 2002.  It describes the goals, design, and
+-  implementation of Ingo's new ultra-scalable O(1) scheduler.
+-  Last Updated: 18 April 2002.
+-
+-
+-Goal
+-====
+-
+-The main goal of the new scheduler is to keep all the good things we know
+-and love about the current Linux scheduler:
+-
+- - good interactive performance even during high load: if the user
+-   types or clicks then the system must react instantly and must execute
+-   the user tasks smoothly, even during considerable background load.
+-
+- - good scheduling/wakeup performance with 1-2 runnable processes.
+-
+- - fairness: no process should stay without any timeslice for any
+-   unreasonable amount of time. No process should get an unjustly high
+-   amount of CPU time.
+-
+- - priorities: less important tasks can be started with lower priority,
+-   more important tasks with higher priority.
+-
+- - SMP efficiency: no CPU should stay idle if there is work to do.
+-
+- - SMP affinity: processes which run on one CPU should stay affine to
+-   that CPU. Processes should not bounce between CPUs too frequently.
+-
+- - plus additional scheduler features: RT scheduling, CPU binding.
+-
+-and the goal is also to add a few new things:
+-
+- - fully O(1) scheduling. Are you tired of the recalculation loop
+-   blowing the L1 cache away every now and then? Do you think the goodness
+-   loop is taking a bit too long to finish if there are lots of runnable
+-   processes? This new scheduler takes no prisoners: wakeup(), schedule(),
+-   the timer interrupt are all O(1) algorithms. There is no recalculation
+-   loop. There is no goodness loop either.
+-
+- - 'perfect' SMP scalability. With the new scheduler there is no 'big'
+-   runqueue_lock anymore - it's all per-CPU runqueues and locks - two
+-   tasks on two separate CPUs can wake up, schedule and context-switch
+-   completely in parallel, without any interlocking. All
+-   scheduling-relevant data is structured for maximum scalability.
+-
+- - better SMP affinity. The old scheduler has a particular weakness that
+-   causes the random bouncing of tasks between CPUs if/when higher
+-   priority/interactive tasks, this was observed and reported by many
+-   people. The reason is that the timeslice recalculation loop first needs
+-   every currently running task to consume its timeslice. But when this
+-   happens on eg. an 8-way system, then this property starves an
+-   increasing number of CPUs from executing any process. Once the last
+-   task that has a timeslice left has finished using up that timeslice,
+-   the recalculation loop is triggered and other CPUs can start executing
+-   tasks again - after having idled around for a number of timer ticks.
+-   The more CPUs, the worse this effect.
+-
+-   Furthermore, this same effect causes the bouncing effect as well:
+-   whenever there is such a 'timeslice squeeze' of the global runqueue,
+-   idle processors start executing tasks which are not affine to that CPU.
+-   (because the affine tasks have finished off their timeslices already.)
+-
+-   The new scheduler solves this problem by distributing timeslices on a
+-   per-CPU basis, without having any global synchronization or
+-   recalculation.
+-
+- - batch scheduling. A significant proportion of computing-intensive tasks
+-   benefit from batch-scheduling, where timeslices are long and processes
+-   are roundrobin scheduled. The new scheduler does such batch-scheduling
+-   of the lowest priority tasks - so nice +19 jobs will get
+-   'batch-scheduled' automatically. With this scheduler, nice +19 jobs are
+-   in essence SCHED_IDLE, from an interactiveness point of view.
+-
+- - handle extreme loads more smoothly, without breakdown and scheduling
+-   storms.
+-
+- - O(1) RT scheduling. For those RT folks who are paranoid about the
+-   O(nr_running) property of the goodness loop and the recalculation loop.
+-
+- - run fork()ed children before the parent. Andrea has pointed out the
+-   advantages of this a few months ago, but patches for this feature
+-   do not work with the old scheduler as well as they should,
+-   because idle processes often steal the new child before the fork()ing
+-   CPU gets to execute it.
+-
+-
+-Design
+-======
+-
+-The core of the new scheduler contains the following mechanisms:
+-
+- - *two* priority-ordered 'priority arrays' per CPU. There is an 'active'
+-   array and an 'expired' array. The active array contains all tasks that
+-   are affine to this CPU and have timeslices left. The expired array
+-   contains all tasks which have used up their timeslices - but this array
+-   is kept sorted as well. The active and expired array is not accessed
+-   directly, it's accessed through two pointers in the per-CPU runqueue
+-   structure. If all active tasks are used up then we 'switch' the two
+-   pointers and from now on the ready-to-go (former-) expired array is the
+-   active array - and the empty active array serves as the new collector
+-   for expired tasks.
+-
+- - there is a 64-bit bitmap cache for array indices. Finding the highest
+-   priority task is thus a matter of two x86 BSFL bit-search instructions.
+-
+-the split-array solution enables us to have an arbitrary number of active
+-and expired tasks, and the recalculation of timeslices can be done
+-immediately when the timeslice expires. Because the arrays are always
+-access through the pointers in the runqueue, switching the two arrays can
+-be done very quickly.
+-
+-this is a hybride priority-list approach coupled with roundrobin
+-scheduling and the array-switch method of distributing timeslices.
+-
+- - there is a per-task 'load estimator'.
+-
+-one of the toughest things to get right is good interactive feel during
+-heavy system load. While playing with various scheduler variants i found
+-that the best interactive feel is achieved not by 'boosting' interactive
+-tasks, but by 'punishing' tasks that want to use more CPU time than there
+-is available. This method is also much easier to do in an O(1) fashion.
+-
+-to establish the actual 'load' the task contributes to the system, a
+-complex-looking but pretty accurate method is used: there is a 4-entry
+-'history' ringbuffer of the task's activities during the last 4 seconds.
+-This ringbuffer is operated without much overhead. The entries tell the
+-scheduler a pretty accurate load-history of the task: has it used up more
+-CPU time or less during the past N seconds. [the size '4' and the interval
+-of 4x 1 seconds was found by lots of experimentation - this part is
+-flexible and can be changed in both directions.]
+-
+-the penalty a task gets for generating more load than the CPU can handle
+-is a priority decrease - there is a maximum amount to this penalty
+-relative to their static priority, so even fully CPU-bound tasks will
+-observe each other's priorities, and will share the CPU accordingly.
+-
+-the SMP load-balancer can be extended/switched with additional parallel
+-computing and cache hierarchy concepts: NUMA scheduling, multi-core CPUs
+-can be supported easily by changing the load-balancer. Right now it's
+-tuned for my SMP systems.
+-
+-i skipped the prev->mm == next->mm advantage - no workload i know of shows
+-any sensitivity to this. It can be added back by sacrificing O(1)
+-schedule() [the current and one-lower priority list can be searched for a
+-that->mm == current->mm condition], but costs a fair number of cycles
+-during a number of important workloads, so i wanted to avoid this as much
+-as possible.
+-
+-- the SMP idle-task startup code was still racy and the new scheduler
+-triggered this. So i streamlined the idle-setup code a bit. We do not call
+-into schedule() before all processors have started up fully and all idle
+-threads are in place.
+-
+-- the patch also cleans up a number of aspects of sched.c - moves code
+-into other areas of the kernel where it's appropriate, and simplifies
+-certain code paths and data constructs. As a result, the new scheduler's
+-code is smaller than the old one.
+-
+-	Ingo
+diff --git a/arch/arm/kernel/sys_arm.c b/arch/arm/kernel/sys_arm.c
+index 9bd1870..0128687 100644
+--- a/arch/arm/kernel/sys_arm.c
++++ b/arch/arm/kernel/sys_arm.c
+@@ -34,23 +34,6 @@ extern unsigned long do_mremap(unsigned long addr, unsigned long old_len,
+ 			       unsigned long new_len, unsigned long flags,
+ 			       unsigned long new_addr);
+ 
+-/*
+- * sys_pipe() is the normal C calling standard for creating
+- * a pipe. It's not the way unix traditionally does this, though.
+- */
+-asmlinkage int sys_pipe(unsigned long __user *fildes)
+-{
+-	int fd[2];
+-	int error;
+-
+-	error = do_pipe(fd);
+-	if (!error) {
+-		if (copy_to_user(fildes, fd, 2*sizeof(int)))
+-			error = -EFAULT;
+-	}
+-	return error;
+-}
+-
+ /* common code for old and new mmaps */
+ inline long do_mmap2(
+ 	unsigned long addr, unsigned long len,
+diff --git a/arch/avr32/kernel/sys_avr32.c b/arch/avr32/kernel/sys_avr32.c
+index 8deb600..8e8911e 100644
+--- a/arch/avr32/kernel/sys_avr32.c
++++ b/arch/avr32/kernel/sys_avr32.c
+@@ -14,19 +14,6 @@
+ #include <asm/mman.h>
+ #include <asm/uaccess.h>
+ 
+-asmlinkage int sys_pipe(unsigned long __user *filedes)
+-{
+-	int fd[2];
+-	int error;
+-
+-	error = do_pipe(fd);
+-	if (!error) {
+-		if (copy_to_user(filedes, fd, sizeof(fd)))
+-			error = -EFAULT;
+-	}
+-	return error;
+-}
+-
+ asmlinkage long sys_mmap2(unsigned long addr, unsigned long len,
+ 			  unsigned long prot, unsigned long flags,
+ 			  unsigned long fd, off_t offset)
+diff --git a/arch/blackfin/kernel/sys_bfin.c b/arch/blackfin/kernel/sys_bfin.c
+index efb7b25..fce49d7 100644
+--- a/arch/blackfin/kernel/sys_bfin.c
++++ b/arch/blackfin/kernel/sys_bfin.c
+@@ -45,23 +45,6 @@
+ #include <asm/cacheflush.h>
+ #include <asm/dma.h>
+ 
+-/*
+- * sys_pipe() is the normal C calling standard for creating
+- * a pipe. It's not the way unix traditionally does this, though.
+- */
+-asmlinkage int sys_pipe(unsigned long __user *fildes)
+-{
+-	int fd[2];
+-	int error;
+-
+-	error = do_pipe(fd);
+-	if (!error) {
+-		if (copy_to_user(fildes, fd, 2 * sizeof(int)))
+-			error = -EFAULT;
+-	}
+-	return error;
+-}
+-
+ /* common code for old and new mmaps */
+ static inline long
+ do_mmap2(unsigned long addr, unsigned long len,
+diff --git a/arch/frv/kernel/sys_frv.c b/arch/frv/kernel/sys_frv.c
+index 04c6b16..49b2cf2 100644
+--- a/arch/frv/kernel/sys_frv.c
++++ b/arch/frv/kernel/sys_frv.c
+@@ -28,23 +28,6 @@
+ #include <asm/setup.h>
+ #include <asm/uaccess.h>
+ 
+-/*
+- * sys_pipe() is the normal C calling standard for creating
+- * a pipe. It's not the way unix traditionally does this, though.
+- */
+-asmlinkage long sys_pipe(unsigned long __user * fildes)
+-{
+-	int fd[2];
+-	int error;
+-
+-	error = do_pipe(fd);
+-	if (!error) {
+-		if (copy_to_user(fildes, fd, 2*sizeof(int)))
+-			error = -EFAULT;
+-	}
+-	return error;
+-}
+-
+ asmlinkage long sys_mmap2(unsigned long addr, unsigned long len,
+ 			  unsigned long prot, unsigned long flags,
+ 			  unsigned long fd, unsigned long pgoff)
+diff --git a/arch/h8300/kernel/sys_h8300.c b/arch/h8300/kernel/sys_h8300.c
+index 00608be..2745656 100644
+--- a/arch/h8300/kernel/sys_h8300.c
++++ b/arch/h8300/kernel/sys_h8300.c
+@@ -27,23 +27,6 @@
+ #include <asm/traps.h>
+ #include <asm/unistd.h>
+ 
+-/*
+- * sys_pipe() is the normal C calling standard for creating
+- * a pipe. It's not the way unix traditionally does this, though.
+- */
+-asmlinkage int sys_pipe(unsigned long * fildes)
+-{
+-	int fd[2];
+-	int error;
+-
+-	error = do_pipe(fd);
+-	if (!error) {
+-		if (copy_to_user(fildes, fd, 2*sizeof(int)))
+-			error = -EFAULT;
+-	}
+-	return error;
+-}
+-
+ /* common code for old and new mmaps */
+ static inline long do_mmap2(
+ 	unsigned long addr, unsigned long len,
+diff --git a/arch/m68k/kernel/sys_m68k.c b/arch/m68k/kernel/sys_m68k.c
+index e892f17..7f54efa 100644
+--- a/arch/m68k/kernel/sys_m68k.c
++++ b/arch/m68k/kernel/sys_m68k.c
+@@ -30,23 +30,6 @@
+ #include <asm/page.h>
+ #include <asm/unistd.h>
+ 
+-/*
+- * sys_pipe() is the normal C calling standard for creating
+- * a pipe. It's not the way unix traditionally does this, though.
+- */
+-asmlinkage int sys_pipe(unsigned long __user * fildes)
+-{
+-	int fd[2];
+-	int error;
+-
+-	error = do_pipe(fd);
+-	if (!error) {
+-		if (copy_to_user(fildes, fd, 2*sizeof(int)))
+-			error = -EFAULT;
+-	}
+-	return error;
+-}
+-
+ /* common code for old and new mmaps */
+ static inline long do_mmap2(
+ 	unsigned long addr, unsigned long len,
+diff --git a/arch/m68k/kernel/traps.c b/arch/m68k/kernel/traps.c
+index fd4858e..75b8340 100644
+--- a/arch/m68k/kernel/traps.c
++++ b/arch/m68k/kernel/traps.c
+@@ -468,15 +468,26 @@ static inline void access_error040(struct frame *fp)
+ 			 * (if do_page_fault didn't fix the mapping,
+                          * the writeback won't do good)
+ 			 */
++disable_wb:
+ #ifdef DEBUG
+ 			printk(".. disabling wb2\n");
+ #endif
+ 			if (fp->un.fmt7.wb2a == fp->un.fmt7.faddr)
+ 				fp->un.fmt7.wb2s &= ~WBV_040;
++			if (fp->un.fmt7.wb3a == fp->un.fmt7.faddr)
++				fp->un.fmt7.wb3s &= ~WBV_040;
+ 		}
+-	} else if (send_fault_sig(&fp->ptregs) > 0) {
+-		printk("68040 access error, ssw=%x\n", ssw);
+-		trap_c(fp);
++	} else {
++		/* In case of a bus error we either kill the process or expect
++		 * the kernel to catch the fault, which then is also responsible
++		 * for cleaning up the mess.
++		 */
++		current->thread.signo = SIGBUS;
++		current->thread.faddr = fp->un.fmt7.faddr;
++		if (send_fault_sig(&fp->ptregs) >= 0)
++			printk("68040 bus error (ssw=%x, faddr=%lx)\n", ssw,
++			       fp->un.fmt7.faddr);
++		goto disable_wb;
+ 	}
+ 
+ 	do_040writebacks(fp);
+diff --git a/arch/m68k/mac/config.c b/arch/m68k/mac/config.c
+index 735a49b..ad3e3ba 100644
+--- a/arch/m68k/mac/config.c
++++ b/arch/m68k/mac/config.c
+@@ -48,9 +48,6 @@
+ struct mac_booter_data mac_bi_data;
+ int mac_bisize = sizeof mac_bi_data;
+ 
+-struct mac_hw_present mac_hw_present;
+-EXPORT_SYMBOL(mac_hw_present);
+-
+ /* New m68k bootinfo stuff and videobase */
+ 
+ extern int m68k_num_memory;
+@@ -817,27 +814,6 @@ void __init mac_identify(void)
+ 		m68k_ramdisk.addr, m68k_ramdisk.size);
+ #endif
+ 
+-	/*
+-	 * TODO: set the various fields in macintosh_config->hw_present here!
+-	 */
+-	switch (macintosh_config->scsi_type) {
+-	case MAC_SCSI_OLD:
+-		MACHW_SET(MAC_SCSI_80);
+-		break;
+-	case MAC_SCSI_QUADRA:
+-	case MAC_SCSI_QUADRA2:
+-	case MAC_SCSI_QUADRA3:
+-		MACHW_SET(MAC_SCSI_96);
+-		if ((macintosh_config->ident == MAC_MODEL_Q900) ||
+-		    (macintosh_config->ident == MAC_MODEL_Q950))
+-			MACHW_SET(MAC_SCSI_96_2);
+-		break;
+-	default:
+-		printk(KERN_WARNING "config.c: wtf: unknown scsi, using 53c80\n");
+-		MACHW_SET(MAC_SCSI_80);
+-		break;
+-	}
+-
+ 	iop_init();
+ 	via_init();
+ 	oss_init();
+diff --git a/arch/m68knommu/kernel/sys_m68k.c b/arch/m68knommu/kernel/sys_m68k.c
+index 65f7a95..7002816 100644
+--- a/arch/m68knommu/kernel/sys_m68k.c
++++ b/arch/m68knommu/kernel/sys_m68k.c
+@@ -28,23 +28,6 @@
+ #include <asm/cacheflush.h>
+ #include <asm/unistd.h>
+ 
+-/*
+- * sys_pipe() is the normal C calling standard for creating
+- * a pipe. It's not the way unix traditionally does this, though.
+- */
+-asmlinkage int sys_pipe(unsigned long * fildes)
+-{
+-	int fd[2];
+-	int error;
+-
+-	error = do_pipe(fd);
+-	if (!error) {
+-		if (copy_to_user(fildes, fd, 2*sizeof(int)))
+-			error = -EFAULT;
+-	}
+-	return error;
+-}
+-
+ /* common code for old and new mmaps */
+ static inline long do_mmap2(
+ 	unsigned long addr, unsigned long len,
+diff --git a/arch/mn10300/kernel/sys_mn10300.c b/arch/mn10300/kernel/sys_mn10300.c
+index 5f17a1e..bca5a84 100644
+--- a/arch/mn10300/kernel/sys_mn10300.c
++++ b/arch/mn10300/kernel/sys_mn10300.c
+@@ -29,23 +29,6 @@
+ #define MIN_MAP_ADDR	PAGE_SIZE	/* minimum fixed mmap address */
+ 
+ /*
+- * sys_pipe() is the normal C calling standard for creating
+- * a pipe. It's not the way Unix traditionally does this, though.
+- */
+-asmlinkage long sys_pipe(unsigned long __user *fildes)
+-{
+-	int fd[2];
+-	int error;
+-
+-	error = do_pipe(fd);
+-	if (!error) {
+-		if (copy_to_user(fildes, fd, 2 * sizeof(int)))
+-			error = -EFAULT;
+-	}
+-	return error;
+-}
+-
+-/*
+  * memory mapping syscall
+  */
+ asmlinkage long sys_mmap2(unsigned long addr, unsigned long len,
+diff --git a/arch/parisc/kernel/sys_parisc.c b/arch/parisc/kernel/sys_parisc.c
+index 4f58921..71b3195 100644
+--- a/arch/parisc/kernel/sys_parisc.c
++++ b/arch/parisc/kernel/sys_parisc.c
+@@ -33,19 +33,6 @@
+ #include <linux/utsname.h>
+ #include <linux/personality.h>
+ 
+-int sys_pipe(int __user *fildes)
+-{
+-	int fd[2];
+-	int error;
+-
+-	error = do_pipe(fd);
+-	if (!error) {
+-		if (copy_to_user(fildes, fd, 2*sizeof(int)))
+-			error = -EFAULT;
+-	}
+-	return error;
+-}
+-
+ static unsigned long get_unshared_area(unsigned long addr, unsigned long len)
+ {
+ 	struct vm_area_struct *vma;
+diff --git a/arch/powerpc/kernel/syscalls.c b/arch/powerpc/kernel/syscalls.c
+index e722a4e..4fe69ca 100644
+--- a/arch/powerpc/kernel/syscalls.c
++++ b/arch/powerpc/kernel/syscalls.c
+@@ -136,23 +136,6 @@ int sys_ipc(uint call, int first, unsigned long second, long third,
+ 	return ret;
+ }
+ 
+-/*
+- * sys_pipe() is the normal C calling standard for creating
+- * a pipe. It's not the way unix traditionally does this, though.
+- */
+-int sys_pipe(int __user *fildes)
+-{
+-	int fd[2];
+-	int error;
+-
+-	error = do_pipe(fd);
+-	if (!error) {
+-		if (copy_to_user(fildes, fd, 2*sizeof(int)))
+-			error = -EFAULT;
+-	}
+-	return error;
+-}
+-
+ static inline unsigned long do_mmap2(unsigned long addr, size_t len,
+ 			unsigned long prot, unsigned long flags,
+ 			unsigned long fd, unsigned long off, int shift)
+diff --git a/arch/powerpc/kvm/booke_guest.c b/arch/powerpc/kvm/booke_guest.c
+index 6d9884a..712d89a 100644
+--- a/arch/powerpc/kvm/booke_guest.c
++++ b/arch/powerpc/kvm/booke_guest.c
+@@ -49,6 +49,7 @@ struct kvm_stats_debugfs_item debugfs_entries[] = {
+ 	{ "inst_emu",   VCPU_STAT(emulated_inst_exits) },
+ 	{ "dec",        VCPU_STAT(dec_exits) },
+ 	{ "ext_intr",   VCPU_STAT(ext_intr_exits) },
++	{ "halt_wakeup", VCPU_STAT(halt_wakeup) },
+ 	{ NULL }
+ };
+ 
+@@ -338,6 +339,11 @@ int kvmppc_handle_exit(struct kvm_run *run, struct kvm_vcpu *vcpu,
+ 		}
+ 		break;
+ 
++	case BOOKE_INTERRUPT_FP_UNAVAIL:
++		kvmppc_queue_exception(vcpu, exit_nr);
++		r = RESUME_GUEST;
++		break;
++
+ 	case BOOKE_INTERRUPT_DATA_STORAGE:
+ 		vcpu->arch.dear = vcpu->arch.fault_dear;
+ 		vcpu->arch.esr = vcpu->arch.fault_esr;
+diff --git a/arch/powerpc/kvm/powerpc.c b/arch/powerpc/kvm/powerpc.c
+index bad40bd..777e0f3 100644
+--- a/arch/powerpc/kvm/powerpc.c
++++ b/arch/powerpc/kvm/powerpc.c
+@@ -36,13 +36,12 @@ gfn_t unalias_gfn(struct kvm *kvm, gfn_t gfn)
+ 
+ int kvm_cpu_has_interrupt(struct kvm_vcpu *v)
+ {
+-	/* XXX implement me */
+-	return 0;
++	return !!(v->arch.pending_exceptions);
+ }
+ 
+ int kvm_arch_vcpu_runnable(struct kvm_vcpu *v)
+ {
+-	return 1;
++	return !(v->arch.msr & MSR_WE);
+ }
+ 
+ 
+@@ -214,6 +213,11 @@ static void kvmppc_decrementer_func(unsigned long data)
+ 	struct kvm_vcpu *vcpu = (struct kvm_vcpu *)data;
+ 
+ 	kvmppc_queue_exception(vcpu, BOOKE_INTERRUPT_DECREMENTER);
++
++	if (waitqueue_active(&vcpu->wq)) {
++		wake_up_interruptible(&vcpu->wq);
++		vcpu->stat.halt_wakeup++;
++	}
+ }
+ 
+ int kvm_arch_vcpu_init(struct kvm_vcpu *vcpu)
+@@ -339,6 +343,8 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu, struct kvm_run *run)
+ 	int r;
+ 	sigset_t sigsaved;
+ 
++	vcpu_load(vcpu);
++
+ 	if (vcpu->sigset_active)
+ 		sigprocmask(SIG_SETMASK, &vcpu->sigset, &sigsaved);
+ 
+@@ -363,12 +369,20 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu, struct kvm_run *run)
+ 	if (vcpu->sigset_active)
+ 		sigprocmask(SIG_SETMASK, &sigsaved, NULL);
+ 
++	vcpu_put(vcpu);
++
+ 	return r;
+ }
+ 
+ int kvm_vcpu_ioctl_interrupt(struct kvm_vcpu *vcpu, struct kvm_interrupt *irq)
+ {
+ 	kvmppc_queue_exception(vcpu, BOOKE_INTERRUPT_EXTERNAL);
++
++	if (waitqueue_active(&vcpu->wq)) {
++		wake_up_interruptible(&vcpu->wq);
++		vcpu->stat.halt_wakeup++;
++	}
++
+ 	return 0;
+ }
+ 
+diff --git a/arch/powerpc/lib/Makefile b/arch/powerpc/lib/Makefile
+index 4bb023f..f1d2cdc 100644
+--- a/arch/powerpc/lib/Makefile
++++ b/arch/powerpc/lib/Makefile
+@@ -23,3 +23,4 @@ obj-$(CONFIG_SMP)	+= locks.o
+ endif
+ 
+ obj-$(CONFIG_PPC_LIB_RHEAP) += rheap.o
++obj-$(CONFIG_HAS_IOMEM)	+= devres.o
+diff --git a/arch/powerpc/lib/devres.c b/arch/powerpc/lib/devres.c
+new file mode 100644
+index 0000000..292115d
+--- /dev/null
++++ b/arch/powerpc/lib/devres.c
+@@ -0,0 +1,42 @@
++/*
++ * Copyright (C) 2008 Freescale Semiconductor, Inc.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License
++ * as published by the Free Software Foundation; either version
++ * 2 of the License, or (at your option) any later version.
++ */
++
++#include <linux/device.h>	/* devres_*(), devm_ioremap_release() */
++#include <linux/io.h>		/* ioremap_flags() */
++#include <linux/module.h>	/* EXPORT_SYMBOL() */
++
++/**
++ * devm_ioremap_prot - Managed ioremap_flags()
++ * @dev: Generic device to remap IO address for
++ * @offset: BUS offset to map
++ * @size: Size of map
++ * @flags: Page flags
++ *
++ * Managed ioremap_prot().  Map is automatically unmapped on driver
++ * detach.
++ */
++void __iomem *devm_ioremap_prot(struct device *dev, resource_size_t offset,
++				 size_t size, unsigned long flags)
++{
++	void __iomem **ptr, *addr;
++
++	ptr = devres_alloc(devm_ioremap_release, sizeof(*ptr), GFP_KERNEL);
++	if (!ptr)
++		return NULL;
++
++	addr = ioremap_flags(offset, size, flags);
++	if (addr) {
++		*ptr = addr;
++		devres_add(dev, ptr);
++	} else
++		devres_free(ptr);
++
++	return addr;
++}
++EXPORT_SYMBOL(devm_ioremap_prot);
+diff --git a/arch/powerpc/platforms/pseries/scanlog.c b/arch/powerpc/platforms/pseries/scanlog.c
+index bec3803..417eca7 100644
+--- a/arch/powerpc/platforms/pseries/scanlog.c
++++ b/arch/powerpc/platforms/pseries/scanlog.c
+@@ -55,11 +55,6 @@ static ssize_t scanlog_read(struct file *file, char __user *buf,
+         dp = PDE(inode);
+  	data = (unsigned int *)dp->data;
+ 
+-	if (!data) {
+-		printk(KERN_ERR "scanlog: read failed no data\n");
+-		return -EIO;
+-	}
+-
+ 	if (count > RTAS_DATA_BUF_SIZE)
+ 		count = RTAS_DATA_BUF_SIZE;
+ 
+@@ -146,11 +141,6 @@ static int scanlog_open(struct inode * inode, struct file * file)
+ 	struct proc_dir_entry *dp = PDE(inode);
+ 	unsigned int *data = (unsigned int *)dp->data;
+ 
+-	if (!data) {
+-		printk(KERN_ERR "scanlog: open failed no data\n");
+-		return -EIO;
+-	}
+-
+ 	if (data[0] != 0) {
+ 		/* This imperfect test stops a second copy of the
+ 		 * data (or a reset while data is being copied)
+@@ -168,10 +158,6 @@ static int scanlog_release(struct inode * inode, struct file * file)
+ 	struct proc_dir_entry *dp = PDE(inode);
+ 	unsigned int *data = (unsigned int *)dp->data;
+ 
+-	if (!data) {
+-		printk(KERN_ERR "scanlog: release failed no data\n");
+-		return -EIO;
+-	}
+ 	data[0] = 0;
+ 
+ 	return 0;
+@@ -200,12 +186,11 @@ static int __init scanlog_init(void)
+ 	if (!data)
+ 		goto err;
+ 
+-	ent = proc_create("ppc64/rtas/scan-log-dump", S_IRUSR, NULL,
+-			  &scanlog_fops);
++	ent = proc_create_data("ppc64/rtas/scan-log-dump", S_IRUSR, NULL,
++			       &scanlog_fops, data);
+ 	if (!ent)
+ 		goto err;
+ 
+-	ent->data = data;
+ 	proc_ppc64_scan_log_dump = ent;
+ 
+ 	return 0;
+diff --git a/arch/s390/kernel/sys_s390.c b/arch/s390/kernel/sys_s390.c
+index 988d0d6..5fdb799 100644
+--- a/arch/s390/kernel/sys_s390.c
++++ b/arch/s390/kernel/sys_s390.c
+@@ -32,23 +32,6 @@
+ #include <asm/uaccess.h>
+ #include "entry.h"
+ 
+-/*
+- * sys_pipe() is the normal C calling standard for creating
+- * a pipe. It's not the way Unix traditionally does this, though.
+- */
+-asmlinkage long sys_pipe(unsigned long __user *fildes)
+-{
+-	int fd[2];
+-	int error;
+-
+-	error = do_pipe(fd);
+-	if (!error) {
+-		if (copy_to_user(fildes, fd, 2*sizeof(int)))
+-			error = -EFAULT;
+-	}
+-	return error;
+-}
+-
+ /* common code for old and new mmaps */
+ static inline long do_mmap2(
+ 	unsigned long addr, unsigned long len,
+diff --git a/arch/sh/kernel/sys_sh64.c b/arch/sh/kernel/sys_sh64.c
+index 578004d..91fb844 100644
+--- a/arch/sh/kernel/sys_sh64.c
++++ b/arch/sh/kernel/sys_sh64.c
+@@ -31,23 +31,6 @@
+ #include <asm/unistd.h>
+ 
+ /*
+- * sys_pipe() is the normal C calling standard for creating
+- * a pipe. It's not the way Unix traditionally does this, though.
+- */
+-asmlinkage int sys_pipe(unsigned long * fildes)
+-{
+-        int fd[2];
+-        int error;
+-
+-        error = do_pipe(fd);
+-        if (!error) {
+-                if (copy_to_user(fildes, fd, 2*sizeof(int)))
+-                        error = -EFAULT;
+-        }
+-        return error;
+-}
+-
+-/*
+  * Do a system call from kernel instead of calling sys_execve so we
+  * end up with proper pt_regs.
+  */
+diff --git a/arch/um/Makefile b/arch/um/Makefile
+index dbeab15..01b97c1 100644
+--- a/arch/um/Makefile
++++ b/arch/um/Makefile
+@@ -77,7 +77,10 @@ include $(srctree)/$(ARCH_DIR)/Makefile-os-$(OS)
+ KERNEL_DEFINES = $(strip -Derrno=kernel_errno -Dsigprocmask=kernel_sigprocmask \
+ 			 -Dmktime=kernel_mktime $(ARCH_KERNEL_DEFINES))
+ KBUILD_CFLAGS += $(KERNEL_DEFINES)
+-KBUILD_CFLAGS += $(call cc-option,-fno-unit-at-a-time,)
++# Disable unit-at-a-time mode on pre-gcc-4.0 compilers, it makes gcc use
++# a lot more stack due to the lack of sharing of stacklots:
++KBUILD_CFLAGS += $(shell if [ $(call cc-version) -lt 0400 ] ; then \
++			echo $(call cc-option,-fno-unit-at-a-time); fi ;)
+ 
+ PHONY += linux
+ 
+diff --git a/arch/um/kernel/syscall.c b/arch/um/kernel/syscall.c
+index 9cffc62..128ee85 100644
+--- a/arch/um/kernel/syscall.c
++++ b/arch/um/kernel/syscall.c
+@@ -73,23 +73,6 @@ long old_mmap(unsigned long addr, unsigned long len,
+  out:
+ 	return err;
+ }
+-/*
+- * sys_pipe() is the normal C calling standard for creating
+- * a pipe. It's not the way unix traditionally does this, though.
+- */
+-long sys_pipe(unsigned long __user * fildes)
+-{
+-	int fd[2];
+-	long error;
+-
+-	error = do_pipe(fd);
+-	if (!error) {
+-		if (copy_to_user(fildes, fd, sizeof(fd)))
+-			error = -EFAULT;
+-	}
+-	return error;
+-}
+-
+ 
+ long sys_uname(struct old_utsname __user * name)
+ {
+diff --git a/arch/v850/kernel/syscalls.c b/arch/v850/kernel/syscalls.c
+index 003db9c..1a83daf 100644
+--- a/arch/v850/kernel/syscalls.c
++++ b/arch/v850/kernel/syscalls.c
+@@ -132,23 +132,6 @@ sys_ipc (uint call, int first, int second, int third, void *ptr, long fifth)
+ 	return ret;
+ }
+ 
+-/*
+- * sys_pipe() is the normal C calling standard for creating
+- * a pipe. It's not the way unix traditionally does this, though.
+- */
+-int sys_pipe (int *fildes)
+-{
+-	int fd[2];
+-	int error;
+-
+-	error = do_pipe (fd);
+-	if (!error) {
+-		if (copy_to_user (fildes, fd, 2*sizeof (int)))
+-			error = -EFAULT;
+-	}
+-	return error;
+-}
+-
+ static inline unsigned long
+ do_mmap2 (unsigned long addr, size_t len,
+ 	 unsigned long prot, unsigned long flags,
+diff --git a/arch/x86/Kconfig b/arch/x86/Kconfig
+index c3f8809..bbcafaa 100644
+--- a/arch/x86/Kconfig
++++ b/arch/x86/Kconfig
+@@ -18,6 +18,7 @@ config X86_64
+ ### Arch settings
+ config X86
+ 	def_bool y
++	select HAVE_UNSTABLE_SCHED_CLOCK
+ 	select HAVE_IDE
+ 	select HAVE_OPROFILE
+ 	select HAVE_KPROBES
+@@ -1661,6 +1662,7 @@ config GEODE_MFGPT_TIMER
+ 
+ config OLPC
+ 	bool "One Laptop Per Child support"
++	depends on MGEODE_LX
+ 	default n
+ 	help
+ 	  Add support for detecting the unique features of the OLPC
+diff --git a/arch/x86/boot/compressed/relocs.c b/arch/x86/boot/compressed/relocs.c
+index d01ea42..edaadea 100644
+--- a/arch/x86/boot/compressed/relocs.c
++++ b/arch/x86/boot/compressed/relocs.c
+@@ -191,7 +191,7 @@ static void read_ehdr(FILE *fp)
+ 		die("Cannot read ELF header: %s\n",
+ 			strerror(errno));
+ 	}
+-	if (memcmp(ehdr.e_ident, ELFMAG, 4) != 0) {
++	if (memcmp(ehdr.e_ident, ELFMAG, SELFMAG) != 0) {
+ 		die("No ELF magic\n");
+ 	}
+ 	if (ehdr.e_ident[EI_CLASS] != ELFCLASS32) {
+diff --git a/arch/x86/kernel/acpi/Makefile b/arch/x86/kernel/acpi/Makefile
+index 7335959..fd5ca97 100644
+--- a/arch/x86/kernel/acpi/Makefile
++++ b/arch/x86/kernel/acpi/Makefile
+@@ -10,5 +10,5 @@ endif
+ $(obj)/wakeup_rm.o:    $(obj)/realmode/wakeup.bin
+ 
+ $(obj)/realmode/wakeup.bin: FORCE
+-	$(Q)$(MAKE) $(build)=$(obj)/realmode $@
++	$(Q)$(MAKE) $(build)=$(obj)/realmode
+ 
+diff --git a/arch/x86/kernel/acpi/realmode/Makefile b/arch/x86/kernel/acpi/realmode/Makefile
+index 0929008..1c31cc0 100644
+--- a/arch/x86/kernel/acpi/realmode/Makefile
++++ b/arch/x86/kernel/acpi/realmode/Makefile
+@@ -6,7 +6,8 @@
+ # for more details.
+ #
+ 
+-targets		:= wakeup.bin wakeup.elf
++always		:= wakeup.bin
++targets		:= wakeup.elf wakeup.lds
+ 
+ wakeup-y	+= wakeup.o wakemain.o video-mode.o copy.o
+ 
+@@ -48,7 +49,7 @@ LDFLAGS_wakeup.elf	:= -T
+ 
+ CPPFLAGS_wakeup.lds += -P -C
+ 
+-$(obj)/wakeup.elf: $(src)/wakeup.lds $(WAKEUP_OBJS) FORCE
++$(obj)/wakeup.elf: $(obj)/wakeup.lds $(WAKEUP_OBJS) FORCE
+ 	$(call if_changed,ld)
+ 
+ OBJCOPYFLAGS_wakeup.bin	:= -O binary
+diff --git a/arch/x86/kernel/kvmclock.c b/arch/x86/kernel/kvmclock.c
+index ddee040..4bc1be5 100644
+--- a/arch/x86/kernel/kvmclock.c
++++ b/arch/x86/kernel/kvmclock.c
+@@ -133,6 +133,7 @@ static int kvm_register_clock(void)
+ 	return native_write_msr_safe(MSR_KVM_SYSTEM_TIME, low, high);
+ }
+ 
++#ifdef CONFIG_X86_LOCAL_APIC
+ static void kvm_setup_secondary_clock(void)
+ {
+ 	/*
+@@ -143,6 +144,7 @@ static void kvm_setup_secondary_clock(void)
+ 	/* ok, done with our trickery, call native */
+ 	setup_secondary_APIC_clock();
+ }
++#endif
+ 
+ /*
+  * After the clock is registered, the host will keep writing to the
+@@ -177,7 +179,9 @@ void __init kvmclock_init(void)
+ 		pv_time_ops.get_wallclock = kvm_get_wallclock;
+ 		pv_time_ops.set_wallclock = kvm_set_wallclock;
+ 		pv_time_ops.sched_clock = kvm_clock_read;
++#ifdef CONFIG_X86_LOCAL_APIC
+ 		pv_apic_ops.setup_secondary_clock = kvm_setup_secondary_clock;
++#endif
+ 		machine_ops.shutdown  = kvm_shutdown;
+ #ifdef CONFIG_KEXEC
+ 		machine_ops.crash_shutdown  = kvm_crash_shutdown;
+diff --git a/arch/x86/kernel/mpparse.c b/arch/x86/kernel/mpparse.c
+index 3e2c54d..404683b 100644
+--- a/arch/x86/kernel/mpparse.c
++++ b/arch/x86/kernel/mpparse.c
+@@ -794,6 +794,11 @@ void __init find_smp_config(void)
+                             ACPI-based MP Configuration
+    -------------------------------------------------------------------------- */
+ 
++/*
++ * Keep this outside and initialized to 0, for !CONFIG_ACPI builds:
++ */
++int es7000_plat;
++
+ #ifdef CONFIG_ACPI
+ 
+ #ifdef	CONFIG_X86_IO_APIC
+@@ -909,8 +914,6 @@ void __init mp_override_legacy_irq(u8 bus_irq, u8 polarity, u8 trigger, u32 gsi)
+ 	MP_intsrc_info(&intsrc);
+ }
+ 
+-int es7000_plat;
+-
+ void __init mp_config_acpi_legacy_irqs(void)
+ {
+ 	struct mpc_config_intsrc intsrc;
+diff --git a/arch/x86/kernel/reboot.c b/arch/x86/kernel/reboot.c
+index 07c6d42..f6be7d5 100644
+--- a/arch/x86/kernel/reboot.c
++++ b/arch/x86/kernel/reboot.c
+@@ -149,7 +149,6 @@ static struct dmi_system_id __initdata reboot_dmi_table[] = {
+ 		.matches = {
+ 			DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
+ 			DMI_MATCH(DMI_PRODUCT_NAME, "OptiPlex 745"),
+-			DMI_MATCH(DMI_BOARD_NAME, "0WF810"),
+ 		},
+ 	},
+ 	{       /* Handle problems with rebooting on Dell Optiplex 745's DFF*/
+diff --git a/arch/x86/kernel/setup.c b/arch/x86/kernel/setup.c
+index c0c68c1..cc6f5eb 100644
+--- a/arch/x86/kernel/setup.c
++++ b/arch/x86/kernel/setup.c
+@@ -95,7 +95,7 @@ void __init setup_per_cpu_areas(void)
+ 
+ 	/* Copy section for each CPU (we discard the original) */
+ 	size = PERCPU_ENOUGH_ROOM;
+-	printk(KERN_INFO "PERCPU: Allocating %lu bytes of per cpu data\n",
++	printk(KERN_INFO "PERCPU: Allocating %zd bytes of per cpu data\n",
+ 			  size);
+ 
+ 	for_each_possible_cpu(i) {
+diff --git a/arch/x86/kernel/smpboot.c b/arch/x86/kernel/smpboot.c
+index 84241a2..6b087ab 100644
+--- a/arch/x86/kernel/smpboot.c
++++ b/arch/x86/kernel/smpboot.c
+@@ -299,7 +299,7 @@ static void __cpuinit smp_callin(void)
+ /*
+  * Activate a secondary processor.
+  */
+-void __cpuinit start_secondary(void *unused)
++static void __cpuinit start_secondary(void *unused)
+ {
+ 	/*
+ 	 * Don't put *anything* before cpu_init(), SMP booting is too
+@@ -1306,7 +1306,7 @@ static void remove_siblinginfo(int cpu)
+ 	cpu_clear(cpu, cpu_sibling_setup_map);
+ }
+ 
+-int additional_cpus __initdata = -1;
++static int additional_cpus __initdata = -1;
+ 
+ static __init int setup_additional_cpus(char *s)
+ {
+diff --git a/arch/x86/kernel/sys_i386_32.c b/arch/x86/kernel/sys_i386_32.c
+index a86d26f..d2ab52c 100644
+--- a/arch/x86/kernel/sys_i386_32.c
++++ b/arch/x86/kernel/sys_i386_32.c
+@@ -22,23 +22,6 @@
+ #include <asm/uaccess.h>
+ #include <asm/unistd.h>
+ 
+-/*
+- * sys_pipe() is the normal C calling standard for creating
+- * a pipe. It's not the way Unix traditionally does this, though.
+- */
+-asmlinkage int sys_pipe(unsigned long __user * fildes)
+-{
+-	int fd[2];
+-	int error;
+-
+-	error = do_pipe(fd);
+-	if (!error) {
+-		if (copy_to_user(fildes, fd, 2*sizeof(int)))
+-			error = -EFAULT;
+-	}
+-	return error;
+-}
+-
+ asmlinkage long sys_mmap2(unsigned long addr, unsigned long len,
+ 			  unsigned long prot, unsigned long flags,
+ 			  unsigned long fd, unsigned long pgoff)
+diff --git a/arch/x86/kernel/sys_x86_64.c b/arch/x86/kernel/sys_x86_64.c
+index bd802a5..3b360ef 100644
+--- a/arch/x86/kernel/sys_x86_64.c
++++ b/arch/x86/kernel/sys_x86_64.c
+@@ -17,23 +17,6 @@
+ #include <asm/uaccess.h>
+ #include <asm/ia32.h>
+ 
+-/*
+- * sys_pipe() is the normal C calling standard for creating
+- * a pipe. It's not the way Unix traditionally does this, though.
+- */
+-asmlinkage long sys_pipe(int __user *fildes)
+-{
+-	int fd[2];
+-	int error;
+-
+-	error = do_pipe(fd);
+-	if (!error) {
+-		if (copy_to_user(fildes, fd, 2*sizeof(int)))
+-			error = -EFAULT;
+-	}
+-	return error;
+-}
+-
+ asmlinkage long sys_mmap(unsigned long addr, unsigned long len, unsigned long prot, unsigned long flags,
+ 	unsigned long fd, unsigned long off)
+ {
+diff --git a/arch/x86/kvm/i8254.c b/arch/x86/kvm/i8254.c
+index 4c943ea..3324d90 100644
+--- a/arch/x86/kvm/i8254.c
++++ b/arch/x86/kvm/i8254.c
+@@ -288,6 +288,8 @@ static void pit_load_count(struct kvm *kvm, int channel, u32 val)
+ 	 * mode 1 is one shot, mode 2 is period, otherwise del timer */
+ 	switch (ps->channels[0].mode) {
+ 	case 1:
++        /* FIXME: enhance mode 4 precision */
++	case 4:
+ 		create_pit_timer(&ps->pit_timer, val, 0);
+ 		break;
+ 	case 2:
+diff --git a/arch/x86/kvm/mmu.c b/arch/x86/kvm/mmu.c
+index 2ad6f54..36c5406 100644
+--- a/arch/x86/kvm/mmu.c
++++ b/arch/x86/kvm/mmu.c
+@@ -79,36 +79,6 @@ static int dbg = 1;
+ 	}
+ #endif
+ 
+-#define PT64_PT_BITS 9
+-#define PT64_ENT_PER_PAGE (1 << PT64_PT_BITS)
+-#define PT32_PT_BITS 10
+-#define PT32_ENT_PER_PAGE (1 << PT32_PT_BITS)
+-
+-#define PT_WRITABLE_SHIFT 1
+-
+-#define PT_PRESENT_MASK (1ULL << 0)
+-#define PT_WRITABLE_MASK (1ULL << PT_WRITABLE_SHIFT)
+-#define PT_USER_MASK (1ULL << 2)
+-#define PT_PWT_MASK (1ULL << 3)
+-#define PT_PCD_MASK (1ULL << 4)
+-#define PT_ACCESSED_MASK (1ULL << 5)
+-#define PT_DIRTY_MASK (1ULL << 6)
+-#define PT_PAGE_SIZE_MASK (1ULL << 7)
+-#define PT_PAT_MASK (1ULL << 7)
+-#define PT_GLOBAL_MASK (1ULL << 8)
+-#define PT64_NX_SHIFT 63
+-#define PT64_NX_MASK (1ULL << PT64_NX_SHIFT)
+-
+-#define PT_PAT_SHIFT 7
+-#define PT_DIR_PAT_SHIFT 12
+-#define PT_DIR_PAT_MASK (1ULL << PT_DIR_PAT_SHIFT)
+-
+-#define PT32_DIR_PSE36_SIZE 4
+-#define PT32_DIR_PSE36_SHIFT 13
+-#define PT32_DIR_PSE36_MASK \
+-	(((1ULL << PT32_DIR_PSE36_SIZE) - 1) << PT32_DIR_PSE36_SHIFT)
+-
+-
+ #define PT_FIRST_AVAIL_BITS_SHIFT 9
+ #define PT64_SECOND_AVAIL_BITS_SHIFT 52
+ 
+@@ -154,10 +124,6 @@ static int dbg = 1;
+ #define PFERR_USER_MASK (1U << 2)
+ #define PFERR_FETCH_MASK (1U << 4)
+ 
+-#define PT64_ROOT_LEVEL 4
+-#define PT32_ROOT_LEVEL 2
+-#define PT32E_ROOT_LEVEL 3
+-
+ #define PT_DIRECTORY_LEVEL 2
+ #define PT_PAGE_TABLE_LEVEL 1
+ 
+@@ -186,6 +152,12 @@ static struct kmem_cache *mmu_page_header_cache;
+ 
+ static u64 __read_mostly shadow_trap_nonpresent_pte;
+ static u64 __read_mostly shadow_notrap_nonpresent_pte;
++static u64 __read_mostly shadow_base_present_pte;
++static u64 __read_mostly shadow_nx_mask;
++static u64 __read_mostly shadow_x_mask;	/* mutual exclusive with nx_mask */
++static u64 __read_mostly shadow_user_mask;
++static u64 __read_mostly shadow_accessed_mask;
++static u64 __read_mostly shadow_dirty_mask;
+ 
+ void kvm_mmu_set_nonpresent_ptes(u64 trap_pte, u64 notrap_pte)
+ {
+@@ -194,6 +166,23 @@ void kvm_mmu_set_nonpresent_ptes(u64 trap_pte, u64 notrap_pte)
+ }
+ EXPORT_SYMBOL_GPL(kvm_mmu_set_nonpresent_ptes);
+ 
++void kvm_mmu_set_base_ptes(u64 base_pte)
++{
++	shadow_base_present_pte = base_pte;
++}
++EXPORT_SYMBOL_GPL(kvm_mmu_set_base_ptes);
++
++void kvm_mmu_set_mask_ptes(u64 user_mask, u64 accessed_mask,
++		u64 dirty_mask, u64 nx_mask, u64 x_mask)
++{
++	shadow_user_mask = user_mask;
++	shadow_accessed_mask = accessed_mask;
++	shadow_dirty_mask = dirty_mask;
++	shadow_nx_mask = nx_mask;
++	shadow_x_mask = x_mask;
++}
++EXPORT_SYMBOL_GPL(kvm_mmu_set_mask_ptes);
++
+ static int is_write_protection(struct kvm_vcpu *vcpu)
+ {
+ 	return vcpu->arch.cr0 & X86_CR0_WP;
+@@ -232,7 +221,7 @@ static int is_writeble_pte(unsigned long pte)
+ 
+ static int is_dirty_pte(unsigned long pte)
+ {
+-	return pte & PT_DIRTY_MASK;
++	return pte & shadow_dirty_mask;
+ }
+ 
+ static int is_rmap_pte(u64 pte)
+@@ -387,7 +376,6 @@ static void account_shadowed(struct kvm *kvm, gfn_t gfn)
+ 
+ 	write_count = slot_largepage_idx(gfn, gfn_to_memslot(kvm, gfn));
+ 	*write_count += 1;
+-	WARN_ON(*write_count > KVM_PAGES_PER_HPAGE);
+ }
+ 
+ static void unaccount_shadowed(struct kvm *kvm, gfn_t gfn)
+@@ -547,7 +535,7 @@ static void rmap_remove(struct kvm *kvm, u64 *spte)
+ 		return;
+ 	sp = page_header(__pa(spte));
+ 	pfn = spte_to_pfn(*spte);
+-	if (*spte & PT_ACCESSED_MASK)
++	if (*spte & shadow_accessed_mask)
+ 		kvm_set_pfn_accessed(pfn);
+ 	if (is_writeble_pte(*spte))
+ 		kvm_release_pfn_dirty(pfn);
+@@ -1073,17 +1061,17 @@ static void mmu_set_spte(struct kvm_vcpu *vcpu, u64 *shadow_pte,
+ 	 * whether the guest actually used the pte (in order to detect
+ 	 * demand paging).
+ 	 */
+-	spte = PT_PRESENT_MASK | PT_DIRTY_MASK;
++	spte = shadow_base_present_pte | shadow_dirty_mask;
+ 	if (!speculative)
+ 		pte_access |= PT_ACCESSED_MASK;
+ 	if (!dirty)
+ 		pte_access &= ~ACC_WRITE_MASK;
+-	if (!(pte_access & ACC_EXEC_MASK))
+-		spte |= PT64_NX_MASK;
+-
+-	spte |= PT_PRESENT_MASK;
++	if (pte_access & ACC_EXEC_MASK)
++		spte |= shadow_x_mask;
++	else
++		spte |= shadow_nx_mask;
+ 	if (pte_access & ACC_USER_MASK)
+-		spte |= PT_USER_MASK;
++		spte |= shadow_user_mask;
+ 	if (largepage)
+ 		spte |= PT_PAGE_SIZE_MASK;
+ 
+@@ -1188,8 +1176,9 @@ static int __direct_map(struct kvm_vcpu *vcpu, gpa_t v, int write,
+ 				return -ENOMEM;
+ 			}
+ 
+-			table[index] = __pa(new_table->spt) | PT_PRESENT_MASK
+-				| PT_WRITABLE_MASK | PT_USER_MASK;
++			table[index] = __pa(new_table->spt)
++				| PT_PRESENT_MASK | PT_WRITABLE_MASK
++				| shadow_user_mask | shadow_x_mask;
+ 		}
+ 		table_addr = table[index] & PT64_BASE_ADDR_MASK;
+ 	}
+@@ -1244,7 +1233,6 @@ static void mmu_free_roots(struct kvm_vcpu *vcpu)
+ 	if (!VALID_PAGE(vcpu->arch.mmu.root_hpa))
+ 		return;
+ 	spin_lock(&vcpu->kvm->mmu_lock);
+-#ifdef CONFIG_X86_64
+ 	if (vcpu->arch.mmu.shadow_root_level == PT64_ROOT_LEVEL) {
+ 		hpa_t root = vcpu->arch.mmu.root_hpa;
+ 
+@@ -1256,7 +1244,6 @@ static void mmu_free_roots(struct kvm_vcpu *vcpu)
+ 		spin_unlock(&vcpu->kvm->mmu_lock);
+ 		return;
+ 	}
+-#endif
+ 	for (i = 0; i < 4; ++i) {
+ 		hpa_t root = vcpu->arch.mmu.pae_root[i];
+ 
+@@ -1282,7 +1269,6 @@ static void mmu_alloc_roots(struct kvm_vcpu *vcpu)
+ 
+ 	root_gfn = vcpu->arch.cr3 >> PAGE_SHIFT;
+ 
+-#ifdef CONFIG_X86_64
+ 	if (vcpu->arch.mmu.shadow_root_level == PT64_ROOT_LEVEL) {
+ 		hpa_t root = vcpu->arch.mmu.root_hpa;
+ 
+@@ -1297,7 +1283,6 @@ static void mmu_alloc_roots(struct kvm_vcpu *vcpu)
+ 		vcpu->arch.mmu.root_hpa = root;
+ 		return;
+ 	}
+-#endif
+ 	metaphysical = !is_paging(vcpu);
+ 	if (tdp_enabled)
+ 		metaphysical = 1;
+@@ -1377,7 +1362,7 @@ static int tdp_page_fault(struct kvm_vcpu *vcpu, gva_t gpa,
+ 	spin_lock(&vcpu->kvm->mmu_lock);
+ 	kvm_mmu_free_some_pages(vcpu);
+ 	r = __direct_map(vcpu, gpa, error_code & PFERR_WRITE_MASK,
+-			 largepage, gfn, pfn, TDP_ROOT_LEVEL);
++			 largepage, gfn, pfn, kvm_x86_ops->get_tdp_level());
+ 	spin_unlock(&vcpu->kvm->mmu_lock);
+ 
+ 	return r;
+@@ -1484,7 +1469,7 @@ static int init_kvm_tdp_mmu(struct kvm_vcpu *vcpu)
+ 	context->page_fault = tdp_page_fault;
+ 	context->free = nonpaging_free;
+ 	context->prefetch_page = nonpaging_prefetch_page;
+-	context->shadow_root_level = TDP_ROOT_LEVEL;
++	context->shadow_root_level = kvm_x86_ops->get_tdp_level();
+ 	context->root_hpa = INVALID_PAGE;
+ 
+ 	if (!is_paging(vcpu)) {
+@@ -1633,7 +1618,7 @@ static bool last_updated_pte_accessed(struct kvm_vcpu *vcpu)
+ {
+ 	u64 *spte = vcpu->arch.last_pte_updated;
+ 
+-	return !!(spte && (*spte & PT_ACCESSED_MASK));
++	return !!(spte && (*spte & shadow_accessed_mask));
+ }
+ 
+ static void mmu_guess_page_from_pte_write(struct kvm_vcpu *vcpu, gpa_t gpa,
+diff --git a/arch/x86/kvm/mmu.h b/arch/x86/kvm/mmu.h
+index e64e9f5..1730757 100644
+--- a/arch/x86/kvm/mmu.h
++++ b/arch/x86/kvm/mmu.h
+@@ -3,11 +3,38 @@
+ 
+ #include <linux/kvm_host.h>
+ 
+-#ifdef CONFIG_X86_64
+-#define TDP_ROOT_LEVEL PT64_ROOT_LEVEL
+-#else
+-#define TDP_ROOT_LEVEL PT32E_ROOT_LEVEL
+-#endif
++#define PT64_PT_BITS 9
++#define PT64_ENT_PER_PAGE (1 << PT64_PT_BITS)
++#define PT32_PT_BITS 10
++#define PT32_ENT_PER_PAGE (1 << PT32_PT_BITS)
++
++#define PT_WRITABLE_SHIFT 1
++
++#define PT_PRESENT_MASK (1ULL << 0)
++#define PT_WRITABLE_MASK (1ULL << PT_WRITABLE_SHIFT)
++#define PT_USER_MASK (1ULL << 2)
++#define PT_PWT_MASK (1ULL << 3)
++#define PT_PCD_MASK (1ULL << 4)
++#define PT_ACCESSED_MASK (1ULL << 5)
++#define PT_DIRTY_MASK (1ULL << 6)
++#define PT_PAGE_SIZE_MASK (1ULL << 7)
++#define PT_PAT_MASK (1ULL << 7)
++#define PT_GLOBAL_MASK (1ULL << 8)
++#define PT64_NX_SHIFT 63
++#define PT64_NX_MASK (1ULL << PT64_NX_SHIFT)
++
++#define PT_PAT_SHIFT 7
++#define PT_DIR_PAT_SHIFT 12
++#define PT_DIR_PAT_MASK (1ULL << PT_DIR_PAT_SHIFT)
++
++#define PT32_DIR_PSE36_SIZE 4
++#define PT32_DIR_PSE36_SHIFT 13
++#define PT32_DIR_PSE36_MASK \
++	(((1ULL << PT32_DIR_PSE36_SIZE) - 1) << PT32_DIR_PSE36_SHIFT)
++
++#define PT64_ROOT_LEVEL 4
++#define PT32_ROOT_LEVEL 2
++#define PT32E_ROOT_LEVEL 3
+ 
+ static inline void kvm_mmu_free_some_pages(struct kvm_vcpu *vcpu)
+ {
+diff --git a/arch/x86/kvm/svm.c b/arch/x86/kvm/svm.c
+index 89e0be2..ab22615 100644
+--- a/arch/x86/kvm/svm.c
++++ b/arch/x86/kvm/svm.c
+@@ -1863,6 +1863,15 @@ static bool svm_cpu_has_accelerated_tpr(void)
+ 	return false;
+ }
+ 
++static int get_npt_level(void)
++{
++#ifdef CONFIG_X86_64
++	return PT64_ROOT_LEVEL;
++#else
++	return PT32E_ROOT_LEVEL;
++#endif
++}
++
+ static struct kvm_x86_ops svm_x86_ops = {
+ 	.cpu_has_kvm_support = has_svm,
+ 	.disabled_by_bios = is_disabled,
+@@ -1920,6 +1929,7 @@ static struct kvm_x86_ops svm_x86_ops = {
+ 	.inject_pending_vectors = do_interrupt_requests,
+ 
+ 	.set_tss_addr = svm_set_tss_addr,
++	.get_tdp_level = get_npt_level,
+ };
+ 
+ static int __init svm_init(void)
+diff --git a/arch/x86/kvm/vmx.c b/arch/x86/kvm/vmx.c
+index 8e5d664..bfe4db1 100644
+--- a/arch/x86/kvm/vmx.c
++++ b/arch/x86/kvm/vmx.c
+@@ -42,6 +42,9 @@ module_param(enable_vpid, bool, 0);
+ static int flexpriority_enabled = 1;
+ module_param(flexpriority_enabled, bool, 0);
+ 
++static int enable_ept = 1;
++module_param(enable_ept, bool, 0);
++
+ struct vmcs {
+ 	u32 revision_id;
+ 	u32 abort;
+@@ -84,7 +87,7 @@ static inline struct vcpu_vmx *to_vmx(struct kvm_vcpu *vcpu)
+ 	return container_of(vcpu, struct vcpu_vmx, vcpu);
+ }
+ 
+-static int init_rmode_tss(struct kvm *kvm);
++static int init_rmode(struct kvm *kvm);
+ 
+ static DEFINE_PER_CPU(struct vmcs *, vmxarea);
+ static DEFINE_PER_CPU(struct vmcs *, current_vmcs);
+@@ -107,6 +110,11 @@ static struct vmcs_config {
+ 	u32 vmentry_ctrl;
+ } vmcs_config;
+ 
++struct vmx_capability {
++	u32 ept;
++	u32 vpid;
++} vmx_capability;
++
+ #define VMX_SEGMENT_FIELD(seg)					\
+ 	[VCPU_SREG_##seg] = {                                   \
+ 		.selector = GUEST_##seg##_SELECTOR,		\
+@@ -214,6 +222,32 @@ static inline bool cpu_has_vmx_virtualize_apic_accesses(void)
+ 		    SECONDARY_EXEC_VIRTUALIZE_APIC_ACCESSES);
+ }
+ 
++static inline int cpu_has_vmx_invept_individual_addr(void)
++{
++	return (!!(vmx_capability.ept & VMX_EPT_EXTENT_INDIVIDUAL_BIT));
++}
++
++static inline int cpu_has_vmx_invept_context(void)
++{
++	return (!!(vmx_capability.ept & VMX_EPT_EXTENT_CONTEXT_BIT));
++}
++
++static inline int cpu_has_vmx_invept_global(void)
++{
++	return (!!(vmx_capability.ept & VMX_EPT_EXTENT_GLOBAL_BIT));
++}
++
++static inline int cpu_has_vmx_ept(void)
++{
++	return (vmcs_config.cpu_based_2nd_exec_ctrl &
++		SECONDARY_EXEC_ENABLE_EPT);
++}
++
++static inline int vm_need_ept(void)
++{
++	return (cpu_has_vmx_ept() && enable_ept);
++}
++
+ static inline int vm_need_virtualize_apic_accesses(struct kvm *kvm)
+ {
+ 	return ((cpu_has_vmx_virtualize_apic_accesses()) &&
+@@ -250,6 +284,18 @@ static inline void __invvpid(int ext, u16 vpid, gva_t gva)
+ 		  : : "a"(&operand), "c"(ext) : "cc", "memory");
+ }
+ 
++static inline void __invept(int ext, u64 eptp, gpa_t gpa)
++{
++	struct {
++		u64 eptp, gpa;
++	} operand = {eptp, gpa};
++
++	asm volatile (ASM_VMX_INVEPT
++			/* CF==1 or ZF==1 --> rc = -1 */
++			"; ja 1f ; ud2 ; 1:\n"
++			: : "a" (&operand), "c" (ext) : "cc", "memory");
++}
++
+ static struct kvm_msr_entry *find_msr_entry(struct vcpu_vmx *vmx, u32 msr)
+ {
+ 	int i;
+@@ -301,6 +347,33 @@ static inline void vpid_sync_vcpu_all(struct vcpu_vmx *vmx)
+ 	__invvpid(VMX_VPID_EXTENT_SINGLE_CONTEXT, vmx->vpid, 0);
+ }
+ 
++static inline void ept_sync_global(void)
++{
++	if (cpu_has_vmx_invept_global())
++		__invept(VMX_EPT_EXTENT_GLOBAL, 0, 0);
++}
++
++static inline void ept_sync_context(u64 eptp)
++{
++	if (vm_need_ept()) {
++		if (cpu_has_vmx_invept_context())
++			__invept(VMX_EPT_EXTENT_CONTEXT, eptp, 0);
++		else
++			ept_sync_global();
++	}
++}
++
++static inline void ept_sync_individual_addr(u64 eptp, gpa_t gpa)
++{
++	if (vm_need_ept()) {
++		if (cpu_has_vmx_invept_individual_addr())
++			__invept(VMX_EPT_EXTENT_INDIVIDUAL_ADDR,
++					eptp, gpa);
++		else
++			ept_sync_context(eptp);
++	}
++}
++
+ static unsigned long vmcs_readl(unsigned long field)
+ {
+ 	unsigned long value;
+@@ -388,6 +461,8 @@ static void update_exception_bitmap(struct kvm_vcpu *vcpu)
+ 		eb |= 1u << 1;
+ 	if (vcpu->arch.rmode.active)
+ 		eb = ~0;
++	if (vm_need_ept())
++		eb &= ~(1u << PF_VECTOR); /* bypass_guest_pf = 0 */
+ 	vmcs_write32(EXCEPTION_BITMAP, eb);
+ }
+ 
+@@ -985,7 +1060,7 @@ static __init int adjust_vmx_controls(u32 ctl_min, u32 ctl_opt,
+ static __init int setup_vmcs_config(struct vmcs_config *vmcs_conf)
+ {
+ 	u32 vmx_msr_low, vmx_msr_high;
+-	u32 min, opt;
++	u32 min, opt, min2, opt2;
+ 	u32 _pin_based_exec_control = 0;
+ 	u32 _cpu_based_exec_control = 0;
+ 	u32 _cpu_based_2nd_exec_control = 0;
+@@ -1003,6 +1078,8 @@ static __init int setup_vmcs_config(struct vmcs_config *vmcs_conf)
+ 	      CPU_BASED_CR8_LOAD_EXITING |
+ 	      CPU_BASED_CR8_STORE_EXITING |
+ #endif
++	      CPU_BASED_CR3_LOAD_EXITING |
++	      CPU_BASED_CR3_STORE_EXITING |
+ 	      CPU_BASED_USE_IO_BITMAPS |
+ 	      CPU_BASED_MOV_DR_EXITING |
+ 	      CPU_BASED_USE_TSC_OFFSETING;
+@@ -1018,11 +1095,13 @@ static __init int setup_vmcs_config(struct vmcs_config *vmcs_conf)
+ 					   ~CPU_BASED_CR8_STORE_EXITING;
+ #endif
+ 	if (_cpu_based_exec_control & CPU_BASED_ACTIVATE_SECONDARY_CONTROLS) {
+-		min = 0;
+-		opt = SECONDARY_EXEC_VIRTUALIZE_APIC_ACCESSES |
++		min2 = 0;
++		opt2 = SECONDARY_EXEC_VIRTUALIZE_APIC_ACCESSES |
+ 			SECONDARY_EXEC_WBINVD_EXITING |
+-			SECONDARY_EXEC_ENABLE_VPID;
+-		if (adjust_vmx_controls(min, opt, MSR_IA32_VMX_PROCBASED_CTLS2,
++			SECONDARY_EXEC_ENABLE_VPID |
++			SECONDARY_EXEC_ENABLE_EPT;
++		if (adjust_vmx_controls(min2, opt2,
++					MSR_IA32_VMX_PROCBASED_CTLS2,
+ 					&_cpu_based_2nd_exec_control) < 0)
+ 			return -EIO;
+ 	}
+@@ -1031,6 +1110,16 @@ static __init int setup_vmcs_config(struct vmcs_config *vmcs_conf)
+ 				SECONDARY_EXEC_VIRTUALIZE_APIC_ACCESSES))
+ 		_cpu_based_exec_control &= ~CPU_BASED_TPR_SHADOW;
+ #endif
++	if (_cpu_based_2nd_exec_control & SECONDARY_EXEC_ENABLE_EPT) {
++		/* CR3 accesses don't need to cause VM Exits when EPT enabled */
++		min &= ~(CPU_BASED_CR3_LOAD_EXITING |
++			 CPU_BASED_CR3_STORE_EXITING);
++		if (adjust_vmx_controls(min, opt, MSR_IA32_VMX_PROCBASED_CTLS,
++					&_cpu_based_exec_control) < 0)
++			return -EIO;
++		rdmsr(MSR_IA32_VMX_EPT_VPID_CAP,
++		      vmx_capability.ept, vmx_capability.vpid);
++	}
+ 
+ 	min = 0;
+ #ifdef CONFIG_X86_64
+@@ -1256,7 +1345,7 @@ static void enter_rmode(struct kvm_vcpu *vcpu)
+ 	fix_rmode_seg(VCPU_SREG_FS, &vcpu->arch.rmode.fs);
+ 
+ 	kvm_mmu_reset_context(vcpu);
+-	init_rmode_tss(vcpu->kvm);
++	init_rmode(vcpu->kvm);
+ }
+ 
+ #ifdef CONFIG_X86_64
+@@ -1304,8 +1393,64 @@ static void vmx_decache_cr4_guest_bits(struct kvm_vcpu *vcpu)
+ 	vcpu->arch.cr4 |= vmcs_readl(GUEST_CR4) & ~KVM_GUEST_CR4_MASK;
+ }
+ 
++static void ept_load_pdptrs(struct kvm_vcpu *vcpu)
++{
++	if (is_paging(vcpu) && is_pae(vcpu) && !is_long_mode(vcpu)) {
++		if (!load_pdptrs(vcpu, vcpu->arch.cr3)) {
++			printk(KERN_ERR "EPT: Fail to load pdptrs!\n");
++			return;
++		}
++		vmcs_write64(GUEST_PDPTR0, vcpu->arch.pdptrs[0]);
++		vmcs_write64(GUEST_PDPTR1, vcpu->arch.pdptrs[1]);
++		vmcs_write64(GUEST_PDPTR2, vcpu->arch.pdptrs[2]);
++		vmcs_write64(GUEST_PDPTR3, vcpu->arch.pdptrs[3]);
++	}
++}
++
++static void vmx_set_cr4(struct kvm_vcpu *vcpu, unsigned long cr4);
++
++static void ept_update_paging_mode_cr0(unsigned long *hw_cr0,
++					unsigned long cr0,
++					struct kvm_vcpu *vcpu)
++{
++	if (!(cr0 & X86_CR0_PG)) {
++		/* From paging/starting to nonpaging */
++		vmcs_write32(CPU_BASED_VM_EXEC_CONTROL,
++			     vmcs_config.cpu_based_exec_ctrl |
++			     (CPU_BASED_CR3_LOAD_EXITING |
++			      CPU_BASED_CR3_STORE_EXITING));
++		vcpu->arch.cr0 = cr0;
++		vmx_set_cr4(vcpu, vcpu->arch.cr4);
++		*hw_cr0 |= X86_CR0_PE | X86_CR0_PG;
++		*hw_cr0 &= ~X86_CR0_WP;
++	} else if (!is_paging(vcpu)) {
++		/* From nonpaging to paging */
++		vmcs_write32(CPU_BASED_VM_EXEC_CONTROL,
++			     vmcs_config.cpu_based_exec_ctrl &
++			     ~(CPU_BASED_CR3_LOAD_EXITING |
++			       CPU_BASED_CR3_STORE_EXITING));
++		vcpu->arch.cr0 = cr0;
++		vmx_set_cr4(vcpu, vcpu->arch.cr4);
++		if (!(vcpu->arch.cr0 & X86_CR0_WP))
++			*hw_cr0 &= ~X86_CR0_WP;
++	}
++}
++
++static void ept_update_paging_mode_cr4(unsigned long *hw_cr4,
++					struct kvm_vcpu *vcpu)
++{
++	if (!is_paging(vcpu)) {
++		*hw_cr4 &= ~X86_CR4_PAE;
++		*hw_cr4 |= X86_CR4_PSE;
++	} else if (!(vcpu->arch.cr4 & X86_CR4_PAE))
++		*hw_cr4 &= ~X86_CR4_PAE;
++}
++
+ static void vmx_set_cr0(struct kvm_vcpu *vcpu, unsigned long cr0)
+ {
++	unsigned long hw_cr0 = (cr0 & ~KVM_GUEST_CR0_MASK) |
++				KVM_VM_CR0_ALWAYS_ON;
++
+ 	vmx_fpu_deactivate(vcpu);
+ 
+ 	if (vcpu->arch.rmode.active && (cr0 & X86_CR0_PE))
+@@ -1323,29 +1468,61 @@ static void vmx_set_cr0(struct kvm_vcpu *vcpu, unsigned long cr0)
+ 	}
+ #endif
+ 
++	if (vm_need_ept())
++		ept_update_paging_mode_cr0(&hw_cr0, cr0, vcpu);
++
+ 	vmcs_writel(CR0_READ_SHADOW, cr0);
+-	vmcs_writel(GUEST_CR0,
+-		    (cr0 & ~KVM_GUEST_CR0_MASK) | KVM_VM_CR0_ALWAYS_ON);
++	vmcs_writel(GUEST_CR0, hw_cr0);
+ 	vcpu->arch.cr0 = cr0;
+ 
+ 	if (!(cr0 & X86_CR0_TS) || !(cr0 & X86_CR0_PE))
+ 		vmx_fpu_activate(vcpu);
+ }
+ 
++static u64 construct_eptp(unsigned long root_hpa)
++{
++	u64 eptp;
++
++	/* TODO write the value reading from MSR */
++	eptp = VMX_EPT_DEFAULT_MT |
++		VMX_EPT_DEFAULT_GAW << VMX_EPT_GAW_EPTP_SHIFT;
++	eptp |= (root_hpa & PAGE_MASK);
++
++	return eptp;
++}
++
+ static void vmx_set_cr3(struct kvm_vcpu *vcpu, unsigned long cr3)
+ {
++	unsigned long guest_cr3;
++	u64 eptp;
++
++	guest_cr3 = cr3;
++	if (vm_need_ept()) {
++		eptp = construct_eptp(cr3);
++		vmcs_write64(EPT_POINTER, eptp);
++		ept_sync_context(eptp);
++		ept_load_pdptrs(vcpu);
++		guest_cr3 = is_paging(vcpu) ? vcpu->arch.cr3 :
++			VMX_EPT_IDENTITY_PAGETABLE_ADDR;
++	}
++
+ 	vmx_flush_tlb(vcpu);
+-	vmcs_writel(GUEST_CR3, cr3);
++	vmcs_writel(GUEST_CR3, guest_cr3);
+ 	if (vcpu->arch.cr0 & X86_CR0_PE)
+ 		vmx_fpu_deactivate(vcpu);
+ }
+ 
+ static void vmx_set_cr4(struct kvm_vcpu *vcpu, unsigned long cr4)
+ {
+-	vmcs_writel(CR4_READ_SHADOW, cr4);
+-	vmcs_writel(GUEST_CR4, cr4 | (vcpu->arch.rmode.active ?
+-		    KVM_RMODE_VM_CR4_ALWAYS_ON : KVM_PMODE_VM_CR4_ALWAYS_ON));
++	unsigned long hw_cr4 = cr4 | (vcpu->arch.rmode.active ?
++		    KVM_RMODE_VM_CR4_ALWAYS_ON : KVM_PMODE_VM_CR4_ALWAYS_ON);
++
+ 	vcpu->arch.cr4 = cr4;
++	if (vm_need_ept())
++		ept_update_paging_mode_cr4(&hw_cr4, vcpu);
++
++	vmcs_writel(CR4_READ_SHADOW, cr4);
++	vmcs_writel(GUEST_CR4, hw_cr4);
+ }
+ 
+ static void vmx_set_efer(struct kvm_vcpu *vcpu, u64 efer)
+@@ -1530,6 +1707,41 @@ out:
+ 	return ret;
+ }
+ 
++static int init_rmode_identity_map(struct kvm *kvm)
++{
++	int i, r, ret;
++	pfn_t identity_map_pfn;
++	u32 tmp;
++
++	if (!vm_need_ept())
++		return 1;
++	if (unlikely(!kvm->arch.ept_identity_pagetable)) {
++		printk(KERN_ERR "EPT: identity-mapping pagetable "
++			"haven't been allocated!\n");
++		return 0;
++	}
++	if (likely(kvm->arch.ept_identity_pagetable_done))
++		return 1;
++	ret = 0;
++	identity_map_pfn = VMX_EPT_IDENTITY_PAGETABLE_ADDR >> PAGE_SHIFT;
++	r = kvm_clear_guest_page(kvm, identity_map_pfn, 0, PAGE_SIZE);
++	if (r < 0)
++		goto out;
++	/* Set up identity-mapping pagetable for EPT in real mode */
++	for (i = 0; i < PT32_ENT_PER_PAGE; i++) {
++		tmp = (i << 22) + (_PAGE_PRESENT | _PAGE_RW | _PAGE_USER |
++			_PAGE_ACCESSED | _PAGE_DIRTY | _PAGE_PSE);
++		r = kvm_write_guest_page(kvm, identity_map_pfn,
++				&tmp, i * sizeof(tmp), sizeof(tmp));
++		if (r < 0)
++			goto out;
++	}
++	kvm->arch.ept_identity_pagetable_done = true;
++	ret = 1;
++out:
++	return ret;
++}
++
+ static void seg_setup(int seg)
+ {
+ 	struct kvm_vmx_segment_field *sf = &kvm_vmx_segment_fields[seg];
+@@ -1564,6 +1776,31 @@ out:
+ 	return r;
+ }
+ 
++static int alloc_identity_pagetable(struct kvm *kvm)
++{
++	struct kvm_userspace_memory_region kvm_userspace_mem;
++	int r = 0;
++
++	down_write(&kvm->slots_lock);
++	if (kvm->arch.ept_identity_pagetable)
++		goto out;
++	kvm_userspace_mem.slot = IDENTITY_PAGETABLE_PRIVATE_MEMSLOT;
++	kvm_userspace_mem.flags = 0;
++	kvm_userspace_mem.guest_phys_addr = VMX_EPT_IDENTITY_PAGETABLE_ADDR;
++	kvm_userspace_mem.memory_size = PAGE_SIZE;
++	r = __kvm_set_memory_region(kvm, &kvm_userspace_mem, 0);
++	if (r)
++		goto out;
++
++	down_read(&current->mm->mmap_sem);
++	kvm->arch.ept_identity_pagetable = gfn_to_page(kvm,
++			VMX_EPT_IDENTITY_PAGETABLE_ADDR >> PAGE_SHIFT);
++	up_read(&current->mm->mmap_sem);
++out:
++	up_write(&kvm->slots_lock);
++	return r;
++}
++
+ static void allocate_vpid(struct vcpu_vmx *vmx)
+ {
+ 	int vpid;
+@@ -1638,6 +1875,9 @@ static int vmx_vcpu_setup(struct vcpu_vmx *vmx)
+ 				CPU_BASED_CR8_LOAD_EXITING;
+ #endif
+ 	}
++	if (!vm_need_ept())
++		exec_control |= CPU_BASED_CR3_STORE_EXITING |
++				CPU_BASED_CR3_LOAD_EXITING;
+ 	vmcs_write32(CPU_BASED_VM_EXEC_CONTROL, exec_control);
+ 
+ 	if (cpu_has_secondary_exec_ctrls()) {
+@@ -1647,6 +1887,8 @@ static int vmx_vcpu_setup(struct vcpu_vmx *vmx)
+ 				~SECONDARY_EXEC_VIRTUALIZE_APIC_ACCESSES;
+ 		if (vmx->vpid == 0)
+ 			exec_control &= ~SECONDARY_EXEC_ENABLE_VPID;
++		if (!vm_need_ept())
++			exec_control &= ~SECONDARY_EXEC_ENABLE_EPT;
+ 		vmcs_write32(SECONDARY_VM_EXEC_CONTROL, exec_control);
+ 	}
+ 
+@@ -1722,6 +1964,15 @@ static int vmx_vcpu_setup(struct vcpu_vmx *vmx)
+ 	return 0;
+ }
+ 
++static int init_rmode(struct kvm *kvm)
++{
++	if (!init_rmode_tss(kvm))
++		return 0;
++	if (!init_rmode_identity_map(kvm))
++		return 0;
++	return 1;
++}
++
+ static int vmx_vcpu_reset(struct kvm_vcpu *vcpu)
+ {
+ 	struct vcpu_vmx *vmx = to_vmx(vcpu);
+@@ -1729,7 +1980,7 @@ static int vmx_vcpu_reset(struct kvm_vcpu *vcpu)
+ 	int ret;
+ 
+ 	down_read(&vcpu->kvm->slots_lock);
+-	if (!init_rmode_tss(vmx->vcpu.kvm)) {
++	if (!init_rmode(vmx->vcpu.kvm)) {
+ 		ret = -ENOMEM;
+ 		goto out;
+ 	}
+@@ -1994,6 +2245,9 @@ static int handle_exception(struct kvm_vcpu *vcpu, struct kvm_run *kvm_run)
+ 	if (intr_info & INTR_INFO_DELIVER_CODE_MASK)
+ 		error_code = vmcs_read32(VM_EXIT_INTR_ERROR_CODE);
+ 	if (is_page_fault(intr_info)) {
++		/* EPT won't cause page fault directly */
++		if (vm_need_ept())
++			BUG();
+ 		cr2 = vmcs_readl(EXIT_QUALIFICATION);
+ 		KVMTRACE_3D(PAGE_FAULT, vcpu, error_code, (u32)cr2,
+ 			    (u32)((u64)cr2 >> 32), handler);
+@@ -2323,6 +2577,64 @@ static int handle_task_switch(struct kvm_vcpu *vcpu, struct kvm_run *kvm_run)
+ 	return kvm_task_switch(vcpu, tss_selector, reason);
+ }
+ 
++static int handle_ept_violation(struct kvm_vcpu *vcpu, struct kvm_run *kvm_run)
++{
++	u64 exit_qualification;
++	enum emulation_result er;
++	gpa_t gpa;
++	unsigned long hva;
++	int gla_validity;
++	int r;
++
++	exit_qualification = vmcs_read64(EXIT_QUALIFICATION);
++
++	if (exit_qualification & (1 << 6)) {
++		printk(KERN_ERR "EPT: GPA exceeds GAW!\n");
++		return -ENOTSUPP;
++	}
++
++	gla_validity = (exit_qualification >> 7) & 0x3;
++	if (gla_validity != 0x3 && gla_validity != 0x1 && gla_validity != 0) {
++		printk(KERN_ERR "EPT: Handling EPT violation failed!\n");
++		printk(KERN_ERR "EPT: GPA: 0x%lx, GVA: 0x%lx\n",
++			(long unsigned int)vmcs_read64(GUEST_PHYSICAL_ADDRESS),
++			(long unsigned int)vmcs_read64(GUEST_LINEAR_ADDRESS));
++		printk(KERN_ERR "EPT: Exit qualification is 0x%lx\n",
++			(long unsigned int)exit_qualification);
++		kvm_run->exit_reason = KVM_EXIT_UNKNOWN;
++		kvm_run->hw.hardware_exit_reason = 0;
++		return -ENOTSUPP;
++	}
++
++	gpa = vmcs_read64(GUEST_PHYSICAL_ADDRESS);
++	hva = gfn_to_hva(vcpu->kvm, gpa >> PAGE_SHIFT);
++	if (!kvm_is_error_hva(hva)) {
++		r = kvm_mmu_page_fault(vcpu, gpa & PAGE_MASK, 0);
++		if (r < 0) {
++			printk(KERN_ERR "EPT: Not enough memory!\n");
++			return -ENOMEM;
++		}
++		return 1;
++	} else {
++		/* must be MMIO */
++		er = emulate_instruction(vcpu, kvm_run, 0, 0, 0);
++
++		if (er == EMULATE_FAIL) {
++			printk(KERN_ERR
++			 "EPT: Fail to handle EPT violation vmexit!er is %d\n",
++			 er);
++			printk(KERN_ERR "EPT: GPA: 0x%lx, GVA: 0x%lx\n",
++			 (long unsigned int)vmcs_read64(GUEST_PHYSICAL_ADDRESS),
++			 (long unsigned int)vmcs_read64(GUEST_LINEAR_ADDRESS));
++			printk(KERN_ERR "EPT: Exit qualification is 0x%lx\n",
++				(long unsigned int)exit_qualification);
++			return -ENOTSUPP;
++		} else if (er == EMULATE_DO_MMIO)
++			return 0;
++	}
++	return 1;
++}
++
+ /*
+  * The exit handlers return 1 if the exit was handled fully and guest execution
+  * may resume.  Otherwise they set the kvm_run parameter to indicate what needs
+@@ -2346,6 +2658,7 @@ static int (*kvm_vmx_exit_handlers[])(struct kvm_vcpu *vcpu,
+ 	[EXIT_REASON_APIC_ACCESS]             = handle_apic_access,
+ 	[EXIT_REASON_WBINVD]                  = handle_wbinvd,
+ 	[EXIT_REASON_TASK_SWITCH]             = handle_task_switch,
++	[EXIT_REASON_EPT_VIOLATION]	      = handle_ept_violation,
+ };
+ 
+ static const int kvm_vmx_max_exit_handlers =
+@@ -2364,6 +2677,13 @@ static int kvm_handle_exit(struct kvm_run *kvm_run, struct kvm_vcpu *vcpu)
+ 	KVMTRACE_3D(VMEXIT, vcpu, exit_reason, (u32)vmcs_readl(GUEST_RIP),
+ 		    (u32)((u64)vmcs_readl(GUEST_RIP) >> 32), entryexit);
+ 
++	/* Access CR3 don't cause VMExit in paging mode, so we need
++	 * to sync with guest real CR3. */
++	if (vm_need_ept() && is_paging(vcpu)) {
++		vcpu->arch.cr3 = vmcs_readl(GUEST_CR3);
++		ept_load_pdptrs(vcpu);
++	}
++
+ 	if (unlikely(vmx->fail)) {
+ 		kvm_run->exit_reason = KVM_EXIT_FAIL_ENTRY;
+ 		kvm_run->fail_entry.hardware_entry_failure_reason
+@@ -2372,7 +2692,8 @@ static int kvm_handle_exit(struct kvm_run *kvm_run, struct kvm_vcpu *vcpu)
+ 	}
+ 
+ 	if ((vectoring_info & VECTORING_INFO_VALID_MASK) &&
+-				exit_reason != EXIT_REASON_EXCEPTION_NMI)
++			(exit_reason != EXIT_REASON_EXCEPTION_NMI &&
++			exit_reason != EXIT_REASON_EPT_VIOLATION))
+ 		printk(KERN_WARNING "%s: unexpected, valid vectoring info and "
+ 		       "exit reason is 0x%x\n", __func__, exit_reason);
+ 	if (exit_reason < kvm_vmx_max_exit_handlers
+@@ -2674,6 +2995,15 @@ static struct kvm_vcpu *vmx_create_vcpu(struct kvm *kvm, unsigned int id)
+ 		return ERR_PTR(-ENOMEM);
+ 
+ 	allocate_vpid(vmx);
++	if (id == 0 && vm_need_ept()) {
++		kvm_mmu_set_base_ptes(VMX_EPT_READABLE_MASK |
++			VMX_EPT_WRITABLE_MASK |
++			VMX_EPT_DEFAULT_MT << VMX_EPT_MT_EPTE_SHIFT);
++		kvm_mmu_set_mask_ptes(0ull, VMX_EPT_FAKE_ACCESSED_MASK,
++				VMX_EPT_FAKE_DIRTY_MASK, 0ull,
++				VMX_EPT_EXECUTABLE_MASK);
++		kvm_enable_tdp();
++	}
+ 
+ 	err = kvm_vcpu_init(&vmx->vcpu, kvm, id);
+ 	if (err)
+@@ -2706,6 +3036,10 @@ static struct kvm_vcpu *vmx_create_vcpu(struct kvm *kvm, unsigned int id)
+ 		if (alloc_apic_access_page(kvm) != 0)
+ 			goto free_vmcs;
+ 
++	if (vm_need_ept())
++		if (alloc_identity_pagetable(kvm) != 0)
++			goto free_vmcs;
++
+ 	return &vmx->vcpu;
+ 
+ free_vmcs:
+@@ -2735,6 +3069,11 @@ static void __init vmx_check_processor_compat(void *rtn)
+ 	}
+ }
+ 
++static int get_ept_level(void)
++{
++	return VMX_EPT_DEFAULT_GAW + 1;
++}
++
+ static struct kvm_x86_ops vmx_x86_ops = {
+ 	.cpu_has_kvm_support = cpu_has_kvm_support,
+ 	.disabled_by_bios = vmx_disabled_by_bios,
+@@ -2791,6 +3130,7 @@ static struct kvm_x86_ops vmx_x86_ops = {
+ 	.inject_pending_vectors = do_interrupt_requests,
+ 
+ 	.set_tss_addr = vmx_set_tss_addr,
++	.get_tdp_level = get_ept_level,
+ };
+ 
+ static int __init vmx_init(void)
+@@ -2843,9 +3183,14 @@ static int __init vmx_init(void)
+ 	vmx_disable_intercept_for_msr(vmx_msr_bitmap, MSR_IA32_SYSENTER_ESP);
+ 	vmx_disable_intercept_for_msr(vmx_msr_bitmap, MSR_IA32_SYSENTER_EIP);
+ 
++	if (cpu_has_vmx_ept())
++		bypass_guest_pf = 0;
++
+ 	if (bypass_guest_pf)
+ 		kvm_mmu_set_nonpresent_ptes(~0xffeull, 0ull);
+ 
++	ept_sync_global();
++
+ 	return 0;
+ 
+ out2:
+diff --git a/arch/x86/kvm/vmx.h b/arch/x86/kvm/vmx.h
+index 5dff460..79d94c6 100644
+--- a/arch/x86/kvm/vmx.h
++++ b/arch/x86/kvm/vmx.h
+@@ -35,6 +35,8 @@
+ #define CPU_BASED_MWAIT_EXITING                 0x00000400
+ #define CPU_BASED_RDPMC_EXITING                 0x00000800
+ #define CPU_BASED_RDTSC_EXITING                 0x00001000
++#define CPU_BASED_CR3_LOAD_EXITING		0x00008000
++#define CPU_BASED_CR3_STORE_EXITING		0x00010000
+ #define CPU_BASED_CR8_LOAD_EXITING              0x00080000
+ #define CPU_BASED_CR8_STORE_EXITING             0x00100000
+ #define CPU_BASED_TPR_SHADOW                    0x00200000
+@@ -49,6 +51,7 @@
+  * Definitions of Secondary Processor-Based VM-Execution Controls.
+  */
+ #define SECONDARY_EXEC_VIRTUALIZE_APIC_ACCESSES 0x00000001
++#define SECONDARY_EXEC_ENABLE_EPT               0x00000002
+ #define SECONDARY_EXEC_ENABLE_VPID              0x00000020
+ #define SECONDARY_EXEC_WBINVD_EXITING		0x00000040
+ 
+@@ -100,10 +103,22 @@ enum vmcs_field {
+ 	VIRTUAL_APIC_PAGE_ADDR_HIGH     = 0x00002013,
+ 	APIC_ACCESS_ADDR		= 0x00002014,
+ 	APIC_ACCESS_ADDR_HIGH		= 0x00002015,
++	EPT_POINTER                     = 0x0000201a,
++	EPT_POINTER_HIGH                = 0x0000201b,
++	GUEST_PHYSICAL_ADDRESS          = 0x00002400,
++	GUEST_PHYSICAL_ADDRESS_HIGH     = 0x00002401,
+ 	VMCS_LINK_POINTER               = 0x00002800,
+ 	VMCS_LINK_POINTER_HIGH          = 0x00002801,
+ 	GUEST_IA32_DEBUGCTL             = 0x00002802,
+ 	GUEST_IA32_DEBUGCTL_HIGH        = 0x00002803,
++	GUEST_PDPTR0                    = 0x0000280a,
++	GUEST_PDPTR0_HIGH               = 0x0000280b,
++	GUEST_PDPTR1                    = 0x0000280c,
++	GUEST_PDPTR1_HIGH               = 0x0000280d,
++	GUEST_PDPTR2                    = 0x0000280e,
++	GUEST_PDPTR2_HIGH               = 0x0000280f,
++	GUEST_PDPTR3                    = 0x00002810,
++	GUEST_PDPTR3_HIGH               = 0x00002811,
+ 	PIN_BASED_VM_EXEC_CONTROL       = 0x00004000,
+ 	CPU_BASED_VM_EXEC_CONTROL       = 0x00004002,
+ 	EXCEPTION_BITMAP                = 0x00004004,
+@@ -226,6 +241,8 @@ enum vmcs_field {
+ #define EXIT_REASON_MWAIT_INSTRUCTION   36
+ #define EXIT_REASON_TPR_BELOW_THRESHOLD 43
+ #define EXIT_REASON_APIC_ACCESS         44
++#define EXIT_REASON_EPT_VIOLATION       48
++#define EXIT_REASON_EPT_MISCONFIG       49
+ #define EXIT_REASON_WBINVD		54
+ 
+ /*
+@@ -316,15 +333,36 @@ enum vmcs_field {
+ #define MSR_IA32_VMX_CR4_FIXED1                 0x489
+ #define MSR_IA32_VMX_VMCS_ENUM                  0x48a
+ #define MSR_IA32_VMX_PROCBASED_CTLS2            0x48b
++#define MSR_IA32_VMX_EPT_VPID_CAP               0x48c
+ 
+ #define MSR_IA32_FEATURE_CONTROL                0x3a
+ #define MSR_IA32_FEATURE_CONTROL_LOCKED         0x1
+ #define MSR_IA32_FEATURE_CONTROL_VMXON_ENABLED  0x4
+ 
+ #define APIC_ACCESS_PAGE_PRIVATE_MEMSLOT	9
++#define IDENTITY_PAGETABLE_PRIVATE_MEMSLOT	10
+ 
+ #define VMX_NR_VPIDS				(1 << 16)
+ #define VMX_VPID_EXTENT_SINGLE_CONTEXT		1
+ #define VMX_VPID_EXTENT_ALL_CONTEXT		2
+ 
++#define VMX_EPT_EXTENT_INDIVIDUAL_ADDR		0
++#define VMX_EPT_EXTENT_CONTEXT			1
++#define VMX_EPT_EXTENT_GLOBAL			2
++#define VMX_EPT_EXTENT_INDIVIDUAL_BIT		(1ull << 24)
++#define VMX_EPT_EXTENT_CONTEXT_BIT		(1ull << 25)
++#define VMX_EPT_EXTENT_GLOBAL_BIT		(1ull << 26)
++#define VMX_EPT_DEFAULT_GAW			3
++#define VMX_EPT_MAX_GAW				0x4
++#define VMX_EPT_MT_EPTE_SHIFT			3
++#define VMX_EPT_GAW_EPTP_SHIFT			3
++#define VMX_EPT_DEFAULT_MT			0x6ull
++#define VMX_EPT_READABLE_MASK			0x1ull
++#define VMX_EPT_WRITABLE_MASK			0x2ull
++#define VMX_EPT_EXECUTABLE_MASK			0x4ull
++#define VMX_EPT_FAKE_ACCESSED_MASK		(1ull << 62)
++#define VMX_EPT_FAKE_DIRTY_MASK			(1ull << 63)
++
++#define VMX_EPT_IDENTITY_PAGETABLE_ADDR		0xfffbc000ul
++
+ #endif
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index 0ce5563..21338bd 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -2417,6 +2417,9 @@ int kvm_arch_init(void *opaque)
+ 
+ 	kvm_x86_ops = ops;
+ 	kvm_mmu_set_nonpresent_ptes(0ull, 0ull);
++	kvm_mmu_set_base_ptes(PT_PRESENT_MASK);
++	kvm_mmu_set_mask_ptes(PT_USER_MASK, PT_ACCESSED_MASK,
++			PT_DIRTY_MASK, PT64_NX_MASK, 0);
+ 	return 0;
+ 
+ out:
+@@ -3019,6 +3022,8 @@ int kvm_arch_vcpu_ioctl_set_regs(struct kvm_vcpu *vcpu, struct kvm_regs *regs)
+ 
+ 	kvm_x86_ops->decache_regs(vcpu);
+ 
++	vcpu->arch.exception.pending = false;
++
+ 	vcpu_put(vcpu);
+ 
+ 	return 0;
+@@ -3481,7 +3486,7 @@ int kvm_task_switch(struct kvm_vcpu *vcpu, u16 tss_selector, int reason)
+ 	}
+ 
+ 	if (reason == TASK_SWITCH_IRET || reason == TASK_SWITCH_JMP) {
+-		cseg_desc.type &= ~(1 << 8); //clear the B flag
++		cseg_desc.type &= ~(1 << 1); //clear the B flag
+ 		save_guest_segment_descriptor(vcpu, tr_seg.selector,
+ 					      &cseg_desc);
+ 	}
+@@ -3507,7 +3512,7 @@ int kvm_task_switch(struct kvm_vcpu *vcpu, u16 tss_selector, int reason)
+ 	}
+ 
+ 	if (reason != TASK_SWITCH_IRET) {
+-		nseg_desc.type |= (1 << 8);
++		nseg_desc.type |= (1 << 1);
+ 		save_guest_segment_descriptor(vcpu, tss_selector,
+ 					      &nseg_desc);
+ 	}
+@@ -3698,10 +3703,19 @@ void fx_init(struct kvm_vcpu *vcpu)
+ {
+ 	unsigned after_mxcsr_mask;
+ 
++	/*
++	 * Touch the fpu the first time in non atomic context as if
++	 * this is the first fpu instruction the exception handler
++	 * will fire before the instruction returns and it'll have to
++	 * allocate ram with GFP_KERNEL.
++	 */
++	if (!used_math())
++		fx_save(&vcpu->arch.host_fx_image);
++
+ 	/* Initialize guest FPU by resetting ours and saving into guest's */
+ 	preempt_disable();
+ 	fx_save(&vcpu->arch.host_fx_image);
+-	fpu_init();
++	fx_finit();
+ 	fx_save(&vcpu->arch.guest_fx_image);
+ 	fx_restore(&vcpu->arch.host_fx_image);
+ 	preempt_enable();
+@@ -3906,6 +3920,8 @@ void kvm_arch_destroy_vm(struct kvm *kvm)
+ 	kvm_free_physmem(kvm);
+ 	if (kvm->arch.apic_access_page)
+ 		put_page(kvm->arch.apic_access_page);
++	if (kvm->arch.ept_identity_pagetable)
++		put_page(kvm->arch.ept_identity_pagetable);
+ 	kfree(kvm);
+ }
+ 
+diff --git a/arch/x86/kvm/x86_emulate.c b/arch/x86/kvm/x86_emulate.c
+index 2ca0838..f2a696d 100644
+--- a/arch/x86/kvm/x86_emulate.c
++++ b/arch/x86/kvm/x86_emulate.c
+@@ -1761,6 +1761,7 @@ twobyte_insn:
+ 		case 6: /* lmsw */
+ 			realmode_lmsw(ctxt->vcpu, (u16)c->src.val,
+ 				      &ctxt->eflags);
++			c->dst.type = OP_NONE;
+ 			break;
+ 		case 7: /* invlpg*/
+ 			emulate_invlpg(ctxt->vcpu, memop);
+diff --git a/arch/x86/mm/discontig_32.c b/arch/x86/mm/discontig_32.c
+index 1837885..914ccf9 100644
+--- a/arch/x86/mm/discontig_32.c
++++ b/arch/x86/mm/discontig_32.c
+@@ -476,29 +476,3 @@ int memory_add_physaddr_to_nid(u64 addr)
+ 
+ EXPORT_SYMBOL_GPL(memory_add_physaddr_to_nid);
+ #endif
+-
+-#ifndef CONFIG_HAVE_ARCH_PARSE_SRAT
+-/*
+- * XXX FIXME: Make SLIT table parsing available to 32-bit NUMA
+- *
+- * These stub functions are needed to compile 32-bit NUMA when SRAT is
+- * not set. There are functions in srat_64.c for parsing this table
+- * and it may be possible to make them common functions.
+- */
+-void acpi_numa_slit_init (struct acpi_table_slit *slit)
+-{
+-	printk(KERN_INFO "ACPI: No support for parsing SLIT table\n");
+-}
+-
+-void acpi_numa_processor_affinity_init (struct acpi_srat_cpu_affinity *pa)
+-{
+-}
+-
+-void acpi_numa_memory_affinity_init (struct acpi_srat_mem_affinity *ma)
+-{
+-}
+-
+-void acpi_numa_arch_fixup(void)
+-{
+-}
+-#endif /* CONFIG_HAVE_ARCH_PARSE_SRAT */
+diff --git a/arch/x86/pci/Makefile_32 b/arch/x86/pci/Makefile_32
+index 7fa5198..89ec35d 100644
+--- a/arch/x86/pci/Makefile_32
++++ b/arch/x86/pci/Makefile_32
+@@ -6,11 +6,19 @@ obj-$(CONFIG_PCI_DIRECT)	+= direct.o
+ obj-$(CONFIG_PCI_OLPC)		+= olpc.o
+ 
+ pci-y				:= fixup.o
++
++# Do not change the ordering here. There is a nasty init function
++# ordering dependency which breaks when you move acpi.o below
++# legacy/irq.o
+ pci-$(CONFIG_ACPI)		+= acpi.o
+ pci-y				+= legacy.o irq.o
+ 
+-pci-$(CONFIG_X86_VISWS)		+= visws.o fixup.o
+-pci-$(CONFIG_X86_NUMAQ)		+= numa.o irq.o
++# Careful: VISWS and NUMAQ overrule the pci-y above. The colons are
++# therefor correct. This needs a proper fix by distangling the code.
++pci-$(CONFIG_X86_VISWS)		:= visws.o fixup.o
++pci-$(CONFIG_X86_NUMAQ)		:= numa.o irq.o
++
++# Necessary for NUMAQ as well
+ pci-$(CONFIG_NUMA)		+= mp_bus_to_node.o
+ 
+ obj-y				+= $(pci-y) common.o early.o
+diff --git a/arch/x86/pci/acpi.c b/arch/x86/pci/acpi.c
+index 1a9c0c6..d95de2f 100644
+--- a/arch/x86/pci/acpi.c
++++ b/arch/x86/pci/acpi.c
+@@ -6,45 +6,6 @@
+ #include <asm/numa.h>
+ #include "pci.h"
+ 
+-static int __devinit can_skip_ioresource_align(const struct dmi_system_id *d)
+-{
+-	pci_probe |= PCI_CAN_SKIP_ISA_ALIGN;
+-	printk(KERN_INFO "PCI: %s detected, can skip ISA alignment\n", d->ident);
+-	return 0;
+-}
+-
+-static struct dmi_system_id acpi_pciprobe_dmi_table[] __devinitdata = {
+-/*
+- * Systems where PCI IO resource ISA alignment can be skipped
+- * when the ISA enable bit in the bridge control is not set
+- */
+-	{
+-		.callback = can_skip_ioresource_align,
+-		.ident = "IBM System x3800",
+-		.matches = {
+-			DMI_MATCH(DMI_SYS_VENDOR, "IBM"),
+-			DMI_MATCH(DMI_PRODUCT_NAME, "x3800"),
+-		},
+-	},
+-	{
+-		.callback = can_skip_ioresource_align,
+-		.ident = "IBM System x3850",
+-		.matches = {
+-			DMI_MATCH(DMI_SYS_VENDOR, "IBM"),
+-			DMI_MATCH(DMI_PRODUCT_NAME, "x3850"),
+-		},
+-	},
+-	{
+-		.callback = can_skip_ioresource_align,
+-		.ident = "IBM System x3950",
+-		.matches = {
+-			DMI_MATCH(DMI_SYS_VENDOR, "IBM"),
+-			DMI_MATCH(DMI_PRODUCT_NAME, "x3950"),
+-		},
+-	},
+-	{}
+-};
+-
+ struct pci_root_info {
+ 	char *name;
+ 	unsigned int res_num;
+@@ -196,8 +157,6 @@ struct pci_bus * __devinit pci_acpi_scan_root(struct acpi_device *device, int do
+ 	int pxm;
+ #endif
+ 
+-	dmi_check_system(acpi_pciprobe_dmi_table);
+-
+ 	if (domain && !pci_domains_supported) {
+ 		printk(KERN_WARNING "PCI: Multiple domains not supported "
+ 		       "(dom %d, bus %d)\n", domain, busnum);
+diff --git a/arch/x86/pci/common.c b/arch/x86/pci/common.c
+index 2a4d751..bfa72a9 100644
+--- a/arch/x86/pci/common.c
++++ b/arch/x86/pci/common.c
+@@ -90,6 +90,50 @@ static void __devinit pcibios_fixup_device_resources(struct pci_dev *dev)
+ 		rom_r->start = rom_r->end = rom_r->flags = 0;
+ }
+ 
++static int __devinit can_skip_ioresource_align(const struct dmi_system_id *d)
++{
++	pci_probe |= PCI_CAN_SKIP_ISA_ALIGN;
++	printk(KERN_INFO "PCI: %s detected, can skip ISA alignment\n", d->ident);
++	return 0;
++}
++
++static struct dmi_system_id can_skip_pciprobe_dmi_table[] __devinitdata = {
++/*
++ * Systems where PCI IO resource ISA alignment can be skipped
++ * when the ISA enable bit in the bridge control is not set
++ */
++	{
++		.callback = can_skip_ioresource_align,
++		.ident = "IBM System x3800",
++		.matches = {
++			DMI_MATCH(DMI_SYS_VENDOR, "IBM"),
++			DMI_MATCH(DMI_PRODUCT_NAME, "x3800"),
++		},
++	},
++	{
++		.callback = can_skip_ioresource_align,
++		.ident = "IBM System x3850",
++		.matches = {
++			DMI_MATCH(DMI_SYS_VENDOR, "IBM"),
++			DMI_MATCH(DMI_PRODUCT_NAME, "x3850"),
++		},
++	},
++	{
++		.callback = can_skip_ioresource_align,
++		.ident = "IBM System x3950",
++		.matches = {
++			DMI_MATCH(DMI_SYS_VENDOR, "IBM"),
++			DMI_MATCH(DMI_PRODUCT_NAME, "x3950"),
++		},
++	},
++	{}
++};
++
++void __init dmi_check_skip_isa_align(void)
++{
++	dmi_check_system(can_skip_pciprobe_dmi_table);
++}
++
+ /*
+  *  Called after each bus is probed, but before its children
+  *  are examined.
+@@ -318,13 +362,16 @@ static struct dmi_system_id __devinitdata pciprobe_dmi_table[] = {
+ 	{}
+ };
+ 
++void __init dmi_check_pciprobe(void)
++{
++	dmi_check_system(pciprobe_dmi_table);
++}
++
+ struct pci_bus * __devinit pcibios_scan_root(int busnum)
+ {
+ 	struct pci_bus *bus = NULL;
+ 	struct pci_sysdata *sd;
+ 
+-	dmi_check_system(pciprobe_dmi_table);
+-
+ 	while ((bus = pci_find_next_bus(bus)) != NULL) {
+ 		if (bus->number == busnum) {
+ 			/* Already scanned */
+@@ -462,6 +509,9 @@ char * __devinit  pcibios_setup(char *str)
+ 	} else if (!strcmp(str, "routeirq")) {
+ 		pci_routeirq = 1;
+ 		return NULL;
++	} else if (!strcmp(str, "skip_isa_align")) {
++		pci_probe |= PCI_CAN_SKIP_ISA_ALIGN;
++		return NULL;
+ 	}
+ 	return str;
+ }
+@@ -489,7 +539,7 @@ void pcibios_disable_device (struct pci_dev *dev)
+ 		pcibios_disable_irq(dev);
+ }
+ 
+-struct pci_bus *pci_scan_bus_on_node(int busno, struct pci_ops *ops, int node)
++struct pci_bus * __devinit pci_scan_bus_on_node(int busno, struct pci_ops *ops, int node)
+ {
+ 	struct pci_bus *bus = NULL;
+ 	struct pci_sysdata *sd;
+@@ -512,7 +562,7 @@ struct pci_bus *pci_scan_bus_on_node(int busno, struct pci_ops *ops, int node)
+ 	return bus;
+ }
+ 
+-struct pci_bus *pci_scan_bus_with_sysdata(int busno)
++struct pci_bus * __devinit pci_scan_bus_with_sysdata(int busno)
+ {
+ 	return pci_scan_bus_on_node(busno, &pci_root_ops, -1);
+ }
+diff --git a/arch/x86/pci/fixup.c b/arch/x86/pci/fixup.c
+index b60b2ab..ff3a6a3 100644
+--- a/arch/x86/pci/fixup.c
++++ b/arch/x86/pci/fixup.c
+@@ -502,7 +502,7 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_SIEMENS, 0x0015,
+  */
+ static void fam10h_pci_cfg_space_size(struct pci_dev *dev)
+ {
+-	dev->cfg_size = pci_cfg_space_size_ext(dev, 0);
++	dev->cfg_size = pci_cfg_space_size_ext(dev);
+ }
+ 
+ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_AMD, 0x1200, fam10h_pci_cfg_space_size);
+diff --git a/arch/x86/pci/init.c b/arch/x86/pci/init.c
+index dd30c60..e70b9c5 100644
+--- a/arch/x86/pci/init.c
++++ b/arch/x86/pci/init.c
+@@ -33,6 +33,10 @@ static __init int pci_access_init(void)
+ 		printk(KERN_ERR
+ 		"PCI: Fatal: No config space access function found\n");
+ 
++	dmi_check_pciprobe();
++
++	dmi_check_skip_isa_align();
++
+ 	return 0;
+ }
+ arch_initcall(pci_access_init);
+diff --git a/arch/x86/pci/pci.h b/arch/x86/pci/pci.h
+index c58805a..f3972b1 100644
+--- a/arch/x86/pci/pci.h
++++ b/arch/x86/pci/pci.h
+@@ -38,6 +38,9 @@ enum pci_bf_sort_state {
+ 	pci_dmi_bf,
+ };
+ 
++extern void __init dmi_check_pciprobe(void);
++extern void __init dmi_check_skip_isa_align(void);
++
+ /* pci-i386.c */
+ 
+ extern unsigned int pcibios_max_latency;
+diff --git a/arch/x86/vdso/vdso32-setup.c b/arch/x86/vdso/vdso32-setup.c
+index 4dceeb1..cf058fe 100644
+--- a/arch/x86/vdso/vdso32-setup.c
++++ b/arch/x86/vdso/vdso32-setup.c
+@@ -162,7 +162,7 @@ static __init void relocate_vdso(Elf32_Ehdr *ehdr)
+ 	Elf32_Shdr *shdr;
+ 	int i;
+ 
+-	BUG_ON(memcmp(ehdr->e_ident, ELFMAG, 4) != 0 ||
++	BUG_ON(memcmp(ehdr->e_ident, ELFMAG, SELFMAG) != 0 ||
+ 	       !elf_check_arch_ia32(ehdr) ||
+ 	       ehdr->e_type != ET_DYN);
+ 
+diff --git a/arch/x86/video/fbdev.c b/arch/x86/video/fbdev.c
+index 4db42bf..6952768 100644
+--- a/arch/x86/video/fbdev.c
++++ b/arch/x86/video/fbdev.c
+@@ -1,5 +1,4 @@
+ /*
+- *
+  * Copyright (C) 2007 Antonino Daplas <adaplas@gmail.com>
+  *
+  * This file is subject to the terms and conditions of the GNU General Public
+@@ -29,3 +28,4 @@ int fb_is_primary_device(struct fb_info *info)
+ 	return retval;
+ }
+ EXPORT_SYMBOL(fb_is_primary_device);
++MODULE_LICENSE("GPL");
+diff --git a/drivers/char/serial167.c b/drivers/char/serial167.c
+index fd2db07..3b23270 100644
+--- a/drivers/char/serial167.c
++++ b/drivers/char/serial167.c
+@@ -1073,7 +1073,7 @@ static int cy_put_char(struct tty_struct *tty, unsigned char ch)
+ 		return 0;
+ 
+ 	if (!info->xmit_buf)
+-		return;
++		return 0;
+ 
+ 	local_irq_save(flags);
+ 	if (info->xmit_cnt >= PAGE_SIZE - 1) {
+diff --git a/drivers/edac/edac_core.h b/drivers/edac/edac_core.h
+index a9aa845..b27b13c 100644
+--- a/drivers/edac/edac_core.h
++++ b/drivers/edac/edac_core.h
+@@ -97,7 +97,7 @@ extern int edac_debug_level;
+ #define PCI_VEND_DEV(vend, dev) PCI_VENDOR_ID_ ## vend, \
+ 	PCI_DEVICE_ID_ ## vend ## _ ## dev
+ 
+-#define dev_name(dev) (dev)->dev_name
++#define edac_dev_name(dev) (dev)->dev_name
+ 
+ /* memory devices */
+ enum dev_type {
+diff --git a/drivers/edac/edac_device.c b/drivers/edac/edac_device.c
+index 63372fa..5fcd3d8 100644
+--- a/drivers/edac/edac_device.c
++++ b/drivers/edac/edac_device.c
+@@ -333,7 +333,7 @@ static int add_edac_dev_to_global_list(struct edac_device_ctl_info *edac_dev)
+ fail0:
+ 	edac_printk(KERN_WARNING, EDAC_MC,
+ 			"%s (%s) %s %s already assigned %d\n",
+-			rover->dev->bus_id, dev_name(rover),
++			rover->dev->bus_id, edac_dev_name(rover),
+ 			rover->mod_name, rover->ctl_name, rover->dev_idx);
+ 	return 1;
+ 
+@@ -538,7 +538,7 @@ int edac_device_add_device(struct edac_device_ctl_info *edac_dev)
+ 				"'%s': DEV '%s' (%s)\n",
+ 				edac_dev->mod_name,
+ 				edac_dev->ctl_name,
+-				dev_name(edac_dev),
++				edac_dev_name(edac_dev),
+ 				edac_op_state_to_string(edac_dev->op_state));
+ 
+ 	mutex_unlock(&device_ctls_mutex);
+@@ -599,7 +599,7 @@ struct edac_device_ctl_info *edac_device_del_device(struct device *dev)
+ 	edac_printk(KERN_INFO, EDAC_MC,
+ 		"Removed device %d for %s %s: DEV %s\n",
+ 		edac_dev->dev_idx,
+-		edac_dev->mod_name, edac_dev->ctl_name, dev_name(edac_dev));
++		edac_dev->mod_name, edac_dev->ctl_name, edac_dev_name(edac_dev));
+ 
+ 	return edac_dev;
+ }
+diff --git a/drivers/edac/edac_mc.c b/drivers/edac/edac_mc.c
+index a4cf164..d110392 100644
+--- a/drivers/edac/edac_mc.c
++++ b/drivers/edac/edac_mc.c
+@@ -402,7 +402,7 @@ static int add_mc_to_global_list(struct mem_ctl_info *mci)
+ fail0:
+ 	edac_printk(KERN_WARNING, EDAC_MC,
+ 		"%s (%s) %s %s already assigned %d\n", p->dev->bus_id,
+-		dev_name(mci), p->mod_name, p->ctl_name, p->mc_idx);
++		edac_dev_name(mci), p->mod_name, p->ctl_name, p->mc_idx);
+ 	return 1;
+ 
+ fail1:
+@@ -517,7 +517,7 @@ int edac_mc_add_mc(struct mem_ctl_info *mci)
+ 
+ 	/* Report action taken */
+ 	edac_mc_printk(mci, KERN_INFO, "Giving out device to '%s' '%s':"
+-		" DEV %s\n", mci->mod_name, mci->ctl_name, dev_name(mci));
++		" DEV %s\n", mci->mod_name, mci->ctl_name, edac_dev_name(mci));
+ 
+ 	mutex_unlock(&mem_ctls_mutex);
+ 	return 0;
+@@ -565,7 +565,7 @@ struct mem_ctl_info *edac_mc_del_mc(struct device *dev)
+ 
+ 	edac_printk(KERN_INFO, EDAC_MC,
+ 		"Removed device %d for %s %s: DEV %s\n", mci->mc_idx,
+-		mci->mod_name, mci->ctl_name, dev_name(mci));
++		mci->mod_name, mci->ctl_name, edac_dev_name(mci));
+ 
+ 	return mci;
+ }
+diff --git a/drivers/edac/edac_pci.c b/drivers/edac/edac_pci.c
+index 9b24340..22ec9d5 100644
+--- a/drivers/edac/edac_pci.c
++++ b/drivers/edac/edac_pci.c
+@@ -150,7 +150,7 @@ static int add_edac_pci_to_global_list(struct edac_pci_ctl_info *pci)
+ fail0:
+ 	edac_printk(KERN_WARNING, EDAC_PCI,
+ 		"%s (%s) %s %s already assigned %d\n",
+-		rover->dev->bus_id, dev_name(rover),
++		rover->dev->bus_id, edac_dev_name(rover),
+ 		rover->mod_name, rover->ctl_name, rover->pci_idx);
+ 	return 1;
+ 
+@@ -360,7 +360,7 @@ int edac_pci_add_device(struct edac_pci_ctl_info *pci, int edac_idx)
+ 			" DEV '%s' (%s)\n",
+ 			pci->mod_name,
+ 			pci->ctl_name,
+-			dev_name(pci), edac_op_state_to_string(pci->op_state));
++			edac_dev_name(pci), edac_op_state_to_string(pci->op_state));
+ 
+ 	mutex_unlock(&edac_pci_ctls_mutex);
+ 	return 0;
+@@ -415,7 +415,7 @@ struct edac_pci_ctl_info *edac_pci_del_device(struct device *dev)
+ 
+ 	edac_printk(KERN_INFO, EDAC_PCI,
+ 		"Removed device %d for %s %s: DEV %s\n",
+-		pci->pci_idx, pci->mod_name, pci->ctl_name, dev_name(pci));
++		pci->pci_idx, pci->mod_name, pci->ctl_name, edac_dev_name(pci));
+ 
+ 	return pci;
+ }
+diff --git a/drivers/ide/ide-probe.c b/drivers/ide/ide-probe.c
+index 591deda..34b0d4f 100644
+--- a/drivers/ide/ide-probe.c
++++ b/drivers/ide/ide-probe.c
+@@ -1355,12 +1355,6 @@ static void ide_init_port(ide_hwif_t *hwif, unsigned int port,
+ 	if (hwif->chipset != ide_dtc2278 || hwif->channel == 0)
+ 		hwif->port_ops = d->port_ops;
+ 
+-	if ((d->host_flags & IDE_HFLAG_SERIALIZE) ||
+-	    ((d->host_flags & IDE_HFLAG_SERIALIZE_DMA) && hwif->dma_base)) {
+-		if (hwif->mate)
+-			hwif->mate->serialized = hwif->serialized = 1;
+-	}
+-
+ 	hwif->swdma_mask = d->swdma_mask;
+ 	hwif->mwdma_mask = d->mwdma_mask;
+ 	hwif->ultra_mask = d->udma_mask;
+@@ -1382,6 +1376,12 @@ static void ide_init_port(ide_hwif_t *hwif, unsigned int port,
+ 			hwif->dma_ops = d->dma_ops;
+ 	}
+ 
++	if ((d->host_flags & IDE_HFLAG_SERIALIZE) ||
++	    ((d->host_flags & IDE_HFLAG_SERIALIZE_DMA) && hwif->dma_base)) {
++		if (hwif->mate)
++			hwif->mate->serialized = hwif->serialized = 1;
++	}
++
+ 	if (d->host_flags & IDE_HFLAG_RQSIZE_256)
+ 		hwif->rqsize = 256;
+ 
+diff --git a/drivers/ide/legacy/falconide.c b/drivers/ide/legacy/falconide.c
+index 83555ca..9e449a0 100644
+--- a/drivers/ide/legacy/falconide.c
++++ b/drivers/ide/legacy/falconide.c
+@@ -61,7 +61,7 @@ static void falconide_output_data(ide_drive_t *drive, struct request *rq,
+ 	unsigned long data_addr = drive->hwif->io_ports.data_addr;
+ 
+ 	if (drive->media == ide_disk && rq && rq->cmd_type == REQ_TYPE_FS)
+-		return outsw(data_adr, buf, (len + 1) / 2);
++		return outsw(data_addr, buf, (len + 1) / 2);
+ 
+ 	outsw_swapw(data_addr, buf, (len + 1) / 2);
+ }
+diff --git a/drivers/infiniband/hw/cxgb3/cxio_hal.c b/drivers/infiniband/hw/cxgb3/cxio_hal.c
+index ed2ee4b..5fd8506 100644
+--- a/drivers/infiniband/hw/cxgb3/cxio_hal.c
++++ b/drivers/infiniband/hw/cxgb3/cxio_hal.c
+@@ -359,9 +359,10 @@ static void insert_recv_cqe(struct t3_wq *wq, struct t3_cq *cq)
+ 	cq->sw_wptr++;
+ }
+ 
+-void cxio_flush_rq(struct t3_wq *wq, struct t3_cq *cq, int count)
++int cxio_flush_rq(struct t3_wq *wq, struct t3_cq *cq, int count)
+ {
+ 	u32 ptr;
++	int flushed = 0;
+ 
+ 	PDBG("%s wq %p cq %p\n", __func__, wq, cq);
+ 
+@@ -369,8 +370,11 @@ void cxio_flush_rq(struct t3_wq *wq, struct t3_cq *cq, int count)
+ 	PDBG("%s rq_rptr %u rq_wptr %u skip count %u\n", __func__,
+ 	    wq->rq_rptr, wq->rq_wptr, count);
+ 	ptr = wq->rq_rptr + count;
+-	while (ptr++ != wq->rq_wptr)
++	while (ptr++ != wq->rq_wptr) {
+ 		insert_recv_cqe(wq, cq);
++		flushed++;
++	}
++	return flushed;
+ }
+ 
+ static void insert_sq_cqe(struct t3_wq *wq, struct t3_cq *cq,
+@@ -394,9 +398,10 @@ static void insert_sq_cqe(struct t3_wq *wq, struct t3_cq *cq,
+ 	cq->sw_wptr++;
+ }
+ 
+-void cxio_flush_sq(struct t3_wq *wq, struct t3_cq *cq, int count)
++int cxio_flush_sq(struct t3_wq *wq, struct t3_cq *cq, int count)
+ {
+ 	__u32 ptr;
++	int flushed = 0;
+ 	struct t3_swsq *sqp = wq->sq + Q_PTR2IDX(wq->sq_rptr, wq->sq_size_log2);
+ 
+ 	ptr = wq->sq_rptr + count;
+@@ -405,7 +410,9 @@ void cxio_flush_sq(struct t3_wq *wq, struct t3_cq *cq, int count)
+ 		insert_sq_cqe(wq, cq, sqp);
+ 		sqp++;
+ 		ptr++;
++		flushed++;
+ 	}
++	return flushed;
+ }
+ 
+ /*
+diff --git a/drivers/infiniband/hw/cxgb3/cxio_hal.h b/drivers/infiniband/hw/cxgb3/cxio_hal.h
+index 2bcff7f..69ab08e 100644
+--- a/drivers/infiniband/hw/cxgb3/cxio_hal.h
++++ b/drivers/infiniband/hw/cxgb3/cxio_hal.h
+@@ -173,8 +173,8 @@ u32 cxio_hal_get_pdid(struct cxio_hal_resource *rscp);
+ void cxio_hal_put_pdid(struct cxio_hal_resource *rscp, u32 pdid);
+ int __init cxio_hal_init(void);
+ void __exit cxio_hal_exit(void);
+-void cxio_flush_rq(struct t3_wq *wq, struct t3_cq *cq, int count);
+-void cxio_flush_sq(struct t3_wq *wq, struct t3_cq *cq, int count);
++int cxio_flush_rq(struct t3_wq *wq, struct t3_cq *cq, int count);
++int cxio_flush_sq(struct t3_wq *wq, struct t3_cq *cq, int count);
+ void cxio_count_rcqes(struct t3_cq *cq, struct t3_wq *wq, int *count);
+ void cxio_count_scqes(struct t3_cq *cq, struct t3_wq *wq, int *count);
+ void cxio_flush_hw_cq(struct t3_cq *cq);
+diff --git a/drivers/infiniband/hw/cxgb3/iwch_cm.c b/drivers/infiniband/hw/cxgb3/iwch_cm.c
+index d44a6df..c325c44 100644
+--- a/drivers/infiniband/hw/cxgb3/iwch_cm.c
++++ b/drivers/infiniband/hw/cxgb3/iwch_cm.c
+@@ -67,10 +67,10 @@ int peer2peer = 0;
+ module_param(peer2peer, int, 0644);
+ MODULE_PARM_DESC(peer2peer, "Support peer2peer ULPs (default=0)");
+ 
+-static int ep_timeout_secs = 10;
++static int ep_timeout_secs = 60;
+ module_param(ep_timeout_secs, int, 0644);
+ MODULE_PARM_DESC(ep_timeout_secs, "CM Endpoint operation timeout "
+-				   "in seconds (default=10)");
++				   "in seconds (default=60)");
+ 
+ static int mpa_rev = 1;
+ module_param(mpa_rev, int, 0644);
+@@ -1650,8 +1650,8 @@ static int close_con_rpl(struct t3cdev *tdev, struct sk_buff *skb, void *ctx)
+ 		release = 1;
+ 		break;
+ 	case ABORTING:
+-		break;
+ 	case DEAD:
++		break;
+ 	default:
+ 		BUG_ON(1);
+ 		break;
+diff --git a/drivers/infiniband/hw/cxgb3/iwch_qp.c b/drivers/infiniband/hw/cxgb3/iwch_qp.c
+index 9b4be88..79dbe5b 100644
+--- a/drivers/infiniband/hw/cxgb3/iwch_qp.c
++++ b/drivers/infiniband/hw/cxgb3/iwch_qp.c
+@@ -655,6 +655,7 @@ static void __flush_qp(struct iwch_qp *qhp, unsigned long *flag)
+ {
+ 	struct iwch_cq *rchp, *schp;
+ 	int count;
++	int flushed;
+ 
+ 	rchp = get_chp(qhp->rhp, qhp->attr.rcq);
+ 	schp = get_chp(qhp->rhp, qhp->attr.scq);
+@@ -669,20 +670,22 @@ static void __flush_qp(struct iwch_qp *qhp, unsigned long *flag)
+ 	spin_lock(&qhp->lock);
+ 	cxio_flush_hw_cq(&rchp->cq);
+ 	cxio_count_rcqes(&rchp->cq, &qhp->wq, &count);
+-	cxio_flush_rq(&qhp->wq, &rchp->cq, count);
++	flushed = cxio_flush_rq(&qhp->wq, &rchp->cq, count);
+ 	spin_unlock(&qhp->lock);
+ 	spin_unlock_irqrestore(&rchp->lock, *flag);
+-	(*rchp->ibcq.comp_handler)(&rchp->ibcq, rchp->ibcq.cq_context);
++	if (flushed)
++		(*rchp->ibcq.comp_handler)(&rchp->ibcq, rchp->ibcq.cq_context);
+ 
+ 	/* locking heirarchy: cq lock first, then qp lock. */
+ 	spin_lock_irqsave(&schp->lock, *flag);
+ 	spin_lock(&qhp->lock);
+ 	cxio_flush_hw_cq(&schp->cq);
+ 	cxio_count_scqes(&schp->cq, &qhp->wq, &count);
+-	cxio_flush_sq(&qhp->wq, &schp->cq, count);
++	flushed = cxio_flush_sq(&qhp->wq, &schp->cq, count);
+ 	spin_unlock(&qhp->lock);
+ 	spin_unlock_irqrestore(&schp->lock, *flag);
+-	(*schp->ibcq.comp_handler)(&schp->ibcq, schp->ibcq.cq_context);
++	if (flushed)
++		(*schp->ibcq.comp_handler)(&schp->ibcq, schp->ibcq.cq_context);
+ 
+ 	/* deref */
+ 	if (atomic_dec_and_test(&qhp->refcnt))
+@@ -880,7 +883,6 @@ int iwch_modify_qp(struct iwch_dev *rhp, struct iwch_qp *qhp,
+ 				ep = qhp->ep;
+ 				get_ep(&ep->com);
+ 			}
+-			flush_qp(qhp, &flag);
+ 			break;
+ 		case IWCH_QP_STATE_TERMINATE:
+ 			qhp->attr.state = IWCH_QP_STATE_TERMINATE;
+@@ -911,6 +913,7 @@ int iwch_modify_qp(struct iwch_dev *rhp, struct iwch_qp *qhp,
+ 		}
+ 		switch (attrs->next_state) {
+ 			case IWCH_QP_STATE_IDLE:
++				flush_qp(qhp, &flag);
+ 				qhp->attr.state = IWCH_QP_STATE_IDLE;
+ 				qhp->attr.llp_stream_handle = NULL;
+ 				put_ep(&qhp->ep->com);
+diff --git a/drivers/infiniband/hw/ehca/ehca_hca.c b/drivers/infiniband/hw/ehca/ehca_hca.c
+index 2515cbd..bc3b37d 100644
+--- a/drivers/infiniband/hw/ehca/ehca_hca.c
++++ b/drivers/infiniband/hw/ehca/ehca_hca.c
+@@ -101,7 +101,6 @@ int ehca_query_device(struct ib_device *ibdev, struct ib_device_attr *props)
+ 	props->max_ee          = limit_uint(rblock->max_rd_ee_context);
+ 	props->max_rdd         = limit_uint(rblock->max_rd_domain);
+ 	props->max_fmr         = limit_uint(rblock->max_mr);
+-	props->local_ca_ack_delay  = limit_uint(rblock->local_ca_ack_delay);
+ 	props->max_qp_rd_atom  = limit_uint(rblock->max_rr_qp);
+ 	props->max_ee_rd_atom  = limit_uint(rblock->max_rr_ee_context);
+ 	props->max_res_rd_atom = limit_uint(rblock->max_rr_hca);
+@@ -115,7 +114,7 @@ int ehca_query_device(struct ib_device *ibdev, struct ib_device_attr *props)
+ 	}
+ 
+ 	props->max_pkeys           = 16;
+-	props->local_ca_ack_delay  = limit_uint(rblock->local_ca_ack_delay);
++	props->local_ca_ack_delay  = min_t(u8, rblock->local_ca_ack_delay, 255);
+ 	props->max_raw_ipv6_qp     = limit_uint(rblock->max_raw_ipv6_qp);
+ 	props->max_raw_ethy_qp     = limit_uint(rblock->max_raw_ethy_qp);
+ 	props->max_mcast_grp       = limit_uint(rblock->max_mcast_grp);
+@@ -136,7 +135,7 @@ query_device1:
+ 	return ret;
+ }
+ 
+-static int map_mtu(struct ehca_shca *shca, u32 fw_mtu)
++static enum ib_mtu map_mtu(struct ehca_shca *shca, u32 fw_mtu)
+ {
+ 	switch (fw_mtu) {
+ 	case 0x1:
+@@ -156,7 +155,7 @@ static int map_mtu(struct ehca_shca *shca, u32 fw_mtu)
+ 	}
+ }
+ 
+-static int map_number_of_vls(struct ehca_shca *shca, u32 vl_cap)
++static u8 map_number_of_vls(struct ehca_shca *shca, u32 vl_cap)
+ {
+ 	switch (vl_cap) {
+ 	case 0x1:
+diff --git a/drivers/infiniband/hw/mlx4/cq.c b/drivers/infiniband/hw/mlx4/cq.c
+index 2f199c5..4521319 100644
+--- a/drivers/infiniband/hw/mlx4/cq.c
++++ b/drivers/infiniband/hw/mlx4/cq.c
+@@ -246,7 +246,7 @@ err_mtt:
+ 	if (context)
+ 		ib_umem_release(cq->umem);
+ 	else
+-		mlx4_ib_free_cq_buf(dev, &cq->buf, entries);
++		mlx4_ib_free_cq_buf(dev, &cq->buf, cq->ibcq.cqe);
+ 
+ err_db:
+ 	if (!context)
+@@ -434,7 +434,7 @@ int mlx4_ib_destroy_cq(struct ib_cq *cq)
+ 		mlx4_ib_db_unmap_user(to_mucontext(cq->uobject->context), &mcq->db);
+ 		ib_umem_release(mcq->umem);
+ 	} else {
+-		mlx4_ib_free_cq_buf(dev, &mcq->buf, cq->cqe + 1);
++		mlx4_ib_free_cq_buf(dev, &mcq->buf, cq->cqe);
+ 		mlx4_db_free(dev->dev, &mcq->db);
+ 	}
+ 
+diff --git a/drivers/infiniband/ulp/ipoib/ipoib.h b/drivers/infiniband/ulp/ipoib/ipoib.h
+index 9044f88..ca126fc 100644
+--- a/drivers/infiniband/ulp/ipoib/ipoib.h
++++ b/drivers/infiniband/ulp/ipoib/ipoib.h
+@@ -334,6 +334,7 @@ struct ipoib_dev_priv {
+ #endif
+ 	int	hca_caps;
+ 	struct ipoib_ethtool_st ethtool;
++	struct timer_list poll_timer;
+ };
+ 
+ struct ipoib_ah {
+@@ -404,6 +405,7 @@ extern struct workqueue_struct *ipoib_workqueue;
+ 
+ int ipoib_poll(struct napi_struct *napi, int budget);
+ void ipoib_ib_completion(struct ib_cq *cq, void *dev_ptr);
++void ipoib_send_comp_handler(struct ib_cq *cq, void *dev_ptr);
+ 
+ struct ipoib_ah *ipoib_create_ah(struct net_device *dev,
+ 				 struct ib_pd *pd, struct ib_ah_attr *attr);
+diff --git a/drivers/infiniband/ulp/ipoib/ipoib_ib.c b/drivers/infiniband/ulp/ipoib/ipoib_ib.c
+index 97b815c..f429bce 100644
+--- a/drivers/infiniband/ulp/ipoib/ipoib_ib.c
++++ b/drivers/infiniband/ulp/ipoib/ipoib_ib.c
+@@ -461,6 +461,26 @@ void ipoib_ib_completion(struct ib_cq *cq, void *dev_ptr)
+ 	netif_rx_schedule(dev, &priv->napi);
+ }
+ 
++static void drain_tx_cq(struct net_device *dev)
++{
++	struct ipoib_dev_priv *priv = netdev_priv(dev);
++	unsigned long flags;
++
++	spin_lock_irqsave(&priv->tx_lock, flags);
++	while (poll_tx(priv))
++		; /* nothing */
++
++	if (netif_queue_stopped(dev))
++		mod_timer(&priv->poll_timer, jiffies + 1);
++
++	spin_unlock_irqrestore(&priv->tx_lock, flags);
++}
++
++void ipoib_send_comp_handler(struct ib_cq *cq, void *dev_ptr)
++{
++	drain_tx_cq((struct net_device *)dev_ptr);
++}
++
+ static inline int post_send(struct ipoib_dev_priv *priv,
+ 			    unsigned int wr_id,
+ 			    struct ib_ah *address, u32 qpn,
+@@ -555,12 +575,22 @@ void ipoib_send(struct net_device *dev, struct sk_buff *skb,
+ 	else
+ 		priv->tx_wr.send_flags &= ~IB_SEND_IP_CSUM;
+ 
++	if (++priv->tx_outstanding == ipoib_sendq_size) {
++		ipoib_dbg(priv, "TX ring full, stopping kernel net queue\n");
++		if (ib_req_notify_cq(priv->send_cq, IB_CQ_NEXT_COMP))
++			ipoib_warn(priv, "request notify on send CQ failed\n");
++		netif_stop_queue(dev);
++	}
++
+ 	if (unlikely(post_send(priv, priv->tx_head & (ipoib_sendq_size - 1),
+ 			       address->ah, qpn, tx_req, phead, hlen))) {
+ 		ipoib_warn(priv, "post_send failed\n");
+ 		++dev->stats.tx_errors;
++		--priv->tx_outstanding;
+ 		ipoib_dma_unmap_tx(priv->ca, tx_req);
+ 		dev_kfree_skb_any(skb);
++		if (netif_queue_stopped(dev))
++			netif_wake_queue(dev);
+ 	} else {
+ 		dev->trans_start = jiffies;
+ 
+@@ -568,14 +598,11 @@ void ipoib_send(struct net_device *dev, struct sk_buff *skb,
+ 		++priv->tx_head;
+ 		skb_orphan(skb);
+ 
+-		if (++priv->tx_outstanding == ipoib_sendq_size) {
+-			ipoib_dbg(priv, "TX ring full, stopping kernel net queue\n");
+-			netif_stop_queue(dev);
+-		}
+ 	}
+ 
+ 	if (unlikely(priv->tx_outstanding > MAX_SEND_CQE))
+-		poll_tx(priv);
++		while (poll_tx(priv))
++			; /* nothing */
+ }
+ 
+ static void __ipoib_reap_ah(struct net_device *dev)
+@@ -609,6 +636,11 @@ void ipoib_reap_ah(struct work_struct *work)
+ 				   round_jiffies_relative(HZ));
+ }
+ 
++static void ipoib_ib_tx_timer_func(unsigned long ctx)
++{
++	drain_tx_cq((struct net_device *)ctx);
++}
++
+ int ipoib_ib_dev_open(struct net_device *dev)
+ {
+ 	struct ipoib_dev_priv *priv = netdev_priv(dev);
+@@ -645,6 +677,10 @@ int ipoib_ib_dev_open(struct net_device *dev)
+ 	queue_delayed_work(ipoib_workqueue, &priv->ah_reap_task,
+ 			   round_jiffies_relative(HZ));
+ 
++	init_timer(&priv->poll_timer);
++	priv->poll_timer.function = ipoib_ib_tx_timer_func;
++	priv->poll_timer.data = (unsigned long)dev;
++
+ 	set_bit(IPOIB_FLAG_INITIALIZED, &priv->flags);
+ 
+ 	return 0;
+@@ -810,6 +846,7 @@ int ipoib_ib_dev_stop(struct net_device *dev, int flush)
+ 	ipoib_dbg(priv, "All sends and receives done.\n");
+ 
+ timeout:
++	del_timer_sync(&priv->poll_timer);
+ 	qp_attr.qp_state = IB_QPS_RESET;
+ 	if (ib_modify_qp(priv->qp, &qp_attr, IB_QP_STATE))
+ 		ipoib_warn(priv, "Failed to modify QP to RESET state\n");
+diff --git a/drivers/infiniband/ulp/ipoib/ipoib_verbs.c b/drivers/infiniband/ulp/ipoib/ipoib_verbs.c
+index c1e7ece..8766d29 100644
+--- a/drivers/infiniband/ulp/ipoib/ipoib_verbs.c
++++ b/drivers/infiniband/ulp/ipoib/ipoib_verbs.c
+@@ -187,7 +187,8 @@ int ipoib_transport_dev_init(struct net_device *dev, struct ib_device *ca)
+ 		goto out_free_mr;
+ 	}
+ 
+-	priv->send_cq = ib_create_cq(priv->ca, NULL, NULL, dev, ipoib_sendq_size, 0);
++	priv->send_cq = ib_create_cq(priv->ca, ipoib_send_comp_handler, NULL,
++				     dev, ipoib_sendq_size, 0);
+ 	if (IS_ERR(priv->send_cq)) {
+ 		printk(KERN_WARNING "%s: failed to create send CQ\n", ca->name);
+ 		goto out_free_recv_cq;
+diff --git a/drivers/input/serio/hp_sdc.c b/drivers/input/serio/hp_sdc.c
+index 02b3ad8..edfedd9 100644
+--- a/drivers/input/serio/hp_sdc.c
++++ b/drivers/input/serio/hp_sdc.c
+@@ -69,6 +69,7 @@
+ #include <linux/time.h>
+ #include <linux/slab.h>
+ #include <linux/hil.h>
++#include <linux/semaphore.h>
+ #include <asm/io.h>
+ #include <asm/system.h>
+ 
+diff --git a/drivers/macintosh/adb.c b/drivers/macintosh/adb.c
+index 2097820..b8b9e44 100644
+--- a/drivers/macintosh/adb.c
++++ b/drivers/macintosh/adb.c
+@@ -37,7 +37,7 @@
+ #include <linux/device.h>
+ #include <linux/kthread.h>
+ #include <linux/platform_device.h>
+-#include <linux/semaphore.h>
++#include <linux/mutex.h>
+ 
+ #include <asm/uaccess.h>
+ #ifdef CONFIG_PPC
+@@ -102,7 +102,7 @@ static struct adb_handler {
+ } adb_handler[16];
+ 
+ /*
+- * The adb_handler_sem mutex protects all accesses to the original_address
++ * The adb_handler_mutex mutex protects all accesses to the original_address
+  * and handler_id fields of adb_handler[i] for all i, and changes to the
+  * handler field.
+  * Accesses to the handler field are protected by the adb_handler_lock
+@@ -110,7 +110,7 @@ static struct adb_handler {
+  * time adb_unregister returns, we know that the old handler isn't being
+  * called.
+  */
+-static DECLARE_MUTEX(adb_handler_sem);
++static DEFINE_MUTEX(adb_handler_mutex);
+ static DEFINE_RWLOCK(adb_handler_lock);
+ 
+ #if 0
+@@ -355,7 +355,7 @@ do_adb_reset_bus(void)
+ 		msleep(500);
+ 	}
+ 
+-	down(&adb_handler_sem);
++	mutex_lock(&adb_handler_mutex);
+ 	write_lock_irq(&adb_handler_lock);
+ 	memset(adb_handler, 0, sizeof(adb_handler));
+ 	write_unlock_irq(&adb_handler_lock);
+@@ -376,7 +376,7 @@ do_adb_reset_bus(void)
+ 		if (adb_controller->autopoll)
+ 			adb_controller->autopoll(autopoll_devs);
+ 	}
+-	up(&adb_handler_sem);
++	mutex_unlock(&adb_handler_mutex);
+ 
+ 	blocking_notifier_call_chain(&adb_client_list,
+ 		ADB_MSG_POST_RESET, NULL);
+@@ -454,7 +454,7 @@ adb_register(int default_id, int handler_id, struct adb_ids *ids,
+ {
+ 	int i;
+ 
+-	down(&adb_handler_sem);
++	mutex_lock(&adb_handler_mutex);
+ 	ids->nids = 0;
+ 	for (i = 1; i < 16; i++) {
+ 		if ((adb_handler[i].original_address == default_id) &&
+@@ -472,7 +472,7 @@ adb_register(int default_id, int handler_id, struct adb_ids *ids,
+ 			ids->id[ids->nids++] = i;
+ 		}
+ 	}
+-	up(&adb_handler_sem);
++	mutex_unlock(&adb_handler_mutex);
+ 	return ids->nids;
+ }
+ 
+@@ -481,7 +481,7 @@ adb_unregister(int index)
+ {
+ 	int ret = -ENODEV;
+ 
+-	down(&adb_handler_sem);
++	mutex_lock(&adb_handler_mutex);
+ 	write_lock_irq(&adb_handler_lock);
+ 	if (adb_handler[index].handler) {
+ 		while(adb_handler[index].busy) {
+@@ -493,7 +493,7 @@ adb_unregister(int index)
+ 		adb_handler[index].handler = NULL;
+ 	}
+ 	write_unlock_irq(&adb_handler_lock);
+-	up(&adb_handler_sem);
++	mutex_unlock(&adb_handler_mutex);
+ 	return ret;
+ }
+ 
+@@ -557,19 +557,19 @@ adb_try_handler_change(int address, int new_id)
+ {
+ 	int ret;
+ 
+-	down(&adb_handler_sem);
++	mutex_lock(&adb_handler_mutex);
+ 	ret = try_handler_change(address, new_id);
+-	up(&adb_handler_sem);
++	mutex_unlock(&adb_handler_mutex);
+ 	return ret;
+ }
+ 
+ int
+ adb_get_infos(int address, int *original_address, int *handler_id)
+ {
+-	down(&adb_handler_sem);
++	mutex_lock(&adb_handler_mutex);
+ 	*original_address = adb_handler[address].original_address;
+ 	*handler_id = adb_handler[address].handler_id;
+-	up(&adb_handler_sem);
++	mutex_unlock(&adb_handler_mutex);
+ 
+ 	return (*original_address != 0);
+ }
+@@ -628,10 +628,10 @@ do_adb_query(struct adb_request *req)
+ 	case ADB_QUERY_GETDEVINFO:
+ 		if (req->nbytes < 3)
+ 			break;
+-		down(&adb_handler_sem);
++		mutex_lock(&adb_handler_mutex);
+ 		req->reply[0] = adb_handler[req->data[2]].original_address;
+ 		req->reply[1] = adb_handler[req->data[2]].handler_id;
+-		up(&adb_handler_sem);
++		mutex_unlock(&adb_handler_mutex);
+ 		req->complete = 1;
+ 		req->reply_len = 2;
+ 		adb_write_done(req);
+diff --git a/drivers/macintosh/therm_pm72.c b/drivers/macintosh/therm_pm72.c
+index 1e0a69a..ddfb426 100644
+--- a/drivers/macintosh/therm_pm72.c
++++ b/drivers/macintosh/therm_pm72.c
+@@ -122,6 +122,7 @@
+ #include <linux/kmod.h>
+ #include <linux/i2c.h>
+ #include <linux/kthread.h>
++#include <linux/mutex.h>
+ #include <asm/prom.h>
+ #include <asm/machdep.h>
+ #include <asm/io.h>
+@@ -169,7 +170,7 @@ static int				rackmac;
+ static s32				dimm_output_clamp;
+ static int 				fcu_rpm_shift;
+ static int				fcu_tickle_ticks;
+-static DECLARE_MUTEX(driver_lock);
++static DEFINE_MUTEX(driver_lock);
+ 
+ /*
+  * We have 3 types of CPU PID control. One is "split" old style control
+@@ -729,9 +730,9 @@ static void fetch_cpu_pumps_minmax(void)
+ static ssize_t show_##name(struct device *dev, struct device_attribute *attr, char *buf)	\
+ {								\
+ 	ssize_t r;						\
+-	down(&driver_lock);					\
++	mutex_lock(&driver_lock);					\
+ 	r = sprintf(buf, "%d.%03d", FIX32TOPRINT(data));	\
+-	up(&driver_lock);					\
++	mutex_unlock(&driver_lock);					\
+ 	return r;						\
+ }
+ #define BUILD_SHOW_FUNC_INT(name, data)				\
+@@ -1803,11 +1804,11 @@ static int main_control_loop(void *x)
+ {
+ 	DBG("main_control_loop started\n");
+ 
+-	down(&driver_lock);
++	mutex_lock(&driver_lock);
+ 
+ 	if (start_fcu() < 0) {
+ 		printk(KERN_ERR "kfand: failed to start FCU\n");
+-		up(&driver_lock);
++		mutex_unlock(&driver_lock);
+ 		goto out;
+ 	}
+ 
+@@ -1822,14 +1823,14 @@ static int main_control_loop(void *x)
+ 
+ 	fcu_tickle_ticks = FCU_TICKLE_TICKS;
+ 
+-	up(&driver_lock);
++	mutex_unlock(&driver_lock);
+ 
+ 	while (state == state_attached) {
+ 		unsigned long elapsed, start;
+ 
+ 		start = jiffies;
+ 
+-		down(&driver_lock);
++		mutex_lock(&driver_lock);
+ 
+ 		/* Tickle the FCU just in case */
+ 		if (--fcu_tickle_ticks < 0) {
+@@ -1861,7 +1862,7 @@ static int main_control_loop(void *x)
+ 			do_monitor_slots(&slots_state);
+ 		else
+ 			do_monitor_drives(&drives_state);
+-		up(&driver_lock);
++		mutex_unlock(&driver_lock);
+ 
+ 		if (critical_state == 1) {
+ 			printk(KERN_WARNING "Temperature control detected a critical condition\n");
+@@ -2019,13 +2020,13 @@ static void detach_fcu(void)
+  */
+ static int therm_pm72_attach(struct i2c_adapter *adapter)
+ {
+-	down(&driver_lock);
++	mutex_lock(&driver_lock);
+ 
+ 	/* Check state */
+ 	if (state == state_detached)
+ 		state = state_attaching;
+ 	if (state != state_attaching) {
+-		up(&driver_lock);
++		mutex_unlock(&driver_lock);
+ 		return 0;
+ 	}
+ 
+@@ -2054,7 +2055,7 @@ static int therm_pm72_attach(struct i2c_adapter *adapter)
+ 		state = state_attached;
+ 		start_control_loops();
+ 	}
+-	up(&driver_lock);
++	mutex_unlock(&driver_lock);
+ 
+ 	return 0;
+ }
+@@ -2065,16 +2066,16 @@ static int therm_pm72_attach(struct i2c_adapter *adapter)
+  */
+ static int therm_pm72_detach(struct i2c_adapter *adapter)
+ {
+-	down(&driver_lock);
++	mutex_lock(&driver_lock);
+ 
+ 	if (state != state_detached)
+ 		state = state_detaching;
+ 
+ 	/* Stop control loops if any */
+ 	DBG("stopping control loops\n");
+-	up(&driver_lock);
++	mutex_unlock(&driver_lock);
+ 	stop_control_loops();
+-	down(&driver_lock);
++	mutex_lock(&driver_lock);
+ 
+ 	if (u3_0 != NULL && !strcmp(adapter->name, "u3 0")) {
+ 		DBG("lost U3-0, disposing control loops\n");
+@@ -2090,7 +2091,7 @@ static int therm_pm72_detach(struct i2c_adapter *adapter)
+ 	if (u3_0 == NULL && u3_1 == NULL)
+ 		state = state_detached;
+ 
+-	up(&driver_lock);
++	mutex_unlock(&driver_lock);
+ 
+ 	return 0;
+ }
+diff --git a/drivers/macintosh/windfarm_smu_sat.c b/drivers/macintosh/windfarm_smu_sat.c
+index 797918d..7f2be4b 100644
+--- a/drivers/macintosh/windfarm_smu_sat.c
++++ b/drivers/macintosh/windfarm_smu_sat.c
+@@ -13,7 +13,7 @@
+ #include <linux/init.h>
+ #include <linux/wait.h>
+ #include <linux/i2c.h>
+-#include <linux/semaphore.h>
++#include <linux/mutex.h>
+ #include <asm/prom.h>
+ #include <asm/smu.h>
+ #include <asm/pmac_low_i2c.h>
+@@ -36,7 +36,7 @@
+ struct wf_sat {
+ 	int			nr;
+ 	atomic_t		refcnt;
+-	struct semaphore	mutex;
++	struct mutex		mutex;
+ 	unsigned long		last_read; /* jiffies when cache last updated */
+ 	u8			cache[16];
+ 	struct i2c_client	i2c;
+@@ -163,7 +163,7 @@ static int wf_sat_get(struct wf_sensor *sr, s32 *value)
+ 	if (sat->i2c.adapter == NULL)
+ 		return -ENODEV;
+ 
+-	down(&sat->mutex);
++	mutex_lock(&sat->mutex);
+ 	if (time_after(jiffies, (sat->last_read + MAX_AGE))) {
+ 		err = wf_sat_read_cache(sat);
+ 		if (err)
+@@ -182,7 +182,7 @@ static int wf_sat_get(struct wf_sensor *sr, s32 *value)
+ 	err = 0;
+ 
+  fail:
+-	up(&sat->mutex);
++	mutex_unlock(&sat->mutex);
+ 	return err;
+ }
+ 
+@@ -233,7 +233,7 @@ static void wf_sat_create(struct i2c_adapter *adapter, struct device_node *dev)
+ 	sat->nr = -1;
+ 	sat->node = of_node_get(dev);
+ 	atomic_set(&sat->refcnt, 0);
+-	init_MUTEX(&sat->mutex);
++	mutex_init(&sat->mutex);
+ 	sat->i2c.addr = (addr >> 1) & 0x7f;
+ 	sat->i2c.adapter = adapter;
+ 	sat->i2c.driver = &wf_sat_driver;
+diff --git a/drivers/misc/kgdbts.c b/drivers/misc/kgdbts.c
+index 30a1af8..fa39410 100644
+--- a/drivers/misc/kgdbts.c
++++ b/drivers/misc/kgdbts.c
+@@ -47,6 +47,7 @@
+  *       to test the HW NMI watchdog
+  * F## = Break at do_fork for ## iterations
+  * S## = Break at sys_open for ## iterations
++ * I## = Run the single step test ## iterations
+  *
+  * NOTE: that the do_fork and sys_open tests are mutually exclusive.
+  *
+@@ -375,7 +376,7 @@ static void emul_sstep_get(char *arg)
+ 		break;
+ 	case 1:
+ 		/* set breakpoint */
+-		break_helper("Z0", 0, sstep_addr);
++		break_helper("Z0", NULL, sstep_addr);
+ 		break;
+ 	case 2:
+ 		/* Continue */
+@@ -383,7 +384,7 @@ static void emul_sstep_get(char *arg)
+ 		break;
+ 	case 3:
+ 		/* Clear breakpoint */
+-		break_helper("z0", 0, sstep_addr);
++		break_helper("z0", NULL, sstep_addr);
+ 		break;
+ 	default:
+ 		eprintk("kgdbts: ERROR failed sstep get emulation\n");
+@@ -465,11 +466,11 @@ static struct test_struct sw_breakpoint_test[] = {
+ 	{ "?", "S0*" }, /* Clear break points */
+ 	{ "kgdbts_break_test", "OK", sw_break, }, /* set sw breakpoint */
+ 	{ "c", "T0*", }, /* Continue */
+-	{ "g", "kgdbts_break_test", 0, check_and_rewind_pc },
++	{ "g", "kgdbts_break_test", NULL, check_and_rewind_pc },
+ 	{ "write", "OK", write_regs },
+ 	{ "kgdbts_break_test", "OK", sw_rem_break }, /*remove breakpoint */
+ 	{ "D", "OK" }, /* Detach */
+-	{ "D", "OK", 0,  got_break }, /* If the test worked we made it here */
++	{ "D", "OK", NULL,  got_break }, /* On success we made it here */
+ 	{ "", "" },
+ };
+ 
+@@ -499,14 +500,14 @@ static struct test_struct singlestep_break_test[] = {
+ 	{ "?", "S0*" }, /* Clear break points */
+ 	{ "kgdbts_break_test", "OK", sw_break, }, /* set sw breakpoint */
+ 	{ "c", "T0*", }, /* Continue */
+-	{ "g", "kgdbts_break_test", 0, check_and_rewind_pc },
++	{ "g", "kgdbts_break_test", NULL, check_and_rewind_pc },
+ 	{ "write", "OK", write_regs }, /* Write registers */
+ 	{ "kgdbts_break_test", "OK", sw_rem_break }, /*remove breakpoint */
+ 	{ "s", "T0*", emul_sstep_get, emul_sstep_put }, /* Single step */
+-	{ "g", "kgdbts_break_test", 0, check_single_step },
++	{ "g", "kgdbts_break_test", NULL, check_single_step },
+ 	{ "kgdbts_break_test", "OK", sw_break, }, /* set sw breakpoint */
+ 	{ "c", "T0*", }, /* Continue */
+-	{ "g", "kgdbts_break_test", 0, check_and_rewind_pc },
++	{ "g", "kgdbts_break_test", NULL, check_and_rewind_pc },
+ 	{ "write", "OK", write_regs }, /* Write registers */
+ 	{ "D", "OK" }, /* Remove all breakpoints and continues */
+ 	{ "", "" },
+@@ -520,14 +521,14 @@ static struct test_struct do_fork_test[] = {
+ 	{ "?", "S0*" }, /* Clear break points */
+ 	{ "do_fork", "OK", sw_break, }, /* set sw breakpoint */
+ 	{ "c", "T0*", }, /* Continue */
+-	{ "g", "do_fork", 0, check_and_rewind_pc }, /* check location */
++	{ "g", "do_fork", NULL, check_and_rewind_pc }, /* check location */
+ 	{ "write", "OK", write_regs }, /* Write registers */
+ 	{ "do_fork", "OK", sw_rem_break }, /*remove breakpoint */
+ 	{ "s", "T0*", emul_sstep_get, emul_sstep_put }, /* Single step */
+-	{ "g", "do_fork", 0, check_single_step },
++	{ "g", "do_fork", NULL, check_single_step },
+ 	{ "do_fork", "OK", sw_break, }, /* set sw breakpoint */
+ 	{ "7", "T0*", skip_back_repeat_test }, /* Loop based on repeat_test */
+-	{ "D", "OK", 0, final_ack_set }, /* detach and unregister I/O */
++	{ "D", "OK", NULL, final_ack_set }, /* detach and unregister I/O */
+ 	{ "", "" },
+ };
+ 
+@@ -538,14 +539,14 @@ static struct test_struct sys_open_test[] = {
+ 	{ "?", "S0*" }, /* Clear break points */
+ 	{ "sys_open", "OK", sw_break, }, /* set sw breakpoint */
+ 	{ "c", "T0*", }, /* Continue */
+-	{ "g", "sys_open", 0, check_and_rewind_pc }, /* check location */
++	{ "g", "sys_open", NULL, check_and_rewind_pc }, /* check location */
+ 	{ "write", "OK", write_regs }, /* Write registers */
+ 	{ "sys_open", "OK", sw_rem_break }, /*remove breakpoint */
+ 	{ "s", "T0*", emul_sstep_get, emul_sstep_put }, /* Single step */
+-	{ "g", "sys_open", 0, check_single_step },
++	{ "g", "sys_open", NULL, check_single_step },
+ 	{ "sys_open", "OK", sw_break, }, /* set sw breakpoint */
+ 	{ "7", "T0*", skip_back_repeat_test }, /* Loop based on repeat_test */
+-	{ "D", "OK", 0, final_ack_set }, /* detach and unregister I/O */
++	{ "D", "OK", NULL, final_ack_set }, /* detach and unregister I/O */
+ 	{ "", "" },
+ };
+ 
+@@ -556,11 +557,11 @@ static struct test_struct hw_breakpoint_test[] = {
+ 	{ "?", "S0*" }, /* Clear break points */
+ 	{ "kgdbts_break_test", "OK", hw_break, }, /* set hw breakpoint */
+ 	{ "c", "T0*", }, /* Continue */
+-	{ "g", "kgdbts_break_test", 0, check_and_rewind_pc },
++	{ "g", "kgdbts_break_test", NULL, check_and_rewind_pc },
+ 	{ "write", "OK", write_regs },
+ 	{ "kgdbts_break_test", "OK", hw_rem_break }, /*remove breakpoint */
+ 	{ "D", "OK" }, /* Detach */
+-	{ "D", "OK", 0,  got_break }, /* If the test worked we made it here */
++	{ "D", "OK", NULL,  got_break }, /* On success we made it here */
+ 	{ "", "" },
+ };
+ 
+@@ -570,12 +571,12 @@ static struct test_struct hw_breakpoint_test[] = {
+ static struct test_struct hw_write_break_test[] = {
+ 	{ "?", "S0*" }, /* Clear break points */
+ 	{ "hw_break_val", "OK", hw_write_break, }, /* set hw breakpoint */
+-	{ "c", "T0*", 0, got_break }, /* Continue */
+-	{ "g", "silent", 0, check_and_rewind_pc },
++	{ "c", "T0*", NULL, got_break }, /* Continue */
++	{ "g", "silent", NULL, check_and_rewind_pc },
+ 	{ "write", "OK", write_regs },
+ 	{ "hw_break_val", "OK", hw_rem_write_break }, /*remove breakpoint */
+ 	{ "D", "OK" }, /* Detach */
+-	{ "D", "OK", 0,  got_break }, /* If the test worked we made it here */
++	{ "D", "OK", NULL,  got_break }, /* On success we made it here */
+ 	{ "", "" },
+ };
+ 
+@@ -585,12 +586,12 @@ static struct test_struct hw_write_break_test[] = {
+ static struct test_struct hw_access_break_test[] = {
+ 	{ "?", "S0*" }, /* Clear break points */
+ 	{ "hw_break_val", "OK", hw_access_break, }, /* set hw breakpoint */
+-	{ "c", "T0*", 0, got_break }, /* Continue */
+-	{ "g", "silent", 0, check_and_rewind_pc },
++	{ "c", "T0*", NULL, got_break }, /* Continue */
++	{ "g", "silent", NULL, check_and_rewind_pc },
+ 	{ "write", "OK", write_regs },
+ 	{ "hw_break_val", "OK", hw_rem_access_break }, /*remove breakpoint */
+ 	{ "D", "OK" }, /* Detach */
+-	{ "D", "OK", 0,  got_break }, /* If the test worked we made it here */
++	{ "D", "OK", NULL,  got_break }, /* On success we made it here */
+ 	{ "", "" },
+ };
+ 
+@@ -599,9 +600,9 @@ static struct test_struct hw_access_break_test[] = {
+  */
+ static struct test_struct nmi_sleep_test[] = {
+ 	{ "?", "S0*" }, /* Clear break points */
+-	{ "c", "T0*", 0, got_break }, /* Continue */
++	{ "c", "T0*", NULL, got_break }, /* Continue */
+ 	{ "D", "OK" }, /* Detach */
+-	{ "D", "OK", 0,  got_break }, /* If the test worked we made it here */
++	{ "D", "OK", NULL,  got_break }, /* On success we made it here */
+ 	{ "", "" },
+ };
+ 
+@@ -874,18 +875,23 @@ static void kgdbts_run_tests(void)
+ {
+ 	char *ptr;
+ 	int fork_test = 0;
+-	int sys_open_test = 0;
++	int do_sys_open_test = 0;
++	int sstep_test = 1000;
+ 	int nmi_sleep = 0;
++	int i;
+ 
+ 	ptr = strstr(config, "F");
+ 	if (ptr)
+-		fork_test = simple_strtol(ptr+1, NULL, 10);
++		fork_test = simple_strtol(ptr + 1, NULL, 10);
+ 	ptr = strstr(config, "S");
+ 	if (ptr)
+-		sys_open_test = simple_strtol(ptr+1, NULL, 10);
++		do_sys_open_test = simple_strtol(ptr + 1, NULL, 10);
+ 	ptr = strstr(config, "N");
+ 	if (ptr)
+ 		nmi_sleep = simple_strtol(ptr+1, NULL, 10);
++	ptr = strstr(config, "I");
++	if (ptr)
++		sstep_test = simple_strtol(ptr+1, NULL, 10);
+ 
+ 	/* required internal KGDB tests */
+ 	v1printk("kgdbts:RUN plant and detach test\n");
+@@ -894,8 +900,13 @@ static void kgdbts_run_tests(void)
+ 	run_breakpoint_test(0);
+ 	v1printk("kgdbts:RUN bad memory access test\n");
+ 	run_bad_read_test();
+-	v1printk("kgdbts:RUN singlestep breakpoint test\n");
+-	run_singlestep_break_test();
++	v1printk("kgdbts:RUN singlestep test %i iterations\n", sstep_test);
++	for (i = 0; i < sstep_test; i++) {
++		run_singlestep_break_test();
++		if (i % 100 == 0)
++			v1printk("kgdbts:RUN singlestep [%i/%i]\n",
++				 i, sstep_test);
++	}
+ 
+ 	/* ===Optional tests=== */
+ 
+@@ -922,7 +933,7 @@ static void kgdbts_run_tests(void)
+ 		repeat_test = fork_test;
+ 		printk(KERN_INFO "kgdbts:RUN do_fork for %i breakpoints\n",
+ 			repeat_test);
+-		kthread_run(kgdbts_unreg_thread, 0, "kgdbts_unreg");
++		kthread_run(kgdbts_unreg_thread, NULL, "kgdbts_unreg");
+ 		run_do_fork_test();
+ 		return;
+ 	}
+@@ -931,11 +942,11 @@ static void kgdbts_run_tests(void)
+ 	 * executed because a kernel thread will be spawned at the very
+ 	 * end to unregister the debug hooks.
+ 	 */
+-	if (sys_open_test) {
+-		repeat_test = sys_open_test;
++	if (do_sys_open_test) {
++		repeat_test = do_sys_open_test;
+ 		printk(KERN_INFO "kgdbts:RUN sys_open for %i breakpoints\n",
+ 			repeat_test);
+-		kthread_run(kgdbts_unreg_thread, 0, "kgdbts_unreg");
++		kthread_run(kgdbts_unreg_thread, NULL, "kgdbts_unreg");
+ 		run_sys_open_test();
+ 		return;
+ 	}
+diff --git a/drivers/net/mlx4/mr.c b/drivers/net/mlx4/mr.c
+index cb46446..03a9abc 100644
+--- a/drivers/net/mlx4/mr.c
++++ b/drivers/net/mlx4/mr.c
+@@ -551,7 +551,7 @@ int mlx4_fmr_alloc(struct mlx4_dev *dev, u32 pd, u32 access, int max_pages,
+ 	u64 mtt_seg;
+ 	int err = -ENOMEM;
+ 
+-	if (page_shift < 12 || page_shift >= 32)
++	if (page_shift < (ffs(dev->caps.page_size_cap) - 1) || page_shift >= 32)
+ 		return -EINVAL;
+ 
+ 	/* All MTTs must fit in the same page */
+diff --git a/drivers/pci/probe.c b/drivers/pci/probe.c
+index 4a55bf3..3706ce7 100644
+--- a/drivers/pci/probe.c
++++ b/drivers/pci/probe.c
+@@ -842,13 +842,25 @@ static void set_pcie_port_type(struct pci_dev *pdev)
+  * reading the dword at 0x100 which must either be 0 or a valid extended
+  * capability header.
+  */
+-int pci_cfg_space_size_ext(struct pci_dev *dev, unsigned check_exp_pcix)
++int pci_cfg_space_size_ext(struct pci_dev *dev)
+ {
+-	int pos;
+ 	u32 status;
+ 
+-	if (!check_exp_pcix)
+-		goto skip;
++	if (pci_read_config_dword(dev, 256, &status) != PCIBIOS_SUCCESSFUL)
++		goto fail;
++	if (status == 0xffffffff)
++		goto fail;
++
++	return PCI_CFG_SPACE_EXP_SIZE;
++
++ fail:
++	return PCI_CFG_SPACE_SIZE;
++}
++
++int pci_cfg_space_size(struct pci_dev *dev)
++{
++	int pos;
++	u32 status;
+ 
+ 	pos = pci_find_capability(dev, PCI_CAP_ID_EXP);
+ 	if (!pos) {
+@@ -861,23 +873,12 @@ int pci_cfg_space_size_ext(struct pci_dev *dev, unsigned check_exp_pcix)
+ 			goto fail;
+ 	}
+ 
+- skip:
+-	if (pci_read_config_dword(dev, 256, &status) != PCIBIOS_SUCCESSFUL)
+-		goto fail;
+-	if (status == 0xffffffff)
+-		goto fail;
+-
+-	return PCI_CFG_SPACE_EXP_SIZE;
++	return pci_cfg_space_size_ext(dev);
+ 
+  fail:
+ 	return PCI_CFG_SPACE_SIZE;
+ }
+ 
+-int pci_cfg_space_size(struct pci_dev *dev)
+-{
+-	return pci_cfg_space_size_ext(dev, 1);
+-}
+-
+ static void pci_release_bus_bridge_dev(struct device *dev)
+ {
+ 	kfree(dev);
+diff --git a/drivers/scsi/Kconfig b/drivers/scsi/Kconfig
+index 46d7e40..81ccbd7 100644
+--- a/drivers/scsi/Kconfig
++++ b/drivers/scsi/Kconfig
+@@ -1679,6 +1679,7 @@ config MAC_SCSI
+ config SCSI_MAC_ESP
+ 	tristate "Macintosh NCR53c9[46] SCSI"
+ 	depends on MAC && SCSI
++	select SCSI_SPI_ATTRS
+ 	help
+ 	  This is the NCR 53c9x SCSI controller found on most of the 68040
+ 	  based Macintoshes.
+diff --git a/fs/pipe.c b/fs/pipe.c
+index f73492b..3499f9f 100644
+--- a/fs/pipe.c
++++ b/fs/pipe.c
+@@ -1076,6 +1076,23 @@ int do_pipe(int *fd)
+ }
+ 
+ /*
++ * sys_pipe() is the normal C calling standard for creating
++ * a pipe. It's not the way Unix traditionally does this, though.
++ */
++asmlinkage long __weak sys_pipe(int __user *fildes)
++{
++	int fd[2];
++	int error;
++
++	error = do_pipe(fd);
++	if (!error) {
++		if (copy_to_user(fildes, fd, sizeof(fd)))
++			error = -EFAULT;
++	}
++	return error;
++}
++
++/*
+  * pipefs should _never_ be mounted by userland - too much of security hassle,
+  * no real gain from having the whole whorehouse mounted. So we don't need
+  * any operations on the root directory. However, we need a non-trivial
+diff --git a/fs/proc/task_nommu.c b/fs/proc/task_nommu.c
+index 4b733f1..4b4f9cc 100644
+--- a/fs/proc/task_nommu.c
++++ b/fs/proc/task_nommu.c
+@@ -1,6 +1,7 @@
+ 
+ #include <linux/mm.h>
+ #include <linux/file.h>
++#include <linux/fdtable.h>
+ #include <linux/mount.h>
+ #include <linux/ptrace.h>
+ #include <linux/seq_file.h>
+diff --git a/include/asm-alpha/types.h b/include/asm-alpha/types.h
+index a9e34ca..c154135 100644
+--- a/include/asm-alpha/types.h
++++ b/include/asm-alpha/types.h
+@@ -23,5 +23,11 @@ typedef unsigned int umode_t;
+ 
+ #define BITS_PER_LONG 64
+ 
++#ifndef __ASSEMBLY__
++
++typedef u64 dma_addr_t;
++typedef u64 dma64_addr_t;
++
++#endif /* __ASSEMBLY__ */
+ #endif /* __KERNEL__ */
+ #endif /* _ALPHA_TYPES_H */
+diff --git a/include/asm-m68k/machw.h b/include/asm-m68k/machw.h
+index d2e0e25..3562499 100644
+--- a/include/asm-m68k/machw.h
++++ b/include/asm-m68k/machw.h
+@@ -66,36 +66,6 @@ struct MAC_SCC
+ # define mac_scc ((*(volatile struct SCC*)MAC_SCC_BAS))
+ #endif
+ 
+-/* hardware stuff */
+-
+-#define MACHW_DECLARE(name)	unsigned name : 1
+-#define MACHW_SET(name)		(mac_hw_present.name = 1)
+-#define MACHW_PRESENT(name)	(mac_hw_present.name)
+-
+-struct mac_hw_present {
+-  /* video hardware */
+-  /* sound hardware */
+-  /* disk storage interfaces */
+-  MACHW_DECLARE(MAC_SCSI_80);     /* Directly mapped NCR5380 */
+-  MACHW_DECLARE(MAC_SCSI_96);     /* 53c9[46] */
+-  MACHW_DECLARE(MAC_SCSI_96_2);   /* 2nd 53c9[46] Q900 and Q950 */
+-  MACHW_DECLARE(IDE);             /* IDE Interface */
+-  /* other I/O hardware */
+-  MACHW_DECLARE(SCC);             /* Serial Communications Contr. */
+-  /* DMA */
+-  MACHW_DECLARE(SCSI_DMA);        /* DMA for the NCR5380 */
+-  /* real time clocks */
+-  MACHW_DECLARE(RTC_CLK);         /* clock chip */
+-  /* supporting hardware */
+-  MACHW_DECLARE(VIA1);            /* Versatile Interface Ad. 1 */
+-  MACHW_DECLARE(VIA2);            /* Versatile Interface Ad. 2 */
+-  MACHW_DECLARE(RBV);             /* Versatile Interface Ad. 2+ */
+-  /* NUBUS */
+-  MACHW_DECLARE(NUBUS);           /* NUBUS */
+-};
+-
+-extern struct mac_hw_present mac_hw_present;
+-
+ #endif /* __ASSEMBLY__ */
+ 
+ #endif /* linux/machw.h */
+diff --git a/include/asm-mips/types.h b/include/asm-mips/types.h
+index 7a2ee4f..bcbb8d6 100644
+--- a/include/asm-mips/types.h
++++ b/include/asm-mips/types.h
+@@ -19,8 +19,6 @@
+ 
+ typedef unsigned short umode_t;
+ 
+-#endif
+-
+ #endif /* __ASSEMBLY__ */
+ 
+ /*
+diff --git a/include/asm-powerpc/io.h b/include/asm-powerpc/io.h
+index afae069..e0062d7 100644
+--- a/include/asm-powerpc/io.h
++++ b/include/asm-powerpc/io.h
+@@ -2,7 +2,7 @@
+ #define _ASM_POWERPC_IO_H
+ #ifdef __KERNEL__
+ 
+-/* 
++/*
+  * This program is free software; you can redistribute it and/or
+  * modify it under the terms of the GNU General Public License
+  * as published by the Free Software Foundation; either version
+@@ -18,6 +18,9 @@ extern int check_legacy_ioport(unsigned long base_port);
+ #define _PNPWRP		0xa79
+ #define PNPBIOS_BASE	0xf000
+ 
++#include <linux/device.h>
++#include <linux/io.h>
++
+ #include <linux/compiler.h>
+ #include <asm/page.h>
+ #include <asm/byteorder.h>
+@@ -744,6 +747,9 @@ static inline void * bus_to_virt(unsigned long address)
+ 
+ #define clrsetbits_8(addr, clear, set) clrsetbits(8, addr, clear, set)
+ 
++void __iomem *devm_ioremap_prot(struct device *dev, resource_size_t offset,
++				size_t size, unsigned long flags);
++
+ #endif /* __KERNEL__ */
+ 
+ #endif /* _ASM_POWERPC_IO_H */
+diff --git a/include/asm-powerpc/kvm_host.h b/include/asm-powerpc/kvm_host.h
+index 04ffbb8..81a69d7 100644
+--- a/include/asm-powerpc/kvm_host.h
++++ b/include/asm-powerpc/kvm_host.h
+@@ -59,6 +59,7 @@ struct kvm_vcpu_stat {
+ 	u32 emulated_inst_exits;
+ 	u32 dec_exits;
+ 	u32 ext_intr_exits;
++	u32 halt_wakeup;
+ };
+ 
+ struct tlbe {
+diff --git a/include/asm-powerpc/kvm_ppc.h b/include/asm-powerpc/kvm_ppc.h
+index 7ac8203..b35a7e3 100644
+--- a/include/asm-powerpc/kvm_ppc.h
++++ b/include/asm-powerpc/kvm_ppc.h
+@@ -77,12 +77,17 @@ static inline void kvmppc_clear_exception(struct kvm_vcpu *vcpu, int exception)
+ 	clear_bit(priority, &vcpu->arch.pending_exceptions);
+ }
+ 
++/* Helper function for "full" MSR writes. No need to call this if only EE is
++ * changing. */
+ static inline void kvmppc_set_msr(struct kvm_vcpu *vcpu, u32 new_msr)
+ {
+ 	if ((new_msr & MSR_PR) != (vcpu->arch.msr & MSR_PR))
+ 		kvmppc_mmu_priv_switch(vcpu, new_msr & MSR_PR);
+ 
+ 	vcpu->arch.msr = new_msr;
++
++	if (vcpu->arch.msr & MSR_WE)
++		kvm_vcpu_block(vcpu);
+ }
+ 
+ #endif /* __POWERPC_KVM_PPC_H__ */
+diff --git a/include/asm-powerpc/syscalls.h b/include/asm-powerpc/syscalls.h
+index b3ca41f..2b8a458 100644
+--- a/include/asm-powerpc/syscalls.h
++++ b/include/asm-powerpc/syscalls.h
+@@ -30,7 +30,7 @@ asmlinkage int sys_fork(unsigned long p1, unsigned long p2,
+ asmlinkage int sys_vfork(unsigned long p1, unsigned long p2,
+ 		unsigned long p3, unsigned long p4, unsigned long p5,
+ 		unsigned long p6, struct pt_regs *regs);
+-asmlinkage int sys_pipe(int __user *fildes);
++asmlinkage long sys_pipe(int __user *fildes);
+ asmlinkage long sys_rt_sigaction(int sig,
+ 		const struct sigaction __user *act,
+ 		struct sigaction __user *oact, size_t sigsetsize);
+diff --git a/include/asm-x86/bootparam.h b/include/asm-x86/bootparam.h
+index e865990..f62f473 100644
+--- a/include/asm-x86/bootparam.h
++++ b/include/asm-x86/bootparam.h
+@@ -14,10 +14,10 @@
+ 
+ /* extensible setup data list node */
+ struct setup_data {
+-	u64 next;
+-	u32 type;
+-	u32 len;
+-	u8 data[0];
++	__u64 next;
++	__u32 type;
++	__u32 len;
++	__u8 data[0];
+ };
+ 
+ struct setup_header {
+diff --git a/include/asm-x86/kvm_host.h b/include/asm-x86/kvm_host.h
+index 9d963cd..1d8cd01 100644
+--- a/include/asm-x86/kvm_host.h
++++ b/include/asm-x86/kvm_host.h
+@@ -314,6 +314,9 @@ struct kvm_arch{
+ 	struct page *apic_access_page;
+ 
+ 	gpa_t wall_clock;
++
++	struct page *ept_identity_pagetable;
++	bool ept_identity_pagetable_done;
+ };
+ 
+ struct kvm_vm_stat {
+@@ -422,6 +425,7 @@ struct kvm_x86_ops {
+ 				       struct kvm_run *run);
+ 
+ 	int (*set_tss_addr)(struct kvm *kvm, unsigned int addr);
++	int (*get_tdp_level)(void);
+ };
+ 
+ extern struct kvm_x86_ops *kvm_x86_ops;
+@@ -433,6 +437,9 @@ void kvm_mmu_destroy(struct kvm_vcpu *vcpu);
+ int kvm_mmu_create(struct kvm_vcpu *vcpu);
+ int kvm_mmu_setup(struct kvm_vcpu *vcpu);
+ void kvm_mmu_set_nonpresent_ptes(u64 trap_pte, u64 notrap_pte);
++void kvm_mmu_set_base_ptes(u64 base_pte);
++void kvm_mmu_set_mask_ptes(u64 user_mask, u64 accessed_mask,
++		u64 dirty_mask, u64 nx_mask, u64 x_mask);
+ 
+ int kvm_mmu_reset_context(struct kvm_vcpu *vcpu);
+ void kvm_mmu_slot_remove_write_access(struct kvm *kvm, int slot);
+@@ -620,7 +627,7 @@ static inline void fx_restore(struct i387_fxsave_struct *image)
+ 	asm("fxrstor (%0)":: "r" (image));
+ }
+ 
+-static inline void fpu_init(void)
++static inline void fx_finit(void)
+ {
+ 	asm("finit");
+ }
+@@ -644,6 +651,7 @@ static inline void kvm_inject_gp(struct kvm_vcpu *vcpu, u32 error_code)
+ #define ASM_VMX_VMWRITE_RSP_RDX   ".byte 0x0f, 0x79, 0xd4"
+ #define ASM_VMX_VMXOFF            ".byte 0x0f, 0x01, 0xc4"
+ #define ASM_VMX_VMXON_RAX         ".byte 0xf3, 0x0f, 0xc7, 0x30"
++#define ASM_VMX_INVEPT		  ".byte 0x66, 0x0f, 0x38, 0x80, 0x08"
+ #define ASM_VMX_INVVPID		  ".byte 0x66, 0x0f, 0x38, 0x81, 0x08"
+ 
+ #define MSR_IA32_TIME_STAMP_COUNTER		0x010
+diff --git a/include/linux/hrtimer.h b/include/linux/hrtimer.h
+index 31a4d65..6d93dce 100644
+--- a/include/linux/hrtimer.h
++++ b/include/linux/hrtimer.h
+@@ -316,6 +316,15 @@ static inline int hrtimer_is_queued(struct hrtimer *timer)
+ 		(HRTIMER_STATE_ENQUEUED | HRTIMER_STATE_PENDING);
+ }
+ 
++/*
++ * Helper function to check, whether the timer is running the callback
++ * function
++ */
++static inline int hrtimer_callback_running(struct hrtimer *timer)
++{
++	return timer->state & HRTIMER_STATE_CALLBACK;
++}
++
+ /* Forward a hrtimer so it expires after now: */
+ extern u64
+ hrtimer_forward(struct hrtimer *timer, ktime_t now, ktime_t interval);
+diff --git a/include/linux/io.h b/include/linux/io.h
+index 3a03a36..6c7f0ba 100644
+--- a/include/linux/io.h
++++ b/include/linux/io.h
+@@ -65,5 +65,6 @@ void __iomem *devm_ioremap_nocache(struct device *dev, resource_size_t offset,
+ void devm_iounmap(struct device *dev, void __iomem *addr);
+ int check_signature(const volatile void __iomem *io_addr,
+ 			const unsigned char *signature, int length);
++void devm_ioremap_release(struct device *dev, void *res);
+ 
+ #endif /* _LINUX_IO_H */
+diff --git a/include/linux/kgdb.h b/include/linux/kgdb.h
+index 9757b1a..6adcc29 100644
+--- a/include/linux/kgdb.h
++++ b/include/linux/kgdb.h
+@@ -261,10 +261,12 @@ struct kgdb_io {
+ 
+ extern struct kgdb_arch		arch_kgdb_ops;
+ 
++extern unsigned long __weak kgdb_arch_pc(int exception, struct pt_regs *regs);
++
+ extern int kgdb_register_io_module(struct kgdb_io *local_kgdb_io_ops);
+ extern void kgdb_unregister_io_module(struct kgdb_io *local_kgdb_io_ops);
+ 
+-extern int kgdb_hex2long(char **ptr, long *long_val);
++extern int kgdb_hex2long(char **ptr, unsigned long *long_val);
+ extern int kgdb_mem2hex(char *mem, char *buf, int count);
+ extern int kgdb_hex2mem(char *buf, char *mem, int count);
+ 
+diff --git a/include/linux/pci.h b/include/linux/pci.h
+index 96acd0d..509159b 100644
+--- a/include/linux/pci.h
++++ b/include/linux/pci.h
+@@ -44,6 +44,7 @@
+ #include <linux/mod_devicetable.h>
+ 
+ #include <linux/types.h>
++#include <linux/init.h>
+ #include <linux/ioport.h>
+ #include <linux/list.h>
+ #include <linux/compiler.h>
+@@ -474,7 +475,7 @@ extern struct pci_bus *pci_find_bus(int domain, int busnr);
+ void pci_bus_add_devices(struct pci_bus *bus);
+ struct pci_bus *pci_scan_bus_parented(struct device *parent, int bus,
+ 				      struct pci_ops *ops, void *sysdata);
+-static inline struct pci_bus *pci_scan_bus(int bus, struct pci_ops *ops,
++static inline struct pci_bus * __devinit pci_scan_bus(int bus, struct pci_ops *ops,
+ 					   void *sysdata)
+ {
+ 	struct pci_bus *root_bus;
+@@ -666,7 +667,7 @@ int pci_scan_bridge(struct pci_bus *bus, struct pci_dev *dev, int max,
+ 
+ void pci_walk_bus(struct pci_bus *top, void (*cb)(struct pci_dev *, void *),
+ 		  void *userdata);
+-int pci_cfg_space_size_ext(struct pci_dev *dev, unsigned check_exp_pcix);
++int pci_cfg_space_size_ext(struct pci_dev *dev);
+ int pci_cfg_space_size(struct pci_dev *dev);
+ unsigned char pci_bus_max_busnr(struct pci_bus *bus);
+ 
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+index 03c2380..0c35b03 100644
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -158,6 +158,8 @@ print_cfs_rq(struct seq_file *m, int cpu, struct cfs_rq *cfs_rq)
+ }
+ #endif
+ 
++extern unsigned long long time_sync_thresh;
++
+ /*
+  * Task state bitmask. NOTE! These bits are also
+  * encoded in fs/proc/array.c: get_task_state().
+@@ -1551,6 +1553,35 @@ static inline int set_cpus_allowed(struct task_struct *p, cpumask_t new_mask)
+ 
+ extern unsigned long long sched_clock(void);
+ 
++#ifndef CONFIG_HAVE_UNSTABLE_SCHED_CLOCK
++static inline void sched_clock_init(void)
++{
++}
++
++static inline u64 sched_clock_cpu(int cpu)
++{
++	return sched_clock();
++}
++
++static inline void sched_clock_tick(void)
++{
++}
++
++static inline void sched_clock_idle_sleep_event(void)
++{
++}
++
++static inline void sched_clock_idle_wakeup_event(u64 delta_ns)
++{
++}
++#else
++extern void sched_clock_init(void);
++extern u64 sched_clock_cpu(int cpu);
++extern void sched_clock_tick(void);
++extern void sched_clock_idle_sleep_event(void);
++extern void sched_clock_idle_wakeup_event(u64 delta_ns);
++#endif
++
+ /*
+  * For kernel-internal use: high-speed (but slightly incorrect) per-cpu
+  * clock constructed from sched_clock():
+@@ -1977,6 +2008,11 @@ static inline void clear_tsk_need_resched(struct task_struct *tsk)
+ 	clear_tsk_thread_flag(tsk,TIF_NEED_RESCHED);
+ }
+ 
++static inline int test_tsk_need_resched(struct task_struct *tsk)
++{
++	return unlikely(test_tsk_thread_flag(tsk,TIF_NEED_RESCHED));
++}
++
+ static inline int signal_pending(struct task_struct *p)
+ {
+ 	return unlikely(test_tsk_thread_flag(p,TIF_SIGPENDING));
+@@ -1991,7 +2027,7 @@ static inline int fatal_signal_pending(struct task_struct *p)
+ 
+ static inline int need_resched(void)
+ {
+-	return unlikely(test_thread_flag(TIF_NEED_RESCHED));
++	return unlikely(test_tsk_need_resched(current));
+ }
+ 
+ /*
+diff --git a/include/linux/sysfs.h b/include/linux/sysfs.h
+index 27bad59..7858eac 100644
+--- a/include/linux/sysfs.h
++++ b/include/linux/sysfs.h
+@@ -196,12 +196,6 @@ static inline int sysfs_update_group(struct kobject *kobj,
+ 	return 0;
+ }
+ 
+-static inline int sysfs_update_group(struct kobject *kobj,
+-				const struct attribute_group *grp)
+-{
+-	return 0;
+-}
+-
+ static inline void sysfs_remove_group(struct kobject *kobj,
+ 				      const struct attribute_group *grp)
+ {
+diff --git a/init/Kconfig b/init/Kconfig
+index 6a44def..4c33316 100644
+--- a/init/Kconfig
++++ b/init/Kconfig
+@@ -316,9 +316,16 @@ config CPUSETS
+ 
+ 	  Say N if unsure.
+ 
++#
++# Architectures with an unreliable sched_clock() should select this:
++#
++config HAVE_UNSTABLE_SCHED_CLOCK
++	bool
++
+ config GROUP_SCHED
+ 	bool "Group CPU scheduler"
+-	default y
++	depends on EXPERIMENTAL
++	default n
+ 	help
+ 	  This feature lets CPU scheduler recognize task groups and control CPU
+ 	  bandwidth allocation to such task groups.
+@@ -326,7 +333,7 @@ config GROUP_SCHED
+ config FAIR_GROUP_SCHED
+ 	bool "Group scheduling for SCHED_OTHER"
+ 	depends on GROUP_SCHED
+-	default y
++	default GROUP_SCHED
+ 
+ config RT_GROUP_SCHED
+ 	bool "Group scheduling for SCHED_RR/FIFO"
+@@ -825,6 +832,15 @@ menuconfig MODULES
+ 
+ 	  If unsure, say Y.
+ 
++config MODULE_FORCE_LOAD
++	bool "Forced module loading"
++	depends on MODULES
++	default n
++	help
++	  This option allows loading of modules even if that would set the
++          'F' (forced) taint, due to lack of version info.  Which is
++	  usually a really bad idea.
++
+ config MODULE_UNLOAD
+ 	bool "Module unloading"
+ 	depends on MODULES
+diff --git a/init/main.c b/init/main.c
+index a87d4ca..ddada7a 100644
+--- a/init/main.c
++++ b/init/main.c
+@@ -602,6 +602,7 @@ asmlinkage void __init start_kernel(void)
+ 	softirq_init();
+ 	timekeeping_init();
+ 	time_init();
++	sched_clock_init();
+ 	profile_init();
+ 	if (!irqs_disabled())
+ 		printk("start_kernel(): bug: interrupts were enabled early\n");
+diff --git a/ipc/mqueue.c b/ipc/mqueue.c
+index 94fd3b0..b3b69fd 100644
+--- a/ipc/mqueue.c
++++ b/ipc/mqueue.c
+@@ -673,7 +673,7 @@ asmlinkage long sys_mq_open(const char __user *u_name, int oflag, mode_t mode,
+ 	if (IS_ERR(name = getname(u_name)))
+ 		return PTR_ERR(name);
+ 
+-	fd = get_unused_fd();
++	fd = get_unused_fd_flags(O_CLOEXEC);
+ 	if (fd < 0)
+ 		goto out_putname;
+ 
+@@ -709,7 +709,6 @@ asmlinkage long sys_mq_open(const char __user *u_name, int oflag, mode_t mode,
+ 		goto out_putfd;
+ 	}
+ 
+-	set_close_on_exec(fd, 1);
+ 	fd_install(fd, filp);
+ 	goto out_upsem;
+ 
+diff --git a/kernel/Makefile b/kernel/Makefile
+index 188c432..1c9938a 100644
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -9,7 +9,7 @@ obj-y     = sched.o fork.o exec_domain.o panic.o printk.o profile.o \
+ 	    rcupdate.o extable.o params.o posix-timers.o \
+ 	    kthread.o wait.o kfifo.o sys_ni.o posix-cpu-timers.o mutex.o \
+ 	    hrtimer.o rwsem.o nsproxy.o srcu.o semaphore.o \
+-	    notifier.o ksysfs.o pm_qos_params.o
++	    notifier.o ksysfs.o pm_qos_params.o sched_clock.o
+ 
+ obj-$(CONFIG_SYSCTL_SYSCALL_CHECK) += sysctl_check.o
+ obj-$(CONFIG_STACKTRACE) += stacktrace.o
+diff --git a/kernel/futex.c b/kernel/futex.c
+index 98092c9..449def8 100644
+--- a/kernel/futex.c
++++ b/kernel/futex.c
+@@ -104,10 +104,6 @@ struct futex_q {
+ 	/* Key which the futex is hashed on: */
+ 	union futex_key key;
+ 
+-	/* For fd, sigio sent using these: */
+-	int fd;
+-	struct file *filp;
+-
+ 	/* Optional priority inheritance state: */
+ 	struct futex_pi_state *pi_state;
+ 	struct task_struct *task;
+@@ -126,9 +122,6 @@ struct futex_hash_bucket {
+ 
+ static struct futex_hash_bucket futex_queues[1<<FUTEX_HASHBITS];
+ 
+-/* Futex-fs vfsmount entry: */
+-static struct vfsmount *futex_mnt;
+-
+ /*
+  * Take mm->mmap_sem, when futex is shared
+  */
+@@ -610,8 +603,6 @@ lookup_pi_state(u32 uval, struct futex_hash_bucket *hb,
+ static void wake_futex(struct futex_q *q)
+ {
+ 	plist_del(&q->list, &q->list.plist);
+-	if (q->filp)
+-		send_sigio(&q->filp->f_owner, q->fd, POLL_IN);
+ 	/*
+ 	 * The lock in wake_up_all() is a crucial memory barrier after the
+ 	 * plist_del() and also before assigning to q->lock_ptr.
+@@ -988,14 +979,10 @@ out:
+ }
+ 
+ /* The key must be already stored in q->key. */
+-static inline struct futex_hash_bucket *
+-queue_lock(struct futex_q *q, int fd, struct file *filp)
++static inline struct futex_hash_bucket *queue_lock(struct futex_q *q)
+ {
+ 	struct futex_hash_bucket *hb;
+ 
+-	q->fd = fd;
+-	q->filp = filp;
+-
+ 	init_waitqueue_head(&q->waiters);
+ 
+ 	get_futex_key_refs(&q->key);
+@@ -1006,7 +993,7 @@ queue_lock(struct futex_q *q, int fd, struct file *filp)
+ 	return hb;
+ }
+ 
+-static inline void __queue_me(struct futex_q *q, struct futex_hash_bucket *hb)
++static inline void queue_me(struct futex_q *q, struct futex_hash_bucket *hb)
+ {
+ 	int prio;
+ 
+@@ -1041,15 +1028,6 @@ queue_unlock(struct futex_q *q, struct futex_hash_bucket *hb)
+  * exactly once.  They are called with the hashed spinlock held.
+  */
+ 
+-/* The key must be already stored in q->key. */
+-static void queue_me(struct futex_q *q, int fd, struct file *filp)
+-{
+-	struct futex_hash_bucket *hb;
+-
+-	hb = queue_lock(q, fd, filp);
+-	__queue_me(q, hb);
+-}
+-
+ /* Return 1 if we were still queued (ie. 0 means we were woken) */
+ static int unqueue_me(struct futex_q *q)
+ {
+@@ -1194,7 +1172,7 @@ static int futex_wait(u32 __user *uaddr, struct rw_semaphore *fshared,
+ 	if (unlikely(ret != 0))
+ 		goto out_release_sem;
+ 
+-	hb = queue_lock(&q, -1, NULL);
++	hb = queue_lock(&q);
+ 
+ 	/*
+ 	 * Access the page AFTER the futex is queued.
+@@ -1238,7 +1216,7 @@ static int futex_wait(u32 __user *uaddr, struct rw_semaphore *fshared,
+ 		goto out_unlock_release_sem;
+ 
+ 	/* Only actually queue if *uaddr contained val.  */
+-	__queue_me(&q, hb);
++	queue_me(&q, hb);
+ 
+ 	/*
+ 	 * Now the futex is queued and we have checked the data, we
+@@ -1386,7 +1364,7 @@ static int futex_lock_pi(u32 __user *uaddr, struct rw_semaphore *fshared,
+ 		goto out_release_sem;
+ 
+  retry_unlocked:
+-	hb = queue_lock(&q, -1, NULL);
++	hb = queue_lock(&q);
+ 
+  retry_locked:
+ 	ret = lock_taken = 0;
+@@ -1499,7 +1477,7 @@ static int futex_lock_pi(u32 __user *uaddr, struct rw_semaphore *fshared,
+ 	/*
+ 	 * Only actually queue now that the atomic ops are done:
+ 	 */
+-	__queue_me(&q, hb);
++	queue_me(&q, hb);
+ 
+ 	/*
+ 	 * Now the futex is queued and we have checked the data, we
+@@ -1746,121 +1724,6 @@ pi_faulted:
+ 	return ret;
+ }
+ 
+-static int futex_close(struct inode *inode, struct file *filp)
+-{
+-	struct futex_q *q = filp->private_data;
+-
+-	unqueue_me(q);
+-	kfree(q);
+-
+-	return 0;
+-}
+-
+-/* This is one-shot: once it's gone off you need a new fd */
+-static unsigned int futex_poll(struct file *filp,
+-			       struct poll_table_struct *wait)
+-{
+-	struct futex_q *q = filp->private_data;
+-	int ret = 0;
+-
+-	poll_wait(filp, &q->waiters, wait);
+-
+-	/*
+-	 * plist_node_empty() is safe here without any lock.
+-	 * q->lock_ptr != 0 is not safe, because of ordering against wakeup.
+-	 */
+-	if (plist_node_empty(&q->list))
+-		ret = POLLIN | POLLRDNORM;
+-
+-	return ret;
+-}
+-
+-static const struct file_operations futex_fops = {
+-	.release	= futex_close,
+-	.poll		= futex_poll,
+-};
+-
+-/*
+- * Signal allows caller to avoid the race which would occur if they
+- * set the sigio stuff up afterwards.
+- */
+-static int futex_fd(u32 __user *uaddr, int signal)
+-{
+-	struct futex_q *q;
+-	struct file *filp;
+-	int ret, err;
+-	struct rw_semaphore *fshared;
+-	static unsigned long printk_interval;
+-
+-	if (printk_timed_ratelimit(&printk_interval, 60 * 60 * 1000)) {
+-		printk(KERN_WARNING "Process `%s' used FUTEX_FD, which "
+-		       "will be removed from the kernel in June 2007\n",
+-		       current->comm);
+-	}
+-
+-	ret = -EINVAL;
+-	if (!valid_signal(signal))
+-		goto out;
+-
+-	ret = get_unused_fd();
+-	if (ret < 0)
+-		goto out;
+-	filp = get_empty_filp();
+-	if (!filp) {
+-		put_unused_fd(ret);
+-		ret = -ENFILE;
+-		goto out;
+-	}
+-	filp->f_op = &futex_fops;
+-	filp->f_path.mnt = mntget(futex_mnt);
+-	filp->f_path.dentry = dget(futex_mnt->mnt_root);
+-	filp->f_mapping = filp->f_path.dentry->d_inode->i_mapping;
+-
+-	if (signal) {
+-		err = __f_setown(filp, task_pid(current), PIDTYPE_PID, 1);
+-		if (err < 0) {
+-			goto error;
+-		}
+-		filp->f_owner.signum = signal;
+-	}
+-
+-	q = kmalloc(sizeof(*q), GFP_KERNEL);
+-	if (!q) {
+-		err = -ENOMEM;
+-		goto error;
+-	}
+-	q->pi_state = NULL;
+-
+-	fshared = &current->mm->mmap_sem;
+-	down_read(fshared);
+-	err = get_futex_key(uaddr, fshared, &q->key);
+-
+-	if (unlikely(err != 0)) {
+-		up_read(fshared);
+-		kfree(q);
+-		goto error;
+-	}
+-
+-	/*
+-	 * queue_me() must be called before releasing mmap_sem, because
+-	 * key->shared.inode needs to be referenced while holding it.
+-	 */
+-	filp->private_data = q;
+-
+-	queue_me(q, ret, filp);
+-	up_read(fshared);
+-
+-	/* Now we map fd to filp, so userspace can access it */
+-	fd_install(ret, filp);
+-out:
+-	return ret;
+-error:
+-	put_unused_fd(ret);
+-	put_filp(filp);
+-	ret = err;
+-	goto out;
+-}
+-
+ /*
+  * Support for robust futexes: the kernel cleans up held futexes at
+  * thread exit time.
+@@ -2092,10 +1955,6 @@ long do_futex(u32 __user *uaddr, int op, u32 val, ktime_t *timeout,
+ 	case FUTEX_WAKE_BITSET:
+ 		ret = futex_wake(uaddr, fshared, val, val3);
+ 		break;
+-	case FUTEX_FD:
+-		/* non-zero val means F_SETOWN(getpid()) & F_SETSIG(val) */
+-		ret = futex_fd(uaddr, val);
+-		break;
+ 	case FUTEX_REQUEUE:
+ 		ret = futex_requeue(uaddr, fshared, uaddr2, val, val2, NULL);
+ 		break;
+@@ -2156,19 +2015,6 @@ asmlinkage long sys_futex(u32 __user *uaddr, int op, u32 val,
+ 	return do_futex(uaddr, op, val, tp, uaddr2, val2, val3);
+ }
+ 
+-static int futexfs_get_sb(struct file_system_type *fs_type,
+-			  int flags, const char *dev_name, void *data,
+-			  struct vfsmount *mnt)
+-{
+-	return get_sb_pseudo(fs_type, "futex", NULL, FUTEXFS_SUPER_MAGIC, mnt);
+-}
+-
+-static struct file_system_type futex_fs_type = {
+-	.name		= "futexfs",
+-	.get_sb		= futexfs_get_sb,
+-	.kill_sb	= kill_anon_super,
+-};
+-
+ static int __init futex_init(void)
+ {
+ 	u32 curval;
+@@ -2193,16 +2039,6 @@ static int __init futex_init(void)
+ 		spin_lock_init(&futex_queues[i].lock);
+ 	}
+ 
+-	i = register_filesystem(&futex_fs_type);
+-	if (i)
+-		return i;
+-
+-	futex_mnt = kern_mount(&futex_fs_type);
+-	if (IS_ERR(futex_mnt)) {
+-		unregister_filesystem(&futex_fs_type);
+-		return PTR_ERR(futex_mnt);
+-	}
+-
+ 	return 0;
+ }
+ __initcall(futex_init);
+diff --git a/kernel/hrtimer.c b/kernel/hrtimer.c
+index 9af1d6a..421be5f 100644
+--- a/kernel/hrtimer.c
++++ b/kernel/hrtimer.c
+@@ -154,15 +154,6 @@ static void hrtimer_get_softirq_time(struct hrtimer_cpu_base *base)
+ }
+ 
+ /*
+- * Helper function to check, whether the timer is running the callback
+- * function
+- */
+-static inline int hrtimer_callback_running(struct hrtimer *timer)
+-{
+-	return timer->state & HRTIMER_STATE_CALLBACK;
+-}
+-
+-/*
+  * Functions and macros which are different for UP/SMP systems are kept in a
+  * single place
+  */
+diff --git a/kernel/kgdb.c b/kernel/kgdb.c
+index 1bd0ec1..39e31a0 100644
+--- a/kernel/kgdb.c
++++ b/kernel/kgdb.c
+@@ -61,7 +61,7 @@ struct kgdb_state {
+ 	int			err_code;
+ 	int			cpu;
+ 	int			pass_exception;
+-	long			threadid;
++	unsigned long		threadid;
+ 	long			kgdb_usethreadid;
+ 	struct pt_regs		*linux_regs;
+ };
+@@ -146,7 +146,7 @@ atomic_t			kgdb_cpu_doing_single_step = ATOMIC_INIT(-1);
+  * the other CPUs might interfere with your debugging context, so
+  * use this with care:
+  */
+-int				kgdb_do_roundup = 1;
++static int kgdb_do_roundup = 1;
+ 
+ static int __init opt_nokgdbroundup(char *str)
+ {
+@@ -438,7 +438,7 @@ int kgdb_hex2mem(char *buf, char *mem, int count)
+  * While we find nice hex chars, build a long_val.
+  * Return number of chars processed.
+  */
+-int kgdb_hex2long(char **ptr, long *long_val)
++int kgdb_hex2long(char **ptr, unsigned long *long_val)
+ {
+ 	int hex_val;
+ 	int num = 0;
+@@ -709,7 +709,7 @@ int kgdb_isremovedbreak(unsigned long addr)
+ 	return 0;
+ }
+ 
+-int remove_all_break(void)
++static int remove_all_break(void)
+ {
+ 	unsigned long addr;
+ 	int error;
+diff --git a/kernel/module.c b/kernel/module.c
+index 8674a39..8e4528c 100644
+--- a/kernel/module.c
++++ b/kernel/module.c
+@@ -890,6 +890,19 @@ static struct module_attribute *modinfo_attrs[] = {
+ 
+ static const char vermagic[] = VERMAGIC_STRING;
+ 
++static int try_to_force_load(struct module *mod, const char *symname)
++{
++#ifdef CONFIG_MODULE_FORCE_LOAD
++	if (!(tainted & TAINT_FORCED_MODULE))
++		printk("%s: no version for \"%s\" found: kernel tainted.\n",
++		       mod->name, symname);
++	add_taint_module(mod, TAINT_FORCED_MODULE);
++	return 0;
++#else
++	return -ENOEXEC;
++#endif
++}
++
+ #ifdef CONFIG_MODVERSIONS
+ static int check_version(Elf_Shdr *sechdrs,
+ 			 unsigned int versindex,
+@@ -914,18 +927,18 @@ static int check_version(Elf_Shdr *sechdrs,
+ 
+ 		if (versions[i].crc == *crc)
+ 			return 1;
+-		printk("%s: disagrees about version of symbol %s\n",
+-		       mod->name, symname);
+ 		DEBUGP("Found checksum %lX vs module %lX\n",
+ 		       *crc, versions[i].crc);
+-		return 0;
++		goto bad_version;
+ 	}
+-	/* Not in module's version table.  OK, but that taints the kernel. */
+-	if (!(tainted & TAINT_FORCED_MODULE))
+-		printk("%s: no version for \"%s\" found: kernel tainted.\n",
+-		       mod->name, symname);
+-	add_taint_module(mod, TAINT_FORCED_MODULE);
+-	return 1;
++
++	if (!try_to_force_load(mod, symname))
++		return 1;
++
++bad_version:
++	printk("%s: disagrees about version of symbol %s\n",
++	       mod->name, symname);
++	return 0;
+ }
+ 
+ static inline int check_modstruct_version(Elf_Shdr *sechdrs,
+@@ -1853,9 +1866,9 @@ static struct module *load_module(void __user *umod,
+ 	modmagic = get_modinfo(sechdrs, infoindex, "vermagic");
+ 	/* This is allowed: modprobe --force will invalidate it. */
+ 	if (!modmagic) {
+-		add_taint_module(mod, TAINT_FORCED_MODULE);
+-		printk(KERN_WARNING "%s: no version magic, tainting kernel.\n",
+-		       mod->name);
++		err = try_to_force_load(mod, "magic");
++		if (err)
++			goto free_hdr;
+ 	} else if (!same_magic(modmagic, vermagic)) {
+ 		printk(KERN_ERR "%s: version magic '%s' should be '%s'\n",
+ 		       mod->name, modmagic, vermagic);
+@@ -2006,9 +2019,10 @@ static struct module *load_module(void __user *umod,
+ 	    (mod->num_gpl_future_syms && !gplfuturecrcindex) ||
+ 	    (mod->num_unused_syms && !unusedcrcindex) ||
+ 	    (mod->num_unused_gpl_syms && !unusedgplcrcindex)) {
+-		printk(KERN_WARNING "%s: No versions for exported symbols."
+-		       " Tainting kernel.\n", mod->name);
+-		add_taint_module(mod, TAINT_FORCED_MODULE);
++		printk(KERN_WARNING "%s: No versions for exported symbols.\n", mod->name);
++		err = try_to_force_load(mod, "nocrc");
++		if (err)
++			goto cleanup;
+ 	}
+ #endif
+ 	markersindex = find_sec(hdr, sechdrs, secstrings, "__markers");
+diff --git a/kernel/sched.c b/kernel/sched.c
+index 34bcc5b..58fb8af 100644
+--- a/kernel/sched.c
++++ b/kernel/sched.c
+@@ -75,16 +75,6 @@
+ #include <asm/irq_regs.h>
+ 
+ /*
+- * Scheduler clock - returns current time in nanosec units.
+- * This is default implementation.
+- * Architectures and sub-architectures can override this.
+- */
+-unsigned long long __attribute__((weak)) sched_clock(void)
+-{
+-	return (unsigned long long)jiffies * (NSEC_PER_SEC / HZ);
+-}
+-
+-/*
+  * Convert user-nice values [ -20 ... 0 ... 19 ]
+  * to static priority [ MAX_RT_PRIO..MAX_PRIO-1 ],
+  * and back.
+@@ -242,6 +232,12 @@ static void destroy_rt_bandwidth(struct rt_bandwidth *rt_b)
+ }
+ #endif
+ 
++/*
++ * sched_domains_mutex serializes calls to arch_init_sched_domains,
++ * detach_destroy_domains and partition_sched_domains.
++ */
++static DEFINE_MUTEX(sched_domains_mutex);
++
+ #ifdef CONFIG_GROUP_SCHED
+ 
+ #include <linux/cgroup.h>
+@@ -308,9 +304,6 @@ static DEFINE_PER_CPU(struct rt_rq, init_rt_rq) ____cacheline_aligned_in_smp;
+  */
+ static DEFINE_SPINLOCK(task_group_lock);
+ 
+-/* doms_cur_mutex serializes access to doms_cur[] array */
+-static DEFINE_MUTEX(doms_cur_mutex);
+-
+ #ifdef CONFIG_FAIR_GROUP_SCHED
+ #ifdef CONFIG_USER_SCHED
+ # define INIT_TASK_GROUP_LOAD	(2*NICE_0_LOAD)
+@@ -318,7 +311,13 @@ static DEFINE_MUTEX(doms_cur_mutex);
+ # define INIT_TASK_GROUP_LOAD	NICE_0_LOAD
+ #endif
+ 
++/*
++ * A weight of 0, 1 or ULONG_MAX can cause arithmetics problems.
++ * (The default weight is 1024 - so there's no practical
++ *  limitation from this.)
++ */
+ #define MIN_SHARES	2
++#define MAX_SHARES	(ULONG_MAX - 1)
+ 
+ static int init_task_group_load = INIT_TASK_GROUP_LOAD;
+ #endif
+@@ -358,21 +357,9 @@ static inline void set_task_rq(struct task_struct *p, unsigned int cpu)
+ #endif
+ }
+ 
+-static inline void lock_doms_cur(void)
+-{
+-	mutex_lock(&doms_cur_mutex);
+-}
+-
+-static inline void unlock_doms_cur(void)
+-{
+-	mutex_unlock(&doms_cur_mutex);
+-}
+-
+ #else
+ 
+ static inline void set_task_rq(struct task_struct *p, unsigned int cpu) { }
+-static inline void lock_doms_cur(void) { }
+-static inline void unlock_doms_cur(void) { }
+ 
+ #endif	/* CONFIG_GROUP_SCHED */
+ 
+@@ -560,13 +547,7 @@ struct rq {
+ 	unsigned long next_balance;
+ 	struct mm_struct *prev_mm;
+ 
+-	u64 clock, prev_clock_raw;
+-	s64 clock_max_delta;
+-
+-	unsigned int clock_warps, clock_overflows, clock_underflows;
+-	u64 idle_clock;
+-	unsigned int clock_deep_idle_events;
+-	u64 tick_timestamp;
++	u64 clock;
+ 
+ 	atomic_t nr_iowait;
+ 
+@@ -631,82 +612,6 @@ static inline int cpu_of(struct rq *rq)
+ #endif
+ }
+ 
+-#ifdef CONFIG_NO_HZ
+-static inline bool nohz_on(int cpu)
+-{
+-	return tick_get_tick_sched(cpu)->nohz_mode != NOHZ_MODE_INACTIVE;
+-}
+-
+-static inline u64 max_skipped_ticks(struct rq *rq)
+-{
+-	return nohz_on(cpu_of(rq)) ? jiffies - rq->last_tick_seen + 2 : 1;
+-}
+-
+-static inline void update_last_tick_seen(struct rq *rq)
+-{
+-	rq->last_tick_seen = jiffies;
+-}
+-#else
+-static inline u64 max_skipped_ticks(struct rq *rq)
+-{
+-	return 1;
+-}
+-
+-static inline void update_last_tick_seen(struct rq *rq)
+-{
+-}
+-#endif
+-
+-/*
+- * Update the per-runqueue clock, as finegrained as the platform can give
+- * us, but without assuming monotonicity, etc.:
+- */
+-static void __update_rq_clock(struct rq *rq)
+-{
+-	u64 prev_raw = rq->prev_clock_raw;
+-	u64 now = sched_clock();
+-	s64 delta = now - prev_raw;
+-	u64 clock = rq->clock;
+-
+-#ifdef CONFIG_SCHED_DEBUG
+-	WARN_ON_ONCE(cpu_of(rq) != smp_processor_id());
+-#endif
+-	/*
+-	 * Protect against sched_clock() occasionally going backwards:
+-	 */
+-	if (unlikely(delta < 0)) {
+-		clock++;
+-		rq->clock_warps++;
+-	} else {
+-		/*
+-		 * Catch too large forward jumps too:
+-		 */
+-		u64 max_jump = max_skipped_ticks(rq) * TICK_NSEC;
+-		u64 max_time = rq->tick_timestamp + max_jump;
+-
+-		if (unlikely(clock + delta > max_time)) {
+-			if (clock < max_time)
+-				clock = max_time;
+-			else
+-				clock++;
+-			rq->clock_overflows++;
+-		} else {
+-			if (unlikely(delta > rq->clock_max_delta))
+-				rq->clock_max_delta = delta;
+-			clock += delta;
+-		}
+-	}
+-
+-	rq->prev_clock_raw = now;
+-	rq->clock = clock;
+-}
+-
+-static void update_rq_clock(struct rq *rq)
+-{
+-	if (likely(smp_processor_id() == cpu_of(rq)))
+-		__update_rq_clock(rq);
+-}
+-
+ /*
+  * The domain tree (rq->sd) is protected by RCU's quiescent state transition.
+  * See detach_destroy_domains: synchronize_sched for details.
+@@ -722,6 +627,11 @@ static void update_rq_clock(struct rq *rq)
+ #define task_rq(p)		cpu_rq(task_cpu(p))
+ #define cpu_curr(cpu)		(cpu_rq(cpu)->curr)
+ 
++static inline void update_rq_clock(struct rq *rq)
++{
++	rq->clock = sched_clock_cpu(cpu_of(rq));
++}
++
+ /*
+  * Tunables that become constants when CONFIG_SCHED_DEBUG is off:
+  */
+@@ -757,14 +667,14 @@ const_debug unsigned int sysctl_sched_features =
+ #define SCHED_FEAT(name, enabled)	\
+ 	#name ,
+ 
+-__read_mostly char *sched_feat_names[] = {
++static __read_mostly char *sched_feat_names[] = {
+ #include "sched_features.h"
+ 	NULL
+ };
+ 
+ #undef SCHED_FEAT
+ 
+-int sched_feat_open(struct inode *inode, struct file *filp)
++static int sched_feat_open(struct inode *inode, struct file *filp)
+ {
+ 	filp->private_data = inode->i_private;
+ 	return 0;
+@@ -899,7 +809,7 @@ static inline u64 global_rt_runtime(void)
+ 	return (u64)sysctl_sched_rt_runtime * NSEC_PER_USEC;
+ }
+ 
+-static const unsigned long long time_sync_thresh = 100000;
++unsigned long long time_sync_thresh = 100000;
+ 
+ static DEFINE_PER_CPU(unsigned long long, time_offset);
+ static DEFINE_PER_CPU(unsigned long long, prev_cpu_time);
+@@ -913,11 +823,14 @@ static DEFINE_PER_CPU(unsigned long long, prev_cpu_time);
+ static DEFINE_SPINLOCK(time_sync_lock);
+ static unsigned long long prev_global_time;
+ 
+-static unsigned long long __sync_cpu_clock(cycles_t time, int cpu)
++static unsigned long long __sync_cpu_clock(unsigned long long time, int cpu)
+ {
+-	unsigned long flags;
+-
+-	spin_lock_irqsave(&time_sync_lock, flags);
++	/*
++	 * We want this inlined, to not get tracer function calls
++	 * in this critical section:
++	 */
++	spin_acquire(&time_sync_lock.dep_map, 0, 0, _THIS_IP_);
++	__raw_spin_lock(&time_sync_lock.raw_lock);
+ 
+ 	if (time < prev_global_time) {
+ 		per_cpu(time_offset, cpu) += prev_global_time - time;
+@@ -926,7 +839,8 @@ static unsigned long long __sync_cpu_clock(cycles_t time, int cpu)
+ 		prev_global_time = time;
+ 	}
+ 
+-	spin_unlock_irqrestore(&time_sync_lock, flags);
++	__raw_spin_unlock(&time_sync_lock.raw_lock);
++	spin_release(&time_sync_lock.dep_map, 1, _THIS_IP_);
+ 
+ 	return time;
+ }
+@@ -934,8 +848,6 @@ static unsigned long long __sync_cpu_clock(cycles_t time, int cpu)
+ static unsigned long long __cpu_clock(int cpu)
+ {
+ 	unsigned long long now;
+-	unsigned long flags;
+-	struct rq *rq;
+ 
+ 	/*
+ 	 * Only call sched_clock() if the scheduler has already been
+@@ -944,11 +856,7 @@ static unsigned long long __cpu_clock(int cpu)
+ 	if (unlikely(!scheduler_running))
+ 		return 0;
+ 
+-	local_irq_save(flags);
+-	rq = cpu_rq(cpu);
+-	update_rq_clock(rq);
+-	now = rq->clock;
+-	local_irq_restore(flags);
++	now = sched_clock_cpu(cpu);
+ 
+ 	return now;
+ }
+@@ -960,13 +868,18 @@ static unsigned long long __cpu_clock(int cpu)
+ unsigned long long cpu_clock(int cpu)
+ {
+ 	unsigned long long prev_cpu_time, time, delta_time;
++	unsigned long flags;
+ 
++	local_irq_save(flags);
+ 	prev_cpu_time = per_cpu(prev_cpu_time, cpu);
+ 	time = __cpu_clock(cpu) + per_cpu(time_offset, cpu);
+ 	delta_time = time-prev_cpu_time;
+ 
+-	if (unlikely(delta_time > time_sync_thresh))
++	if (unlikely(delta_time > time_sync_thresh)) {
+ 		time = __sync_cpu_clock(time, cpu);
++		per_cpu(prev_cpu_time, cpu) = time;
++	}
++	local_irq_restore(flags);
+ 
+ 	return time;
+ }
+@@ -1117,43 +1030,6 @@ static struct rq *this_rq_lock(void)
+ 	return rq;
+ }
+ 
+-/*
+- * We are going deep-idle (irqs are disabled):
+- */
+-void sched_clock_idle_sleep_event(void)
+-{
+-	struct rq *rq = cpu_rq(smp_processor_id());
+-
+-	spin_lock(&rq->lock);
+-	__update_rq_clock(rq);
+-	spin_unlock(&rq->lock);
+-	rq->clock_deep_idle_events++;
+-}
+-EXPORT_SYMBOL_GPL(sched_clock_idle_sleep_event);
+-
+-/*
+- * We just idled delta nanoseconds (called with irqs disabled):
+- */
+-void sched_clock_idle_wakeup_event(u64 delta_ns)
+-{
+-	struct rq *rq = cpu_rq(smp_processor_id());
+-	u64 now = sched_clock();
+-
+-	rq->idle_clock += delta_ns;
+-	/*
+-	 * Override the previous timestamp and ignore all
+-	 * sched_clock() deltas that occured while we idled,
+-	 * and use the PM-provided delta_ns to advance the
+-	 * rq clock:
+-	 */
+-	spin_lock(&rq->lock);
+-	rq->prev_clock_raw = now;
+-	rq->clock += delta_ns;
+-	spin_unlock(&rq->lock);
+-	touch_softlockup_watchdog();
+-}
+-EXPORT_SYMBOL_GPL(sched_clock_idle_wakeup_event);
+-
+ static void __resched_task(struct task_struct *p, int tif_bit);
+ 
+ static inline void resched_task(struct task_struct *p)
+@@ -1189,6 +1065,7 @@ static inline void resched_rq(struct rq *rq)
+ enum {
+ 	HRTICK_SET,		/* re-programm hrtick_timer */
+ 	HRTICK_RESET,		/* not a new slice */
++	HRTICK_BLOCK,		/* stop hrtick operations */
+ };
+ 
+ /*
+@@ -1200,6 +1077,8 @@ static inline int hrtick_enabled(struct rq *rq)
+ {
+ 	if (!sched_feat(HRTICK))
+ 		return 0;
++	if (unlikely(test_bit(HRTICK_BLOCK, &rq->hrtick_flags)))
++		return 0;
+ 	return hrtimer_is_hres_active(&rq->hrtick_timer);
+ }
+ 
+@@ -1275,14 +1154,70 @@ static enum hrtimer_restart hrtick(struct hrtimer *timer)
+ 	WARN_ON_ONCE(cpu_of(rq) != smp_processor_id());
+ 
+ 	spin_lock(&rq->lock);
+-	__update_rq_clock(rq);
++	update_rq_clock(rq);
+ 	rq->curr->sched_class->task_tick(rq, rq->curr, 1);
+ 	spin_unlock(&rq->lock);
+ 
+ 	return HRTIMER_NORESTART;
+ }
+ 
+-static inline void init_rq_hrtick(struct rq *rq)
++static void hotplug_hrtick_disable(int cpu)
++{
++	struct rq *rq = cpu_rq(cpu);
++	unsigned long flags;
++
++	spin_lock_irqsave(&rq->lock, flags);
++	rq->hrtick_flags = 0;
++	__set_bit(HRTICK_BLOCK, &rq->hrtick_flags);
++	spin_unlock_irqrestore(&rq->lock, flags);
++
++	hrtick_clear(rq);
++}
++
++static void hotplug_hrtick_enable(int cpu)
++{
++	struct rq *rq = cpu_rq(cpu);
++	unsigned long flags;
++
++	spin_lock_irqsave(&rq->lock, flags);
++	__clear_bit(HRTICK_BLOCK, &rq->hrtick_flags);
++	spin_unlock_irqrestore(&rq->lock, flags);
++}
++
++static int
++hotplug_hrtick(struct notifier_block *nfb, unsigned long action, void *hcpu)
++{
++	int cpu = (int)(long)hcpu;
++
++	switch (action) {
++	case CPU_UP_CANCELED:
++	case CPU_UP_CANCELED_FROZEN:
++	case CPU_DOWN_PREPARE:
++	case CPU_DOWN_PREPARE_FROZEN:
++	case CPU_DEAD:
++	case CPU_DEAD_FROZEN:
++		hotplug_hrtick_disable(cpu);
++		return NOTIFY_OK;
++
++	case CPU_UP_PREPARE:
++	case CPU_UP_PREPARE_FROZEN:
++	case CPU_DOWN_FAILED:
++	case CPU_DOWN_FAILED_FROZEN:
++	case CPU_ONLINE:
++	case CPU_ONLINE_FROZEN:
++		hotplug_hrtick_enable(cpu);
++		return NOTIFY_OK;
++	}
++
++	return NOTIFY_DONE;
++}
++
++static void init_hrtick(void)
++{
++	hotcpu_notifier(hotplug_hrtick, 0);
++}
++
++static void init_rq_hrtick(struct rq *rq)
+ {
+ 	rq->hrtick_flags = 0;
+ 	hrtimer_init(&rq->hrtick_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+@@ -1319,6 +1254,10 @@ static inline void init_rq_hrtick(struct rq *rq)
+ void hrtick_resched(void)
+ {
+ }
++
++static inline void init_hrtick(void)
++{
++}
+ #endif
+ 
+ /*
+@@ -1438,8 +1377,8 @@ calc_delta_mine(unsigned long delta_exec, unsigned long weight,
+ {
+ 	u64 tmp;
+ 
+-	if (unlikely(!lw->inv_weight))
+-		lw->inv_weight = (WMULT_CONST-lw->weight/2) / (lw->weight+1);
++	if (!lw->inv_weight)
++		lw->inv_weight = 1 + (WMULT_CONST-lw->weight/2)/(lw->weight+1);
+ 
+ 	tmp = (u64)delta_exec * weight;
+ 	/*
+@@ -1748,6 +1687,8 @@ __update_group_shares_cpu(struct task_group *tg, struct sched_domain *sd,
+ 
+ 	if (shares < MIN_SHARES)
+ 		shares = MIN_SHARES;
++	else if (shares > MAX_SHARES)
++		shares = MAX_SHARES;
+ 
+ 	__set_se_shares(tg->se[tcpu], shares);
+ }
+@@ -4339,8 +4280,10 @@ void account_system_time(struct task_struct *p, int hardirq_offset,
+ 	struct rq *rq = this_rq();
+ 	cputime64_t tmp;
+ 
+-	if ((p->flags & PF_VCPU) && (irq_count() - hardirq_offset == 0))
+-		return account_guest_time(p, cputime);
++	if ((p->flags & PF_VCPU) && (irq_count() - hardirq_offset == 0)) {
++		account_guest_time(p, cputime);
++		return;
++	}
+ 
+ 	p->stime = cputime_add(p->stime, cputime);
+ 
+@@ -4404,19 +4347,11 @@ void scheduler_tick(void)
+ 	int cpu = smp_processor_id();
+ 	struct rq *rq = cpu_rq(cpu);
+ 	struct task_struct *curr = rq->curr;
+-	u64 next_tick = rq->tick_timestamp + TICK_NSEC;
++
++	sched_clock_tick();
+ 
+ 	spin_lock(&rq->lock);
+-	__update_rq_clock(rq);
+-	/*
+-	 * Let rq->clock advance by at least TICK_NSEC:
+-	 */
+-	if (unlikely(rq->clock < next_tick)) {
+-		rq->clock = next_tick;
+-		rq->clock_underflows++;
+-	}
+-	rq->tick_timestamp = rq->clock;
+-	update_last_tick_seen(rq);
++	update_rq_clock(rq);
+ 	update_cpu_load(rq);
+ 	curr->sched_class->task_tick(rq, curr, 0);
+ 	spin_unlock(&rq->lock);
+@@ -4570,7 +4505,7 @@ need_resched_nonpreemptible:
+ 	 * Do the rq-clock update outside the rq lock:
+ 	 */
+ 	local_irq_disable();
+-	__update_rq_clock(rq);
++	update_rq_clock(rq);
+ 	spin_lock(&rq->lock);
+ 	clear_tsk_need_resched(prev);
+ 
+@@ -4595,9 +4530,9 @@ need_resched_nonpreemptible:
+ 	prev->sched_class->put_prev_task(rq, prev);
+ 	next = pick_next_task(rq, prev);
+ 
+-	sched_info_switch(prev, next);
+-
+ 	if (likely(prev != next)) {
++		sched_info_switch(prev, next);
++
+ 		rq->nr_switches++;
+ 		rq->curr = next;
+ 		++*switch_count;
+@@ -7755,7 +7690,7 @@ void partition_sched_domains(int ndoms_new, cpumask_t *doms_new,
+ {
+ 	int i, j;
+ 
+-	lock_doms_cur();
++	mutex_lock(&sched_domains_mutex);
+ 
+ 	/* always unregister in case we don't destroy any domains */
+ 	unregister_sched_domain_sysctl();
+@@ -7804,7 +7739,7 @@ match2:
+ 
+ 	register_sched_domain_sysctl();
+ 
+-	unlock_doms_cur();
++	mutex_unlock(&sched_domains_mutex);
+ }
+ 
+ #if defined(CONFIG_SCHED_MC) || defined(CONFIG_SCHED_SMT)
+@@ -7813,8 +7748,10 @@ int arch_reinit_sched_domains(void)
+ 	int err;
+ 
+ 	get_online_cpus();
++	mutex_lock(&sched_domains_mutex);
+ 	detach_destroy_domains(&cpu_online_map);
+ 	err = arch_init_sched_domains(&cpu_online_map);
++	mutex_unlock(&sched_domains_mutex);
+ 	put_online_cpus();
+ 
+ 	return err;
+@@ -7932,13 +7869,16 @@ void __init sched_init_smp(void)
+ 	BUG_ON(sched_group_nodes_bycpu == NULL);
+ #endif
+ 	get_online_cpus();
++	mutex_lock(&sched_domains_mutex);
+ 	arch_init_sched_domains(&cpu_online_map);
+ 	cpus_andnot(non_isolated_cpus, cpu_possible_map, cpu_isolated_map);
+ 	if (cpus_empty(non_isolated_cpus))
+ 		cpu_set(smp_processor_id(), non_isolated_cpus);
++	mutex_unlock(&sched_domains_mutex);
+ 	put_online_cpus();
+ 	/* XXX: Theoretical race here - CPU may be hotplugged now */
+ 	hotcpu_notifier(update_sched_domains, 0);
++	init_hrtick();
+ 
+ 	/* Move init over to a non-isolated CPU */
+ 	if (set_cpus_allowed_ptr(current, &non_isolated_cpus) < 0)
+@@ -8025,7 +7965,7 @@ static void init_tg_cfs_entry(struct task_group *tg, struct cfs_rq *cfs_rq,
+ 
+ 	se->my_q = cfs_rq;
+ 	se->load.weight = tg->shares;
+-	se->load.inv_weight = div64_u64(1ULL<<32, se->load.weight);
++	se->load.inv_weight = 0;
+ 	se->parent = parent;
+ }
+ #endif
+@@ -8149,8 +8089,6 @@ void __init sched_init(void)
+ 		spin_lock_init(&rq->lock);
+ 		lockdep_set_class(&rq->lock, &rq->rq_lock_key);
+ 		rq->nr_running = 0;
+-		rq->clock = 1;
+-		update_last_tick_seen(rq);
+ 		init_cfs_rq(&rq->cfs, rq);
+ 		init_rt_rq(&rq->rt, rq);
+ #ifdef CONFIG_FAIR_GROUP_SCHED
+@@ -8294,6 +8232,7 @@ EXPORT_SYMBOL(__might_sleep);
+ static void normalize_task(struct rq *rq, struct task_struct *p)
+ {
+ 	int on_rq;
++
+ 	update_rq_clock(rq);
+ 	on_rq = p->se.on_rq;
+ 	if (on_rq)
+@@ -8325,7 +8264,6 @@ void normalize_rt_tasks(void)
+ 		p->se.sleep_start		= 0;
+ 		p->se.block_start		= 0;
+ #endif
+-		task_rq(p)->clock		= 0;
+ 
+ 		if (!rt_task(p)) {
+ 			/*
+@@ -8692,7 +8630,7 @@ static void __set_se_shares(struct sched_entity *se, unsigned long shares)
+ 		dequeue_entity(cfs_rq, se, 0);
+ 
+ 	se->load.weight = shares;
+-	se->load.inv_weight = div64_u64((1ULL<<32), shares);
++	se->load.inv_weight = 0;
+ 
+ 	if (on_rq)
+ 		enqueue_entity(cfs_rq, se, 0);
+@@ -8722,13 +8660,10 @@ int sched_group_set_shares(struct task_group *tg, unsigned long shares)
+ 	if (!tg->se[0])
+ 		return -EINVAL;
+ 
+-	/*
+-	 * A weight of 0 or 1 can cause arithmetics problems.
+-	 * (The default weight is 1024 - so there's no practical
+-	 *  limitation from this.)
+-	 */
+ 	if (shares < MIN_SHARES)
+ 		shares = MIN_SHARES;
++	else if (shares > MAX_SHARES)
++		shares = MAX_SHARES;
+ 
+ 	mutex_lock(&shares_mutex);
+ 	if (tg->shares == shares)
+@@ -8753,7 +8688,7 @@ int sched_group_set_shares(struct task_group *tg, unsigned long shares)
+ 		 * force a rebalance
+ 		 */
+ 		cfs_rq_set_shares(tg->cfs_rq[i], 0);
+-		set_se_shares(tg->se[i], shares/nr_cpu_ids);
++		set_se_shares(tg->se[i], shares);
+ 	}
+ 
+ 	/*
+diff --git a/kernel/sched_clock.c b/kernel/sched_clock.c
+new file mode 100644
+index 0000000..9c597e3
+--- /dev/null
++++ b/kernel/sched_clock.c
+@@ -0,0 +1,236 @@
++/*
++ * sched_clock for unstable cpu clocks
++ *
++ *  Copyright (C) 2008 Red Hat, Inc., Peter Zijlstra <pzijlstr@redhat.com>
++ *
++ * Based on code by:
++ *   Ingo Molnar <mingo@redhat.com>
++ *   Guillaume Chazarain <guichaz@gmail.com>
++ *
++ * Create a semi stable clock from a mixture of other events, including:
++ *  - gtod
++ *  - jiffies
++ *  - sched_clock()
++ *  - explicit idle events
++ *
++ * We use gtod as base and the unstable clock deltas. The deltas are filtered,
++ * making it monotonic and keeping it within an expected window.  This window
++ * is set up using jiffies.
++ *
++ * Furthermore, explicit sleep and wakeup hooks allow us to account for time
++ * that is otherwise invisible (TSC gets stopped).
++ *
++ * The clock: sched_clock_cpu() is monotonic per cpu, and should be somewhat
++ * consistent between cpus (never more than 1 jiffies difference).
++ */
++#include <linux/sched.h>
++#include <linux/percpu.h>
++#include <linux/spinlock.h>
++#include <linux/ktime.h>
++#include <linux/module.h>
++
++
++#ifdef CONFIG_HAVE_UNSTABLE_SCHED_CLOCK
++
++struct sched_clock_data {
++	/*
++	 * Raw spinlock - this is a special case: this might be called
++	 * from within instrumentation code so we dont want to do any
++	 * instrumentation ourselves.
++	 */
++	raw_spinlock_t		lock;
++
++	unsigned long		prev_jiffies;
++	u64			prev_raw;
++	u64			tick_raw;
++	u64			tick_gtod;
++	u64			clock;
++};
++
++static DEFINE_PER_CPU_SHARED_ALIGNED(struct sched_clock_data, sched_clock_data);
++
++static inline struct sched_clock_data *this_scd(void)
++{
++	return &__get_cpu_var(sched_clock_data);
++}
++
++static inline struct sched_clock_data *cpu_sdc(int cpu)
++{
++	return &per_cpu(sched_clock_data, cpu);
++}
++
++void sched_clock_init(void)
++{
++	u64 ktime_now = ktime_to_ns(ktime_get());
++	u64 now = 0;
++	int cpu;
++
++	for_each_possible_cpu(cpu) {
++		struct sched_clock_data *scd = cpu_sdc(cpu);
++
++		scd->lock = (raw_spinlock_t)__RAW_SPIN_LOCK_UNLOCKED;
++		scd->prev_jiffies = jiffies;
++		scd->prev_raw = now;
++		scd->tick_raw = now;
++		scd->tick_gtod = ktime_now;
++		scd->clock = ktime_now;
++	}
++}
++
++/*
++ * update the percpu scd from the raw @now value
++ *
++ *  - filter out backward motion
++ *  - use jiffies to generate a min,max window to clip the raw values
++ */
++static void __update_sched_clock(struct sched_clock_data *scd, u64 now)
++{
++	unsigned long now_jiffies = jiffies;
++	long delta_jiffies = now_jiffies - scd->prev_jiffies;
++	u64 clock = scd->clock;
++	u64 min_clock, max_clock;
++	s64 delta = now - scd->prev_raw;
++
++	WARN_ON_ONCE(!irqs_disabled());
++	min_clock = scd->tick_gtod + delta_jiffies * TICK_NSEC;
++
++	if (unlikely(delta < 0)) {
++		clock++;
++		goto out;
++	}
++
++	max_clock = min_clock + TICK_NSEC;
++
++	if (unlikely(clock + delta > max_clock)) {
++		if (clock < max_clock)
++			clock = max_clock;
++		else
++			clock++;
++	} else {
++		clock += delta;
++	}
++
++ out:
++	if (unlikely(clock < min_clock))
++		clock = min_clock;
++
++	scd->prev_raw = now;
++	scd->prev_jiffies = now_jiffies;
++	scd->clock = clock;
++}
++
++static void lock_double_clock(struct sched_clock_data *data1,
++				struct sched_clock_data *data2)
++{
++	if (data1 < data2) {
++		__raw_spin_lock(&data1->lock);
++		__raw_spin_lock(&data2->lock);
++	} else {
++		__raw_spin_lock(&data2->lock);
++		__raw_spin_lock(&data1->lock);
++	}
++}
++
++u64 sched_clock_cpu(int cpu)
++{
++	struct sched_clock_data *scd = cpu_sdc(cpu);
++	u64 now, clock;
++
++	WARN_ON_ONCE(!irqs_disabled());
++	now = sched_clock();
++
++	if (cpu != raw_smp_processor_id()) {
++		/*
++		 * in order to update a remote cpu's clock based on our
++		 * unstable raw time rebase it against:
++		 *   tick_raw		(offset between raw counters)
++		 *   tick_gotd          (tick offset between cpus)
++		 */
++		struct sched_clock_data *my_scd = this_scd();
++
++		lock_double_clock(scd, my_scd);
++
++		now -= my_scd->tick_raw;
++		now += scd->tick_raw;
++
++		now -= my_scd->tick_gtod;
++		now += scd->tick_gtod;
++
++		__raw_spin_unlock(&my_scd->lock);
++	} else {
++		__raw_spin_lock(&scd->lock);
++	}
++
++	__update_sched_clock(scd, now);
++	clock = scd->clock;
++
++	__raw_spin_unlock(&scd->lock);
++
++	return clock;
++}
++
++void sched_clock_tick(void)
++{
++	struct sched_clock_data *scd = this_scd();
++	u64 now, now_gtod;
++
++	WARN_ON_ONCE(!irqs_disabled());
++
++	now = sched_clock();
++	now_gtod = ktime_to_ns(ktime_get());
++
++	__raw_spin_lock(&scd->lock);
++	__update_sched_clock(scd, now);
++	/*
++	 * update tick_gtod after __update_sched_clock() because that will
++	 * already observe 1 new jiffy; adding a new tick_gtod to that would
++	 * increase the clock 2 jiffies.
++	 */
++	scd->tick_raw = now;
++	scd->tick_gtod = now_gtod;
++	__raw_spin_unlock(&scd->lock);
++}
++
++/*
++ * We are going deep-idle (irqs are disabled):
++ */
++void sched_clock_idle_sleep_event(void)
++{
++	sched_clock_cpu(smp_processor_id());
++}
++EXPORT_SYMBOL_GPL(sched_clock_idle_sleep_event);
++
++/*
++ * We just idled delta nanoseconds (called with irqs disabled):
++ */
++void sched_clock_idle_wakeup_event(u64 delta_ns)
++{
++	struct sched_clock_data *scd = this_scd();
++	u64 now = sched_clock();
++
++	/*
++	 * Override the previous timestamp and ignore all
++	 * sched_clock() deltas that occured while we idled,
++	 * and use the PM-provided delta_ns to advance the
++	 * rq clock:
++	 */
++	__raw_spin_lock(&scd->lock);
++	scd->prev_raw = now;
++	scd->clock += delta_ns;
++	__raw_spin_unlock(&scd->lock);
++
++	touch_softlockup_watchdog();
++}
++EXPORT_SYMBOL_GPL(sched_clock_idle_wakeup_event);
++
++#endif
++
++/*
++ * Scheduler clock - returns current time in nanosec units.
++ * This is default implementation.
++ * Architectures and sub-architectures can override this.
++ */
++unsigned long long __attribute__((weak)) sched_clock(void)
++{
++	return (unsigned long long)jiffies * (NSEC_PER_SEC / HZ);
++}
+diff --git a/kernel/sched_debug.c b/kernel/sched_debug.c
+index 6b4a125..5f06118 100644
+--- a/kernel/sched_debug.c
++++ b/kernel/sched_debug.c
+@@ -204,13 +204,6 @@ static void print_cpu(struct seq_file *m, int cpu)
+ 	PN(next_balance);
+ 	P(curr->pid);
+ 	PN(clock);
+-	PN(idle_clock);
+-	PN(prev_clock_raw);
+-	P(clock_warps);
+-	P(clock_overflows);
+-	P(clock_underflows);
+-	P(clock_deep_idle_events);
+-	PN(clock_max_delta);
+ 	P(cpu_load[0]);
+ 	P(cpu_load[1]);
+ 	P(cpu_load[2]);
+diff --git a/kernel/sched_fair.c b/kernel/sched_fair.c
+index 89fa32b..c863663 100644
+--- a/kernel/sched_fair.c
++++ b/kernel/sched_fair.c
+@@ -682,6 +682,7 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int wakeup)
+ 	 * Update run-time statistics of the 'current'.
+ 	 */
+ 	update_curr(cfs_rq);
++	account_entity_enqueue(cfs_rq, se);
+ 
+ 	if (wakeup) {
+ 		place_entity(cfs_rq, se, 0);
+@@ -692,7 +693,6 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int wakeup)
+ 	check_spread(cfs_rq, se);
+ 	if (se != cfs_rq->curr)
+ 		__enqueue_entity(cfs_rq, se);
+-	account_entity_enqueue(cfs_rq, se);
+ }
+ 
+ static void update_avg(u64 *avg, u64 sample)
+@@ -841,8 +841,10 @@ entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
+ 	 * queued ticks are scheduled to match the slice, so don't bother
+ 	 * validating it and just reschedule.
+ 	 */
+-	if (queued)
+-		return resched_task(rq_of(cfs_rq)->curr);
++	if (queued) {
++		resched_task(rq_of(cfs_rq)->curr);
++		return;
++	}
+ 	/*
+ 	 * don't let the period tick interfere with the hrtick preemption
+ 	 */
+@@ -957,7 +959,7 @@ static void yield_task_fair(struct rq *rq)
+ 		return;
+ 
+ 	if (likely(!sysctl_sched_compat_yield) && curr->policy != SCHED_BATCH) {
+-		__update_rq_clock(rq);
++		update_rq_clock(rq);
+ 		/*
+ 		 * Update run-time statistics of the 'current'.
+ 		 */
+@@ -1007,7 +1009,7 @@ static int wake_idle(int cpu, struct task_struct *p)
+ 	 * sibling runqueue info. This will avoid the checks and cache miss
+ 	 * penalities associated with that.
+ 	 */
+-	if (idle_cpu(cpu) || cpu_rq(cpu)->nr_running > 1)
++	if (idle_cpu(cpu) || cpu_rq(cpu)->cfs.nr_running > 1)
+ 		return cpu;
+ 
+ 	for_each_domain(cpu, sd) {
+@@ -1611,30 +1613,6 @@ static const struct sched_class fair_sched_class = {
+ };
+ 
+ #ifdef CONFIG_SCHED_DEBUG
+-static void
+-print_cfs_rq_tasks(struct seq_file *m, struct cfs_rq *cfs_rq, int depth)
+-{
+-	struct sched_entity *se;
+-
+-	if (!cfs_rq)
+-		return;
+-
+-	list_for_each_entry_rcu(se, &cfs_rq->tasks, group_node) {
+-		int i;
+-
+-		for (i = depth; i; i--)
+-			seq_puts(m, "  ");
+-
+-		seq_printf(m, "%lu %s %lu\n",
+-				se->load.weight,
+-				entity_is_task(se) ? "T" : "G",
+-				calc_delta_weight(SCHED_LOAD_SCALE, se)
+-				);
+-		if (!entity_is_task(se))
+-			print_cfs_rq_tasks(m, group_cfs_rq(se), depth + 1);
+-	}
+-}
+-
+ static void print_cfs_stats(struct seq_file *m, int cpu)
+ {
+ 	struct cfs_rq *cfs_rq;
+@@ -1642,9 +1620,6 @@ static void print_cfs_stats(struct seq_file *m, int cpu)
+ 	rcu_read_lock();
+ 	for_each_leaf_cfs_rq(cpu_rq(cpu), cfs_rq)
+ 		print_cfs_rq(m, cpu, cfs_rq);
+-
+-	seq_printf(m, "\nWeight tree:\n");
+-	print_cfs_rq_tasks(m, &cpu_rq(cpu)->cfs, 1);
+ 	rcu_read_unlock();
+ }
+ #endif
+diff --git a/kernel/sched_idletask.c b/kernel/sched_idletask.c
+index 2bcafa3..3a4f92d 100644
+--- a/kernel/sched_idletask.c
++++ b/kernel/sched_idletask.c
+@@ -99,7 +99,7 @@ static void prio_changed_idle(struct rq *rq, struct task_struct *p,
+ /*
+  * Simple, special scheduling class for the per-CPU idle tasks:
+  */
+-const struct sched_class idle_sched_class = {
++static const struct sched_class idle_sched_class = {
+ 	/* .next is NULL */
+ 	/* no enqueue/yield_task for idle tasks */
+ 
+diff --git a/kernel/sched_rt.c b/kernel/sched_rt.c
+index c2730a5..060e87b 100644
+--- a/kernel/sched_rt.c
++++ b/kernel/sched_rt.c
+@@ -1098,11 +1098,14 @@ static void post_schedule_rt(struct rq *rq)
+ 	}
+ }
+ 
+-
++/*
++ * If we are not running and we are not going to reschedule soon, we should
++ * try to push tasks away now
++ */
+ static void task_wake_up_rt(struct rq *rq, struct task_struct *p)
+ {
+ 	if (!task_running(rq, p) &&
+-	    (p->prio >= rq->rt.highest_prio) &&
++	    !test_tsk_need_resched(rq->curr) &&
+ 	    rq->rt.overloaded)
+ 		push_rt_tasks(rq);
+ }
+@@ -1309,7 +1312,7 @@ static void set_curr_task_rt(struct rq *rq)
+ 	p->se.exec_start = rq->clock;
+ }
+ 
+-const struct sched_class rt_sched_class = {
++static const struct sched_class rt_sched_class = {
+ 	.next			= &fair_sched_class,
+ 	.enqueue_task		= enqueue_task_rt,
+ 	.dequeue_task		= dequeue_task_rt,
+diff --git a/kernel/time/clocksource.c b/kernel/time/clocksource.c
+index 73961f3..dadde53 100644
+--- a/kernel/time/clocksource.c
++++ b/kernel/time/clocksource.c
+@@ -471,10 +471,10 @@ sysfs_show_available_clocksources(struct sys_device *dev, char *buf)
+ /*
+  * Sysfs setup bits:
+  */
+-static SYSDEV_ATTR(current_clocksource, 0600, sysfs_show_current_clocksources,
++static SYSDEV_ATTR(current_clocksource, 0644, sysfs_show_current_clocksources,
+ 		   sysfs_override_clocksource);
+ 
+-static SYSDEV_ATTR(available_clocksource, 0600,
++static SYSDEV_ATTR(available_clocksource, 0444,
+ 		   sysfs_show_available_clocksources, NULL);
+ 
+ static struct sysdev_class clocksource_sysclass = {
+diff --git a/lib/Kconfig.kgdb b/lib/Kconfig.kgdb
+index f2e01ac..a5d4b1d 100644
+--- a/lib/Kconfig.kgdb
++++ b/lib/Kconfig.kgdb
+@@ -1,4 +1,10 @@
+ 
++config HAVE_ARCH_KGDB_SHADOW_INFO
++	bool
++
++config HAVE_ARCH_KGDB
++	bool
++
+ menuconfig KGDB
+ 	bool "KGDB: kernel debugging with remote gdb"
+ 	select FRAME_POINTER
+@@ -10,15 +16,10 @@ menuconfig KGDB
+ 	  at http://kgdb.sourceforge.net as well as in DocBook form
+ 	  in Documentation/DocBook/.  If unsure, say N.
+ 
+-config HAVE_ARCH_KGDB_SHADOW_INFO
+-	bool
+-
+-config HAVE_ARCH_KGDB
+-	bool
++if KGDB
+ 
+ config KGDB_SERIAL_CONSOLE
+ 	tristate "KGDB: use kgdb over the serial console"
+-	depends on KGDB
+ 	select CONSOLE_POLL
+ 	select MAGIC_SYSRQ
+ 	default y
+@@ -28,7 +29,6 @@ config KGDB_SERIAL_CONSOLE
+ 
+ config KGDB_TESTS
+ 	bool "KGDB: internal test suite"
+-	depends on KGDB
+ 	default n
+ 	help
+ 	  This is a kgdb I/O module specifically designed to test
+@@ -56,3 +56,5 @@ config KGDB_TESTS_BOOT_STRING
+ 	  boot.  See the drivers/misc/kgdbts.c for detailed
+ 	  information about other strings you could use beyond the
+ 	  default of V1F100.
++
++endif # KGDB
+diff --git a/lib/devres.c b/lib/devres.c
+index 26c87c4..72c8909 100644
+--- a/lib/devres.c
++++ b/lib/devres.c
+@@ -2,7 +2,7 @@
+ #include <linux/io.h>
+ #include <linux/module.h>
+ 
+-static void devm_ioremap_release(struct device *dev, void *res)
++void devm_ioremap_release(struct device *dev, void *res)
+ {
+ 	iounmap(*(void __iomem **)res);
+ }
+diff --git a/net/can/bcm.c b/net/can/bcm.c
+index 74fd2d3..d9a3a9d 100644
+--- a/net/can/bcm.c
++++ b/net/can/bcm.c
+@@ -412,12 +412,6 @@ static void bcm_rx_changed(struct bcm_op *op, struct can_frame *data)
+ 	bcm_send_to_user(op, &head, data, 1);
+ }
+ 
+-/* TODO: move to linux/hrtimer.h */
+-static inline int hrtimer_callback_running(struct hrtimer *timer)
+-{
+-        return timer->state & HRTIMER_STATE_CALLBACK;
+-}
+-
+ /*
+  * bcm_rx_update_and_send - process a detected relevant receive content change
+  *                          1. update the last received data
+diff --git a/scripts/kconfig/lkc.h b/scripts/kconfig/lkc.h
+index 4bc68f2..96521cb 100644
+--- a/scripts/kconfig/lkc.h
++++ b/scripts/kconfig/lkc.h
+@@ -11,9 +11,9 @@
+ #ifndef KBUILD_NO_NLS
+ # include <libintl.h>
+ #else
+-# define gettext(Msgid) ((const char *) (Msgid))
+-# define textdomain(Domainname) ((const char *) (Domainname))
+-# define bindtextdomain(Domainname, Dirname) ((const char *) (Dirname))
++static inline const char *gettext(const char *txt) { return txt; }
++static inline void textdomain(const char *domainname) {}
++static inline void bindtextdomain(const char *name, const char *dir) {}
+ #endif
+ 
+ #ifdef __cplusplus
+diff --git a/scripts/kconfig/mconf.c b/scripts/kconfig/mconf.c
+index 734cf4f..6841e95 100644
+--- a/scripts/kconfig/mconf.c
++++ b/scripts/kconfig/mconf.c
+@@ -773,7 +773,7 @@ static void conf_string(struct menu *menu)
+ 
+ 	while (1) {
+ 		int res;
+-		char *heading;
++		const char *heading;
+ 
+ 		switch (sym_get_type(menu->sym)) {
+ 		case S_INT:
+@@ -925,3 +925,4 @@ int main(int ac, char **av)
+ 
+ 	return 0;
+ }
++
+diff --git a/scripts/mod/file2alias.c b/scripts/mod/file2alias.c
+index e04c421..cea4a79 100644
+--- a/scripts/mod/file2alias.c
++++ b/scripts/mod/file2alias.c
+@@ -51,6 +51,15 @@ do {                                                            \
+                 sprintf(str + strlen(str), "*");                \
+ } while(0)
+ 
++/* Always end in a wildcard, for future extension */
++static inline void add_wildcard(char *str)
++{
++	int len = strlen(str);
++
++	if (str[len - 1] != '*')
++		strcat(str + len, "*");
++}
++
+ unsigned int cross_build = 0;
+ /**
+  * Check that sizeof(device_id type) are consistent with size of section
+@@ -133,9 +142,7 @@ static void do_usb_entry(struct usb_device_id *id,
+ 	    id->match_flags&USB_DEVICE_ID_MATCH_INT_PROTOCOL,
+ 	    id->bInterfaceProtocol);
+ 
+-	/* Always end in a wildcard, for future extension */
+-	if (alias[strlen(alias)-1] != '*')
+-		strcat(alias, "*");
++	add_wildcard(alias);
+ 	buf_printf(&mod->dev_table_buf,
+ 		   "MODULE_ALIAS(\"%s\");\n", alias);
+ }
+@@ -219,6 +226,7 @@ static int do_ieee1394_entry(const char *filename,
+ 	ADD(alias, "ver", id->match_flags & IEEE1394_MATCH_VERSION,
+ 	    id->version);
+ 
++	add_wildcard(alias);
+ 	return 1;
+ }
+ 
+@@ -261,6 +269,7 @@ static int do_pci_entry(const char *filename,
+ 	ADD(alias, "bc", baseclass_mask == 0xFF, baseclass);
+ 	ADD(alias, "sc", subclass_mask == 0xFF, subclass);
+ 	ADD(alias, "i", interface_mask == 0xFF, interface);
++	add_wildcard(alias);
+ 	return 1;
+ }
+ 
+@@ -283,6 +292,7 @@ static int do_ccw_entry(const char *filename,
+ 	    id->dev_type);
+ 	ADD(alias, "dm", id->match_flags&CCW_DEVICE_ID_MATCH_DEVICE_MODEL,
+ 	    id->dev_model);
++	add_wildcard(alias);
+ 	return 1;
+ }
+ 
+@@ -290,7 +300,7 @@ static int do_ccw_entry(const char *filename,
+ static int do_ap_entry(const char *filename,
+ 		       struct ap_device_id *id, char *alias)
+ {
+-	sprintf(alias, "ap:t%02X", id->dev_type);
++	sprintf(alias, "ap:t%02X*", id->dev_type);
+ 	return 1;
+ }
+ 
+@@ -309,6 +319,7 @@ static int do_serio_entry(const char *filename,
+ 	ADD(alias, "id", id->id != SERIO_ANY, id->id);
+ 	ADD(alias, "ex", id->extra != SERIO_ANY, id->extra);
+ 
++	add_wildcard(alias);
+ 	return 1;
+ }
+ 
+@@ -316,7 +327,7 @@ static int do_serio_entry(const char *filename,
+ static int do_acpi_entry(const char *filename,
+ 			struct acpi_device_id *id, char *alias)
+ {
+-	sprintf(alias, "acpi*:%s:", id->id);
++	sprintf(alias, "acpi*:%s:*", id->id);
+ 	return 1;
+ }
+ 
+@@ -324,7 +335,7 @@ static int do_acpi_entry(const char *filename,
+ static int do_pnp_entry(const char *filename,
+ 			struct pnp_device_id *id, char *alias)
+ {
+-	sprintf(alias, "pnp:d%s", id->id);
++	sprintf(alias, "pnp:d%s*", id->id);
+ 	return 1;
+ }
+ 
+@@ -409,6 +420,7 @@ static int do_pcmcia_entry(const char *filename,
+        ADD(alias, "pc", id->match_flags & PCMCIA_DEV_ID_MATCH_PROD_ID3, id->prod_id_hash[2]);
+        ADD(alias, "pd", id->match_flags & PCMCIA_DEV_ID_MATCH_PROD_ID4, id->prod_id_hash[3]);
+ 
++	add_wildcard(alias);
+        return 1;
+ }
+ 
+@@ -432,6 +444,7 @@ static int do_of_entry (const char *filename, struct of_device_id *of, char *ali
+         if (isspace (*tmp))
+             *tmp = '_';
+ 
++    add_wildcard(alias);
+     return 1;
+ }
+ 
+@@ -448,6 +461,7 @@ static int do_vio_entry(const char *filename, struct vio_device_id *vio,
+ 		if (isspace (*tmp))
+ 			*tmp = '_';
+ 
++	add_wildcard(alias);
+ 	return 1;
+ }
+ 
+@@ -511,6 +525,8 @@ static int do_eisa_entry(const char *filename, struct eisa_device_id *eisa,
+ {
+ 	if (eisa->sig[0])
+ 		sprintf(alias, EISA_DEVICE_MODALIAS_FMT "*", eisa->sig);
++	else
++		strcat(alias, "*");
+ 	return 1;
+ }
+ 
+@@ -529,6 +545,7 @@ static int do_parisc_entry(const char *filename, struct parisc_device_id *id,
+ 	ADD(alias, "rev", id->hversion_rev != PA_HVERSION_REV_ANY_ID, id->hversion_rev);
+ 	ADD(alias, "sv", id->sversion != PA_SVERSION_ANY_ID, id->sversion);
+ 
++	add_wildcard(alias);
+ 	return 1;
+ }
+ 
+@@ -544,6 +561,7 @@ static int do_sdio_entry(const char *filename,
+ 	ADD(alias, "c", id->class != (__u8)SDIO_ANY_ID, id->class);
+ 	ADD(alias, "v", id->vendor != (__u16)SDIO_ANY_ID, id->vendor);
+ 	ADD(alias, "d", id->device != (__u16)SDIO_ANY_ID, id->device);
++	add_wildcard(alias);
+ 	return 1;
+ }
+ 
+@@ -559,6 +577,7 @@ static int do_ssb_entry(const char *filename,
+ 	ADD(alias, "v", id->vendor != SSB_ANY_VENDOR, id->vendor);
+ 	ADD(alias, "id", id->coreid != SSB_ANY_ID, id->coreid);
+ 	ADD(alias, "rev", id->revision != SSB_ANY_REV, id->revision);
++	add_wildcard(alias);
+ 	return 1;
+ }
+ 
+@@ -573,6 +592,7 @@ static int do_virtio_entry(const char *filename, struct virtio_device_id *id,
+ 	ADD(alias, "d", 1, id->device);
+ 	ADD(alias, "v", id->vendor != VIRTIO_DEV_ANY_ID, id->vendor);
+ 
++	add_wildcard(alias);
+ 	return 1;
+ }
+ 
+@@ -612,9 +632,6 @@ static void do_table(void *symval, unsigned long size,
+ 
+ 	for (i = 0; i < size; i += id_size) {
+ 		if (do_entry(mod->name, symval+i, alias)) {
+-			/* Always end in a wildcard, for future extension */
+-			if (alias[strlen(alias)-1] != '*')
+-				strcat(alias, "*");
+ 			buf_printf(&mod->dev_table_buf,
+ 				   "MODULE_ALIAS(\"%s\");\n", alias);
+ 		}
+diff --git a/sound/drivers/pcsp/pcsp.c b/sound/drivers/pcsp/pcsp.c
+index 5920351..54a1f90 100644
+--- a/sound/drivers/pcsp/pcsp.c
++++ b/sound/drivers/pcsp/pcsp.c
+@@ -194,6 +194,7 @@ static void pcsp_stop_beep(struct snd_pcsp *chip)
+ 	spin_unlock_irq(&chip->substream_lock);
+ }
+ 
++#ifdef CONFIG_PM
+ static int pcsp_suspend(struct platform_device *dev, pm_message_t state)
+ {
+ 	struct snd_pcsp *chip = platform_get_drvdata(dev);
+@@ -201,6 +202,9 @@ static int pcsp_suspend(struct platform_device *dev, pm_message_t state)
+ 	snd_pcm_suspend_all(chip->pcm);
+ 	return 0;
+ }
++#else
++#define pcsp_suspend NULL
++#endif	/* CONFIG_PM */
+ 
+ static void pcsp_shutdown(struct platform_device *dev)
+ {
+diff --git a/sound/pci/Kconfig b/sound/pci/Kconfig
+index 581debf..7e47421 100644
+--- a/sound/pci/Kconfig
++++ b/sound/pci/Kconfig
+@@ -515,19 +515,16 @@ config SND_FM801
+ config SND_FM801_TEA575X_BOOL
+ 	bool "ForteMedia FM801 + TEA5757 tuner"
+ 	depends on SND_FM801
++	depends on VIDEO_V4L1=y || VIDEO_V4L1=SND_FM801
+ 	help
+ 	  Say Y here to include support for soundcards based on the ForteMedia
+ 	  FM801 chip with a TEA5757 tuner connected to GPIO1-3 pins (Media
+ 	  Forte SF256-PCS-02) into the snd-fm801 driver.
+ 
+-	  This will enable support for the old V4L1 API.
+-
+ config SND_FM801_TEA575X
+ 	tristate
+ 	depends on SND_FM801_TEA575X_BOOL
+ 	default SND_FM801
+-	select VIDEO_V4L1
+-	select VIDEO_DEV
+ 
+ config SND_HDA_INTEL
+ 	tristate "Intel HD Audio"
+diff --git a/sound/pci/ac97/ac97_patch.c b/sound/pci/ac97/ac97_patch.c
+index 39198e5..2da8981 100644
+--- a/sound/pci/ac97/ac97_patch.c
++++ b/sound/pci/ac97/ac97_patch.c
+@@ -3446,6 +3446,7 @@ static const struct snd_kcontrol_new snd_ac97_controls_vt1617a[] = {
+ int patch_vt1617a(struct snd_ac97 * ac97)
+ {
+ 	int err = 0;
++	int val;
+ 
+ 	/* we choose to not fail out at this point, but we tell the
+ 	   caller when we return */
+@@ -3456,7 +3457,13 @@ int patch_vt1617a(struct snd_ac97 * ac97)
+ 	/* bring analog power consumption to normal by turning off the
+ 	 * headphone amplifier, like WinXP driver for EPIA SP
+ 	 */
+-	snd_ac97_write_cache(ac97, 0x5c, 0x20);
++	/* We need to check the bit before writing it.
++	 * On some (many?) hardwares, setting bit actually clears it!
++	 */
++	val = snd_ac97_read(ac97, 0x5c);
++	if (!(val & 0x20))
++		snd_ac97_write_cache(ac97, 0x5c, 0x20);
++
+ 	ac97->ext_id |= AC97_EI_SPDIF;	/* force the detection of spdif */
+ 	ac97->rates[AC97_RATES_SPDIF] = SNDRV_PCM_RATE_44100 | SNDRV_PCM_RATE_48000;
+ 	ac97->build_ops = &patch_vt1616_ops;
+diff --git a/sound/pci/hda/patch_realtek.c b/sound/pci/hda/patch_realtek.c
+index d9783a4..6d4df45 100644
+--- a/sound/pci/hda/patch_realtek.c
++++ b/sound/pci/hda/patch_realtek.c
+@@ -11902,7 +11902,10 @@ static void alc861_auto_set_output_and_unmute(struct hda_codec *codec,
+ 					      hda_nid_t nid,
+ 					      int pin_type, int dac_idx)
+ {
+-	alc_set_pin_output(codec, nid, pin_type);
++	snd_hda_codec_write(codec, nid, 0, AC_VERB_SET_PIN_WIDGET_CONTROL,
++			    pin_type);
++	snd_hda_codec_write(codec, dac_idx, 0, AC_VERB_SET_AMP_GAIN_MUTE,
++			    AMP_OUT_UNMUTE);
+ }
+ 
+ static void alc861_auto_init_multi_out(struct hda_codec *codec)
+diff --git a/sound/pci/hda/patch_sigmatel.c b/sound/pci/hda/patch_sigmatel.c
+index b3a15d6..393f7fd 100644
+--- a/sound/pci/hda/patch_sigmatel.c
++++ b/sound/pci/hda/patch_sigmatel.c
+@@ -4289,6 +4289,8 @@ struct hda_codec_preset snd_hda_preset_sigmatel[] = {
+ 	{ .id = 0x83847635, .name = "STAC9250D", .patch = patch_stac925x },
+ 	{ .id = 0x83847636, .name = "STAC9251", .patch = patch_stac925x },
+ 	{ .id = 0x83847637, .name = "STAC9250D", .patch = patch_stac925x },
++	{ .id = 0x83847645, .name = "92HD206X", .patch = patch_stac927x },
++	{ .id = 0x83847646, .name = "92HD206D", .patch = patch_stac927x },
+  	/* The following does not take into account .id=0x83847661 when subsys =
+  	 * 104D0C00 which is STAC9225s. Because of this, some SZ Notebooks are
+  	 * currently not fully supported.
+diff --git a/sound/soc/s3c24xx/s3c24xx-i2s.c b/sound/soc/s3c24xx/s3c24xx-i2s.c
+index 4ebcd6a..1ed6afd 100644
+--- a/sound/soc/s3c24xx/s3c24xx-i2s.c
++++ b/sound/soc/s3c24xx/s3c24xx-i2s.c
+@@ -224,6 +224,7 @@ static int s3c24xx_i2s_set_fmt(struct snd_soc_cpu_dai *cpu_dai,
+ 		iismod |= S3C2410_IISMOD_SLAVE;
+ 		break;
+ 	case SND_SOC_DAIFMT_CBS_CFS:
++		iismod &= ~S3C2410_IISMOD_SLAVE;
+ 		break;
+ 	default:
+ 		return -EINVAL;
+@@ -234,6 +235,7 @@ static int s3c24xx_i2s_set_fmt(struct snd_soc_cpu_dai *cpu_dai,
+ 		iismod |= S3C2410_IISMOD_MSB;
+ 		break;
+ 	case SND_SOC_DAIFMT_I2S:
++		iismod &= ~S3C2410_IISMOD_MSB;
+ 		break;
+ 	default:
+ 		return -EINVAL;
+diff --git a/sound/soc/s3c24xx/s3c24xx-pcm.c b/sound/soc/s3c24xx/s3c24xx-pcm.c
+index 6c70a81..7806ae6 100644
+--- a/sound/soc/s3c24xx/s3c24xx-pcm.c
++++ b/sound/soc/s3c24xx/s3c24xx-pcm.c
+@@ -171,7 +171,7 @@ static int s3c24xx_pcm_hw_params(struct snd_pcm_substream *substream,
+ 		ret = s3c2410_dma_request(prtd->params->channel,
+ 					  prtd->params->client, NULL);
+ 
+-		if (ret) {
++		if (ret < 0) {
+ 			DBG(KERN_ERR "failed to get dma channel\n");
+ 			return ret;
+ 		}
+diff --git a/virt/kvm/kvm_main.c b/virt/kvm/kvm_main.c
+index e89338e..f7ba099 100644
+--- a/virt/kvm/kvm_main.c
++++ b/virt/kvm/kvm_main.c
+@@ -522,6 +522,7 @@ unsigned long gfn_to_hva(struct kvm *kvm, gfn_t gfn)
+ 		return bad_hva();
+ 	return (slot->userspace_addr + (gfn - slot->base_gfn) * PAGE_SIZE);
+ }
++EXPORT_SYMBOL_GPL(gfn_to_hva);
+ 
+ /*
+  * Requires current->mm->mmap_sem to be held
