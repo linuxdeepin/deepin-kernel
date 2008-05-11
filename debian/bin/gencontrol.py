@@ -58,6 +58,7 @@ class Gencontrol(Base):
         makefile.add('source_%s_real' % arch, cmds = cmds_source)
 
     def do_featureset_setup(self, vars, makeflags, arch, featureset, extra):
+        vars.update(self.config.merge('base', arch, featureset))
         vars.update(self.config.merge('image', arch, featureset))
         makeflags['LOCALVERSION_HEADERS'] = vars['localversion_headers'] = vars['localversion']
         makeflags['KERNEL_HEADER_DIRS'] = vars.get('kernel-header-dirs', vars.get('kernel-arch'))

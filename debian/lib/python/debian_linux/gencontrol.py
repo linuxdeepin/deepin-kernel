@@ -145,8 +145,6 @@ class Gencontrol(object):
     def do_arch(self, packages, makefile, arch, vars, makeflags, extra):
         vars['arch'] = arch
 
-        makeflags['ARCH'] = arch
-
         self.do_arch_setup(vars, makeflags, arch, extra)
         self.do_arch_makefile(makefile, arch, makeflags, extra)
         self.do_arch_packages(packages, makefile, arch, vars, makeflags, extra)
@@ -156,6 +154,8 @@ class Gencontrol(object):
         pass
 
     def do_arch_makefile(self, makefile, arch, makeflags, extra):
+        makeflags['ARCH'] = arch
+
         for i in self.makefile_targets:
             target1 = i
             target2 = '_'.join((target1, arch))
@@ -175,8 +175,6 @@ class Gencontrol(object):
         if not config_base.get('enabled', True):
             return
 
-        makeflags['FEATURESET'] = featureset
-
         vars['localversion'] = ''
         if featureset != 'none':
             vars['localversion'] = '-' + featureset
@@ -190,6 +188,8 @@ class Gencontrol(object):
         pass
 
     def do_featureset_makefile(self, makefile, arch, featureset, makeflags, extra):
+        makeflags['FEATURESET'] = featureset
+
         for i in self.makefile_targets:
             target1 = '_'.join((i, arch))
             target2 = '_'.join((target1, featureset))
@@ -207,10 +207,10 @@ class Gencontrol(object):
     def do_flavour(self, packages, makefile, arch, featureset, flavour, vars, makeflags, extra):
         config_base = self.config.merge('base', arch, featureset, flavour)
 
-        makeflags['FLAVOUR'] = flavour
-
         vars['class'] = config_base['class']
         if not vars.has_key('longclass'):
+#            from warnings import warn
+#            warn("Image lacks longclass setting: %s, %s, %s" % (arch, featureset, flavour), UserWarning, stacklevel = 1)
             vars['longclass'] = vars['class']
 
         vars['localversion'] += '-' + flavour
@@ -228,6 +228,8 @@ class Gencontrol(object):
                 makeflags[i[1]] = vars[i[0]]
 
     def do_flavour_makefile(self, makefile, arch, featureset, flavour, makeflags, extra):
+        makeflags['FLAVOUR'] = flavour
+
         for i in self.makefile_targets:
             target1 = '_'.join((i, arch, featureset))
             target2 = '_'.join((target1, flavour))
