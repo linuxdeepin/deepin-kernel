@@ -58,8 +58,6 @@ class Gencontrol(Base):
         makefile.add('source_%s_real' % arch, cmds = cmds_source)
 
     def do_featureset_setup(self, vars, makeflags, arch, featureset, extra):
-        vars.update(self.config.merge('base', arch, featureset))
-        vars.update(self.config.merge('image', arch, featureset))
         makeflags['LOCALVERSION_HEADERS'] = vars['localversion_headers'] = vars['localversion']
         makeflags['KERNEL_HEADER_DIRS'] = vars.get('kernel-header-dirs', vars.get('kernel-arch'))
 
@@ -116,6 +114,7 @@ class Gencontrol(Base):
         headers = self.templates["control.headers"]
 
         config_entry_base = self.config.merge('base', arch, featureset, flavour)
+        config_entry_image = self.config.merge('image', arch, featureset, flavour)
         config_entry_relations = self.config.merge('relations', arch, featureset, flavour)
 
         compiler = config_entry_base.get('compiler', 'gcc')
@@ -131,7 +130,7 @@ class Gencontrol(Base):
             'depends': PackageRelation(),
         }
         if vars.get('initramfs', True):
-            generators = vars['initramfs-generators']
+            generators = config_entry_image['initramfs-generators']
             config_entry_commands_initramfs = self.config.merge('commands-image-initramfs-generators', arch, featureset, flavour)
             commands = [config_entry_commands_initramfs[i] for i in generators if config_entry_commands_initramfs.has_key(i)]
             makeflags['INITRD_CMD'] = ' '.join(commands)
@@ -148,10 +147,10 @@ class Gencontrol(Base):
         packages_dummy = []
         packages_own = []
 
-        if vars['type'] == 'plain-s390-tape':
+        if config_entry_image['type'] == 'plain-s390-tape':
             image = self.templates["control.image.type-standalone"]
             build_modules = False
-        elif vars['type'] == 'plain-xen':
+        elif config_entry_image['type'] == 'plain-xen':
             image = self.templates["control.image.type-modulesextra"]
             build_modules = True
             config_entry_xen = self.config.merge('xen', arch, featureset, flavour)
@@ -165,7 +164,7 @@ class Gencontrol(Base):
                 packages_dummy.extend(p)
         else:
             build_modules = True
-            image = self.templates["control.image.type-%s" % vars['type']]
+            image = self.templates["control.image.type-%s" % config_entry_image['type']]
             #image = self.templates["control.image.type-modulesinline"]
 
         if not vars.has_key('desc'):
@@ -190,7 +189,7 @@ class Gencontrol(Base):
                 package['Architecture'] = [arch]
                 packages.append(package)
 
-        if vars['type'] == 'plain-xen':
+        if config_entry_image['type'] == 'plain-xen':
             for i in ('postinst', 'postrm', 'prerm'):
                 j = self.substitute(self.templates["image.xen.%s" % i], vars)
                 file("debian/%s.%s" % (packages_own[0]['Package'], i), 'w').write(j)
