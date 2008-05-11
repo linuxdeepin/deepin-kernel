@@ -58,8 +58,9 @@ class Gencontrol(Base):
         makefile.add('source_%s_real' % arch, cmds = cmds_source)
 
     def do_featureset_setup(self, vars, makeflags, arch, featureset, extra):
+        config_base = self.config.merge('base', arch, featureset)
+        makeflags['KERNEL_HEADER_DIRS'] = config_base.get('kernel-header-dirs', config_base.get('kernel-arch'))
         makeflags['LOCALVERSION_HEADERS'] = vars['localversion_headers'] = vars['localversion']
-        makeflags['KERNEL_HEADER_DIRS'] = vars.get('kernel-header-dirs', vars.get('kernel-arch'))
 
     def do_featureset_packages(self, packages, makefile, arch, featureset, vars, makeflags, extra):
         headers_featureset = self.templates["control.headers.featureset"]
@@ -108,7 +109,6 @@ class Gencontrol(Base):
         ):
             if data.has_key(i[0]):
                 makeflags[i[1]] = data[i[0]]
-        makeflags['KERNEL_HEADER_DIRS'] = vars.get('kernel-header-dirs', vars.get('kernel-arch'))
 
     def do_flavour_packages(self, packages, makefile, arch, featureset, flavour, vars, makeflags, extra):
         headers = self.templates["control.headers"]
