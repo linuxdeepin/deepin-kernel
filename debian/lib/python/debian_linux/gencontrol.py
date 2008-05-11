@@ -95,17 +95,14 @@ class Gencontrol(object):
     def do_main(self, packages, makefile):
         config_entry = self.config['base',]
         vars = self.vars.copy()
-        vars.update(config_entry)
 
         makeflags = MakeFlags()
         extra = {}
 
         self.do_main_setup(vars, makeflags, extra)
-        self.do_main_packages(packages, extra)
         self.do_main_makefile(makefile, makeflags, extra)
-
-        for arch in iter(self.config['base',]['arches']):
-            self.do_arch(packages, makefile, arch, vars.copy(), makeflags.copy(), extra)
+        self.do_main_packages(packages, vars, makeflags, extra)
+        self.do_main_recurse(packages, makefile, vars, makeflags, extra)
 
     def do_main_setup(self, vars, makeflags, extra):
         pass
@@ -113,8 +110,12 @@ class Gencontrol(object):
     def do_main_makefile(self, makefile, makeflags, extra):
         makefile.add('binary-indep', cmds = ["$(MAKE) -f debian/rules.real binary-indep %s" % makeflags])
 
-    def do_main_packages(self, packages, extra):
+    def do_main_packages(self, packages, vars, makeflags, extra):
         pass
+
+    def do_main_recurse(self, packages, makefile, vars, makeflags, extra):
+        for arch in iter(self.config['base',]['arches']):
+            self.do_arch(packages, makefile, arch, vars.copy(), makeflags.copy(), extra)
 
     def do_extra(self, packages, makefile):
         templates_extra = self.templates.get("control.extra", None)
@@ -143,7 +144,6 @@ class Gencontrol(object):
 
     def do_arch(self, packages, makefile, arch, vars, makeflags, extra):
         config_base = self.config['base', arch]
-        vars.update(config_base)
         vars['arch'] = arch
 
         makeflags['ARCH'] = arch

@@ -16,7 +16,6 @@ class Gencontrol(Base):
 
     def do_main_setup(self, vars, makeflags, extra):
         super(Gencontrol, self).do_main_setup(vars, makeflags, extra)
-        vars.update(self.config['image',])
         makeflags.update({
             'MAJOR': self.version.linux_major,
             'VERSION': self.version.linux_version,
@@ -25,7 +24,7 @@ class Gencontrol(Base):
             'SOURCEVERSION': self.version.complete,
         })
 
-    def do_main_packages(self, packages, extra):
+    def do_main_packages(self, packages, vars, makeflags, extra):
         packages.extend(self.process_packages(self.templates["control.main"], self.vars))
         packages.append(self.process_real_tree(self.templates["control.tree"][0], self.vars))
         packages.extend(self.process_packages(self.templates["control.support"], self.vars))
