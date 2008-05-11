@@ -269,11 +269,8 @@ class Gencontrol(object):
                 e[key] = self.substitute(value, vars)
         return e
 
-    def process_packages(self, in_entries, vars):
-        entries = []
-        for i in in_entries:
-            entries.append(self.process_package(i, vars))
-        return entries
+    def process_packages(self, entries, vars):
+        return [self.process_package(i, vars) for i in entries]
 
     def substitute(self, s, vars):
         if isinstance(s, (list, tuple)):
