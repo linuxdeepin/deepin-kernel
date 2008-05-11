@@ -125,10 +125,10 @@ class Gencontrol(Base):
                 item.arches = [arch]
         packages['source']['Build-Depends'].extend(relations_compiler_build_dep)
 
-        image_relations = {
-            'conflicts': PackageRelation(),
-            'depends': PackageRelation(),
-        }
+        image_relations = {}
+        for field in 'depends', 'provides', 'suggests', 'recommends', 'conflicts':
+            image_relations[field] = PackageRelation(config_entry_image.get(field, None))
+
         if vars.get('initramfs', True):
             generators = config_entry_image['initramfs-generators']
             config_entry_commands_initramfs = self.config.merge('commands-image-initramfs-generators', arch, featureset, flavour)
@@ -169,7 +169,7 @@ class Gencontrol(Base):
 
         vars.setdefault('desc', None)
 
-        packages_own.append(self.process_real_image(image[0], image_relations, config_entry_relations, vars))
+        packages_own.append(self.process_real_image(image[0], image_relations, vars))
         packages_own.extend(self.process_packages(image[1:], vars))
 
         if build_modules:
@@ -281,14 +281,11 @@ class Gencontrol(Base):
         }
         self.config['version',] = {'source': self.version.complete, 'abiname': self.abiname}
 
-    def process_real_image(self, in_entry, relations, config, vars):
+    def process_real_image(self, in_entry, relations, vars):
         entry = self.process_package(in_entry, vars)
         for field in 'Depends', 'Provides', 'Suggests', 'Recommends', 'Conflicts':
             value = entry.get(field, PackageRelation())
-            t = vars.get(field.lower(), [])
-            value.extend(t)
-            t = relations.get(field.lower(), [])
-            value.extend(t)
+            value.extend(relations.get(field.lower(), []))
             if value:
                 entry[field] = value
         return entry
