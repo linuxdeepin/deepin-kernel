@@ -281,8 +281,8 @@ class Gencontrol(Base):
         }
         self.config['version',] = {'source': self.version.complete, 'abiname': self.abiname}
 
-    def process_real_image(self, in_entry, relations, vars):
-        entry = self.process_package(in_entry, vars)
+    def process_real_image(self, entry, relations, vars):
+        entry = self.process_package(entry, vars)
         for field in 'Depends', 'Provides', 'Suggests', 'Recommends', 'Conflicts':
             value = entry.get(field, PackageRelation())
             value.extend(relations.get(field.lower(), []))
@@ -290,18 +290,17 @@ class Gencontrol(Base):
                 entry[field] = value
         return entry
 
-    def process_real_tree(self, in_entry, vars):
-        entry = self.process_package(in_entry, vars)
-        for i in (('Depends', 'Provides')):
-            value = PackageRelation()
-            value.extend(entry.get(i, []))
-            if i == 'Depends':
-                v = self.changelog[0].version
-                value.append("linux-patch-debian-%s (= %s)" % (v.linux_version, v.complete))
-                value.append(' | '.join(["linux-source-%s (= %s)" % (v.linux_version, v.complete) for v in self.versions]))
-            elif i == 'Provides':
-                value.extend(["linux-tree-%s" % v.complete.replace('~', '-') for v in self.versions])
-            entry[i] = value
+    def process_real_tree(self, entry, vars):
+        entry = self.process_package(entry, vars)
+        version = self.changelog[0].version
+
+        value = entry.setdefault('Depends', PackageRelation())
+        value.append("linux-patch-debian-%s (= %s)" % (version.linux_version, version.complete))
+        value.append(PackageRelationGroup(["linux-source-%s (= %s)" % (v.linux_version, v.complete) for v in self.versions]))
+
+        value = entry.setdefault('Provides', PackageRelation())
+        value.extend(["linux-tree-%s" % v.complete.replace('~', '-') for v in self.versions])
+
         return entry
 
     def write(self, packages, makefile):
