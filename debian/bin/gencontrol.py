@@ -31,7 +31,6 @@ class Gencontrol(Base):
 
     def do_arch_setup(self, vars, makeflags, arch, extra):
         config_base = self.config.merge('base', arch)
-        vars.update(self.config.merge('image', arch))
         config_libc_dev = self.config.merge('libc-dev', arch)
         makeflags['LIBC_DEV_ARCH'] = config_libc_dev.get('arch', config_base.get('kernel-arch'))
 
@@ -81,14 +80,17 @@ class Gencontrol(Base):
         makefile.add('source_%s_%s_real' % (arch, featureset), cmds = cmds_source)
 
     def do_flavour_setup(self, vars, makeflags, arch, featureset, flavour, extra):
+        config_base = self.config.merge('base', arch, featureset, flavour)
         config_image = self.config.merge('image', arch, featureset, flavour)
-
-        vars.update(config_image)
 
         vars['localversion-image'] = vars['localversion']
         override_localversion = config_image.get('override-localversion', None)
         if override_localversion is not None:
             vars['localversion-image'] = vars['localversion_headers'] + '-' + override_localversion
+
+        data = vars.copy()
+        data.update(config_base)
+        data.update(config_image)
 
         for i in (
             ('compiler', 'COMPILER'),
@@ -96,7 +98,7 @@ class Gencontrol(Base):
             ('localversion', 'LOCALVERSION'),
             ('type', 'TYPE'),
         ):
-            makeflags[i[1]] = vars[i[0]]
+            makeflags[i[1]] = data[i[0]]
         for i in (
             ('cflags', 'CFLAGS'),
             ('initramfs', 'INITRAMFS'),
@@ -105,8 +107,8 @@ class Gencontrol(Base):
             ('localversion-image', 'LOCALVERSION_IMAGE'),
             ('override-host-type', 'OVERRIDE_HOST_TYPE'),
         ):
-            if vars.has_key(i[0]):
-                makeflags[i[1]] = vars[i[0]]
+            if data.has_key(i[0]):
+                makeflags[i[1]] = data[i[0]]
         makeflags['KERNEL_HEADER_DIRS'] = vars.get('kernel-header-dirs', vars.get('kernel-arch'))
 
     def do_flavour_packages(self, packages, makefile, arch, featureset, flavour, vars, makeflags, extra):

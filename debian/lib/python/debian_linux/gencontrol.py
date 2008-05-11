@@ -143,7 +143,6 @@ class Gencontrol(object):
             makefile.add("binary-arch_%s_extra" % arch, cmds = cmds)
 
     def do_arch(self, packages, makefile, arch, vars, makeflags, extra):
-        config_base = self.config['base', arch]
         vars['arch'] = arch
 
         makeflags['ARCH'] = arch
@@ -173,8 +172,6 @@ class Gencontrol(object):
 
     def do_featureset(self, packages, makefile, arch, featureset, vars, makeflags, extra):
         config_base = self.config.merge('base', arch, featureset)
-        vars.update(config_base)
-
         if not config_base.get('enabled', True):
             return
 
@@ -209,12 +206,13 @@ class Gencontrol(object):
 
     def do_flavour(self, packages, makefile, arch, featureset, flavour, vars, makeflags, extra):
         config_base = self.config.merge('base', arch, featureset, flavour)
-        vars.update(config_base)
 
+        makeflags['FLAVOUR'] = flavour
+
+        vars['class'] = config_base['class']
         if not vars.has_key('longclass'):
             vars['longclass'] = vars['class']
 
-        makeflags['FLAVOUR'] = flavour
         vars['localversion'] += '-' + flavour
 
         self.do_flavour_setup(vars, makeflags, arch, featureset, flavour, extra)
