@@ -177,7 +177,7 @@ class Gencontrol(Base):
             package_headers = self.process_package(headers[0], vars)
             package_headers['Depends'].extend(relations_compiler)
             packages_own.append(package_headers)
-            extra['headers_arch_depends'].append('%s (= ${Source-Version})' % packages_own[-1]['Package'])
+            extra['headers_arch_depends'].append('%s (= ${binary:Version})' % packages_own[-1]['Package'])
 
         for package in packages_own + packages_dummy:
             name = package['Package']
@@ -235,8 +235,7 @@ class Gencontrol(Base):
         kconfig.extend(check_config("%s/%s/config.%s" % (arch, featureset, flavour), False, arch, featureset, flavour))
         makeflags['KCONFIG'] = ' '.join(kconfig)
 
-        cmds_binary_arch = []
-        cmds_binary_arch.append("$(MAKE) -f debian/rules.real binary-arch-flavour %s" % makeflags)
+        cmds_binary_arch = ["$(MAKE) -f debian/rules.real binary-arch-flavour %s" % makeflags]
         if packages_dummy:
             cmds_binary_arch.append("$(MAKE) -f debian/rules.real install-dummy DH_OPTIONS='%s' %s" % (' '.join(["-p%s" % i['Package'] for i in packages_dummy]), makeflags))
         cmds_build = ["$(MAKE) -f debian/rules.real build %s" % makeflags]
