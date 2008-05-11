@@ -167,8 +167,7 @@ class Gencontrol(Base):
             image = self.templates["control.image.type-%s" % config_entry_image['type']]
             #image = self.templates["control.image.type-modulesinline"]
 
-        if not vars.has_key('desc'):
-            vars['desc'] = None
+        vars.setdefault('desc', None)
 
         packages_own.append(self.process_real_image(image[0], image_relations, config_entry_relations, vars))
         packages_own.extend(self.process_packages(image[1:], vars))

@@ -240,43 +240,41 @@ class Gencontrol(object):
     def do_flavour_packages(self, packages, makefile, arch, featureset, flavour, vars, makeflags, extra):
         pass
 
-    def process_relation(self, key, e, in_e, vars):
+    def process_relation(self, dep, vars):
         import copy
-        dep = copy.deepcopy(in_e[key])
+        dep = copy.deepcopy(dep)
         for groups in dep:
             for item in groups:
                 item.name = self.substitute(item.name, vars)
-        e[key] = dep
+        return dep
 
-    def process_description(self, e, in_e, vars):
-        in_desc = in_e['Description']
+    def process_description(self, in_desc, vars):
         desc = in_desc.__class__()
         desc.short = self.substitute(in_desc.short, vars)
         for i in in_desc.long:
             desc.append(self.substitute(i, vars))
-        e['Description'] = desc
+        return desc
 
     def process_package(self, in_entry, vars):
-        e = Package()
+        entry = in_entry.__class__()
         for key, value in in_entry.iteritems():
             if isinstance(value, PackageRelation):
-                self.process_relation(key, e, in_entry, vars)
-            elif key == 'Description':
-                self.process_description(e, in_entry, vars)
-            elif key[:2] == 'X-':
-                pass
+                value = self.process_relation(value, vars)
+            elif isinstance(value, PackageDescription):
+                value = self.process_description(value, vars)
+            elif key.startswith('X-'):
+                continue
             else:
-                e[key] = self.substitute(value, vars)
-        return e
+                value = self.substitute(value, vars)
+            entry[key] = value
+        return entry
 
     def process_packages(self, entries, vars):
         return [self.process_package(i, vars) for i in entries]
 
     def substitute(self, s, vars):
         if isinstance(s, (list, tuple)):
-            for i in xrange(len(s)):
-                s[i] = self.substitute(s[i], vars)
-            return s
+            return [self.substitute(i, vars) for i in s]
         def subst(match):
             return vars[match.group(1)]
         return re.sub(r'@([-_a-z]+)@', subst, s)
