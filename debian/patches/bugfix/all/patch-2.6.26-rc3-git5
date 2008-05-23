@@ -248,7 +248,7 @@ index c68a118..b42dcfc 100644
  P:	Mauro Carvalho Chehab
  M:	mchehab@infradead.org
 diff --git a/Makefile b/Makefile
-index f638842..ee7c97f 100644
+index f638842..4dc8033 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1114,6 +1114,7 @@ MRPROPER_DIRS  += include/config include2 usr/include
@@ -2567,6 +2567,23 @@ index 5de4e4e..7888cdf 100644
  static struct signal_struct init_signals = INIT_SIGNALS(init_signals);
  static struct sighand_struct init_sighand = INIT_SIGHAND(init_sighand);
  struct mm_struct init_mm = INIT_MM(init_mm);
+diff --git a/arch/m68k/lib/string.c b/arch/m68k/lib/string.c
+index 891e134..4253f87 100644
+--- a/arch/m68k/lib/string.c
++++ b/arch/m68k/lib/string.c
+@@ -15,6 +15,12 @@ char *strcpy(char *dest, const char *src)
+ }
+ EXPORT_SYMBOL(strcpy);
+ 
++char *strcat(char *dest, const char *src)
++{
++	return __kernel_strcpy(dest + __kernel_strlen(dest), src);
++}
++EXPORT_SYMBOL(strcat);
++
+ void *memset(void *s, int c, size_t count)
+ {
+ 	void *xs = s;
 diff --git a/arch/m68knommu/kernel/init_task.c b/arch/m68knommu/kernel/init_task.c
 index 3897043..344c01a 100644
 --- a/arch/m68knommu/kernel/init_task.c
@@ -5943,6 +5960,16 @@ index d494161..7ad0039 100644
  static struct signal_struct init_signals = INIT_SIGNALS(init_signals);
  static struct sighand_struct init_sighand = INIT_SIGHAND(init_sighand);
  struct mm_struct init_mm = INIT_MM(init_mm);
+diff --git a/arch/sh/drivers/heartbeat.c b/arch/sh/drivers/heartbeat.c
+index ab77b0e..938817e 100644
+--- a/arch/sh/drivers/heartbeat.c
++++ b/arch/sh/drivers/heartbeat.c
+@@ -154,4 +154,4 @@ module_exit(heartbeat_exit);
+ 
+ MODULE_VERSION(DRV_VERSION);
+ MODULE_AUTHOR("Paul Mundt");
+-MODULE_LICENSE("GPLv2");
++MODULE_LICENSE("GPL v2");
 diff --git a/arch/sh/kernel/cpu/sh4a/clock-sh7785.c b/arch/sh/kernel/cpu/sh4a/clock-sh7785.c
 index 805535a..27fa81b 100644
 --- a/arch/sh/kernel/cpu/sh4a/clock-sh7785.c
@@ -6842,7 +6869,7 @@ index 90007cf..d2b3123 100644
  static struct sighand_struct init_sighand = INIT_SIGHAND(init_sighand);
  struct mm_struct init_mm = INIT_MM(init_mm);
 diff --git a/arch/sparc64/kernel/process.c b/arch/sparc64/kernel/process.c
-index 4129c04..0a0c05f 100644
+index 4129c04..2084f81 100644
 --- a/arch/sparc64/kernel/process.c
 +++ b/arch/sparc64/kernel/process.c
 @@ -1,6 +1,6 @@
@@ -6989,8 +7016,67 @@ index 4129c04..0a0c05f 100644
  unsigned long thread_saved_pc(struct task_struct *tsk)
  {
  	struct thread_info *ti = task_thread_info(tsk);
+@@ -542,20 +657,39 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long sp,
+ 		struct task_struct *p, struct pt_regs *regs)
+ {
+ 	struct thread_info *t = task_thread_info(p);
++	struct sparc_stackf *parent_sf;
++	unsigned long child_stack_sz;
+ 	char *child_trap_frame;
++	int kernel_thread;
+ 
+-	/* Calculate offset to stack_frame & pt_regs */
+-	child_trap_frame = task_stack_page(p) + (THREAD_SIZE - (TRACEREG_SZ+STACKFRAME_SZ));
+-	memcpy(child_trap_frame, (((struct sparc_stackf *)regs)-1), (TRACEREG_SZ+STACKFRAME_SZ));
++	kernel_thread = (regs->tstate & TSTATE_PRIV) ? 1 : 0;
++	parent_sf = ((struct sparc_stackf *) regs) - 1;
+ 
+-	t->flags = (t->flags & ~((0xffUL << TI_FLAG_CWP_SHIFT) | (0xffUL << TI_FLAG_CURRENT_DS_SHIFT))) |
++	/* Calculate offset to stack_frame & pt_regs */
++	child_stack_sz = ((STACKFRAME_SZ + TRACEREG_SZ) +
++			  (kernel_thread ? STACKFRAME_SZ : 0));
++	child_trap_frame = (task_stack_page(p) +
++			    (THREAD_SIZE - child_stack_sz));
++	memcpy(child_trap_frame, parent_sf, child_stack_sz);
++
++	t->flags = (t->flags & ~((0xffUL << TI_FLAG_CWP_SHIFT) |
++				 (0xffUL << TI_FLAG_CURRENT_DS_SHIFT))) |
+ 		(((regs->tstate + 1) & TSTATE_CWP) << TI_FLAG_CWP_SHIFT);
+ 	t->new_child = 1;
+ 	t->ksp = ((unsigned long) child_trap_frame) - STACK_BIAS;
+-	t->kregs = (struct pt_regs *)(child_trap_frame+sizeof(struct sparc_stackf));
++	t->kregs = (struct pt_regs *) (child_trap_frame +
++				       sizeof(struct sparc_stackf));
+ 	t->fpsaved[0] = 0;
+ 
+-	if (regs->tstate & TSTATE_PRIV) {
++	if (kernel_thread) {
++		struct sparc_stackf *child_sf = (struct sparc_stackf *)
++			(child_trap_frame + (STACKFRAME_SZ + TRACEREG_SZ));
++
++		/* Zero terminate the stack backtrace.  */
++		child_sf->fp = NULL;
++		t->kregs->u_regs[UREG_FP] =
++		  ((unsigned long) child_sf) - STACK_BIAS;
++
+ 		/* Special case, if we are spawning a kernel thread from
+ 		 * a userspace task (via KMOD, NFS, or similar) we must
+ 		 * disable performance counters in the child because the
+@@ -566,12 +700,7 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long sp,
+ 			t->pcr_reg = 0;
+ 			t->flags &= ~_TIF_PERFCTR;
+ 		}
+-		t->kregs->u_regs[UREG_FP] = t->ksp;
+ 		t->flags |= ((long)ASI_P << TI_FLAG_CURRENT_DS_SHIFT);
+-		flush_register_windows();
+-		memcpy((void *)(t->ksp + STACK_BIAS),
+-		       (void *)(regs->u_regs[UREG_FP] + STACK_BIAS),
+-		       sizeof(struct sparc_stackf));
+ 		t->kregs->u_regs[UREG_G6] = (unsigned long) t;
+ 		t->kregs->u_regs[UREG_G4] = (unsigned long) t->task;
+ 	} else {
 diff --git a/arch/sparc64/kernel/rtrap.S b/arch/sparc64/kernel/rtrap.S
-index 16689b2..3afacbb 100644
+index 16689b2..c6fc695 100644
 --- a/arch/sparc64/kernel/rtrap.S
 +++ b/arch/sparc64/kernel/rtrap.S
 @@ -1,4 +1,4 @@
@@ -6999,6 +7085,14 @@ index 16689b2..3afacbb 100644
   * rtrap.S: Preparing for return from trap on Sparc V9.
   *
   * Copyright (C) 1997,1998 Jakub Jelinek (jj@sunsite.mff.cuni.cz)
+@@ -363,6 +363,7 @@ kern_rtt:	rdpr			%canrestore, %g1
+ 		brz,pn			%g1, kern_rtt_fill
+ 		 nop
+ kern_rtt_restore:
++		stw			%g0, [%sp + PTREGS_OFF + PT_V9_MAGIC]
+ 		restore
+ 		retry
+ 
 diff --git a/arch/sparc64/kernel/sbus.c b/arch/sparc64/kernel/sbus.c
 index fa2827c..e33a8a6 100644
 --- a/arch/sparc64/kernel/sbus.c
@@ -7057,6 +7151,41 @@ index 0d6403a..fa63c68 100644
  /* We know that the window frames of the user have been flushed
   * to the stack before we get here because all callers of us
   * are flush_tlb_*() routines, and these run after flush_cache_*()
+diff --git a/arch/sparc64/kernel/stacktrace.c b/arch/sparc64/kernel/stacktrace.c
+index 01b52f5..c73ce3f 100644
+--- a/arch/sparc64/kernel/stacktrace.c
++++ b/arch/sparc64/kernel/stacktrace.c
+@@ -19,7 +19,7 @@ void save_stack_trace(struct stack_trace *trace)
+ 	fp = ksp + STACK_BIAS;
+ 	thread_base = (unsigned long) tp;
+ 	do {
+-		struct reg_window *rw;
++		struct sparc_stackf *sf;
+ 		struct pt_regs *regs;
+ 		unsigned long pc;
+ 
+@@ -28,15 +28,17 @@ void save_stack_trace(struct stack_trace *trace)
+ 		    fp >= (thread_base + THREAD_SIZE))
+ 			break;
+ 
+-		rw = (struct reg_window *) fp;
+-		regs = (struct pt_regs *) (rw + 1);
++		sf = (struct sparc_stackf *) fp;
++		regs = (struct pt_regs *) (sf + 1);
+ 
+ 		if ((regs->magic & ~0x1ff) == PT_REGS_MAGIC) {
++			if (!(regs->tstate & TSTATE_PRIV))
++				break;
+ 			pc = regs->tpc;
+ 			fp = regs->u_regs[UREG_I6] + STACK_BIAS;
+ 		} else {
+-			pc = rw->ins[7];
+-			fp = rw->ins[6] + STACK_BIAS;
++			pc = sf->callers_pc;
++			fp = (unsigned long)sf->fp + STACK_BIAS;
+ 		}
+ 
+ 		if (trace->skip > 0)
 diff --git a/arch/sparc64/kernel/starfire.c b/arch/sparc64/kernel/starfire.c
 index b930fee..7461581 100644
 --- a/arch/sparc64/kernel/starfire.c
@@ -7087,6 +7216,41 @@ index 56ff552..704a3af 100644
   * trampoline.S: Jump start slave processors on sparc64.
   *
   * Copyright (C) 1997 David S. Miller (davem@caip.rutgers.edu)
+diff --git a/arch/sparc64/kernel/traps.c b/arch/sparc64/kernel/traps.c
+index d9b8d46..3697492 100644
+--- a/arch/sparc64/kernel/traps.c
++++ b/arch/sparc64/kernel/traps.c
+@@ -2116,7 +2116,7 @@ void show_stack(struct task_struct *tsk, unsigned long *_ksp)
+ 	printk("\n");
+ #endif
+ 	do {
+-		struct reg_window *rw;
++		struct sparc_stackf *sf;
+ 		struct pt_regs *regs;
+ 		unsigned long pc;
+ 
+@@ -2124,15 +2124,17 @@ void show_stack(struct task_struct *tsk, unsigned long *_ksp)
+ 		if (fp < (thread_base + sizeof(struct thread_info)) ||
+ 		    fp >= (thread_base + THREAD_SIZE))
+ 			break;
+-		rw = (struct reg_window *)fp;
+-		regs = (struct pt_regs *) (rw + 1);
++		sf = (struct sparc_stackf *) fp;
++		regs = (struct pt_regs *) (sf + 1);
+ 
+ 		if ((regs->magic & ~0x1ff) == PT_REGS_MAGIC) {
++			if (!(regs->tstate & TSTATE_PRIV))
++				break;
+ 			pc = regs->tpc;
+ 			fp = regs->u_regs[UREG_I6] + STACK_BIAS;
+ 		} else {
+-			pc = rw->ins[7];
+-			fp = rw->ins[6] + STACK_BIAS;
++			pc = sf->callers_pc;
++			fp = (unsigned long)sf->fp + STACK_BIAS;
+ 		}
+ 
+ 		printk(" [%016lx] ", pc);
 diff --git a/arch/sparc64/kernel/unaligned.c b/arch/sparc64/kernel/unaligned.c
 index 1a511e9..afa7fc4 100644
 --- a/arch/sparc64/kernel/unaligned.c
@@ -7340,6 +7504,32 @@ index a99ccd7..281aea4 100644
   * tree.c: Basic device tree traversal/scanning for the Linux
   *         prom library.
   *
+diff --git a/arch/um/Kconfig b/arch/um/Kconfig
+index dba8e05..6976812 100644
+--- a/arch/um/Kconfig
++++ b/arch/um/Kconfig
+@@ -259,6 +259,8 @@ if BROKEN
+ 	source "drivers/mtd/Kconfig"
+ endif
+ 
++source "drivers/leds/Kconfig"
++
+ #This is just to shut up some Kconfig warnings, so no prompt.
+ config INPUT
+ 	bool
+diff --git a/arch/um/drivers/pcap_user.c b/arch/um/drivers/pcap_user.c
+index e980935..5f90358 100644
+--- a/arch/um/drivers/pcap_user.c
++++ b/arch/um/drivers/pcap_user.c
+@@ -50,7 +50,7 @@ static int pcap_open(void *data)
+ 			return -EIO;
+ 		}
+ 
+-		pri->compiled = kmalloc(sizeof(struct bpf_program),
++		pri->compiled = uml_kmalloc(sizeof(struct bpf_program),
+ 					UM_GFP_KERNEL);
+ 		if (pri->compiled == NULL) {
+ 			printk(UM_KERN_ERR "pcap_open : kmalloc failed\n");
 diff --git a/arch/um/kernel/init_task.c b/arch/um/kernel/init_task.c
 index dcfceca..910eda8 100644
 --- a/arch/um/kernel/init_task.c
@@ -7352,6 +7542,48 @@ index dcfceca..910eda8 100644
  static struct signal_struct init_signals = INIT_SIGNALS(init_signals);
  static struct sighand_struct init_sighand = INIT_SIGHAND(init_sighand);
  EXPORT_SYMBOL(init_mm);
+diff --git a/arch/um/kernel/ksyms.c b/arch/um/kernel/ksyms.c
+index 66e2a30..ccc02a6 100644
+--- a/arch/um/kernel/ksyms.c
++++ b/arch/um/kernel/ksyms.c
+@@ -60,6 +60,11 @@ EXPORT_SYMBOL(os_rcv_fd);
+ EXPORT_SYMBOL(run_helper);
+ EXPORT_SYMBOL(start_thread);
+ 
++EXPORT_SYMBOL(add_sigio_fd);
++EXPORT_SYMBOL(ignore_sigio_fd);
++EXPORT_SYMBOL(deactivate_fd);
++EXPORT_SYMBOL(sigio_broken);
++
+ #ifdef CONFIG_SMP
+ 
+ /* required for SMP */
+diff --git a/arch/um/os-Linux/sys-i386/registers.c b/arch/um/os-Linux/sys-i386/registers.c
+index c6183e7..b487cbe 100644
+--- a/arch/um/os-Linux/sys-i386/registers.c
++++ b/arch/um/os-Linux/sys-i386/registers.c
+@@ -5,6 +5,7 @@
+  */
+ 
+ #include <errno.h>
++#include <sys/ptrace.h>
+ #include <asm/user.h>
+ #include "kern_constants.h"
+ #include "longjmp.h"
+diff --git a/arch/um/sys-x86_64/ksyms.c b/arch/um/sys-x86_64/ksyms.c
+index 4d7d1a8..6604673 100644
+--- a/arch/um/sys-x86_64/ksyms.c
++++ b/arch/um/sys-x86_64/ksyms.c
+@@ -1,5 +1,7 @@
+-#include "linux/module.h"
+-#include "asm/string.h"
++#include <linux/module.h>
++#include <asm/string.h>
++#include <asm/checksum.h>
+ 
+ /*XXX: we need them because they would be exported by x86_64 */
+ EXPORT_SYMBOL(__memcpy);
++EXPORT_SYMBOL(csum_partial);
 diff --git a/arch/v850/kernel/init_task.c b/arch/v850/kernel/init_task.c
 index ed2f93c..44b274d 100644
 --- a/arch/v850/kernel/init_task.c
@@ -13038,6 +13270,75 @@ index cc1afa2..f806da1 100644
  	if (device_create_file(uverbs_dev->dev, &dev_attr_ibdev))
  		goto err_class;
  	if (device_create_file(uverbs_dev->dev, &dev_attr_abi_version))
+diff --git a/drivers/input/keyboard/aaed2000_kbd.c b/drivers/input/keyboard/aaed2000_kbd.c
+index a293e8b..8a77bfc 100644
+--- a/drivers/input/keyboard/aaed2000_kbd.c
++++ b/drivers/input/keyboard/aaed2000_kbd.c
+@@ -183,4 +183,4 @@ module_exit(aaedkbd_exit);
+ 
+ MODULE_AUTHOR("Nicolas Bellido Y Ortega");
+ MODULE_DESCRIPTION("AAED-2000 Keyboard Driver");
+-MODULE_LICENSE("GPLv2");
++MODULE_LICENSE("GPL v2");
+diff --git a/drivers/input/keyboard/corgikbd.c b/drivers/input/keyboard/corgikbd.c
+index 29fbec6..1aa46ae 100644
+--- a/drivers/input/keyboard/corgikbd.c
++++ b/drivers/input/keyboard/corgikbd.c
+@@ -412,5 +412,5 @@ module_exit(corgikbd_exit);
+ 
+ MODULE_AUTHOR("Richard Purdie <rpurdie@rpsys.net>");
+ MODULE_DESCRIPTION("Corgi Keyboard Driver");
+-MODULE_LICENSE("GPLv2");
++MODULE_LICENSE("GPL v2");
+ MODULE_ALIAS("platform:corgi-keyboard");
+diff --git a/drivers/input/keyboard/jornada680_kbd.c b/drivers/input/keyboard/jornada680_kbd.c
+index 9387da3..781fc61 100644
+--- a/drivers/input/keyboard/jornada680_kbd.c
++++ b/drivers/input/keyboard/jornada680_kbd.c
+@@ -275,5 +275,5 @@ module_exit(jornada680kbd_exit);
+ 
+ MODULE_AUTHOR("Kristoffer Ericson <kristoffer.ericson@gmail.com>");
+ MODULE_DESCRIPTION("HP Jornada 620/660/680/690 Keyboard Driver");
+-MODULE_LICENSE("GPLv2");
++MODULE_LICENSE("GPL v2");
+ MODULE_ALIAS("platform:jornada680_kbd");
+diff --git a/drivers/input/keyboard/jornada720_kbd.c b/drivers/input/keyboard/jornada720_kbd.c
+index a1164a0..ce650af 100644
+--- a/drivers/input/keyboard/jornada720_kbd.c
++++ b/drivers/input/keyboard/jornada720_kbd.c
+@@ -29,7 +29,7 @@
+ 
+ MODULE_AUTHOR("Kristoffer Ericson <Kristoffer.Ericson@gmail.com>");
+ MODULE_DESCRIPTION("HP Jornada 710/720/728 keyboard driver");
+-MODULE_LICENSE("GPLv2");
++MODULE_LICENSE("GPL v2");
+ 
+ static unsigned short jornada_std_keymap[128] = {					/* ROW */
+ 	0, KEY_ESC, KEY_F1, KEY_F2, KEY_F3, KEY_F4, KEY_F5, KEY_F6, KEY_F7,		/* #1  */
+diff --git a/drivers/input/keyboard/spitzkbd.c b/drivers/input/keyboard/spitzkbd.c
+index 61e401b..1aa3718 100644
+--- a/drivers/input/keyboard/spitzkbd.c
++++ b/drivers/input/keyboard/spitzkbd.c
+@@ -494,5 +494,5 @@ module_exit(spitzkbd_exit);
+ 
+ MODULE_AUTHOR("Richard Purdie <rpurdie@rpsys.net>");
+ MODULE_DESCRIPTION("Spitz Keyboard Driver");
+-MODULE_LICENSE("GPLv2");
++MODULE_LICENSE("GPL v2");
+ MODULE_ALIAS("platform:spitz-keyboard");
+diff --git a/drivers/input/touchscreen/jornada720_ts.c b/drivers/input/touchscreen/jornada720_ts.c
+index 7422421..1aca108 100644
+--- a/drivers/input/touchscreen/jornada720_ts.c
++++ b/drivers/input/touchscreen/jornada720_ts.c
+@@ -24,7 +24,7 @@
+ 
+ MODULE_AUTHOR("Kristoffer Ericson <kristoffer.ericson@gmail.com>");
+ MODULE_DESCRIPTION("HP Jornada 710/720/728 touchscreen driver");
+-MODULE_LICENSE("GPLv2");
++MODULE_LICENSE("GPL v2");
+ 
+ struct jornada_ts {
+ 	struct input_dev *dev;
 diff --git a/drivers/isdn/capi/capiutil.c b/drivers/isdn/capi/capiutil.c
 index ebef4ce..29419a8 100644
 --- a/drivers/isdn/capi/capiutil.c
@@ -13156,6 +13457,19 @@ index b3c54be..559a408 100644
  	/* register the attributes */
  	rc = device_create_file(led_cdev->dev, &dev_attr_brightness);
  	if (rc)
+diff --git a/drivers/media/video/Kconfig b/drivers/media/video/Kconfig
+index 89d8d37..3b26fbd 100644
+--- a/drivers/media/video/Kconfig
++++ b/drivers/media/video/Kconfig
+@@ -901,7 +901,7 @@ endif # V4L_USB_DRIVERS
+ 
+ config SOC_CAMERA
+ 	tristate "SoC camera support"
+-	depends on VIDEO_V4L2
++	depends on VIDEO_V4L2 && HAS_DMA
+ 	select VIDEOBUF_DMA_SG
+ 	help
+ 	  SoC Camera is a common API to several cameras, not connecting
 diff --git a/drivers/media/video/bt8xx/bttv-driver.c b/drivers/media/video/bt8xx/bttv-driver.c
 index 2ca3e9c..0165aac 100644
 --- a/drivers/media/video/bt8xx/bttv-driver.c
@@ -13190,6 +13504,19 @@ index 982f446..0a88c44 100644
  EXPORT_SYMBOL_GPL(videobuf_mmap_setup);
  EXPORT_SYMBOL_GPL(videobuf_mmap_free);
  EXPORT_SYMBOL_GPL(videobuf_mmap_mapper);
+diff --git a/drivers/mfd/Kconfig b/drivers/mfd/Kconfig
+index 2566479..ae96bd6 100644
+--- a/drivers/mfd/Kconfig
++++ b/drivers/mfd/Kconfig
+@@ -24,7 +24,7 @@ config MFD_ASIC3
+ 
+ config HTC_EGPIO
+ 	bool "HTC EGPIO support"
+-	depends on GENERIC_HARDIRQS && HAVE_GPIO_LIB
++	depends on GENERIC_HARDIRQS && HAVE_GPIO_LIB && ARM
+ 	help
+ 	    This driver supports the CPLD egpio chip present on
+ 	    several HTC phones.  It provides basic support for input
 diff --git a/drivers/mmc/card/Kconfig b/drivers/mmc/card/Kconfig
 index aa8a4e4..dd0f398 100644
 --- a/drivers/mmc/card/Kconfig
@@ -14120,6 +14447,19 @@ index 0000000..ffadee5
 +MODULE_LICENSE("GPL");
 +MODULE_DESCRIPTION("Multimedia Card (MMC) host test driver");
 +MODULE_AUTHOR("Pierre Ossman");
+diff --git a/drivers/mmc/host/Kconfig b/drivers/mmc/host/Kconfig
+index 3b3cd0e..dead617 100644
+--- a/drivers/mmc/host/Kconfig
++++ b/drivers/mmc/host/Kconfig
+@@ -119,7 +119,7 @@ config MMC_TIFM_SD
+ 
+ config MMC_SPI
+ 	tristate "MMC/SD over SPI"
+-	depends on MMC && SPI_MASTER && !HIGHMEM
++	depends on MMC && SPI_MASTER && !HIGHMEM && HAS_DMA
+ 	select CRC7
+ 	select CRC_ITU_T
+ 	help
 diff --git a/drivers/mmc/host/at91_mci.c b/drivers/mmc/host/at91_mci.c
 index a28fc2f..8979ad3 100644
 --- a/drivers/mmc/host/at91_mci.c
@@ -14178,6 +14518,82 @@ index 14759e9..549517c 100644
  			     host, &dma_ch);
  	if (r != 0) {
  		dev_dbg(mmc_dev(host->mmc), "omap_request_dma() failed with %d\n", r);
+diff --git a/drivers/net/3c509.c b/drivers/net/3c509.c
+index e6c545f..87d8795 100644
+--- a/drivers/net/3c509.c
++++ b/drivers/net/3c509.c
+@@ -413,7 +413,7 @@ static int __devinit el3_pnp_probe(struct pnp_dev *pdev,
+ {
+ 	short i;
+ 	int ioaddr, irq, if_port;
+-	u16 phys_addr[3];
++	__be16 phys_addr[3];
+ 	struct net_device *dev = NULL;
+ 	int err;
+ 
+@@ -605,7 +605,7 @@ static int __init el3_mca_probe(struct device *device)
+ 
+ 	short i;
+ 	int ioaddr, irq, if_port;
+-	u16 phys_addr[3];
++	__be16 phys_addr[3];
+ 	struct net_device *dev = NULL;
+ 	u_char pos4, pos5;
+ 	struct mca_device *mdev = to_mca_device(device);
+@@ -635,14 +635,13 @@ static int __init el3_mca_probe(struct device *device)
+ 			printk(KERN_DEBUG "3c529: irq %d  ioaddr 0x%x  ifport %d\n", irq, ioaddr, if_port);
+ 	}
+ 	EL3WINDOW(0);
+-	for (i = 0; i < 3; i++) {
+-			phys_addr[i] = htons(read_eeprom(ioaddr, i));
+-	}
++	for (i = 0; i < 3; i++)
++		phys_addr[i] = htons(read_eeprom(ioaddr, i));
+ 
+ 	dev = alloc_etherdev(sizeof (struct el3_private));
+ 	if (dev == NULL) {
+-			release_region(ioaddr, EL3_IO_EXTENT);
+-			return -ENOMEM;
++		release_region(ioaddr, EL3_IO_EXTENT);
++		return -ENOMEM;
+ 	}
+ 
+ 	netdev_boot_setup_check(dev);
+@@ -668,7 +667,7 @@ static int __init el3_eisa_probe (struct device *device)
+ {
+ 	short i;
+ 	int ioaddr, irq, if_port;
+-	u16 phys_addr[3];
++	__be16 phys_addr[3];
+ 	struct net_device *dev = NULL;
+ 	struct eisa_device *edev;
+ 	int err;
+diff --git a/drivers/net/Kconfig b/drivers/net/Kconfig
+index 9f6cc8a..dd0ec9e 100644
+--- a/drivers/net/Kconfig
++++ b/drivers/net/Kconfig
+@@ -1353,7 +1353,7 @@ config APRICOT
+ 
+ config B44
+ 	tristate "Broadcom 440x/47xx ethernet support"
+-	depends on SSB_POSSIBLE
++	depends on SSB_POSSIBLE && HAS_DMA
+ 	select SSB
+ 	select MII
+ 	help
+diff --git a/drivers/net/atlx/atl1.c b/drivers/net/atlx/atl1.c
+index 9c2394d..6e4c80d 100644
+--- a/drivers/net/atlx/atl1.c
++++ b/drivers/net/atlx/atl1.c
+@@ -2135,7 +2135,7 @@ static int atl1_tso(struct atl1_adapter *adapter, struct sk_buff *skb,
+ 				return -1;
+ 		}
+ 
+-		if (skb->protocol == ntohs(ETH_P_IP)) {
++		if (skb->protocol == htons(ETH_P_IP)) {
+ 			struct iphdr *iph = ip_hdr(skb);
+ 
+ 			real_len = (((unsigned char *)iph - skb->data) +
 diff --git a/drivers/net/bonding/bond_sysfs.c b/drivers/net/bonding/bond_sysfs.c
 index 68c41a0..08f3d39 100644
 --- a/drivers/net/bonding/bond_sysfs.c
@@ -14201,6 +14617,67 @@ index 68c41a0..08f3d39 100644
  	}
  
  	return ret;
+diff --git a/drivers/net/cassini.c b/drivers/net/cassini.c
+index 93e1363..83768df 100644
+--- a/drivers/net/cassini.c
++++ b/drivers/net/cassini.c
+@@ -142,8 +142,8 @@
+ 
+ #define DRV_MODULE_NAME		"cassini"
+ #define PFX DRV_MODULE_NAME	": "
+-#define DRV_MODULE_VERSION	"1.5"
+-#define DRV_MODULE_RELDATE	"4 Jan 2008"
++#define DRV_MODULE_VERSION	"1.6"
++#define DRV_MODULE_RELDATE	"21 May 2008"
+ 
+ #define CAS_DEF_MSG_ENABLE	  \
+ 	(NETIF_MSG_DRV		| \
+@@ -2136,9 +2136,12 @@ end_copy_pkt:
+ 		if (addr)
+ 			cas_page_unmap(addr);
+ 	}
+-	skb->csum = csum_unfold(~csum);
+-	skb->ip_summed = CHECKSUM_COMPLETE;
+ 	skb->protocol = eth_type_trans(skb, cp->dev);
++	if (skb->protocol == htons(ETH_P_IP)) {
++		skb->csum = csum_unfold(~csum);
++		skb->ip_summed = CHECKSUM_COMPLETE;
++	} else
++		skb->ip_summed = CHECKSUM_NONE;
+ 	return len;
+ }
+ 
+diff --git a/drivers/net/irda/irda-usb.c b/drivers/net/irda/irda-usb.c
+index 9081234..6f50ed7 100644
+--- a/drivers/net/irda/irda-usb.c
++++ b/drivers/net/irda/irda-usb.c
+@@ -1120,7 +1120,7 @@ static int stir421x_patch_device(struct irda_usb_cb *self)
+                 }
+         }
+ 
+-        if (self->usbdev->descriptor.bcdDevice == fw_version) {
++        if (self->usbdev->descriptor.bcdDevice == cpu_to_le16(fw_version)) {
+                 /*
+ 		 * If we're here, we've found a correct patch
+                  * The actual image starts after the "STMP" keyword
+diff --git a/drivers/net/irda/irda-usb.h b/drivers/net/irda/irda-usb.h
+index e846c38..a0ca9c1 100644
+--- a/drivers/net/irda/irda-usb.h
++++ b/drivers/net/irda/irda-usb.h
+@@ -117,11 +117,11 @@
+ struct irda_class_desc {
+ 	__u8  bLength;
+ 	__u8  bDescriptorType;
+-	__u16 bcdSpecRevision;
++	__le16 bcdSpecRevision;
+ 	__u8  bmDataSize;
+ 	__u8  bmWindowSize;
+ 	__u8  bmMinTurnaroundTime;
+-	__u16 wBaudRate;
++	__le16 wBaudRate;
+ 	__u8  bmAdditionalBOFs;
+ 	__u8  bIrdaRateSniff;
+ 	__u8  bMaxUnicastList;
 diff --git a/drivers/net/pppol2tp.c b/drivers/net/pppol2tp.c
 index 7935991..8db342f 100644
 --- a/drivers/net/pppol2tp.c
@@ -14245,6 +14722,22 @@ index 7935991..8db342f 100644
  	skb->sk = sk_tun;
  
  	/* Queue the packet to IP for output */
+diff --git a/drivers/net/usb/catc.c b/drivers/net/usb/catc.c
+index 76752d8..22c17bb 100644
+--- a/drivers/net/usb/catc.c
++++ b/drivers/net/usb/catc.c
+@@ -423,7 +423,10 @@ static int catc_hard_start_xmit(struct sk_buff *skb, struct net_device *netdev)
+ 
+ 	catc->tx_ptr = (((catc->tx_ptr - 1) >> 6) + 1) << 6;
+ 	tx_buf = catc->tx_buf[catc->tx_idx] + catc->tx_ptr;
+-	*((u16*)tx_buf) = (catc->is_f5u011) ? cpu_to_be16((u16)skb->len) : cpu_to_le16((u16)skb->len);
++	if (catc->is_f5u011)
++		*(__be16 *)tx_buf = cpu_to_be16(skb->len);
++	else
++		*(__le16 *)tx_buf = cpu_to_le16(skb->len);
+ 	skb_copy_from_linear_data(skb, tx_buf + 2, skb->len);
+ 	catc->tx_ptr += skb->len + 2;
+ 
 diff --git a/drivers/net/usb/cdc_subset.c b/drivers/net/usb/cdc_subset.c
 index 0ec7936..c66b9c3 100644
 --- a/drivers/net/usb/cdc_subset.c
@@ -14258,6 +14751,21 @@ index 0ec7936..c66b9c3 100644
  #endif
  
  /*
+diff --git a/drivers/net/usb/rndis_host.c b/drivers/net/usb/rndis_host.c
+index 21a7785..3969b7a 100644
+--- a/drivers/net/usb/rndis_host.c
++++ b/drivers/net/usb/rndis_host.c
+@@ -283,8 +283,8 @@ generic_rndis_bind(struct usbnet *dev, struct usb_interface *intf, int flags)
+ 		struct rndis_set_c	*set_c;
+ 		struct rndis_halt	*halt;
+ 	} u;
+-	u32			tmp, phym_unspec;
+-	__le32			*phym;
++	u32			tmp;
++	__le32			phym_unspec, *phym;
+ 	int			reply_len;
+ 	unsigned char		*bp;
+ 
 diff --git a/drivers/net/wireless/airo.c b/drivers/net/wireless/airo.c
 index 45f47c1..4e1c690 100644
 --- a/drivers/net/wireless/airo.c
@@ -14279,6 +14787,93 @@ index 45f47c1..4e1c690 100644
  		udelay (10);
  		if ((++delay % 20) == 0)
  			OUT4500(ai, EVACK, EV_CLEARCOMMANDBUSY);
+diff --git a/drivers/net/wireless/ath5k/base.c b/drivers/net/wireless/ath5k/base.c
+index 4e5c8fc..635b9ac 100644
+--- a/drivers/net/wireless/ath5k/base.c
++++ b/drivers/net/wireless/ath5k/base.c
+@@ -1787,6 +1787,8 @@ ath5k_tasklet_rx(unsigned long data)
+ 
+ 	spin_lock(&sc->rxbuflock);
+ 	do {
++		rxs.flag = 0;
++
+ 		if (unlikely(list_empty(&sc->rxbuf))) {
+ 			ATH5K_WARN(sc, "empty rx buf pool\n");
+ 			break;
+diff --git a/drivers/net/wireless/ath5k/hw.c b/drivers/net/wireless/ath5k/hw.c
+index 5fb1ae6..77990b5 100644
+--- a/drivers/net/wireless/ath5k/hw.c
++++ b/drivers/net/wireless/ath5k/hw.c
+@@ -4119,6 +4119,7 @@ static int ath5k_hw_proc_5210_rx_status(struct ath5k_hw *ah,
+ 	rs->rs_tstamp = AR5K_REG_MS(rx_status->rx_status_1,
+ 		AR5K_5210_RX_DESC_STATUS1_RECEIVE_TIMESTAMP);
+ 	rs->rs_status = 0;
++	rs->rs_phyerr = 0;
+ 
+ 	/*
+ 	 * Key table status
+@@ -4145,7 +4146,7 @@ static int ath5k_hw_proc_5210_rx_status(struct ath5k_hw *ah,
+ 		if (rx_status->rx_status_1 &
+ 				AR5K_5210_RX_DESC_STATUS1_PHY_ERROR) {
+ 			rs->rs_status |= AR5K_RXERR_PHY;
+-			rs->rs_phyerr = AR5K_REG_MS(rx_status->rx_status_1,
++			rs->rs_phyerr |= AR5K_REG_MS(rx_status->rx_status_1,
+ 					   AR5K_5210_RX_DESC_STATUS1_PHY_ERROR);
+ 		}
+ 
+@@ -4193,6 +4194,7 @@ static int ath5k_hw_proc_5212_rx_status(struct ath5k_hw *ah,
+ 	rs->rs_tstamp = AR5K_REG_MS(rx_status->rx_status_1,
+ 		AR5K_5212_RX_DESC_STATUS1_RECEIVE_TIMESTAMP);
+ 	rs->rs_status = 0;
++	rs->rs_phyerr = 0;
+ 
+ 	/*
+ 	 * Key table status
+@@ -4215,7 +4217,7 @@ static int ath5k_hw_proc_5212_rx_status(struct ath5k_hw *ah,
+ 		if (rx_status->rx_status_1 &
+ 				AR5K_5212_RX_DESC_STATUS1_PHY_ERROR) {
+ 			rs->rs_status |= AR5K_RXERR_PHY;
+-			rs->rs_phyerr = AR5K_REG_MS(rx_err->rx_error_1,
++			rs->rs_phyerr |= AR5K_REG_MS(rx_err->rx_error_1,
+ 					   AR5K_RX_DESC_ERROR1_PHY_ERROR_CODE);
+ 		}
+ 
+diff --git a/drivers/net/wireless/b43/Kconfig b/drivers/net/wireless/b43/Kconfig
+index f51b2d9..1fa043d 100644
+--- a/drivers/net/wireless/b43/Kconfig
++++ b/drivers/net/wireless/b43/Kconfig
+@@ -1,6 +1,6 @@
+ config B43
+ 	tristate "Broadcom 43xx wireless support (mac80211 stack)"
+-	depends on SSB_POSSIBLE && MAC80211 && WLAN_80211
++	depends on SSB_POSSIBLE && MAC80211 && WLAN_80211 && HAS_DMA
+ 	select SSB
+ 	select FW_LOADER
+ 	select HW_RANDOM
+diff --git a/drivers/net/wireless/b43legacy/Kconfig b/drivers/net/wireless/b43legacy/Kconfig
+index 13c65fa..aef2298 100644
+--- a/drivers/net/wireless/b43legacy/Kconfig
++++ b/drivers/net/wireless/b43legacy/Kconfig
+@@ -1,6 +1,6 @@
+ config B43LEGACY
+ 	tristate "Broadcom 43xx-legacy wireless support (mac80211 stack)"
+-	depends on SSB_POSSIBLE && MAC80211 && WLAN_80211
++	depends on SSB_POSSIBLE && MAC80211 && WLAN_80211 && HAS_DMA
+ 	select SSB
+ 	select FW_LOADER
+ 	select HW_RANDOM
+diff --git a/drivers/net/wireless/hostap/hostap_cs.c b/drivers/net/wireless/hostap/hostap_cs.c
+index 437a9bc..ed4317a 100644
+--- a/drivers/net/wireless/hostap/hostap_cs.c
++++ b/drivers/net/wireless/hostap/hostap_cs.c
+@@ -833,6 +833,7 @@ static struct pcmcia_device_id hostap_cs_ids[] = {
+ 	PCMCIA_DEVICE_MANF_CARD(0x50c2, 0x0001),
+ 	PCMCIA_DEVICE_MANF_CARD(0x50c2, 0x7300),
+ /*	PCMCIA_DEVICE_MANF_CARD(0xc00f, 0x0000),    conflict with pcnet_cs */
++	PCMCIA_DEVICE_MANF_CARD(0xc250, 0x0002),
+ 	PCMCIA_DEVICE_MANF_CARD(0xd601, 0x0002),
+ 	PCMCIA_DEVICE_MANF_CARD(0xd601, 0x0005),
+ 	PCMCIA_DEVICE_MANF_CARD(0xd601, 0x0010),
 diff --git a/drivers/net/wireless/hostap/hostap_hw.c b/drivers/net/wireless/hostap/hostap_hw.c
 index 7be68db..cdf90c4 100644
 --- a/drivers/net/wireless/hostap/hostap_hw.c
@@ -14318,6 +14913,65 @@ index fa87c5c..d74c061 100644
  
  	rc = register_netdev(priv->prom_net_dev);
  	if (rc) {
+diff --git a/drivers/net/wireless/libertas/ethtool.c b/drivers/net/wireless/libertas/ethtool.c
+index dcfdb40..688d60d 100644
+--- a/drivers/net/wireless/libertas/ethtool.c
++++ b/drivers/net/wireless/libertas/ethtool.c
+@@ -73,8 +73,8 @@ out:
+         return ret;
+ }
+ 
+-static void lbs_ethtool_get_stats(struct net_device * dev,
+-				struct ethtool_stats * stats, u64 * data)
++static void lbs_ethtool_get_stats(struct net_device *dev,
++				  struct ethtool_stats *stats, uint64_t *data)
+ {
+ 	struct lbs_private *priv = dev->priv;
+ 	struct cmd_ds_mesh_access mesh_access;
+@@ -83,12 +83,12 @@ static void lbs_ethtool_get_stats(struct net_device * dev,
+ 	lbs_deb_enter(LBS_DEB_ETHTOOL);
+ 
+ 	/* Get Mesh Statistics */
+-	ret = lbs_prepare_and_send_command(priv,
+-			CMD_MESH_ACCESS, CMD_ACT_MESH_GET_STATS,
+-			CMD_OPTION_WAITFORRSP, 0, &mesh_access);
++	ret = lbs_mesh_access(priv, CMD_ACT_MESH_GET_STATS, &mesh_access);
+ 
+-	if (ret)
++	if (ret) {
++		memset(data, 0, MESH_STATS_NUM*(sizeof(uint64_t)));
+ 		return;
++	}
+ 
+ 	priv->mstats.fwd_drop_rbt = le32_to_cpu(mesh_access.data[0]);
+ 	priv->mstats.fwd_drop_ttl = le32_to_cpu(mesh_access.data[1]);
+@@ -111,19 +111,18 @@ static void lbs_ethtool_get_stats(struct net_device * dev,
+ 	lbs_deb_enter(LBS_DEB_ETHTOOL);
+ }
+ 
+-static int lbs_ethtool_get_sset_count(struct net_device * dev, int sset)
++static int lbs_ethtool_get_sset_count(struct net_device *dev, int sset)
+ {
+-	switch (sset) {
+-	case ETH_SS_STATS:
++	struct lbs_private *priv = dev->priv;
++
++	if (sset == ETH_SS_STATS && dev == priv->mesh_dev)
+ 		return MESH_STATS_NUM;
+-	default:
+-		return -EOPNOTSUPP;
+-	}
++
++	return -EOPNOTSUPP;
+ }
+ 
+ static void lbs_ethtool_get_strings(struct net_device *dev,
+-					  u32 stringset,
+-					  u8 * s)
++				    uint32_t stringset, uint8_t *s)
+ {
+ 	int i;
+ 
 diff --git a/drivers/net/wireless/libertas/main.c b/drivers/net/wireless/libertas/main.c
 index 406f54d..e1f0660 100644
 --- a/drivers/net/wireless/libertas/main.c
@@ -14338,6 +14992,90 @@ index 406f54d..e1f0660 100644
  
  	ret = register_netdev(rtap_dev);
  	if (ret) {
+diff --git a/drivers/net/wireless/orinoco_cs.c b/drivers/net/wireless/orinoco_cs.c
+index 8b7f576..1c216e0 100644
+--- a/drivers/net/wireless/orinoco_cs.c
++++ b/drivers/net/wireless/orinoco_cs.c
+@@ -461,6 +461,7 @@ static struct pcmcia_device_id orinoco_cs_ids[] = {
+ 	PCMCIA_DEVICE_MANF_CARD(0x028a, 0x0673), /* Linksys WCF12 Wireless CompactFlash Card */
+ 	PCMCIA_DEVICE_MANF_CARD(0x02aa, 0x0002), /* ASUS SpaceLink WL-100 */
+ 	PCMCIA_DEVICE_MANF_CARD(0x02ac, 0x0002), /* SpeedStream SS1021 Wireless Adapter */
++	PCMCIA_DEVICE_MANF_CARD(0x02ac, 0x3021), /* SpeedStream Wireless Adapter */
+ 	PCMCIA_DEVICE_MANF_CARD(0x14ea, 0xb001), /* PLANEX RoadLannerWave GW-NS11H */
+ 	PCMCIA_DEVICE_MANF_CARD(0x50c2, 0x7300), /* Airvast WN-100 */
+ 	PCMCIA_DEVICE_MANF_CARD(0x9005, 0x0021), /* Adaptec Ultra Wireless ANW-8030 */
+diff --git a/drivers/net/wireless/rtl8187_dev.c b/drivers/net/wireless/rtl8187_dev.c
+index d5787b3..9223ada 100644
+--- a/drivers/net/wireless/rtl8187_dev.c
++++ b/drivers/net/wireless/rtl8187_dev.c
+@@ -92,6 +92,7 @@ static void rtl8187_iowrite_async(struct rtl8187_priv *priv, __le16 addr,
+ 		u8 data[4];
+ 		struct usb_ctrlrequest dr;
+ 	} *buf;
++	int rc;
+ 
+ 	buf = kmalloc(sizeof(*buf), GFP_ATOMIC);
+ 	if (!buf)
+@@ -116,7 +117,11 @@ static void rtl8187_iowrite_async(struct rtl8187_priv *priv, __le16 addr,
+ 	usb_fill_control_urb(urb, priv->udev, usb_sndctrlpipe(priv->udev, 0),
+ 			     (unsigned char *)dr, buf, len,
+ 			     rtl8187_iowrite_async_cb, buf);
+-	usb_submit_urb(urb, GFP_ATOMIC);
++	rc = usb_submit_urb(urb, GFP_ATOMIC);
++	if (rc < 0) {
++		kfree(buf);
++		usb_free_urb(urb);
++	}
+ }
+ 
+ static inline void rtl818x_iowrite32_async(struct rtl8187_priv *priv,
+@@ -169,6 +174,7 @@ static int rtl8187_tx(struct ieee80211_hw *dev, struct sk_buff *skb,
+ 	struct urb *urb;
+ 	__le16 rts_dur = 0;
+ 	u32 flags;
++	int rc;
+ 
+ 	urb = usb_alloc_urb(0, GFP_ATOMIC);
+ 	if (!urb) {
+@@ -208,7 +214,11 @@ static int rtl8187_tx(struct ieee80211_hw *dev, struct sk_buff *skb,
+ 	info->dev = dev;
+ 	usb_fill_bulk_urb(urb, priv->udev, usb_sndbulkpipe(priv->udev, 2),
+ 			  hdr, skb->len, rtl8187_tx_cb, skb);
+-	usb_submit_urb(urb, GFP_ATOMIC);
++	rc = usb_submit_urb(urb, GFP_ATOMIC);
++	if (rc < 0) {
++		usb_free_urb(urb);
++		kfree_skb(skb);
++	}
+ 
+ 	return 0;
+ }
+diff --git a/drivers/net/wireless/zd1211rw/zd_mac.c b/drivers/net/wireless/zd1211rw/zd_mac.c
+index 69c45ca..6424e5a 100644
+--- a/drivers/net/wireless/zd1211rw/zd_mac.c
++++ b/drivers/net/wireless/zd1211rw/zd_mac.c
+@@ -805,7 +805,7 @@ void zd_process_intr(struct work_struct *work)
+ 	u16 int_status;
+ 	struct zd_mac *mac = container_of(work, struct zd_mac, process_intr);
+ 
+-	int_status = le16_to_cpu(*(u16 *)(mac->intr_buffer+4));
++	int_status = le16_to_cpu(*(__le16 *)(mac->intr_buffer+4));
+ 	if (int_status & INT_CFG_NEXT_BCN) {
+ 		if (net_ratelimit())
+ 			dev_dbg_f(zd_mac_dev(mac), "INT_CFG_NEXT_BCN\n");
+diff --git a/drivers/net/wireless/zd1211rw/zd_usb.c b/drivers/net/wireless/zd1211rw/zd_usb.c
+index 12e24f0..8941f5e 100644
+--- a/drivers/net/wireless/zd1211rw/zd_usb.c
++++ b/drivers/net/wireless/zd1211rw/zd_usb.c
+@@ -342,7 +342,7 @@ static inline void handle_regs_int(struct urb *urb)
+ 	ZD_ASSERT(in_interrupt());
+ 	spin_lock(&intr->lock);
+ 
+-	int_num = le16_to_cpu(*(u16 *)(urb->transfer_buffer+2));
++	int_num = le16_to_cpu(*(__le16 *)(urb->transfer_buffer+2));
+ 	if (int_num == CR_INTERRUPT) {
+ 		struct zd_mac *mac = zd_hw_mac(zd_usb_to_hw(urb->context));
+ 		memcpy(&mac->intr_buffer, urb->transfer_buffer,
 diff --git a/drivers/power/power_supply_core.c b/drivers/power/power_supply_core.c
 index 138dd76..af1633e 100644
 --- a/drivers/power/power_supply_core.c
@@ -14450,6 +15188,37 @@ index 47a7e62..9f55ce6 100644
  	.get = kvm_get,
  	.set = kvm_set,
  	.get_status = kvm_get_status,
+diff --git a/drivers/sbus/char/bpp.c b/drivers/sbus/char/bpp.c
+index b87037e..03c9660 100644
+--- a/drivers/sbus/char/bpp.c
++++ b/drivers/sbus/char/bpp.c
+@@ -869,7 +869,7 @@ static void probeLptPort(unsigned idx)
+       instances[idx].mode = COMPATIBILITY;
+       instances[idx].run_length = 0;
+       instances[idx].run_flag = 0;
+-      if (!request_region(lpAddr,3, dev_name)) return;
++      if (!request_region(lpAddr,3, bpp_dev_name)) return;
+ 
+       /*
+        * First, make sure the instance exists. Do this by writing to
+@@ -1021,7 +1021,7 @@ static int __init bpp_init(void)
+ 	if (rc == 0)
+ 		return -ENODEV;
+ 
+-	rc = register_chrdev(BPP_MAJOR, dev_name, &bpp_fops);
++	rc = register_chrdev(BPP_MAJOR, bpp_dev_name, &bpp_fops);
+ 	if (rc < 0)
+ 		return rc;
+ 
+@@ -1037,7 +1037,7 @@ static void __exit bpp_cleanup(void)
+ {
+ 	unsigned idx;
+ 
+-	unregister_chrdev(BPP_MAJOR, dev_name);
++	unregister_chrdev(BPP_MAJOR, bpp_dev_name);
+ 
+ 	for (idx = 0;  idx < BPP_NO; idx++) {
+ 		if (instances[idx].present)
 diff --git a/drivers/scsi/ch.c b/drivers/scsi/ch.c
 index 75c84d7..c4b938b 100644
 --- a/drivers/scsi/ch.c
@@ -14475,6 +15244,19 @@ index 75c84d7..c4b938b 100644
  	sdev_printk(KERN_INFO, sd, "Attached scsi changer %s\n", ch->name);
  
  	return 0;
+diff --git a/drivers/scsi/mac_esp.c b/drivers/scsi/mac_esp.c
+index cd37bd6..887682a 100644
+--- a/drivers/scsi/mac_esp.c
++++ b/drivers/scsi/mac_esp.c
+@@ -650,7 +650,7 @@ static void __exit mac_esp_exit(void)
+ 
+ MODULE_DESCRIPTION("Mac ESP SCSI driver");
+ MODULE_AUTHOR("Finn Thain <fthain@telegraphics.com.au>");
+-MODULE_LICENSE("GPLv2");
++MODULE_LICENSE("GPL v2");
+ MODULE_VERSION(DRV_VERSION);
+ 
+ module_init(mac_esp_init);
 diff --git a/drivers/scsi/osst.c b/drivers/scsi/osst.c
 index 31f7aec..243d8be 100644
 --- a/drivers/scsi/osst.c
@@ -14631,6 +15413,18 @@ index 8fdafc2..ce6ee92 100644
  	    } while  (get_char(port) != '+');
  	} else
  #endif /* CONFIG_SH_STANDARD_BIOS || CONFIG_SH_KGDB */
+diff --git a/drivers/serial/sunhv.c b/drivers/serial/sunhv.c
+index 145c028..2847336 100644
+--- a/drivers/serial/sunhv.c
++++ b/drivers/serial/sunhv.c
+@@ -499,7 +499,6 @@ static void sunhv_console_write_bychar(struct console *con, const char *s, unsig
+ 	} else
+ 		spin_lock(&port->lock);
+ 
+-	spin_lock_irqsave(&port->lock, flags);
+ 	for (i = 0; i < n; i++) {
+ 		if (*s == '\n')
+ 			sunhv_console_putchar(port, '\r');
 diff --git a/drivers/uio/uio.c b/drivers/uio/uio.c
 index 55cc7b8..0a12e90 100644
 --- a/drivers/uio/uio.c
@@ -15717,6 +16511,1986 @@ index b25707f..0fa95b1 100644
  	return has_dumped;
  }
  
+diff --git a/fs/cifs/AUTHORS b/fs/cifs/AUTHORS
+index 8848e4d..9c136d7 100644
+--- a/fs/cifs/AUTHORS
++++ b/fs/cifs/AUTHORS
+@@ -36,6 +36,7 @@ Miklos Szeredi
+ Kazeon team for various fixes especially for 2.4 version.
+ Asser Ferno (Change Notify support)
+ Shaggy (Dave Kleikamp) for inumerable small fs suggestions and some good cleanup
++Igor Mammedov (DFS support)
+ 
+ Test case and Bug Report contributors
+ -------------------------------------
+diff --git a/fs/cifs/CHANGES b/fs/cifs/CHANGES
+index 8355e91..28e3d5c 100644
+--- a/fs/cifs/CHANGES
++++ b/fs/cifs/CHANGES
+@@ -1,5 +1,7 @@
+ Version 1.53
+ ------------
++DFS support added (Microsoft Distributed File System client support needed
++for referrals which enable a hierarchical name space among servers).
+ 
+ Version 1.52
+ ------------
+@@ -12,7 +14,8 @@ Add ability to modify cifs acls for handling chmod (when mounted with
+ cifsacl flag). Fix prefixpath path separator so we can handle mounts
+ with prefixpaths longer than one directory (one path component) when
+ mounted to Windows servers.  Fix slow file open when cifsacl
+-enabled.
++enabled. Fix memory leak in FindNext when the SMB call returns -EBADF.
++
+ 
+ Version 1.51
+ ------------
+diff --git a/fs/cifs/README b/fs/cifs/README
+index 621aa1a..2bd6fe5 100644
+--- a/fs/cifs/README
++++ b/fs/cifs/README
+@@ -483,6 +483,11 @@ A partial list of the supported mount options follows:
+  sign           Must use packet signing (helps avoid unwanted data modification
+ 		by intermediate systems in the route).  Note that signing
+ 		does not work with lanman or plaintext authentication.
++ seal           Must seal (encrypt) all data on this mounted share before
++		sending on the network.  Requires support for Unix Extensions.
++		Note that this differs from the sign mount option in that it
++		causes encryption of data sent over this mounted share but other
++		shares mounted to the same server are unaffected.
+  sec            Security mode.  Allowed values are:
+ 			none	attempt to connection as a null user (no name)
+ 			krb5    Use Kerberos version 5 authentication
+diff --git a/fs/cifs/TODO b/fs/cifs/TODO
+index 92c9fea..5aff46c 100644
+--- a/fs/cifs/TODO
++++ b/fs/cifs/TODO
+@@ -1,4 +1,4 @@
+-Version 1.52 January 3, 2008
++Version 1.53 May 20, 2008
+ 
+ A Partial List of Missing Features
+ ==================================
+@@ -20,20 +20,21 @@ d) Cleanup now unneeded SessSetup code in
+ fs/cifs/connect.c and add back in NTLMSSP code if any servers
+ need it
+ 
+-e) ms-dfs and ms-dfs host name resolution cleanup
+-
+-f) fix NTLMv2 signing when two mounts with different users to same
++e) fix NTLMv2 signing when two mounts with different users to same
+ server.
+ 
+-g) Directory entry caching relies on a 1 second timer, rather than 
++f) Directory entry caching relies on a 1 second timer, rather than 
+ using FindNotify or equivalent.  - (started)
+ 
+-h) quota support (needs minor kernel change since quota calls
++g) quota support (needs minor kernel change since quota calls
+ to make it to network filesystems or deviceless filesystems)
+ 
+-i) investigate sync behavior (including syncpage) and check  
++h) investigate sync behavior (including syncpage) and check  
+ for proper behavior of intr/nointr
+ 
++i) improve support for very old servers (OS/2 and Win9x for example)
++Including support for changing the time remotely (utimes command).
++
+ j) hook lower into the sockets api (as NFS/SunRPC does) to avoid the
+ extra copy in/out of the socket buffers in some cases.
+ 
+diff --git a/fs/cifs/cifs_dfs_ref.c b/fs/cifs/cifs_dfs_ref.c
+index f6fdecf..d82374c 100644
+--- a/fs/cifs/cifs_dfs_ref.c
++++ b/fs/cifs/cifs_dfs_ref.c
+@@ -219,53 +219,6 @@ static struct vfsmount *cifs_dfs_do_refmount(const struct vfsmount *mnt_parent,
+ 
+ }
+ 
+-static char *build_full_dfs_path_from_dentry(struct dentry *dentry)
+-{
+-	char *full_path = NULL;
+-	char *search_path;
+-	char *tmp_path;
+-	size_t l_max_len;
+-	struct cifs_sb_info *cifs_sb;
+-
+-	if (dentry->d_inode == NULL)
+-		return NULL;
+-
+-	cifs_sb = CIFS_SB(dentry->d_inode->i_sb);
+-
+-	if (cifs_sb->tcon == NULL)
+-		return NULL;
+-
+-	search_path = build_path_from_dentry(dentry);
+-	if (search_path == NULL)
+-		return NULL;
+-
+-	if (cifs_sb->tcon->Flags & SMB_SHARE_IS_IN_DFS) {
+-		int i;
+-		/* we should use full path name for correct working with DFS */
+-		l_max_len = strnlen(cifs_sb->tcon->treeName, MAX_TREE_SIZE+1) +
+-					strnlen(search_path, MAX_PATHCONF) + 1;
+-		tmp_path = kmalloc(l_max_len, GFP_KERNEL);
+-		if (tmp_path == NULL) {
+-			kfree(search_path);
+-			return NULL;
+-		}
+-		strncpy(tmp_path, cifs_sb->tcon->treeName, l_max_len);
+-		tmp_path[l_max_len-1] = 0;
+-		if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_POSIX_PATHS)
+-			for (i = 0; i < l_max_len; i++) {
+-				if (tmp_path[i] == '\\')
+-					tmp_path[i] = '/';
+-			}
+-		strncat(tmp_path, search_path, l_max_len - strlen(tmp_path));
+-
+-		full_path = tmp_path;
+-		kfree(search_path);
+-	} else {
+-		full_path = search_path;
+-	}
+-	return full_path;
+-}
+-
+ static int add_mount_helper(struct vfsmount *newmnt, struct nameidata *nd,
+ 				struct list_head *mntlist)
+ {
+@@ -333,7 +286,7 @@ cifs_dfs_follow_mountpoint(struct dentry *dentry, struct nameidata *nd)
+ 		goto out_err;
+ 	}
+ 
+-	full_path = build_full_dfs_path_from_dentry(dentry);
++	full_path = build_path_from_dentry(dentry);
+ 	if (full_path == NULL) {
+ 		rc = -ENOMEM;
+ 		goto out_err;
+diff --git a/fs/cifs/cifs_fs_sb.h b/fs/cifs/cifs_fs_sb.h
+index 8ad2330..877c854 100644
+--- a/fs/cifs/cifs_fs_sb.h
++++ b/fs/cifs/cifs_fs_sb.h
+@@ -30,6 +30,7 @@
+ #define CIFS_MOUNT_CIFS_ACL     0x200 /* send ACL requests to non-POSIX srv   */
+ #define CIFS_MOUNT_OVERR_UID    0x400 /* override uid returned from server    */
+ #define CIFS_MOUNT_OVERR_GID    0x800 /* override gid returned from server    */
++#define CIFS_MOUNT_DYNPERM	0x1000 /* allow in-memory only mode setting */
+ 
+ struct cifs_sb_info {
+ 	struct cifsTconInfo *tcon;	/* primary mount */
+diff --git a/fs/cifs/cifs_spnego.c b/fs/cifs/cifs_spnego.c
+index 6653e29..7013aaf 100644
+--- a/fs/cifs/cifs_spnego.c
++++ b/fs/cifs/cifs_spnego.c
+@@ -119,6 +119,9 @@ cifs_get_spnego_key(struct cifsSesInfo *sesInfo)
+ 	dp = description + strlen(description);
+ 	sprintf(dp, ";uid=0x%x", sesInfo->linux_uid);
+ 
++	dp = description + strlen(description);
++	sprintf(dp, ";user=%s", sesInfo->userName);
++
+ 	cFYI(1, ("key description = %s", description));
+ 	spnego_key = request_key(&cifs_spnego_key_type, description, "");
+ 
+diff --git a/fs/cifs/cifsfs.c b/fs/cifs/cifsfs.c
+index 427a7c6..5df93fd 100644
+--- a/fs/cifs/cifsfs.c
++++ b/fs/cifs/cifsfs.c
+@@ -1,7 +1,7 @@
+ /*
+  *   fs/cifs/cifsfs.c
+  *
+- *   Copyright (C) International Business Machines  Corp., 2002,2007
++ *   Copyright (C) International Business Machines  Corp., 2002,2008
+  *   Author(s): Steve French (sfrench@us.ibm.com)
+  *
+  *   Common Internet FileSystem (CIFS) client
+@@ -353,9 +353,41 @@ cifs_show_options(struct seq_file *s, struct vfsmount *m)
+ 			if ((cifs_sb->mnt_cifs_flags & CIFS_MOUNT_OVERR_GID) ||
+ 			   !(cifs_sb->tcon->unix_ext))
+ 				seq_printf(s, ",gid=%d", cifs_sb->mnt_gid);
++			if (!cifs_sb->tcon->unix_ext) {
++				seq_printf(s, ",file_mode=0%o,dir_mode=0%o",
++					   cifs_sb->mnt_file_mode,
++					   cifs_sb->mnt_dir_mode);
++			}
++			if (cifs_sb->tcon->seal)
++				seq_printf(s, ",seal");
++			if (cifs_sb->tcon->nocase)
++				seq_printf(s, ",nocase");
++			if (cifs_sb->tcon->retry)
++				seq_printf(s, ",hard");
+ 		}
+ 		if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_POSIX_PATHS)
+ 			seq_printf(s, ",posixpaths");
++		if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_SET_UID)
++			seq_printf(s, ",setuids");
++		if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_SERVER_INUM)
++			seq_printf(s, ",serverino");
++		if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_DIRECT_IO)
++			seq_printf(s, ",directio");
++		if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_NO_XATTR)
++			seq_printf(s, ",nouser_xattr");
++		if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_MAP_SPECIAL_CHR)
++			seq_printf(s, ",mapchars");
++		if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_UNX_EMUL)
++			seq_printf(s, ",sfu");
++		if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_NO_BRL)
++			seq_printf(s, ",nobrl");
++		if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_CIFS_ACL)
++			seq_printf(s, ",cifsacl");
++		if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_DYNPERM)
++			seq_printf(s, ",dynperm");
++		if (m->mnt_sb->s_flags & MS_POSIXACL)
++			seq_printf(s, ",acl");
++
+ 		seq_printf(s, ",rsize=%d", cifs_sb->rsize);
+ 		seq_printf(s, ",wsize=%d", cifs_sb->wsize);
+ 	}
+@@ -657,7 +689,7 @@ const struct file_operations cifs_file_ops = {
+ 	.splice_read = generic_file_splice_read,
+ 	.llseek = cifs_llseek,
+ #ifdef CONFIG_CIFS_POSIX
+-	.ioctl	= cifs_ioctl,
++	.unlocked_ioctl	= cifs_ioctl,
+ #endif /* CONFIG_CIFS_POSIX */
+ 
+ #ifdef CONFIG_CIFS_EXPERIMENTAL
+@@ -677,7 +709,7 @@ const struct file_operations cifs_file_direct_ops = {
+ 	.flush = cifs_flush,
+ 	.splice_read = generic_file_splice_read,
+ #ifdef CONFIG_CIFS_POSIX
+-	.ioctl  = cifs_ioctl,
++	.unlocked_ioctl  = cifs_ioctl,
+ #endif /* CONFIG_CIFS_POSIX */
+ 	.llseek = cifs_llseek,
+ #ifdef CONFIG_CIFS_EXPERIMENTAL
+@@ -697,7 +729,7 @@ const struct file_operations cifs_file_nobrl_ops = {
+ 	.splice_read = generic_file_splice_read,
+ 	.llseek = cifs_llseek,
+ #ifdef CONFIG_CIFS_POSIX
+-	.ioctl	= cifs_ioctl,
++	.unlocked_ioctl	= cifs_ioctl,
+ #endif /* CONFIG_CIFS_POSIX */
+ 
+ #ifdef CONFIG_CIFS_EXPERIMENTAL
+@@ -716,7 +748,7 @@ const struct file_operations cifs_file_direct_nobrl_ops = {
+ 	.flush = cifs_flush,
+ 	.splice_read = generic_file_splice_read,
+ #ifdef CONFIG_CIFS_POSIX
+-	.ioctl  = cifs_ioctl,
++	.unlocked_ioctl  = cifs_ioctl,
+ #endif /* CONFIG_CIFS_POSIX */
+ 	.llseek = cifs_llseek,
+ #ifdef CONFIG_CIFS_EXPERIMENTAL
+@@ -731,7 +763,7 @@ const struct file_operations cifs_dir_ops = {
+ #ifdef CONFIG_CIFS_EXPERIMENTAL
+ 	.dir_notify = cifs_dir_notify,
+ #endif /* CONFIG_CIFS_EXPERIMENTAL */
+-	.ioctl  = cifs_ioctl,
++	.unlocked_ioctl  = cifs_ioctl,
+ };
+ 
+ static void
+diff --git a/fs/cifs/cifsfs.h b/fs/cifs/cifsfs.h
+index cd1301a..25a6cbd 100644
+--- a/fs/cifs/cifsfs.h
++++ b/fs/cifs/cifsfs.h
+@@ -95,8 +95,7 @@ extern int 	cifs_setxattr(struct dentry *, const char *, const void *,
+ 			size_t, int);
+ extern ssize_t	cifs_getxattr(struct dentry *, const char *, void *, size_t);
+ extern ssize_t	cifs_listxattr(struct dentry *, char *, size_t);
+-extern int cifs_ioctl(struct inode *inode, struct file *filep,
+-		       unsigned int command, unsigned long arg);
++extern long cifs_ioctl(struct file *filep, unsigned int cmd, unsigned long arg);
+ 
+ #ifdef CONFIG_CIFS_EXPERIMENTAL
+ extern const struct export_operations cifs_export_ops;
+diff --git a/fs/cifs/cifsglob.h b/fs/cifs/cifsglob.h
+index b7d9f69..0891405 100644
+--- a/fs/cifs/cifsglob.h
++++ b/fs/cifs/cifsglob.h
+@@ -281,6 +281,7 @@ struct cifsTconInfo {
+ 	bool ipc:1;		/* set if connection to IPC$ eg for RPC/PIPES */
+ 	bool retry:1;
+ 	bool nocase:1;
++	bool seal:1;      /* transport encryption for this mounted share */
+ 	bool unix_ext:1;  /* if false disable Linux extensions to CIFS protocol
+ 				for this mount even if server would support */
+ 	/* BB add field for back pointer to sb struct(s)? */
+diff --git a/fs/cifs/cifspdu.h b/fs/cifs/cifspdu.h
+index c43bf4b..65d58b4 100644
+--- a/fs/cifs/cifspdu.h
++++ b/fs/cifs/cifspdu.h
+@@ -1904,19 +1904,26 @@ typedef struct smb_com_transaction2_get_dfs_refer_req {
+ 	char RequestFileName[1];
+ } __attribute__((packed)) TRANSACTION2_GET_DFS_REFER_REQ;
+ 
++#define DFS_VERSION cpu_to_le16(0x0003)
++
++/* DFS server target type */
++#define DFS_TYPE_LINK 0x0000  /* also for sysvol targets */
++#define DFS_TYPE_ROOT 0x0001
++ 
++/* Referral Entry Flags */
++#define DFS_NAME_LIST_REF 0x0200
++
+ typedef struct dfs_referral_level_3 {
+ 	__le16 VersionNumber;
+-	__le16 ReferralSize;
+-	__le16 ServerType;	/* 0x0001 = CIFS server */
+-	__le16 ReferralFlags;	/* or proximity - not clear which since it is
+-				   always set to zero - SNIA spec says 0x01
+-				   means strip off PathConsumed chars before
+-				   submitting RequestFileName to remote node */
+-	__le16 TimeToLive;
+-	__le16 Proximity;
++	__le16 Size;
++	__le16 ServerType; /* 0x0001 = root targets; 0x0000 = link targets */
++	__le16 ReferralEntryFlags; /* 0x0200 bit set only for domain
++				      or DC referral responce */
++	__le32 TimeToLive;
+ 	__le16 DfsPathOffset;
+ 	__le16 DfsAlternatePathOffset;
+-	__le16 NetworkAddressOffset;
++	__le16 NetworkAddressOffset; /* offset of the link target */
++	__le16 ServiceSiteGuid;
+ } __attribute__((packed)) REFERRAL3;
+ 
+ typedef struct smb_com_transaction_get_dfs_refer_rsp {
+diff --git a/fs/cifs/cifsproto.h b/fs/cifs/cifsproto.h
+index d481f6c..b9f5e93 100644
+--- a/fs/cifs/cifsproto.h
++++ b/fs/cifs/cifsproto.h
+@@ -93,7 +93,7 @@ extern struct timespec cnvrtDosUnixTm(__u16 date, __u16 time);
+ 
+ extern int cifs_get_inode_info(struct inode **pinode,
+ 			const unsigned char *search_path,
+-			FILE_ALL_INFO * pfile_info,
++			FILE_ALL_INFO *pfile_info,
+ 			struct super_block *sb, int xid, const __u16 *pfid);
+ extern int cifs_get_inode_info_unix(struct inode **pinode,
+ 			const unsigned char *search_path,
+@@ -130,7 +130,7 @@ extern int CIFSFindClose(const int, struct cifsTconInfo *tcon,
+ 
+ extern int CIFSSMBQPathInfo(const int xid, struct cifsTconInfo *tcon,
+ 			const unsigned char *searchName,
+-			FILE_ALL_INFO * findData,
++			FILE_ALL_INFO *findData,
+ 			int legacy /* whether to use old info level */,
+ 			const struct nls_table *nls_codepage, int remap);
+ extern int SMBQueryInformation(const int xid, struct cifsTconInfo *tcon,
+@@ -141,18 +141,15 @@ extern int SMBQueryInformation(const int xid, struct cifsTconInfo *tcon,
+ extern int CIFSSMBUnixQPathInfo(const int xid,
+ 			struct cifsTconInfo *tcon,
+ 			const unsigned char *searchName,
+-			FILE_UNIX_BASIC_INFO * pFindData,
++			FILE_UNIX_BASIC_INFO *pFindData,
+ 			const struct nls_table *nls_codepage, int remap);
+ 
+ extern int CIFSGetDFSRefer(const int xid, struct cifsSesInfo *ses,
+ 			const unsigned char *searchName,
+-			unsigned char **targetUNCs,
+-			unsigned int *number_of_UNC_in_array,
++			struct dfs_info3_param **target_nodes,
++			unsigned int *number_of_nodes_in_array,
+ 			const struct nls_table *nls_codepage, int remap);
+ 
+-extern int connect_to_dfs_path(int xid, struct cifsSesInfo *pSesInfo,
+-			const char *old_path,
+-			const struct nls_table *nls_codepage, int remap);
+ extern int get_dfs_path(int xid, struct cifsSesInfo *pSesInfo,
+ 			const char *old_path,
+ 			const struct nls_table *nls_codepage,
+diff --git a/fs/cifs/cifssmb.c b/fs/cifs/cifssmb.c
+index 95fbba4..9b8b4cf 100644
+--- a/fs/cifs/cifssmb.c
++++ b/fs/cifs/cifssmb.c
+@@ -81,6 +81,40 @@ static struct {
+ #endif /* CONFIG_CIFS_WEAK_PW_HASH */
+ #endif /* CIFS_POSIX */
+ 
++/* Allocates buffer into dst and copies smb string from src to it.
++ * caller is responsible for freeing dst if function returned 0.
++ * returns:
++ * 	on success - 0
++ *	on failure - errno
++ */
++static int
++cifs_strncpy_to_host(char **dst, const char *src, const int maxlen,
++		 const bool is_unicode, const struct nls_table *nls_codepage)
++{
++	int plen;
++
++	if (is_unicode) {
++		plen = UniStrnlen((wchar_t *)src, maxlen);
++		*dst = kmalloc(plen + 2, GFP_KERNEL);
++		if (!*dst)
++			goto cifs_strncpy_to_host_ErrExit;
++		cifs_strfromUCS_le(*dst, (__le16 *)src, plen, nls_codepage);
++	} else {
++		plen = strnlen(src, maxlen);
++		*dst = kmalloc(plen + 2, GFP_KERNEL);
++		if (!*dst)
++			goto cifs_strncpy_to_host_ErrExit;
++		strncpy(*dst, src, plen);
++	}
++	(*dst)[plen] = 0;
++	(*dst)[plen+1] = 0; /* harmless for ASCII case, needed for Unicode */
++	return 0;
++
++cifs_strncpy_to_host_ErrExit:
++	cERROR(1, ("Failed to allocate buffer for string\n"));
++	return -ENOMEM;
++}
++
+ 
+ /* Mark as invalid, all open files on tree connections since they
+    were closed when session to server was lost */
+@@ -1166,6 +1200,20 @@ static __u16 convert_disposition(int disposition)
+ 	return ofun;
+ }
+ 
++static int
++access_flags_to_smbopen_mode(const int access_flags)
++{
++	int masked_flags = access_flags & (GENERIC_READ | GENERIC_WRITE);
++
++	if (masked_flags == GENERIC_READ)
++		return SMBOPEN_READ;
++	else if (masked_flags == GENERIC_WRITE)
++		return SMBOPEN_WRITE;
++
++	/* just go for read/write */
++	return SMBOPEN_READWRITE;
++}
++
+ int
+ SMBLegacyOpen(const int xid, struct cifsTconInfo *tcon,
+ 	    const char *fileName, const int openDisposition,
+@@ -1207,13 +1255,7 @@ OldOpenRetry:
+ 		pSMB->OpenFlags = cpu_to_le16(REQ_BATCHOPLOCK);
+ 
+ 	pSMB->OpenFlags |= cpu_to_le16(REQ_MORE_INFO);
+-	/* BB fixme add conversion for access_flags to bits 0 - 2 of mode */
+-	/* 0 = read
+-	   1 = write
+-	   2 = rw
+-	   3 = execute
+-	 */
+-	pSMB->Mode = cpu_to_le16(2);
++	pSMB->Mode = cpu_to_le16(access_flags_to_smbopen_mode(access_flags));
+ 	pSMB->Mode |= cpu_to_le16(0x40); /* deny none */
+ 	/* set file as system file if special file such
+ 	   as fifo and server expecting SFU style and
+@@ -1247,7 +1289,7 @@ OldOpenRetry:
+ 	} else {
+ 	/* BB verify if wct == 15 */
+ 
+-/*		*pOplock = pSMBr->OplockLevel; */  /* BB take from action field BB */
++/*		*pOplock = pSMBr->OplockLevel; */ /* BB take from action field*/
+ 
+ 		*netfid = pSMBr->Fid;   /* cifs fid stays in le */
+ 		/* Let caller know file was created so we can set the mode. */
+@@ -1767,7 +1809,7 @@ CIFSSMBPosixLock(const int xid, struct cifsTconInfo *tcon,
+ 	cFYI(1, ("Posix Lock"));
+ 
+ 	if (pLockData == NULL)
+-		return EINVAL;
++		return -EINVAL;
+ 
+ 	rc = small_smb_init(SMB_COM_TRANSACTION2, 15, tcon, (void **) &pSMB);
+ 
+@@ -1944,7 +1986,7 @@ renameRetry:
+ 	/* protocol requires ASCII signature byte on Unicode string */
+ 		pSMB->OldFileName[name_len + 1] = 0x00;
+ 		name_len2 =
+-		    cifsConvertToUCS((__le16 *) &pSMB->OldFileName[name_len + 2],
++		    cifsConvertToUCS((__le16 *)&pSMB->OldFileName[name_len + 2],
+ 				     toName, PATH_MAX, nls_codepage, remap);
+ 		name_len2 += 1 /* trailing null */  + 1 /* Signature word */ ;
+ 		name_len2 *= 2;	/* convert to bytes */
+@@ -2117,8 +2159,7 @@ copyRetry:
+ 		cFYI(1, ("Send error in copy = %d with %d files copied",
+ 			rc, le16_to_cpu(pSMBr->CopyCount)));
+ 	}
+-	if (pSMB)
+-		cifs_buf_release(pSMB);
++	cifs_buf_release(pSMB);
+ 
+ 	if (rc == -EAGAIN)
+ 		goto copyRetry;
+@@ -2207,8 +2248,7 @@ createSymLinkRetry:
+ 	if (rc)
+ 		cFYI(1, ("Send error in SetPathInfo create symlink = %d", rc));
+ 
+-	if (pSMB)
+-		cifs_buf_release(pSMB);
++	cifs_buf_release(pSMB);
+ 
+ 	if (rc == -EAGAIN)
+ 		goto createSymLinkRetry;
+@@ -2925,7 +2965,8 @@ setAclRetry:
+ 	}
+ 	params = 6 + name_len;
+ 	pSMB->MaxParameterCount = cpu_to_le16(2);
+-	pSMB->MaxDataCount = cpu_to_le16(1000); /* BB find max SMB size from sess */
++	/* BB find max SMB size from sess */
++	pSMB->MaxDataCount = cpu_to_le16(1000);
+ 	pSMB->MaxSetupCount = 0;
+ 	pSMB->Reserved = 0;
+ 	pSMB->Flags = 0;
+@@ -3322,7 +3363,8 @@ QPathInfoRetry:
+ 	params = 2 /* level */ + 4 /* reserved */ + name_len /* includes NUL */;
+ 	pSMB->TotalDataCount = 0;
+ 	pSMB->MaxParameterCount = cpu_to_le16(2);
+-	pSMB->MaxDataCount = cpu_to_le16(4000);	/* BB find exact max SMB PDU from sess structure BB */
++	/* BB find exact max SMB PDU from sess structure BB */
++	pSMB->MaxDataCount = cpu_to_le16(4000);
+ 	pSMB->MaxSetupCount = 0;
+ 	pSMB->Reserved = 0;
+ 	pSMB->Flags = 0;
+@@ -3388,7 +3430,7 @@ QPathInfoRetry:
+ int
+ CIFSSMBUnixQPathInfo(const int xid, struct cifsTconInfo *tcon,
+ 		     const unsigned char *searchName,
+-		     FILE_UNIX_BASIC_INFO * pFindData,
++		     FILE_UNIX_BASIC_INFO *pFindData,
+ 		     const struct nls_table *nls_codepage, int remap)
+ {
+ /* SMB_QUERY_FILE_UNIX_BASIC */
+@@ -3679,6 +3721,7 @@ int CIFSFindNext(const int xid, struct cifsTconInfo *tcon,
+ 	if (rc) {
+ 		if (rc == -EBADF) {
+ 			psrch_inf->endOfSearch = true;
++			cifs_buf_release(pSMB);
+ 			rc = 0; /* search probably was closed at end of search*/
+ 		} else
+ 			cFYI(1, ("FindNext returned = %d", rc));
+@@ -3856,25 +3899,112 @@ GetInodeNumOut:
+ 	return rc;
+ }
+ 
++/* parses DFS refferal V3 structure
++ * caller is responsible for freeing target_nodes
++ * returns:
++ * 	on success - 0
++ *	on failure - errno
++ */
++static int
++parse_DFS_referrals(TRANSACTION2_GET_DFS_REFER_RSP *pSMBr,
++		unsigned int *num_of_nodes,
++		struct dfs_info3_param **target_nodes,
++		const struct nls_table *nls_codepage)
++{
++	int i, rc = 0;
++	char *data_end;
++	bool is_unicode;
++	struct dfs_referral_level_3 *ref;
++
++	is_unicode = pSMBr->hdr.Flags2 & SMBFLG2_UNICODE;
++	*num_of_nodes = le16_to_cpu(pSMBr->NumberOfReferrals);
++
++	if (*num_of_nodes < 1) {
++		cERROR(1, ("num_referrals: must be at least > 0,"
++			"but we get num_referrals = %d\n", *num_of_nodes));
++		rc = -EINVAL;
++		goto parse_DFS_referrals_exit;
++	}
++
++	ref = (struct dfs_referral_level_3 *) &(pSMBr->referrals);
++	if (ref->VersionNumber != 3) {
++		cERROR(1, ("Referrals of V%d version are not supported,"
++			"should be V3", ref->VersionNumber));
++		rc = -EINVAL;
++		goto parse_DFS_referrals_exit;
++	}
++
++	/* get the upper boundary of the resp buffer */
++	data_end = (char *)(&(pSMBr->PathConsumed)) +
++				le16_to_cpu(pSMBr->t2.DataCount);
++
++	cFYI(1, ("num_referrals: %d dfs flags: 0x%x ... \n",
++			*num_of_nodes,
++			le16_to_cpu(pSMBr->DFSFlags)));
++
++	*target_nodes = kzalloc(sizeof(struct dfs_info3_param) *
++			*num_of_nodes, GFP_KERNEL);
++	if (*target_nodes == NULL) {
++		cERROR(1, ("Failed to allocate buffer for target_nodes\n"));
++		rc = -ENOMEM;
++		goto parse_DFS_referrals_exit;
++	}
++
++	/* collect neccessary data from referrals */
++	for (i = 0; i < *num_of_nodes; i++) {
++		char *temp;
++		int max_len;
++		struct dfs_info3_param *node = (*target_nodes)+i;
++
++		node->flags = le16_to_cpu(pSMBr->DFSFlags);
++		node->path_consumed = le16_to_cpu(pSMBr->PathConsumed);
++		node->server_type = le16_to_cpu(ref->ServerType);
++		node->ref_flag = le16_to_cpu(ref->ReferralEntryFlags);
++
++		/* copy DfsPath */
++		temp = (char *)ref + le16_to_cpu(ref->DfsPathOffset);
++		max_len = data_end - temp;
++		rc = cifs_strncpy_to_host(&(node->path_name), temp,
++					max_len, is_unicode, nls_codepage);
++		if (rc)
++			goto parse_DFS_referrals_exit;
++
++		/* copy link target UNC */
++		temp = (char *)ref + le16_to_cpu(ref->NetworkAddressOffset);
++		max_len = data_end - temp;
++		rc = cifs_strncpy_to_host(&(node->node_name), temp,
++					max_len, is_unicode, nls_codepage);
++		if (rc)
++			goto parse_DFS_referrals_exit;
++
++		ref += ref->Size;
++	}
++
++parse_DFS_referrals_exit:
++	if (rc) {
++		free_dfs_info_array(*target_nodes, *num_of_nodes);
++		*target_nodes = NULL;
++		*num_of_nodes = 0;
++	}
++	return rc;
++}
++
+ int
+ CIFSGetDFSRefer(const int xid, struct cifsSesInfo *ses,
+ 		const unsigned char *searchName,
+-		unsigned char **targetUNCs,
+-		unsigned int *number_of_UNC_in_array,
++		struct dfs_info3_param **target_nodes,
++		unsigned int *num_of_nodes,
+ 		const struct nls_table *nls_codepage, int remap)
+ {
+ /* TRANS2_GET_DFS_REFERRAL */
+ 	TRANSACTION2_GET_DFS_REFER_REQ *pSMB = NULL;
+ 	TRANSACTION2_GET_DFS_REFER_RSP *pSMBr = NULL;
+-	struct dfs_referral_level_3 *referrals = NULL;
+ 	int rc = 0;
+ 	int bytes_returned;
+ 	int name_len;
+-	unsigned int i;
+-	char *temp;
+ 	__u16 params, byte_count;
+-	*number_of_UNC_in_array = 0;
+-	*targetUNCs = NULL;
++	*num_of_nodes = 0;
++	*target_nodes = NULL;
+ 
+ 	cFYI(1, ("In GetDFSRefer the path %s", searchName));
+ 	if (ses == NULL)
+@@ -3921,7 +4051,8 @@ getDFSRetry:
+ 	pSMB->DataCount = 0;
+ 	pSMB->DataOffset = 0;
+ 	pSMB->MaxParameterCount = 0;
+-	pSMB->MaxDataCount = cpu_to_le16(4000);	/* BB find exact max SMB PDU from sess structure BB */
++	/* BB find exact max SMB PDU from sess structure BB */
++	pSMB->MaxDataCount = cpu_to_le16(4000);
+ 	pSMB->MaxSetupCount = 0;
+ 	pSMB->Reserved = 0;
+ 	pSMB->Flags = 0;
+@@ -3943,103 +4074,26 @@ getDFSRetry:
+ 			 (struct smb_hdr *) pSMBr, &bytes_returned, 0);
+ 	if (rc) {
+ 		cFYI(1, ("Send error in GetDFSRefer = %d", rc));
+-	} else {		/* decode response */
+-/* BB Add logic to parse referrals here */
+-		rc = validate_t2((struct smb_t2_rsp *)pSMBr);
++		goto GetDFSRefExit;
++	}
++	rc = validate_t2((struct smb_t2_rsp *)pSMBr);
+ 
+-		/* BB Also check if enough total bytes returned? */
+-		if (rc || (pSMBr->ByteCount < 17))
+-			rc = -EIO;      /* bad smb */
+-		else {
+-			__u16 data_offset = le16_to_cpu(pSMBr->t2.DataOffset);
+-			__u16 data_count = le16_to_cpu(pSMBr->t2.DataCount);
++	/* BB Also check if enough total bytes returned? */
++	if (rc || (pSMBr->ByteCount < 17)) {
++		rc = -EIO;      /* bad smb */
++		goto GetDFSRefExit;
++	}
+ 
+-			cFYI(1,
+-			    ("Decoding GetDFSRefer response BCC: %d  Offset %d",
+-			      pSMBr->ByteCount, data_offset));
+-			referrals =
+-			    (struct dfs_referral_level_3 *)
+-					(8 /* sizeof start of data block */ +
+-					data_offset +
+-					(char *) &pSMBr->hdr.Protocol);
+-			cFYI(1, ("num_referrals: %d dfs flags: 0x%x ... \n"
+-				"for referral one refer size: 0x%x srv "
+-				"type: 0x%x refer flags: 0x%x ttl: 0x%x",
+-				le16_to_cpu(pSMBr->NumberOfReferrals),
+-				le16_to_cpu(pSMBr->DFSFlags),
+-				le16_to_cpu(referrals->ReferralSize),
+-				le16_to_cpu(referrals->ServerType),
+-				le16_to_cpu(referrals->ReferralFlags),
+-				le16_to_cpu(referrals->TimeToLive)));
+-			/* BB This field is actually two bytes in from start of
+-			   data block so we could do safety check that DataBlock
+-			   begins at address of pSMBr->NumberOfReferrals */
+-			*number_of_UNC_in_array =
+-					le16_to_cpu(pSMBr->NumberOfReferrals);
+-
+-			/* BB Fix below so can return more than one referral */
+-			if (*number_of_UNC_in_array > 1)
+-				*number_of_UNC_in_array = 1;
+-
+-			/* get the length of the strings describing refs */
+-			name_len = 0;
+-			for (i = 0; i < *number_of_UNC_in_array; i++) {
+-				/* make sure that DfsPathOffset not past end */
+-				__u16 offset =
+-					le16_to_cpu(referrals->DfsPathOffset);
+-				if (offset > data_count) {
+-					/* if invalid referral, stop here and do
+-					not try to copy any more */
+-					*number_of_UNC_in_array = i;
+-					break;
+-				}
+-				temp = ((char *)referrals) + offset;
++	cFYI(1, ("Decoding GetDFSRefer response BCC: %d  Offset %d",
++				pSMBr->ByteCount,
++				le16_to_cpu(pSMBr->t2.DataOffset)));
+ 
+-				if (pSMBr->hdr.Flags2 & SMBFLG2_UNICODE) {
+-					name_len += UniStrnlen((wchar_t *)temp,
+-								data_count);
+-				} else {
+-					name_len += strnlen(temp, data_count);
+-				}
+-				referrals++;
+-				/* BB add check that referral pointer does
+-				   not fall off end PDU */
+-			}
+-			/* BB add check for name_len bigger than bcc */
+-			*targetUNCs =
+-				kmalloc(name_len+1+(*number_of_UNC_in_array),
+-					GFP_KERNEL);
+-			if (*targetUNCs == NULL) {
+-				rc = -ENOMEM;
+-				goto GetDFSRefExit;
+-			}
+-			/* copy the ref strings */
+-			referrals = (struct dfs_referral_level_3 *)
+-					(8 /* sizeof data hdr */ + data_offset +
+-					(char *) &pSMBr->hdr.Protocol);
+-
+-			for (i = 0; i < *number_of_UNC_in_array; i++) {
+-				temp = ((char *)referrals) +
+-					  le16_to_cpu(referrals->DfsPathOffset);
+-				if (pSMBr->hdr.Flags2 & SMBFLG2_UNICODE) {
+-					cifs_strfromUCS_le(*targetUNCs,
+-							  (__le16 *) temp,
+-							  name_len,
+-							  nls_codepage);
+-				} else {
+-					strncpy(*targetUNCs, temp, name_len);
+-				}
+-				/*  BB update target_uncs pointers */
+-				referrals++;
+-			}
+-			temp = *targetUNCs;
+-			temp[name_len] = 0;
+-		}
++	/* parse returned result into more usable form */
++	rc = parse_DFS_referrals(pSMBr, num_of_nodes,
++				 target_nodes, nls_codepage);
+ 
+-	}
+ GetDFSRefExit:
+-	if (pSMB)
+-		cifs_buf_release(pSMB);
++	cifs_buf_release(pSMB);
+ 
+ 	if (rc == -EAGAIN)
+ 		goto getDFSRetry;
+@@ -4229,7 +4283,8 @@ QFSAttributeRetry:
+ 	params = 2;	/* level */
+ 	pSMB->TotalDataCount = 0;
+ 	pSMB->MaxParameterCount = cpu_to_le16(2);
+-	pSMB->MaxDataCount = cpu_to_le16(1000);	/* BB find exact max SMB PDU from sess structure BB */
++	/* BB find exact max SMB PDU from sess structure BB */
++	pSMB->MaxDataCount = cpu_to_le16(1000);
+ 	pSMB->MaxSetupCount = 0;
+ 	pSMB->Reserved = 0;
+ 	pSMB->Flags = 0;
+@@ -4298,7 +4353,8 @@ QFSDeviceRetry:
+ 	params = 2;	/* level */
+ 	pSMB->TotalDataCount = 0;
+ 	pSMB->MaxParameterCount = cpu_to_le16(2);
+-	pSMB->MaxDataCount = cpu_to_le16(1000);	/* BB find exact max SMB PDU from sess structure BB */
++	/* BB find exact max SMB PDU from sess structure BB */
++	pSMB->MaxDataCount = cpu_to_le16(1000);
+ 	pSMB->MaxSetupCount = 0;
+ 	pSMB->Reserved = 0;
+ 	pSMB->Flags = 0;
+@@ -4369,7 +4425,8 @@ QFSUnixRetry:
+ 	pSMB->DataCount = 0;
+ 	pSMB->DataOffset = 0;
+ 	pSMB->MaxParameterCount = cpu_to_le16(2);
+-	pSMB->MaxDataCount = cpu_to_le16(100);	/* BB find exact max SMB PDU from sess structure BB */
++	/* BB find exact max SMB PDU from sess structure BB */
++	pSMB->MaxDataCount = cpu_to_le16(100);
+ 	pSMB->MaxSetupCount = 0;
+ 	pSMB->Reserved = 0;
+ 	pSMB->Flags = 0;
+@@ -4444,7 +4501,8 @@ SETFSUnixRetry:
+ 	offset = param_offset + params;
+ 
+ 	pSMB->MaxParameterCount = cpu_to_le16(4);
+-	pSMB->MaxDataCount = cpu_to_le16(100);	/* BB find exact max SMB PDU from sess structure BB */
++	/* BB find exact max SMB PDU from sess structure BB */
++	pSMB->MaxDataCount = cpu_to_le16(100);
+ 	pSMB->SetupCount = 1;
+ 	pSMB->Reserved3 = 0;
+ 	pSMB->SubCommand = cpu_to_le16(TRANS2_SET_FS_INFORMATION);
+@@ -4512,7 +4570,8 @@ QFSPosixRetry:
+ 	pSMB->DataCount = 0;
+ 	pSMB->DataOffset = 0;
+ 	pSMB->MaxParameterCount = cpu_to_le16(2);
+-	pSMB->MaxDataCount = cpu_to_le16(100);	/* BB find exact max SMB PDU from sess structure BB */
++	/* BB find exact max SMB PDU from sess structure BB */
++	pSMB->MaxDataCount = cpu_to_le16(100);
+ 	pSMB->MaxSetupCount = 0;
+ 	pSMB->Reserved = 0;
+ 	pSMB->Flags = 0;
+@@ -4702,7 +4761,8 @@ CIFSSMBSetFileSize(const int xid, struct cifsTconInfo *tcon, __u64 size,
+ 
+ 	count = sizeof(struct file_end_of_file_info);
+ 	pSMB->MaxParameterCount = cpu_to_le16(2);
+-	pSMB->MaxDataCount = cpu_to_le16(1000);	/* BB find max SMB PDU from sess */
++	/* BB find exact max SMB PDU from sess structure BB */
++	pSMB->MaxDataCount = cpu_to_le16(1000);
+ 	pSMB->SetupCount = 1;
+ 	pSMB->Reserved3 = 0;
+ 	pSMB->SubCommand = cpu_to_le16(TRANS2_SET_FILE_INFORMATION);
+@@ -4789,7 +4849,8 @@ CIFSSMBSetFileTimes(const int xid, struct cifsTconInfo *tcon,
+ 
+ 	count = sizeof(FILE_BASIC_INFO);
+ 	pSMB->MaxParameterCount = cpu_to_le16(2);
+-	pSMB->MaxDataCount = cpu_to_le16(1000);	/* BB find max SMB PDU from sess */
++	/* BB find max SMB PDU from sess */
++	pSMB->MaxDataCount = cpu_to_le16(1000);
+ 	pSMB->SetupCount = 1;
+ 	pSMB->Reserved3 = 0;
+ 	pSMB->SubCommand = cpu_to_le16(TRANS2_SET_FILE_INFORMATION);
+@@ -4856,7 +4917,8 @@ SetTimesRetry:
+ 	params = 6 + name_len;
+ 	count = sizeof(FILE_BASIC_INFO);
+ 	pSMB->MaxParameterCount = cpu_to_le16(2);
+-	pSMB->MaxDataCount = cpu_to_le16(1000);	/* BB find exact max SMB PDU from sess structure BB */
++	/* BB find max SMB PDU from sess structure BB */
++	pSMB->MaxDataCount = cpu_to_le16(1000);
+ 	pSMB->MaxSetupCount = 0;
+ 	pSMB->Reserved = 0;
+ 	pSMB->Flags = 0;
+@@ -4986,7 +5048,8 @@ setPermsRetry:
+ 	params = 6 + name_len;
+ 	count = sizeof(FILE_UNIX_BASIC_INFO);
+ 	pSMB->MaxParameterCount = cpu_to_le16(2);
+-	pSMB->MaxDataCount = cpu_to_le16(1000);	/* BB find exact max SMB PDU from sess structure BB */
++	/* BB find max SMB PDU from sess structure BB */
++	pSMB->MaxDataCount = cpu_to_le16(1000);
+ 	pSMB->MaxSetupCount = 0;
+ 	pSMB->Reserved = 0;
+ 	pSMB->Flags = 0;
+@@ -5051,8 +5114,7 @@ setPermsRetry:
+ 	if (rc)
+ 		cFYI(1, ("SetPathInfo (perms) returned %d", rc));
+ 
+-	if (pSMB)
+-		cifs_buf_release(pSMB);
++	cifs_buf_release(pSMB);
+ 	if (rc == -EAGAIN)
+ 		goto setPermsRetry;
+ 	return rc;
+@@ -5169,7 +5231,8 @@ QAllEAsRetry:
+ 	params = 2 /* level */ + 4 /* reserved */ + name_len /* includes NUL */;
+ 	pSMB->TotalDataCount = 0;
+ 	pSMB->MaxParameterCount = cpu_to_le16(2);
+-	pSMB->MaxDataCount = cpu_to_le16(4000);	/* BB find exact max SMB PDU from sess structure BB */
++	/* BB find exact max SMB PDU from sess structure BB */
++	pSMB->MaxDataCount = cpu_to_le16(4000);
+ 	pSMB->MaxSetupCount = 0;
+ 	pSMB->Reserved = 0;
+ 	pSMB->Flags = 0;
+@@ -5273,8 +5336,7 @@ QAllEAsRetry:
+ 			}
+ 		}
+ 	}
+-	if (pSMB)
+-		cifs_buf_release(pSMB);
++	cifs_buf_release(pSMB);
+ 	if (rc == -EAGAIN)
+ 		goto QAllEAsRetry;
+ 
+@@ -5317,7 +5379,8 @@ QEARetry:
+ 	params = 2 /* level */ + 4 /* reserved */ + name_len /* includes NUL */;
+ 	pSMB->TotalDataCount = 0;
+ 	pSMB->MaxParameterCount = cpu_to_le16(2);
+-	pSMB->MaxDataCount = cpu_to_le16(4000);	/* BB find exact max SMB PDU from sess structure BB */
++	/* BB find exact max SMB PDU from sess structure BB */
++	pSMB->MaxDataCount = cpu_to_le16(4000);
+ 	pSMB->MaxSetupCount = 0;
+ 	pSMB->Reserved = 0;
+ 	pSMB->Flags = 0;
+@@ -5422,8 +5485,7 @@ QEARetry:
+ 			}
+ 		}
+ 	}
+-	if (pSMB)
+-		cifs_buf_release(pSMB);
++	cifs_buf_release(pSMB);
+ 	if (rc == -EAGAIN)
+ 		goto QEARetry;
+ 
+@@ -5475,7 +5537,8 @@ SetEARetry:
+ 
+ 	count = sizeof(*parm_data) + ea_value_len + name_len;
+ 	pSMB->MaxParameterCount = cpu_to_le16(2);
+-	pSMB->MaxDataCount = cpu_to_le16(1000);	/* BB find max SMB size from sess */
++	/* BB find max SMB PDU from sess */
++	pSMB->MaxDataCount = cpu_to_le16(1000);
+ 	pSMB->MaxSetupCount = 0;
+ 	pSMB->Reserved = 0;
+ 	pSMB->Flags = 0;
+diff --git a/fs/cifs/connect.c b/fs/cifs/connect.c
+index f428bf3..023434f 100644
+--- a/fs/cifs/connect.c
++++ b/fs/cifs/connect.c
+@@ -60,7 +60,7 @@ struct smb_vol {
+ 	char *domainname;
+ 	char *UNC;
+ 	char *UNCip;
+-	char *in6_addr;  /* ipv6 address as human readable form of in6_addr */
++	char *in6_addr;   /* ipv6 address as human readable form of in6_addr */
+ 	char *iocharset;  /* local code page for mapping to and from Unicode */
+ 	char source_rfc1001_name[16]; /* netbios name of client */
+ 	char target_rfc1001_name[16]; /* netbios name of server for Win9x/ME */
+@@ -75,19 +75,21 @@ struct smb_vol {
+ 	bool setuids:1;
+ 	bool override_uid:1;
+ 	bool override_gid:1;
++	bool dynperm:1;
+ 	bool noperm:1;
+ 	bool no_psx_acl:1; /* set if posix acl support should be disabled */
+ 	bool cifs_acl:1;
+ 	bool no_xattr:1;   /* set if xattr (EA) support should be disabled*/
+ 	bool server_ino:1; /* use inode numbers from server ie UniqueId */
+ 	bool direct_io:1;
+-	bool remap:1;     /* set to remap seven reserved chars in filenames */
+-	bool posix_paths:1;   /* unset to not ask for posix pathnames. */
++	bool remap:1;      /* set to remap seven reserved chars in filenames */
++	bool posix_paths:1; /* unset to not ask for posix pathnames. */
+ 	bool no_linux_ext:1;
+ 	bool sfu_emul:1;
+-	bool nullauth:1; /* attempt to authenticate with null user */
+-	unsigned nocase;     /* request case insensitive filenames */
+-	unsigned nobrl;      /* disable sending byte range locks to srv */
++	bool nullauth:1;   /* attempt to authenticate with null user */
++	bool nocase:1;     /* request case insensitive filenames */
++	bool nobrl:1;      /* disable sending byte range locks to srv */
++	bool seal:1;       /* request transport encryption on share */
+ 	unsigned int rsize;
+ 	unsigned int wsize;
+ 	unsigned int sockopt;
+@@ -1246,6 +1248,10 @@ cifs_parse_mount_options(char *options, const char *devname,
+ 			vol->setuids = 1;
+ 		} else if (strnicmp(data, "nosetuids", 9) == 0) {
+ 			vol->setuids = 0;
++		} else if (strnicmp(data, "dynperm", 7) == 0) {
++			vol->dynperm = true;
++		} else if (strnicmp(data, "nodynperm", 9) == 0) {
++			vol->dynperm = false;
+ 		} else if (strnicmp(data, "nohard", 6) == 0) {
+ 			vol->retry = 0;
+ 		} else if (strnicmp(data, "nosoft", 6) == 0) {
+@@ -1268,8 +1274,12 @@ cifs_parse_mount_options(char *options, const char *devname,
+ 			vol->no_psx_acl = 1;
+ 		} else if (strnicmp(data, "sign", 4) == 0) {
+ 			vol->secFlg |= CIFSSEC_MUST_SIGN;
+-/*		} else if (strnicmp(data, "seal",4) == 0) {
+-			vol->secFlg |= CIFSSEC_MUST_SEAL; */
++		} else if (strnicmp(data, "seal", 4) == 0) {
++			/* we do not do the following in secFlags because seal
++			   is a per tree connection (mount) not a per socket
++			   or per-smb connection option in the protocol */
++			/* vol->secFlg |= CIFSSEC_MUST_SEAL; */
++			vol->seal = 1;
+ 		} else if (strnicmp(data, "direct", 6) == 0) {
+ 			vol->direct_io = 1;
+ 		} else if (strnicmp(data, "forcedirectio", 13) == 0) {
+@@ -1414,34 +1424,12 @@ find_unc(__be32 new_target_ip_addr, char *uncName, char *userName)
+ }
+ 
+ int
+-connect_to_dfs_path(int xid, struct cifsSesInfo *pSesInfo,
+-		    const char *old_path, const struct nls_table *nls_codepage,
+-		    int remap)
+-{
+-	struct dfs_info3_param *referrals = NULL;
+-	unsigned int num_referrals;
+-	int rc = 0;
+-
+-	rc = get_dfs_path(xid, pSesInfo, old_path, nls_codepage,
+-			&num_referrals, &referrals, remap);
+-
+-	/* BB Add in code to: if valid refrl, if not ip address contact
+-		the helper that resolves tcp names, mount to it, try to
+-		tcon to it unmount it if fail */
+-
+-	kfree(referrals);
+-
+-	return rc;
+-}
+-
+-int
+ get_dfs_path(int xid, struct cifsSesInfo *pSesInfo, const char *old_path,
+ 	     const struct nls_table *nls_codepage, unsigned int *pnum_referrals,
+ 	     struct dfs_info3_param **preferrals, int remap)
+ {
+ 	char *temp_unc;
+ 	int rc = 0;
+-	unsigned char *targetUNCs;
+ 
+ 	*pnum_referrals = 0;
+ 	*preferrals = NULL;
+@@ -1464,7 +1452,7 @@ get_dfs_path(int xid, struct cifsSesInfo *pSesInfo, const char *old_path,
+ 		kfree(temp_unc);
+ 	}
+ 	if (rc == 0)
+-		rc = CIFSGetDFSRefer(xid, pSesInfo, old_path, &targetUNCs,
++		rc = CIFSGetDFSRefer(xid, pSesInfo, old_path, preferrals,
+ 				     pnum_referrals, nls_codepage, remap);
+ 	/* BB map targetUNCs to dfs_info3 structures, here or
+ 		in CIFSGetDFSRefer BB */
+@@ -1815,7 +1803,7 @@ convert_delimiter(char *path, char delim)
+ 	if (path == NULL)
+ 		return;
+ 
+-	if (delim == '/') 
++	if (delim == '/')
+ 		old_delim = '\\';
+ 	else
+ 		old_delim = '/';
+@@ -2125,6 +2113,8 @@ cifs_mount(struct super_block *sb, struct cifs_sb_info *cifs_sb,
+ 			cifs_sb->mnt_cifs_flags |= CIFS_MOUNT_OVERR_UID;
+ 		if (volume_info.override_gid)
+ 			cifs_sb->mnt_cifs_flags |= CIFS_MOUNT_OVERR_GID;
++		if (volume_info.dynperm)
++			cifs_sb->mnt_cifs_flags |= CIFS_MOUNT_DYNPERM;
+ 		if (volume_info.direct_io) {
+ 			cFYI(1, ("mounting share using direct i/o"));
+ 			cifs_sb->mnt_cifs_flags |= CIFS_MOUNT_DIRECT_IO;
+@@ -2141,6 +2131,9 @@ cifs_mount(struct super_block *sb, struct cifs_sb_info *cifs_sb,
+ 			   for the retry flag is used */
+ 			tcon->retry = volume_info.retry;
+ 			tcon->nocase = volume_info.nocase;
++			if (tcon->seal != volume_info.seal)
++				cERROR(1, ("transport encryption setting "
++					   "conflicts with existing tid"));
+ 		} else {
+ 			tcon = tconInfoAlloc();
+ 			if (tcon == NULL)
+@@ -2154,10 +2147,11 @@ cifs_mount(struct super_block *sb, struct cifs_sb_info *cifs_sb,
+ 				if ((strchr(volume_info.UNC + 3, '\\') == NULL)
+ 				    && (strchr(volume_info.UNC + 3, '/') ==
+ 					NULL)) {
+-					rc = connect_to_dfs_path(xid, pSesInfo,
++/*					rc = connect_to_dfs_path(xid, pSesInfo,
+ 						"", cifs_sb->local_nls,
+ 						cifs_sb->mnt_cifs_flags &
+-						  CIFS_MOUNT_MAP_SPECIAL_CHR);
++						  CIFS_MOUNT_MAP_SPECIAL_CHR);*/
++					cFYI(1, ("DFS root not supported"));
+ 					rc = -ENODEV;
+ 					goto out;
+ 				} else {
+@@ -2173,6 +2167,7 @@ cifs_mount(struct super_block *sb, struct cifs_sb_info *cifs_sb,
+ 					atomic_inc(&pSesInfo->inUse);
+ 					tcon->retry = volume_info.retry;
+ 					tcon->nocase = volume_info.nocase;
++					tcon->seal = volume_info.seal;
+ 				}
+ 			}
+ 		}
+@@ -2314,9 +2309,10 @@ CIFSSessSetup(unsigned int xid, struct cifsSesInfo *ses,
+ 	user = ses->userName;
+ 	domain = ses->domainName;
+ 	smb_buffer = cifs_buf_get();
+-	if (smb_buffer == NULL) {
++
++	if (smb_buffer == NULL)
+ 		return -ENOMEM;
+-	}
++
+ 	smb_buffer_response = smb_buffer;
+ 	pSMBr = pSMB = (SESSION_SETUP_ANDX *) smb_buffer;
+ 
+diff --git a/fs/cifs/dir.c b/fs/cifs/dir.c
+index e4e0078..f0b5b5f 100644
+--- a/fs/cifs/dir.c
++++ b/fs/cifs/dir.c
+@@ -49,18 +49,25 @@ build_path_from_dentry(struct dentry *direntry)
+ 	struct dentry *temp;
+ 	int namelen;
+ 	int pplen;
++	int dfsplen;
+ 	char *full_path;
+ 	char dirsep;
++	struct cifs_sb_info *cifs_sb;
+ 
+ 	if (direntry == NULL)
+ 		return NULL;  /* not much we can do if dentry is freed and
+ 		we need to reopen the file after it was closed implicitly
+ 		when the server crashed */
+ 
+-	dirsep = CIFS_DIR_SEP(CIFS_SB(direntry->d_sb));
+-	pplen = CIFS_SB(direntry->d_sb)->prepathlen;
++	cifs_sb = CIFS_SB(direntry->d_sb);
++	dirsep = CIFS_DIR_SEP(cifs_sb);
++	pplen = cifs_sb->prepathlen;
++	if (cifs_sb->tcon && (cifs_sb->tcon->Flags & SMB_SHARE_IS_IN_DFS))
++		dfsplen = strnlen(cifs_sb->tcon->treeName, MAX_TREE_SIZE + 1);
++	else
++		dfsplen = 0;
+ cifs_bp_rename_retry:
+-	namelen = pplen;
++	namelen = pplen + dfsplen;
+ 	for (temp = direntry; !IS_ROOT(temp);) {
+ 		namelen += (1 + temp->d_name.len);
+ 		temp = temp->d_parent;
+@@ -91,7 +98,7 @@ cifs_bp_rename_retry:
+ 			return NULL;
+ 		}
+ 	}
+-	if (namelen != pplen) {
++	if (namelen != pplen + dfsplen) {
+ 		cERROR(1,
+ 		       ("did not end path lookup where expected namelen is %d",
+ 			namelen));
+@@ -107,7 +114,18 @@ cifs_bp_rename_retry:
+ 	   since the '\' is a valid posix character so we can not switch
+ 	   those safely to '/' if any are found in the middle of the prepath */
+ 	/* BB test paths to Windows with '/' in the midst of prepath */
+-	strncpy(full_path, CIFS_SB(direntry->d_sb)->prepath, pplen);
++
++	if (dfsplen) {
++		strncpy(full_path, cifs_sb->tcon->treeName, dfsplen);
++		if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_POSIX_PATHS) {
++			int i;
++			for (i = 0; i < dfsplen; i++) {
++				if (full_path[i] == '\\')
++					full_path[i] = '/';
++			}
++		}
++	}
++	strncpy(full_path + dfsplen, CIFS_SB(direntry->d_sb)->prepath, pplen);
+ 	return full_path;
+ }
+ 
+@@ -590,7 +608,7 @@ static int cifs_ci_compare(struct dentry *dentry, struct qstr *a,
+ 		 * case take precedence.  If a is not a negative dentry, this
+ 		 * should have no side effects
+ 		 */
+-		memcpy(a->name, b->name, a->len);
++		memcpy((void *)a->name, b->name, a->len);
+ 		return 0;
+ 	}
+ 	return 1;
+diff --git a/fs/cifs/dns_resolve.c b/fs/cifs/dns_resolve.c
+index 939e256..f730ef3 100644
+--- a/fs/cifs/dns_resolve.c
++++ b/fs/cifs/dns_resolve.c
+@@ -134,10 +134,6 @@ dns_resolve_server_name_to_ip(const char *unc, char **ip_addr)
+ 	rkey = request_key(&key_type_dns_resolver, name, "");
+ 	if (!IS_ERR(rkey)) {
+ 		data = rkey->payload.data;
+-		cFYI(1, ("%s: resolved: %s to %s", __func__,
+-					rkey->description,
+-					*ip_addr
+-				));
+ 	} else {
+ 		cERROR(1, ("%s: unable to resolve: %s", __func__, name));
+ 		goto out;
+@@ -150,6 +146,11 @@ skip_upcall:
+ 		if (*ip_addr) {
+ 			memcpy(*ip_addr, data, len);
+ 			(*ip_addr)[len] = '\0';
++			if (!IS_ERR(rkey))
++				cFYI(1, ("%s: resolved: %s to %s", __func__,
++							name,
++							*ip_addr
++					));
+ 			rc = 0;
+ 		} else {
+ 			rc = -ENOMEM;
+diff --git a/fs/cifs/file.c b/fs/cifs/file.c
+index 31a0a33..8636cec 100644
+--- a/fs/cifs/file.c
++++ b/fs/cifs/file.c
+@@ -75,7 +75,11 @@ static inline int cifs_convert_flags(unsigned int flags)
+ 		return (GENERIC_READ | GENERIC_WRITE);
+ 	}
+ 
+-	return 0x20197;
++	return (READ_CONTROL | FILE_WRITE_ATTRIBUTES | FILE_READ_ATTRIBUTES |
++		FILE_WRITE_EA | FILE_APPEND_DATA | FILE_WRITE_DATA |
++		FILE_READ_DATA);
++
++
+ }
+ 
+ static inline int cifs_get_disposition(unsigned int flags)
+diff --git a/fs/cifs/inode.c b/fs/cifs/inode.c
+index fcbdbb6..129dbfe 100644
+--- a/fs/cifs/inode.c
++++ b/fs/cifs/inode.c
+@@ -161,118 +161,115 @@ static void cifs_unix_info_to_inode(struct inode *inode,
+ 	spin_unlock(&inode->i_lock);
+ }
+ 
+-static const unsigned char *cifs_get_search_path(struct cifs_sb_info *cifs_sb,
+-						const char *search_path)
+-{
+-	int tree_len;
+-	int path_len;
+-	int i;
+-	char *tmp_path;
+-	struct cifsTconInfo *pTcon = cifs_sb->tcon;
+-
+-	if (!(pTcon->Flags & SMB_SHARE_IS_IN_DFS))
+-		return search_path;
+ 
+-	/* use full path name for working with DFS */
+-	tree_len = strnlen(pTcon->treeName, MAX_TREE_SIZE + 1);
+-	path_len = strnlen(search_path, MAX_PATHCONF);
+-
+-	tmp_path = kmalloc(tree_len+path_len+1, GFP_KERNEL);
+-	if (tmp_path == NULL)
+-		return search_path;
++/*
++ *	Needed to setup inode data for the directory which is the
++ *	junction to the new submount (ie to setup the fake directory
++ *      which represents a DFS referral)
++ */
++static void fill_fake_finddataunix(FILE_UNIX_BASIC_INFO *pfnd_dat,
++			       struct super_block *sb)
++{
++	struct inode *pinode = NULL;
++
++	memset(pfnd_dat, 0, sizeof(FILE_UNIX_BASIC_INFO));
++
++/*	__le64 pfnd_dat->EndOfFile = cpu_to_le64(0);
++	__le64 pfnd_dat->NumOfBytes = cpu_to_le64(0);
++	__u64 UniqueId = 0;  */
++	pfnd_dat->LastStatusChange =
++		cpu_to_le64(cifs_UnixTimeToNT(CURRENT_TIME));
++	pfnd_dat->LastAccessTime =
++		cpu_to_le64(cifs_UnixTimeToNT(CURRENT_TIME));
++	pfnd_dat->LastModificationTime =
++		cpu_to_le64(cifs_UnixTimeToNT(CURRENT_TIME));
++	pfnd_dat->Type = cpu_to_le32(UNIX_DIR);
++	pfnd_dat->Permissions = cpu_to_le64(S_IXUGO | S_IRWXU);
++	pfnd_dat->Nlinks = cpu_to_le64(2);
++	if (sb->s_root)
++		pinode = sb->s_root->d_inode;
++	if (pinode == NULL)
++		return;
+ 
+-	strncpy(tmp_path, pTcon->treeName, tree_len);
+-	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_POSIX_PATHS)
+-		for (i = 0; i < tree_len; i++) {
+-			if (tmp_path[i] == '\\')
+-				tmp_path[i] = '/';
+-		}
+-	strncpy(tmp_path+tree_len, search_path, path_len);
+-	tmp_path[tree_len+path_len] = 0;
+-	return tmp_path;
++	/* fill in default values for the remaining based on root
++	   inode since we can not query the server for this inode info */
++	pfnd_dat->DevMajor = cpu_to_le64(MAJOR(pinode->i_rdev));
++	pfnd_dat->DevMinor = cpu_to_le64(MINOR(pinode->i_rdev));
++	pfnd_dat->Uid = cpu_to_le64(pinode->i_uid);
++	pfnd_dat->Gid = cpu_to_le64(pinode->i_gid);
+ }
+ 
+ int cifs_get_inode_info_unix(struct inode **pinode,
+-	const unsigned char *search_path, struct super_block *sb, int xid)
++	const unsigned char *full_path, struct super_block *sb, int xid)
+ {
+ 	int rc = 0;
+-	FILE_UNIX_BASIC_INFO findData;
++	FILE_UNIX_BASIC_INFO find_data;
+ 	struct cifsTconInfo *pTcon;
+ 	struct inode *inode;
+ 	struct cifs_sb_info *cifs_sb = CIFS_SB(sb);
+-	const unsigned char *full_path;
+ 	bool is_dfs_referral = false;
++	struct cifsInodeInfo *cifsInfo;
++	__u64 num_of_bytes;
++	__u64 end_of_file;
+ 
+ 	pTcon = cifs_sb->tcon;
+-	cFYI(1, ("Getting info on %s", search_path));
++	cFYI(1, ("Getting info on %s", full_path));
+ 
+-	full_path = cifs_get_search_path(cifs_sb, search_path);
+-
+-try_again_CIFSSMBUnixQPathInfo:
+ 	/* could have done a find first instead but this returns more info */
+-	rc = CIFSSMBUnixQPathInfo(xid, pTcon, full_path, &findData,
++	rc = CIFSSMBUnixQPathInfo(xid, pTcon, full_path, &find_data,
+ 				  cifs_sb->local_nls, cifs_sb->mnt_cifs_flags &
+ 					CIFS_MOUNT_MAP_SPECIAL_CHR);
+-/*	dump_mem("\nUnixQPathInfo return data", &findData,
+-		 sizeof(findData)); */
+ 	if (rc) {
+ 		if (rc == -EREMOTE && !is_dfs_referral) {
+ 			is_dfs_referral = true;
+-			if (full_path != search_path) {
+-				kfree(full_path);
+-				full_path = search_path;
+-			}
+-			goto try_again_CIFSSMBUnixQPathInfo;
++			cFYI(DBG2, ("DFS ref"));
++			/* for DFS, server does not give us real inode data */
++			fill_fake_finddataunix(&find_data, sb);
++			rc = 0;
+ 		}
+-		goto cgiiu_exit;
+-	} else {
+-		struct cifsInodeInfo *cifsInfo;
+-		__u64 num_of_bytes = le64_to_cpu(findData.NumOfBytes);
+-		__u64 end_of_file = le64_to_cpu(findData.EndOfFile);
++	}
++	num_of_bytes = le64_to_cpu(find_data.NumOfBytes);
++	end_of_file = le64_to_cpu(find_data.EndOfFile);
+ 
+-		/* get new inode */
++	/* get new inode */
++	if (*pinode == NULL) {
++		*pinode = new_inode(sb);
+ 		if (*pinode == NULL) {
+-			*pinode = new_inode(sb);
+-			if (*pinode == NULL) {
+-				rc = -ENOMEM;
+-				goto cgiiu_exit;
+-			}
+-			/* Is an i_ino of zero legal? */
+-			/* Are there sanity checks we can use to ensure that
+-			   the server is really filling in that field? */
+-			if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_SERVER_INUM) {
+-				(*pinode)->i_ino =
+-					(unsigned long)findData.UniqueId;
+-			} /* note ino incremented to unique num in new_inode */
+-			if (sb->s_flags & MS_NOATIME)
+-				(*pinode)->i_flags |= S_NOATIME | S_NOCMTIME;
+-
+-			insert_inode_hash(*pinode);
++			rc = -ENOMEM;
++		goto cgiiu_exit;
+ 		}
++		/* Is an i_ino of zero legal? */
++		/* note ino incremented to unique num in new_inode */
++		/* Are there sanity checks we can use to ensure that
++		   the server is really filling in that field? */
++		if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_SERVER_INUM)
++			(*pinode)->i_ino = (unsigned long)find_data.UniqueId;
+ 
+-		inode = *pinode;
+-		cifsInfo = CIFS_I(inode);
++		if (sb->s_flags & MS_NOATIME)
++			(*pinode)->i_flags |= S_NOATIME | S_NOCMTIME;
+ 
+-		cFYI(1, ("Old time %ld", cifsInfo->time));
+-		cifsInfo->time = jiffies;
+-		cFYI(1, ("New time %ld", cifsInfo->time));
+-		/* this is ok to set on every inode revalidate */
+-		atomic_set(&cifsInfo->inUse, 1);
++		insert_inode_hash(*pinode);
++	}
+ 
+-		cifs_unix_info_to_inode(inode, &findData, 0);
++	inode = *pinode;
++	cifsInfo = CIFS_I(inode);
+ 
++	cFYI(1, ("Old time %ld", cifsInfo->time));
++	cifsInfo->time = jiffies;
++	cFYI(1, ("New time %ld", cifsInfo->time));
++	/* this is ok to set on every inode revalidate */
++	atomic_set(&cifsInfo->inUse, 1);
+ 
+-		if (num_of_bytes < end_of_file)
+-			cFYI(1, ("allocation size less than end of file"));
+-		cFYI(1, ("Size %ld and blocks %llu",
+-			(unsigned long) inode->i_size,
+-			(unsigned long long)inode->i_blocks));
++	cifs_unix_info_to_inode(inode, &find_data, 0);
+ 
+-		cifs_set_ops(inode, is_dfs_referral);
+-	}
++	if (num_of_bytes < end_of_file)
++		cFYI(1, ("allocation size less than end of file"));
++	cFYI(1, ("Size %ld and blocks %llu",
++		(unsigned long) inode->i_size,
++		(unsigned long long)inode->i_blocks));
++
++	cifs_set_ops(inode, is_dfs_referral);
+ cgiiu_exit:
+-	if (full_path != search_path)
+-		kfree(full_path);
+ 	return rc;
+ }
+ 
+@@ -379,21 +376,51 @@ static int get_sfu_mode(struct inode *inode,
+ #endif
+ }
+ 
++/*
++ *	Needed to setup inode data for the directory which is the
++ *	junction to the new submount (ie to setup the fake directory
++ *      which represents a DFS referral)
++ */
++static void fill_fake_finddata(FILE_ALL_INFO *pfnd_dat,
++			       struct super_block *sb)
++{
++	memset(pfnd_dat, 0, sizeof(FILE_ALL_INFO));
++
++/*	__le64 pfnd_dat->AllocationSize = cpu_to_le64(0);
++	__le64 pfnd_dat->EndOfFile = cpu_to_le64(0);
++	__u8 pfnd_dat->DeletePending = 0;
++	__u8 pfnd_data->Directory = 0;
++	__le32 pfnd_dat->EASize = 0;
++	__u64 pfnd_dat->IndexNumber = 0;
++	__u64 pfnd_dat->IndexNumber1 = 0;  */
++	pfnd_dat->CreationTime =
++		cpu_to_le64(cifs_UnixTimeToNT(CURRENT_TIME));
++	pfnd_dat->LastAccessTime =
++		cpu_to_le64(cifs_UnixTimeToNT(CURRENT_TIME));
++	pfnd_dat->LastWriteTime =
++		cpu_to_le64(cifs_UnixTimeToNT(CURRENT_TIME));
++	pfnd_dat->ChangeTime =
++		cpu_to_le64(cifs_UnixTimeToNT(CURRENT_TIME));
++	pfnd_dat->Attributes = cpu_to_le32(ATTR_DIRECTORY);
++	pfnd_dat->NumberOfLinks = cpu_to_le32(2);
++}
++
+ int cifs_get_inode_info(struct inode **pinode,
+-	const unsigned char *search_path, FILE_ALL_INFO *pfindData,
++	const unsigned char *full_path, FILE_ALL_INFO *pfindData,
+ 	struct super_block *sb, int xid, const __u16 *pfid)
+ {
+ 	int rc = 0;
++	__u32 attr;
++	struct cifsInodeInfo *cifsInfo;
+ 	struct cifsTconInfo *pTcon;
+ 	struct inode *inode;
+ 	struct cifs_sb_info *cifs_sb = CIFS_SB(sb);
+-	const unsigned char *full_path = NULL;
+ 	char *buf = NULL;
+ 	bool adjustTZ = false;
+ 	bool is_dfs_referral = false;
+ 
+ 	pTcon = cifs_sb->tcon;
+-	cFYI(1, ("Getting info on %s", search_path));
++	cFYI(1, ("Getting info on %s", full_path));
+ 
+ 	if ((pfindData == NULL) && (*pinode != NULL)) {
+ 		if (CIFS_I(*pinode)->clientCanCacheRead) {
+@@ -409,9 +436,6 @@ int cifs_get_inode_info(struct inode **pinode,
+ 			return -ENOMEM;
+ 		pfindData = (FILE_ALL_INFO *)buf;
+ 
+-		full_path = cifs_get_search_path(cifs_sb, search_path);
+-
+-try_again_CIFSSMBQPathInfo:
+ 		/* could do find first instead but this returns more info */
+ 		rc = CIFSSMBQPathInfo(xid, pTcon, full_path, pfindData,
+ 			      0 /* not legacy */,
+@@ -429,178 +453,168 @@ try_again_CIFSSMBQPathInfo:
+ 		}
+ 	}
+ 	/* dump_mem("\nQPathInfo return data",&findData, sizeof(findData)); */
+-	if (rc) {
+-		if (rc == -EREMOTE && !is_dfs_referral) {
+-			is_dfs_referral = true;
+-			if (full_path != search_path) {
+-				kfree(full_path);
+-				full_path = search_path;
+-			}
+-			goto try_again_CIFSSMBQPathInfo;
+-		}
++	if (rc == -EREMOTE) {
++		is_dfs_referral = true;
++		fill_fake_finddata(pfindData, sb);
++		rc = 0;
++	} else if (rc)
+ 		goto cgii_exit;
+-	} else {
+-		struct cifsInodeInfo *cifsInfo;
+-		__u32 attr = le32_to_cpu(pfindData->Attributes);
+ 
+-		/* get new inode */
+-		if (*pinode == NULL) {
+-			*pinode = new_inode(sb);
+-			if (*pinode == NULL) {
+-				rc = -ENOMEM;
+-				goto cgii_exit;
+-			}
+-			/* Is an i_ino of zero legal? Can we use that to check
+-			   if the server supports returning inode numbers?  Are
+-			   there other sanity checks we can use to ensure that
+-			   the server is really filling in that field? */
++	attr = le32_to_cpu(pfindData->Attributes);
+ 
+-			/* We can not use the IndexNumber field by default from
+-			   Windows or Samba (in ALL_INFO buf) but we can request
+-			   it explicitly.  It may not be unique presumably if
+-			   the server has multiple devices mounted under one
+-			   share */
+-
+-			/* There may be higher info levels that work but are
+-			   there Windows server or network appliances for which
+-			   IndexNumber field is not guaranteed unique? */
+-
+-			if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_SERVER_INUM) {
+-				int rc1 = 0;
+-				__u64 inode_num;
+-
+-				rc1 = CIFSGetSrvInodeNumber(xid, pTcon,
+-					search_path, &inode_num,
++	/* get new inode */
++	if (*pinode == NULL) {
++		*pinode = new_inode(sb);
++		if (*pinode == NULL) {
++			rc = -ENOMEM;
++			goto cgii_exit;
++		}
++		/* Is an i_ino of zero legal? Can we use that to check
++		   if the server supports returning inode numbers?  Are
++		   there other sanity checks we can use to ensure that
++		   the server is really filling in that field? */
++
++		/* We can not use the IndexNumber field by default from
++		   Windows or Samba (in ALL_INFO buf) but we can request
++		   it explicitly.  It may not be unique presumably if
++		   the server has multiple devices mounted under one share */
++
++		/* There may be higher info levels that work but are
++		   there Windows server or network appliances for which
++		   IndexNumber field is not guaranteed unique? */
++
++		if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_SERVER_INUM) {
++			int rc1 = 0;
++			__u64 inode_num;
++
++			rc1 = CIFSGetSrvInodeNumber(xid, pTcon,
++					full_path, &inode_num,
+ 					cifs_sb->local_nls,
+ 					cifs_sb->mnt_cifs_flags &
+ 						CIFS_MOUNT_MAP_SPECIAL_CHR);
+-				if (rc1) {
+-					cFYI(1, ("GetSrvInodeNum rc %d", rc1));
+-					/* BB EOPNOSUPP disable SERVER_INUM? */
+-				} else /* do we need cast or hash to ino? */
+-					(*pinode)->i_ino = inode_num;
+-			} /* else ino incremented to unique num in new_inode*/
+-			if (sb->s_flags & MS_NOATIME)
+-				(*pinode)->i_flags |= S_NOATIME | S_NOCMTIME;
+-			insert_inode_hash(*pinode);
+-		}
+-		inode = *pinode;
+-		cifsInfo = CIFS_I(inode);
+-		cifsInfo->cifsAttrs = attr;
+-		cFYI(1, ("Old time %ld", cifsInfo->time));
+-		cifsInfo->time = jiffies;
+-		cFYI(1, ("New time %ld", cifsInfo->time));
+-
+-		/* blksize needs to be multiple of two. So safer to default to
+-		blksize and blkbits set in superblock so 2**blkbits and blksize
+-		will match rather than setting to:
+-		(pTcon->ses->server->maxBuf - MAX_CIFS_HDR_SIZE) & 0xFFFFFE00;*/
+-
+-		/* Linux can not store file creation time so ignore it */
+-		if (pfindData->LastAccessTime)
+-			inode->i_atime = cifs_NTtimeToUnix
+-				(le64_to_cpu(pfindData->LastAccessTime));
+-		else /* do not need to use current_fs_time - time not stored */
+-			inode->i_atime = CURRENT_TIME;
+-		inode->i_mtime =
++			if (rc1) {
++				cFYI(1, ("GetSrvInodeNum rc %d", rc1));
++				/* BB EOPNOSUPP disable SERVER_INUM? */
++			} else /* do we need cast or hash to ino? */
++				(*pinode)->i_ino = inode_num;
++		} /* else ino incremented to unique num in new_inode*/
++		if (sb->s_flags & MS_NOATIME)
++			(*pinode)->i_flags |= S_NOATIME | S_NOCMTIME;
++		insert_inode_hash(*pinode);
++	}
++	inode = *pinode;
++	cifsInfo = CIFS_I(inode);
++	cifsInfo->cifsAttrs = attr;
++	cFYI(1, ("Old time %ld", cifsInfo->time));
++	cifsInfo->time = jiffies;
++	cFYI(1, ("New time %ld", cifsInfo->time));
++
++	/* blksize needs to be multiple of two. So safer to default to
++	blksize and blkbits set in superblock so 2**blkbits and blksize
++	will match rather than setting to:
++	(pTcon->ses->server->maxBuf - MAX_CIFS_HDR_SIZE) & 0xFFFFFE00;*/
++
++	/* Linux can not store file creation time so ignore it */
++	if (pfindData->LastAccessTime)
++		inode->i_atime = cifs_NTtimeToUnix
++			(le64_to_cpu(pfindData->LastAccessTime));
++	else /* do not need to use current_fs_time - time not stored */
++		inode->i_atime = CURRENT_TIME;
++	inode->i_mtime =
+ 		    cifs_NTtimeToUnix(le64_to_cpu(pfindData->LastWriteTime));
+-		inode->i_ctime =
+-		    cifs_NTtimeToUnix(le64_to_cpu(pfindData->ChangeTime));
+-		cFYI(0, ("Attributes came in as 0x%x", attr));
+-		if (adjustTZ && (pTcon->ses) && (pTcon->ses->server)) {
+-			inode->i_ctime.tv_sec += pTcon->ses->server->timeAdj;
+-			inode->i_mtime.tv_sec += pTcon->ses->server->timeAdj;
+-		}
++	inode->i_ctime =
++	    cifs_NTtimeToUnix(le64_to_cpu(pfindData->ChangeTime));
++	cFYI(DBG2, ("Attributes came in as 0x%x", attr));
++	if (adjustTZ && (pTcon->ses) && (pTcon->ses->server)) {
++		inode->i_ctime.tv_sec += pTcon->ses->server->timeAdj;
++		inode->i_mtime.tv_sec += pTcon->ses->server->timeAdj;
++	}
+ 
+-		/* set default mode. will override for dirs below */
+-		if (atomic_read(&cifsInfo->inUse) == 0)
+-			/* new inode, can safely set these fields */
+-			inode->i_mode = cifs_sb->mnt_file_mode;
+-		else /* since we set the inode type below we need to mask off
+-		     to avoid strange results if type changes and both
+-		     get orred in */
+-			inode->i_mode &= ~S_IFMT;
+-/*		if (attr & ATTR_REPARSE)  */
+-		/* We no longer handle these as symlinks because we could not
+-		   follow them due to the absolute path with drive letter */
+-		if (attr & ATTR_DIRECTORY) {
+-		/* override default perms since we do not do byte range locking
+-		   on dirs */
+-			inode->i_mode = cifs_sb->mnt_dir_mode;
+-			inode->i_mode |= S_IFDIR;
+-		} else if ((cifs_sb->mnt_cifs_flags & CIFS_MOUNT_UNX_EMUL) &&
+-			   (cifsInfo->cifsAttrs & ATTR_SYSTEM) &&
+-			   /* No need to le64 convert size of zero */
+-			   (pfindData->EndOfFile == 0)) {
+-			inode->i_mode = cifs_sb->mnt_file_mode;
+-			inode->i_mode |= S_IFIFO;
++	/* set default mode. will override for dirs below */
++	if (atomic_read(&cifsInfo->inUse) == 0)
++		/* new inode, can safely set these fields */
++		inode->i_mode = cifs_sb->mnt_file_mode;
++	else /* since we set the inode type below we need to mask off
++	     to avoid strange results if type changes and both
++	     get orred in */
++		inode->i_mode &= ~S_IFMT;
++/*	if (attr & ATTR_REPARSE)  */
++	/* We no longer handle these as symlinks because we could not
++	   follow them due to the absolute path with drive letter */
++	if (attr & ATTR_DIRECTORY) {
++	/* override default perms since we do not do byte range locking
++	   on dirs */
++		inode->i_mode = cifs_sb->mnt_dir_mode;
++		inode->i_mode |= S_IFDIR;
++	} else if ((cifs_sb->mnt_cifs_flags & CIFS_MOUNT_UNX_EMUL) &&
++		   (cifsInfo->cifsAttrs & ATTR_SYSTEM) &&
++		   /* No need to le64 convert size of zero */
++		   (pfindData->EndOfFile == 0)) {
++		inode->i_mode = cifs_sb->mnt_file_mode;
++		inode->i_mode |= S_IFIFO;
+ /* BB Finish for SFU style symlinks and devices */
+-		} else if ((cifs_sb->mnt_cifs_flags & CIFS_MOUNT_UNX_EMUL) &&
+-			   (cifsInfo->cifsAttrs & ATTR_SYSTEM)) {
+-			if (decode_sfu_inode(inode,
+-					 le64_to_cpu(pfindData->EndOfFile),
+-					 search_path,
+-					 cifs_sb, xid))
+-				cFYI(1, ("Unrecognized sfu inode type"));
+-
+-			cFYI(1, ("sfu mode 0%o", inode->i_mode));
+-		} else {
+-			inode->i_mode |= S_IFREG;
+-			/* treat the dos attribute of read-only as read-only
+-			   mode e.g. 555 */
+-			if (cifsInfo->cifsAttrs & ATTR_READONLY)
+-				inode->i_mode &= ~(S_IWUGO);
+-			else if ((inode->i_mode & S_IWUGO) == 0)
+-				/* the ATTR_READONLY flag may have been	*/
+-				/* changed on server -- set any w bits	*/
+-				/* allowed by mnt_file_mode		*/
+-				inode->i_mode |= (S_IWUGO &
+-						  cifs_sb->mnt_file_mode);
+-		/* BB add code here -
+-		   validate if device or weird share or device type? */
+-		}
++	} else if ((cifs_sb->mnt_cifs_flags & CIFS_MOUNT_UNX_EMUL) &&
++		   (cifsInfo->cifsAttrs & ATTR_SYSTEM)) {
++		if (decode_sfu_inode(inode, le64_to_cpu(pfindData->EndOfFile),
++				     full_path, cifs_sb, xid))
++			cFYI(1, ("Unrecognized sfu inode type"));
+ 
+-		spin_lock(&inode->i_lock);
+-		if (is_size_safe_to_change(cifsInfo,
+-					   le64_to_cpu(pfindData->EndOfFile))) {
+-			/* can not safely shrink the file size here if the
+-			   client is writing to it due to potential races */
+-			i_size_write(inode, le64_to_cpu(pfindData->EndOfFile));
+-
+-			/* 512 bytes (2**9) is the fake blocksize that must be
+-			   used for this calculation */
+-			inode->i_blocks = (512 - 1 + le64_to_cpu(
+-					   pfindData->AllocationSize)) >> 9;
+-		}
+-		spin_unlock(&inode->i_lock);
++		cFYI(1, ("sfu mode 0%o", inode->i_mode));
++	} else {
++		inode->i_mode |= S_IFREG;
++		/* treat dos attribute of read-only as read-only mode eg 555 */
++		if (cifsInfo->cifsAttrs & ATTR_READONLY)
++			inode->i_mode &= ~(S_IWUGO);
++		else if ((inode->i_mode & S_IWUGO) == 0)
++			/* the ATTR_READONLY flag may have been	*/
++			/* changed on server -- set any w bits	*/
++			/* allowed by mnt_file_mode		*/
++			inode->i_mode |= (S_IWUGO & cifs_sb->mnt_file_mode);
++	/* BB add code to validate if device or weird share or device type? */
++	}
++
++	spin_lock(&inode->i_lock);
++	if (is_size_safe_to_change(cifsInfo,
++				   le64_to_cpu(pfindData->EndOfFile))) {
++		/* can not safely shrink the file size here if the
++		   client is writing to it due to potential races */
++		i_size_write(inode, le64_to_cpu(pfindData->EndOfFile));
++
++		/* 512 bytes (2**9) is the fake blocksize that must be
++		   used for this calculation */
++		inode->i_blocks = (512 - 1 + le64_to_cpu(
++				   pfindData->AllocationSize)) >> 9;
++	}
++	spin_unlock(&inode->i_lock);
+ 
+-		inode->i_nlink = le32_to_cpu(pfindData->NumberOfLinks);
++	inode->i_nlink = le32_to_cpu(pfindData->NumberOfLinks);
+ 
+-		/* BB fill in uid and gid here? with help from winbind?
+-		   or retrieve from NTFS stream extended attribute */
++	/* BB fill in uid and gid here? with help from winbind?
++	   or retrieve from NTFS stream extended attribute */
+ #ifdef CONFIG_CIFS_EXPERIMENTAL
+-		/* fill in 0777 bits from ACL */
+-		if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_CIFS_ACL) {
+-			cFYI(1, ("Getting mode bits from ACL"));
+-			acl_to_uid_mode(inode, search_path, pfid);
+-		}
++	/* fill in 0777 bits from ACL */
++	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_CIFS_ACL) {
++		cFYI(1, ("Getting mode bits from ACL"));
++		acl_to_uid_mode(inode, full_path, pfid);
++	}
+ #endif
+-		if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_UNX_EMUL) {
+-			/* fill in remaining high mode bits e.g. SUID, VTX */
+-			get_sfu_mode(inode, search_path, cifs_sb, xid);
+-		} else if (atomic_read(&cifsInfo->inUse) == 0) {
+-			inode->i_uid = cifs_sb->mnt_uid;
+-			inode->i_gid = cifs_sb->mnt_gid;
+-			/* set so we do not keep refreshing these fields with
+-			   bad data after user has changed them in memory */
+-			atomic_set(&cifsInfo->inUse, 1);
+-		}
+-
+-		cifs_set_ops(inode, is_dfs_referral);
++	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_UNX_EMUL) {
++		/* fill in remaining high mode bits e.g. SUID, VTX */
++		get_sfu_mode(inode, full_path, cifs_sb, xid);
++	} else if (atomic_read(&cifsInfo->inUse) == 0) {
++		inode->i_uid = cifs_sb->mnt_uid;
++		inode->i_gid = cifs_sb->mnt_gid;
++		/* set so we do not keep refreshing these fields with
++		   bad data after user has changed them in memory */
++		atomic_set(&cifsInfo->inUse, 1);
+ 	}
++
++	cifs_set_ops(inode, is_dfs_referral);
++
++
++
++
+ cgii_exit:
+-	if (full_path != search_path)
+-		kfree(full_path);
+ 	kfree(buf);
+ 	return rc;
+ }
+@@ -1502,8 +1516,7 @@ int cifs_setattr(struct dentry *direntry, struct iattr *attrs)
+ 				int oplock = 0;
+ 
+ 				rc = SMBLegacyOpen(xid, pTcon, full_path,
+-					FILE_OPEN,
+-					SYNCHRONIZE | FILE_WRITE_ATTRIBUTES,
++					FILE_OPEN, GENERIC_WRITE,
+ 					CREATE_NOT_DIR, &netfid, &oplock,
+ 					NULL, cifs_sb->local_nls,
+ 					cifs_sb->mnt_cifs_flags &
+diff --git a/fs/cifs/ioctl.c b/fs/cifs/ioctl.c
+index 5c792df..0088a5b 100644
+--- a/fs/cifs/ioctl.c
++++ b/fs/cifs/ioctl.c
+@@ -30,9 +30,9 @@
+ 
+ #define CIFS_IOC_CHECKUMOUNT _IO(0xCF, 2)
+ 
+-int cifs_ioctl(struct inode *inode, struct file *filep,
+-		unsigned int command, unsigned long arg)
++long cifs_ioctl(struct file *filep, unsigned int command, unsigned long arg)
+ {
++	struct inode *inode = filep->f_dentry->d_inode;
+ 	int rc = -ENOTTY; /* strange error - but the precedent */
+ 	int xid;
+ 	struct cifs_sb_info *cifs_sb;
+diff --git a/fs/cifs/link.c b/fs/cifs/link.c
+index 1c2c3ce..63f6440 100644
+--- a/fs/cifs/link.c
++++ b/fs/cifs/link.c
+@@ -234,7 +234,6 @@ cifs_readlink(struct dentry *direntry, char __user *pBuffer, int buflen)
+ 	struct cifs_sb_info *cifs_sb;
+ 	struct cifsTconInfo *pTcon;
+ 	char *full_path = NULL;
+-	char *tmp_path = NULL;
+ 	char *tmpbuffer;
+ 	int len;
+ 	__u16 fid;
+@@ -295,45 +294,9 @@ cifs_readlink(struct dentry *direntry, char __user *pBuffer, int buflen)
+ 				cFYI(1, ("Error closing junction point "
+ 					 "(open for ioctl)"));
+ 			}
+-			/* BB unwind this long, nested function, or remove BB */
+-			if (rc == -EIO) {
+-				/* Query if DFS Junction */
+-				unsigned int num_referrals = 0;
+-				struct dfs_info3_param *refs = NULL;
+-				tmp_path =
+-					kmalloc(MAX_TREE_SIZE + MAX_PATHCONF + 1,
+-						GFP_KERNEL);
+-				if (tmp_path) {
+-					strncpy(tmp_path, pTcon->treeName,
+-						MAX_TREE_SIZE);
+-					strncat(tmp_path, full_path,
+-						MAX_PATHCONF);
+-					rc = get_dfs_path(xid, pTcon->ses,
+-						tmp_path,
+-						cifs_sb->local_nls,
+-						&num_referrals, &refs,
+-						cifs_sb->mnt_cifs_flags &
+-						    CIFS_MOUNT_MAP_SPECIAL_CHR);
+-					cFYI(1, ("Get DFS for %s rc = %d ",
+-						tmp_path, rc));
+-					if ((num_referrals == 0) && (rc == 0))
+-						rc = -EACCES;
+-					else {
+-						cFYI(1, ("num referral: %d",
+-							num_referrals));
+-						if (refs && refs->path_name) {
+-							strncpy(tmpbuffer,
+-								refs->path_name,
+-								len-1);
+-						}
+-					}
+-					kfree(refs);
+-					kfree(tmp_path);
+-}
+-				/* BB add code like else decode referrals
+-				then memcpy to tmpbuffer and free referrals
+-				string array BB */
+-			}
++			/* If it is a DFS junction earlier we would have gotten
++			   PATH_NOT_COVERED returned from server so we do
++			   not need to request the DFS info here */
+ 		}
+ 	}
+ 	/* BB Anything else to do to handle recursive links? */
+diff --git a/fs/cifs/netmisc.c b/fs/cifs/netmisc.c
+index 00f4cff..8703d68 100644
+--- a/fs/cifs/netmisc.c
++++ b/fs/cifs/netmisc.c
+@@ -141,11 +141,11 @@ cifs_inet_pton(const int address_family, const char *cp, void *dst)
+ 	int ret = 0;
+ 
+ 	/* calculate length by finding first slash or NULL */
+-	if (address_family == AF_INET) {
++	if (address_family == AF_INET)
+ 		ret = in4_pton(cp, -1 /* len */, dst, '\\', NULL);
+-	} else if (address_family == AF_INET6) {
++	else if (address_family == AF_INET6)
+ 		ret = in6_pton(cp, -1 /* len */, dst , '\\', NULL);
+-	}
++
+ 	cFYI(DBG2, ("address conversion returned %d for %s", ret, cp));
+ 	if (ret > 0)
+ 		ret = 1;
+diff --git a/fs/cifs/ntlmssp.h b/fs/cifs/ntlmssp.h
+index 7170a9b..c377d80 100644
+--- a/fs/cifs/ntlmssp.h
++++ b/fs/cifs/ntlmssp.h
+@@ -64,7 +64,7 @@ typedef struct _SECURITY_BUFFER {
+ } __attribute__((packed)) SECURITY_BUFFER;
+ 
+ typedef struct _NEGOTIATE_MESSAGE {
+-	__u8 Signature[sizeof (NTLMSSP_SIGNATURE)];
++	__u8 Signature[sizeof(NTLMSSP_SIGNATURE)];
+ 	__le32 MessageType;     /* 1 */
+ 	__le32 NegotiateFlags;
+ 	SECURITY_BUFFER DomainName;	/* RFC 1001 style and ASCII */
+@@ -74,7 +74,7 @@ typedef struct _NEGOTIATE_MESSAGE {
+ } __attribute__((packed)) NEGOTIATE_MESSAGE, *PNEGOTIATE_MESSAGE;
+ 
+ typedef struct _CHALLENGE_MESSAGE {
+-	__u8 Signature[sizeof (NTLMSSP_SIGNATURE)];
++	__u8 Signature[sizeof(NTLMSSP_SIGNATURE)];
+ 	__le32 MessageType;   /* 2 */
+ 	SECURITY_BUFFER TargetName;
+ 	__le32 NegotiateFlags;
+diff --git a/fs/cifs/readdir.c b/fs/cifs/readdir.c
+index 34ec321..713c251 100644
+--- a/fs/cifs/readdir.c
++++ b/fs/cifs/readdir.c
+@@ -670,8 +670,11 @@ static int find_cifs_entry(const int xid, struct cifsTconInfo *pTcon,
+ 	   (index_to_find < first_entry_in_buffer)) {
+ 		/* close and restart search */
+ 		cFYI(1, ("search backing up - close and restart search"));
+-		cifsFile->invalidHandle = true;
+-		CIFSFindClose(xid, pTcon, cifsFile->netfid);
++		if (!cifsFile->srch_inf.endOfSearch &&
++		    !cifsFile->invalidHandle) {
++			cifsFile->invalidHandle = true;
++			CIFSFindClose(xid, pTcon, cifsFile->netfid);
++		}
+ 		kfree(cifsFile->search_resume_name);
+ 		cifsFile->search_resume_name = NULL;
+ 		if (cifsFile->srch_inf.ntwrk_buf_start) {
 diff --git a/fs/compat.c b/fs/compat.c
 index 332a869..ed43e17 100644
 --- a/fs/compat.c
@@ -15876,6 +18650,67 @@ index d6d6e37..78878c5 100644
  		else
  			wake_up(&recv_wq);
  	} else
+diff --git a/fs/ecryptfs/miscdev.c b/fs/ecryptfs/miscdev.c
+index 6560da1..50c994a 100644
+--- a/fs/ecryptfs/miscdev.c
++++ b/fs/ecryptfs/miscdev.c
+@@ -243,7 +243,6 @@ ecryptfs_miscdev_read(struct file *file, char __user *buf, size_t count,
+ 	struct ecryptfs_daemon *daemon;
+ 	struct ecryptfs_msg_ctx *msg_ctx;
+ 	size_t packet_length_size;
+-	u32 counter_nbo;
+ 	char packet_length[3];
+ 	size_t i;
+ 	size_t total_length;
+@@ -328,20 +327,18 @@ check_list:
+ 		       "pending message\n", __func__, count, total_length);
+ 		goto out_unlock_msg_ctx;
+ 	}
+-	i = 0;
+-	buf[i++] = msg_ctx->type;
+-	counter_nbo = cpu_to_be32(msg_ctx->counter);
+-	memcpy(&buf[i], (char *)&counter_nbo, 4);
+-	i += 4;
++	rc = -EFAULT;
++	if (put_user(msg_ctx->type, buf))
++		goto out_unlock_msg_ctx;
++	if (put_user(cpu_to_be32(msg_ctx->counter), (__be32 __user *)(buf + 1)))
++		goto out_unlock_msg_ctx;
++	i = 5;
+ 	if (msg_ctx->msg) {
+-		memcpy(&buf[i], packet_length, packet_length_size);
++		if (copy_to_user(&buf[i], packet_length, packet_length_size))
++			goto out_unlock_msg_ctx;
+ 		i += packet_length_size;
+-		rc = copy_to_user(&buf[i], msg_ctx->msg, msg_ctx->msg_size);
+-		if (rc) {
+-			printk(KERN_ERR "%s: copy_to_user returned error "
+-			       "[%d]\n", __func__, rc);
++		if (copy_to_user(&buf[i], msg_ctx->msg, msg_ctx->msg_size))
+ 			goto out_unlock_msg_ctx;
+-		}
+ 		i += msg_ctx->msg_size;
+ 	}
+ 	rc = i;
+@@ -452,7 +449,8 @@ static ssize_t
+ ecryptfs_miscdev_write(struct file *file, const char __user *buf,
+ 		       size_t count, loff_t *ppos)
+ {
+-	u32 counter_nbo, seq;
++	__be32 counter_nbo;
++	u32 seq;
+ 	size_t packet_size, packet_size_length, i;
+ 	ssize_t sz = 0;
+ 	char *data;
+@@ -485,7 +483,7 @@ ecryptfs_miscdev_write(struct file *file, const char __user *buf,
+ 			       count);
+ 			goto out_free;
+ 		}
+-		memcpy((char *)&counter_nbo, &data[i], 4);
++		memcpy(&counter_nbo, &data[i], 4);
+ 		seq = be32_to_cpu(counter_nbo);
+ 		i += 4;
+ 		rc = ecryptfs_parse_packet_length(&data[i], &packet_size,
 diff --git a/fs/exec.c b/fs/exec.c
 index 1f8a24a..3c2ba7c 100644
 --- a/fs/exec.c
@@ -16299,6 +19134,19 @@ index 7e8f0b1..6387523 100644
  	gfs2_quota_change(ip, *n, ip->i_inode.i_uid, ip->i_inode.i_gid);
  
  	spin_lock(&sdp->sd_rindex_spin);
+diff --git a/fs/hppfs/Makefile b/fs/hppfs/Makefile
+index 8a1f503..3a982bd 100644
+--- a/fs/hppfs/Makefile
++++ b/fs/hppfs/Makefile
+@@ -3,7 +3,4 @@
+ # Licensed under the GPL
+ #
+ 
+-hppfs-objs := hppfs.o
+-
+-obj-y =
+-obj-$(CONFIG_HPPFS) += $(hppfs-objs)
++obj-$(CONFIG_HPPFS) += hppfs.o
 diff --git a/fs/namei.c b/fs/namei.c
 index 32fd965..c7e4353 100644
 --- a/fs/namei.c
@@ -17612,6 +20460,28 @@ index 0b3ffa9..4d4760e 100644
 +	put_nfs4_client(clp);
  	return status;
  }
+ 
+diff --git a/fs/ocfs2/alloc.c b/fs/ocfs2/alloc.c
+index 41f84c9..10bfb46 100644
+--- a/fs/ocfs2/alloc.c
++++ b/fs/ocfs2/alloc.c
+@@ -2788,7 +2788,7 @@ static int ocfs2_merge_rec_right(struct inode *inode,
+ 	BUG_ON(index >= le16_to_cpu(el->l_next_free_rec));
+ 	left_rec = &el->l_recs[index];
+ 
+-	if (index == le16_to_cpu(el->l_next_free_rec - 1) &&
++	if (index == le16_to_cpu(el->l_next_free_rec) - 1 &&
+ 	    le16_to_cpu(el->l_next_free_rec) == le16_to_cpu(el->l_count)) {
+ 		/* we meet with a cross extent block merge. */
+ 		ret = ocfs2_get_right_path(inode, left_path, &right_path);
+@@ -2802,7 +2802,7 @@ static int ocfs2_merge_rec_right(struct inode *inode,
+ 		BUG_ON(next_free <= 0);
+ 		right_rec = &right_el->l_recs[0];
+ 		if (ocfs2_is_empty_extent(right_rec)) {
+-			BUG_ON(le16_to_cpu(next_free) <= 1);
++			BUG_ON(next_free <= 1);
+ 			right_rec = &right_el->l_recs[1];
+ 		}
  
 diff --git a/fs/proc/base.c b/fs/proc/base.c
 index 808cbdc..c447e07 100644
@@ -19604,6 +22474,77 @@ index b11e6e1..2b02664 100644
  #define NETIF_F_TSO		(SKB_GSO_TCPV4 << NETIF_F_GSO_SHIFT)
  #define NETIF_F_UFO		(SKB_GSO_UDP << NETIF_F_GSO_SHIFT)
  #define NETIF_F_GSO_ROBUST	(SKB_GSO_DODGY << NETIF_F_GSO_SHIFT)
+diff --git a/include/linux/netfilter.h b/include/linux/netfilter.h
+index e4c6659..0c5eb7e 100644
+--- a/include/linux/netfilter.h
++++ b/include/linux/netfilter.h
+@@ -3,7 +3,6 @@
+ 
+ #ifdef __KERNEL__
+ #include <linux/init.h>
+-#include <linux/types.h>
+ #include <linux/skbuff.h>
+ #include <linux/net.h>
+ #include <linux/netdevice.h>
+@@ -14,6 +13,7 @@
+ #include <linux/list.h>
+ #include <net/net_namespace.h>
+ #endif
++#include <linux/types.h>
+ #include <linux/compiler.h>
+ 
+ /* Responses from hook functions. */
+diff --git a/include/linux/netfilter_arp/arp_tables.h b/include/linux/netfilter_arp/arp_tables.h
+index dd9c97f..590ac3d 100644
+--- a/include/linux/netfilter_arp/arp_tables.h
++++ b/include/linux/netfilter_arp/arp_tables.h
+@@ -11,11 +11,11 @@
+ 
+ #ifdef __KERNEL__
+ #include <linux/if.h>
+-#include <linux/types.h>
+ #include <linux/in.h>
+ #include <linux/if_arp.h>
+ #include <linux/skbuff.h>
+ #endif
++#include <linux/types.h>
+ #include <linux/compiler.h>
+ #include <linux/netfilter_arp.h>
+ 
+diff --git a/include/linux/netfilter_ipv4/ip_tables.h b/include/linux/netfilter_ipv4/ip_tables.h
+index bfc889f..092bd50 100644
+--- a/include/linux/netfilter_ipv4/ip_tables.h
++++ b/include/linux/netfilter_ipv4/ip_tables.h
+@@ -17,11 +17,11 @@
+ 
+ #ifdef __KERNEL__
+ #include <linux/if.h>
+-#include <linux/types.h>
+ #include <linux/in.h>
+ #include <linux/ip.h>
+ #include <linux/skbuff.h>
+ #endif
++#include <linux/types.h>
+ #include <linux/compiler.h>
+ #include <linux/netfilter_ipv4.h>
+ 
+diff --git a/include/linux/netfilter_ipv6/ip6_tables.h b/include/linux/netfilter_ipv6/ip6_tables.h
+index f2507dc..1089e33 100644
+--- a/include/linux/netfilter_ipv6/ip6_tables.h
++++ b/include/linux/netfilter_ipv6/ip6_tables.h
+@@ -17,11 +17,11 @@
+ 
+ #ifdef __KERNEL__
+ #include <linux/if.h>
+-#include <linux/types.h>
+ #include <linux/in6.h>
+ #include <linux/ipv6.h>
+ #include <linux/skbuff.h>
+ #endif
++#include <linux/types.h>
+ #include <linux/compiler.h>
+ #include <linux/netfilter_ipv6.h>
+ 
 diff --git a/include/linux/sunrpc/svc_rdma.h b/include/linux/sunrpc/svc_rdma.h
 index c11bbcc..05eb466 100644
 --- a/include/linux/sunrpc/svc_rdma.h
@@ -19655,6 +22596,19 @@ index c11bbcc..05eb466 100644
  struct page *svc_rdma_get_page(void);
  extern int svc_rdma_post_recv(struct svcxprt_rdma *);
  extern int svc_rdma_create_listen(struct svc_serv *, int, struct sockaddr *);
+diff --git a/include/linux/tcp.h b/include/linux/tcp.h
+index d96d9b1..18e62e3 100644
+--- a/include/linux/tcp.h
++++ b/include/linux/tcp.h
+@@ -355,7 +355,7 @@ struct tcp_sock {
+ 	u32	lost_retrans_low;	/* Sent seq after any rxmit (lowest) */
+ 
+ 	u16	advmss;		/* Advertised MSS			*/
+-	u16	prior_ssthresh; /* ssthresh saved at recovery start	*/
++	u32	prior_ssthresh; /* ssthresh saved at recovery start	*/
+ 	u32	lost_out;	/* Lost packets			*/
+ 	u32	sacked_out;	/* SACK'd packets			*/
+ 	u32	fackets_out;	/* FACK'd packets			*/
 diff --git a/include/linux/usb/cdc.h b/include/linux/usb/cdc.h
 index 71e52f2..ca228bb 100644
 --- a/include/linux/usb/cdc.h
@@ -20162,6 +23116,343 @@ index 8dca211..fdf5377 100644
  
  	return 0;
  }
+diff --git a/net/ipv4/arp.c b/net/ipv4/arp.c
+index 418862f..9b539fa 100644
+--- a/net/ipv4/arp.c
++++ b/net/ipv4/arp.c
+@@ -1288,7 +1288,6 @@ static void arp_format_neigh_entry(struct seq_file *seq,
+ 				   struct neighbour *n)
+ {
+ 	char hbuffer[HBUFFERLEN];
+-	const char hexbuf[] = "0123456789ABCDEF";
+ 	int k, j;
+ 	char tbuf[16];
+ 	struct net_device *dev = n->dev;
+@@ -1302,8 +1301,8 @@ static void arp_format_neigh_entry(struct seq_file *seq,
+ 	else {
+ #endif
+ 	for (k = 0, j = 0; k < HBUFFERLEN - 3 && j < dev->addr_len; j++) {
+-		hbuffer[k++] = hexbuf[(n->ha[j] >> 4) & 15];
+-		hbuffer[k++] = hexbuf[n->ha[j] & 15];
++		hbuffer[k++] = hex_asc_hi(n->ha[j]);
++		hbuffer[k++] = hex_asc_lo(n->ha[j]);
+ 		hbuffer[k++] = ':';
+ 	}
+ 	hbuffer[--k] = 0;
+diff --git a/net/ipv4/ip_gre.c b/net/ipv4/ip_gre.c
+index 2ada033..4342cba 100644
+--- a/net/ipv4/ip_gre.c
++++ b/net/ipv4/ip_gre.c
+@@ -313,9 +313,8 @@ static void ipgre_tunnel_uninit(struct net_device *dev)
+ 
+ static void ipgre_err(struct sk_buff *skb, u32 info)
+ {
+-#ifndef I_WISH_WORLD_WERE_PERFECT
+ 
+-/* It is not :-( All the routers (except for Linux) return only
++/* All the routers (except for Linux) return only
+    8 bytes of packet payload. It means, that precise relaying of
+    ICMP in the real Internet is absolutely infeasible.
+ 
+@@ -398,149 +397,6 @@ static void ipgre_err(struct sk_buff *skb, u32 info)
+ out:
+ 	read_unlock(&ipgre_lock);
+ 	return;
+-#else
+-	struct iphdr *iph = (struct iphdr*)dp;
+-	struct iphdr *eiph;
+-	__be16	     *p = (__be16*)(dp+(iph->ihl<<2));
+-	const int type = icmp_hdr(skb)->type;
+-	const int code = icmp_hdr(skb)->code;
+-	int rel_type = 0;
+-	int rel_code = 0;
+-	__be32 rel_info = 0;
+-	__u32 n = 0;
+-	__be16 flags;
+-	int grehlen = (iph->ihl<<2) + 4;
+-	struct sk_buff *skb2;
+-	struct flowi fl;
+-	struct rtable *rt;
+-
+-	if (p[1] != htons(ETH_P_IP))
+-		return;
+-
+-	flags = p[0];
+-	if (flags&(GRE_CSUM|GRE_KEY|GRE_SEQ|GRE_ROUTING|GRE_VERSION)) {
+-		if (flags&(GRE_VERSION|GRE_ROUTING))
+-			return;
+-		if (flags&GRE_CSUM)
+-			grehlen += 4;
+-		if (flags&GRE_KEY)
+-			grehlen += 4;
+-		if (flags&GRE_SEQ)
+-			grehlen += 4;
+-	}
+-	if (len < grehlen + sizeof(struct iphdr))
+-		return;
+-	eiph = (struct iphdr*)(dp + grehlen);
+-
+-	switch (type) {
+-	default:
+-		return;
+-	case ICMP_PARAMETERPROB:
+-		n = ntohl(icmp_hdr(skb)->un.gateway) >> 24;
+-		if (n < (iph->ihl<<2))
+-			return;
+-
+-		/* So... This guy found something strange INSIDE encapsulated
+-		   packet. Well, he is fool, but what can we do ?
+-		 */
+-		rel_type = ICMP_PARAMETERPROB;
+-		n -= grehlen;
+-		rel_info = htonl(n << 24);
+-		break;
+-
+-	case ICMP_DEST_UNREACH:
+-		switch (code) {
+-		case ICMP_SR_FAILED:
+-		case ICMP_PORT_UNREACH:
+-			/* Impossible event. */
+-			return;
+-		case ICMP_FRAG_NEEDED:
+-			/* And it is the only really necessary thing :-) */
+-			n = ntohs(icmp_hdr(skb)->un.frag.mtu);
+-			if (n < grehlen+68)
+-				return;
+-			n -= grehlen;
+-			/* BSD 4.2 MORE DOES NOT EXIST IN NATURE. */
+-			if (n > ntohs(eiph->tot_len))
+-				return;
+-			rel_info = htonl(n);
+-			break;
+-		default:
+-			/* All others are translated to HOST_UNREACH.
+-			   rfc2003 contains "deep thoughts" about NET_UNREACH,
+-			   I believe, it is just ether pollution. --ANK
+-			 */
+-			rel_type = ICMP_DEST_UNREACH;
+-			rel_code = ICMP_HOST_UNREACH;
+-			break;
+-		}
+-		break;
+-	case ICMP_TIME_EXCEEDED:
+-		if (code != ICMP_EXC_TTL)
+-			return;
+-		break;
+-	}
+-
+-	/* Prepare fake skb to feed it to icmp_send */
+-	skb2 = skb_clone(skb, GFP_ATOMIC);
+-	if (skb2 == NULL)
+-		return;
+-	dst_release(skb2->dst);
+-	skb2->dst = NULL;
+-	skb_pull(skb2, skb->data - (u8*)eiph);
+-	skb_reset_network_header(skb2);
+-
+-	/* Try to guess incoming interface */
+-	memset(&fl, 0, sizeof(fl));
+-	fl.fl4_dst = eiph->saddr;
+-	fl.fl4_tos = RT_TOS(eiph->tos);
+-	fl.proto = IPPROTO_GRE;
+-	if (ip_route_output_key(dev_net(skb->dev), &rt, &fl)) {
+-		kfree_skb(skb2);
+-		return;
+-	}
+-	skb2->dev = rt->u.dst.dev;
+-
+-	/* route "incoming" packet */
+-	if (rt->rt_flags&RTCF_LOCAL) {
+-		ip_rt_put(rt);
+-		rt = NULL;
+-		fl.fl4_dst = eiph->daddr;
+-		fl.fl4_src = eiph->saddr;
+-		fl.fl4_tos = eiph->tos;
+-		if (ip_route_output_key(dev_net(skb->dev), &rt, &fl) ||
+-		    rt->u.dst.dev->type != ARPHRD_IPGRE) {
+-			ip_rt_put(rt);
+-			kfree_skb(skb2);
+-			return;
+-		}
+-	} else {
+-		ip_rt_put(rt);
+-		if (ip_route_input(skb2, eiph->daddr, eiph->saddr, eiph->tos, skb2->dev) ||
+-		    skb2->dst->dev->type != ARPHRD_IPGRE) {
+-			kfree_skb(skb2);
+-			return;
+-		}
+-	}
+-
+-	/* change mtu on this route */
+-	if (type == ICMP_DEST_UNREACH && code == ICMP_FRAG_NEEDED) {
+-		if (n > dst_mtu(skb2->dst)) {
+-			kfree_skb(skb2);
+-			return;
+-		}
+-		skb2->dst->ops->update_pmtu(skb2->dst, n);
+-	} else if (type == ICMP_TIME_EXCEEDED) {
+-		struct ip_tunnel *t = netdev_priv(skb2->dev);
+-		if (t->parms.iph.ttl) {
+-			rel_type = ICMP_DEST_UNREACH;
+-			rel_code = ICMP_HOST_UNREACH;
+-		}
+-	}
+-
+-	icmp_send(skb2, rel_type, rel_code, rel_info);
+-	kfree_skb(skb2);
+-#endif
+ }
+ 
+ static inline void ipgre_ecn_decapsulate(struct iphdr *iph, struct sk_buff *skb)
+diff --git a/net/ipv4/ipip.c b/net/ipv4/ipip.c
+index 149111f..af5cb53 100644
+--- a/net/ipv4/ipip.c
++++ b/net/ipv4/ipip.c
+@@ -278,9 +278,8 @@ static void ipip_tunnel_uninit(struct net_device *dev)
+ 
+ static int ipip_err(struct sk_buff *skb, u32 info)
+ {
+-#ifndef I_WISH_WORLD_WERE_PERFECT
+ 
+-/* It is not :-( All the routers (except for Linux) return only
++/* All the routers (except for Linux) return only
+    8 bytes of packet payload. It means, that precise relaying of
+    ICMP in the real Internet is absolutely infeasible.
+  */
+@@ -337,133 +336,6 @@ static int ipip_err(struct sk_buff *skb, u32 info)
+ out:
+ 	read_unlock(&ipip_lock);
+ 	return err;
+-#else
+-	struct iphdr *iph = (struct iphdr*)dp;
+-	int hlen = iph->ihl<<2;
+-	struct iphdr *eiph;
+-	const int type = icmp_hdr(skb)->type;
+-	const int code = icmp_hdr(skb)->code;
+-	int rel_type = 0;
+-	int rel_code = 0;
+-	__be32 rel_info = 0;
+-	__u32 n = 0;
+-	struct sk_buff *skb2;
+-	struct flowi fl;
+-	struct rtable *rt;
+-
+-	if (len < hlen + sizeof(struct iphdr))
+-		return 0;
+-	eiph = (struct iphdr*)(dp + hlen);
+-
+-	switch (type) {
+-	default:
+-		return 0;
+-	case ICMP_PARAMETERPROB:
+-		n = ntohl(icmp_hdr(skb)->un.gateway) >> 24;
+-		if (n < hlen)
+-			return 0;
+-
+-		/* So... This guy found something strange INSIDE encapsulated
+-		   packet. Well, he is fool, but what can we do ?
+-		 */
+-		rel_type = ICMP_PARAMETERPROB;
+-		rel_info = htonl((n - hlen) << 24);
+-		break;
+-
+-	case ICMP_DEST_UNREACH:
+-		switch (code) {
+-		case ICMP_SR_FAILED:
+-		case ICMP_PORT_UNREACH:
+-			/* Impossible event. */
+-			return 0;
+-		case ICMP_FRAG_NEEDED:
+-			/* And it is the only really necessary thing :-) */
+-			n = ntohs(icmp_hdr(skb)->un.frag.mtu);
+-			if (n < hlen+68)
+-				return 0;
+-			n -= hlen;
+-			/* BSD 4.2 MORE DOES NOT EXIST IN NATURE. */
+-			if (n > ntohs(eiph->tot_len))
+-				return 0;
+-			rel_info = htonl(n);
+-			break;
+-		default:
+-			/* All others are translated to HOST_UNREACH.
+-			   rfc2003 contains "deep thoughts" about NET_UNREACH,
+-			   I believe, it is just ether pollution. --ANK
+-			 */
+-			rel_type = ICMP_DEST_UNREACH;
+-			rel_code = ICMP_HOST_UNREACH;
+-			break;
+-		}
+-		break;
+-	case ICMP_TIME_EXCEEDED:
+-		if (code != ICMP_EXC_TTL)
+-			return 0;
+-		break;
+-	}
+-
+-	/* Prepare fake skb to feed it to icmp_send */
+-	skb2 = skb_clone(skb, GFP_ATOMIC);
+-	if (skb2 == NULL)
+-		return 0;
+-	dst_release(skb2->dst);
+-	skb2->dst = NULL;
+-	skb_pull(skb2, skb->data - (u8*)eiph);
+-	skb_reset_network_header(skb2);
+-
+-	/* Try to guess incoming interface */
+-	memset(&fl, 0, sizeof(fl));
+-	fl.fl4_daddr = eiph->saddr;
+-	fl.fl4_tos = RT_TOS(eiph->tos);
+-	fl.proto = IPPROTO_IPIP;
+-	if (ip_route_output_key(dev_net(skb->dev), &rt, &key)) {
+-		kfree_skb(skb2);
+-		return 0;
+-	}
+-	skb2->dev = rt->u.dst.dev;
+-
+-	/* route "incoming" packet */
+-	if (rt->rt_flags&RTCF_LOCAL) {
+-		ip_rt_put(rt);
+-		rt = NULL;
+-		fl.fl4_daddr = eiph->daddr;
+-		fl.fl4_src = eiph->saddr;
+-		fl.fl4_tos = eiph->tos;
+-		if (ip_route_output_key(dev_net(skb->dev), &rt, &fl) ||
+-		    rt->u.dst.dev->type != ARPHRD_TUNNEL) {
+-			ip_rt_put(rt);
+-			kfree_skb(skb2);
+-			return 0;
+-		}
+-	} else {
+-		ip_rt_put(rt);
+-		if (ip_route_input(skb2, eiph->daddr, eiph->saddr, eiph->tos, skb2->dev) ||
+-		    skb2->dst->dev->type != ARPHRD_TUNNEL) {
+-			kfree_skb(skb2);
+-			return 0;
+-		}
+-	}
+-
+-	/* change mtu on this route */
+-	if (type == ICMP_DEST_UNREACH && code == ICMP_FRAG_NEEDED) {
+-		if (n > dst_mtu(skb2->dst)) {
+-			kfree_skb(skb2);
+-			return 0;
+-		}
+-		skb2->dst->ops->update_pmtu(skb2->dst, n);
+-	} else if (type == ICMP_TIME_EXCEEDED) {
+-		struct ip_tunnel *t = netdev_priv(skb2->dev);
+-		if (t->parms.iph.ttl) {
+-			rel_type = ICMP_DEST_UNREACH;
+-			rel_code = ICMP_HOST_UNREACH;
+-		}
+-	}
+-
+-	icmp_send(skb2, rel_type, rel_code, rel_info);
+-	kfree_skb(skb2);
+-	return 0;
+-#endif
+ }
+ 
+ static inline void ipip_ecn_decapsulate(const struct iphdr *outer_iph,
 diff --git a/net/ipv4/route.c b/net/ipv4/route.c
 index 92f90ae..df41026 100644
 --- a/net/ipv4/route.c
@@ -20175,6 +23466,41 @@ index 92f90ae..df41026 100644
  	.entry_size =		sizeof(struct rtable),
  	.entries =		ATOMIC_INIT(0),
  };
+diff --git a/net/ipv4/tcp_output.c b/net/ipv4/tcp_output.c
+index debf235..e399bde 100644
+--- a/net/ipv4/tcp_output.c
++++ b/net/ipv4/tcp_output.c
+@@ -1836,7 +1836,7 @@ int tcp_retransmit_skb(struct sock *sk, struct sk_buff *skb)
+ {
+ 	struct tcp_sock *tp = tcp_sk(sk);
+ 	struct inet_connection_sock *icsk = inet_csk(sk);
+-	unsigned int cur_mss = tcp_current_mss(sk, 0);
++	unsigned int cur_mss;
+ 	int err;
+ 
+ 	/* Inconslusive MTU probe */
+@@ -1858,6 +1858,11 @@ int tcp_retransmit_skb(struct sock *sk, struct sk_buff *skb)
+ 			return -ENOMEM;
+ 	}
+ 
++	if (inet_csk(sk)->icsk_af_ops->rebuild_header(sk))
++		return -EHOSTUNREACH; /* Routing failure or similar. */
++
++	cur_mss = tcp_current_mss(sk, 0);
++
+ 	/* If receiver has shrunk his window, and skb is out of
+ 	 * new window, do not retransmit it. The exception is the
+ 	 * case, when window is shrunk to zero. In this case
+@@ -1884,9 +1889,6 @@ int tcp_retransmit_skb(struct sock *sk, struct sk_buff *skb)
+ 	    (sysctl_tcp_retrans_collapse != 0))
+ 		tcp_retrans_try_collapse(sk, skb, cur_mss);
+ 
+-	if (inet_csk(sk)->icsk_af_ops->rebuild_header(sk))
+-		return -EHOSTUNREACH; /* Routing failure or similar. */
+-
+ 	/* Some Solaris stacks overoptimize and ignore the FIN on a
+ 	 * retransmit when old data is attached.  So strip it off
+ 	 * since it is cheap to do so and saves bytes on the network.
 diff --git a/net/ipv6/addrconf.c b/net/ipv6/addrconf.c
 index e591e09..3a83557 100644
 --- a/net/ipv6/addrconf.c
@@ -20391,11 +23717,162 @@ index 12bba08..48534c6 100644
  	if (rtnl_put_cacheinfo(skb, &rt->u.dst, 0, 0, 0,
  			       expires, rt->u.dst.error) < 0)
  		goto nla_put_failure;
+diff --git a/net/ipv6/sit.c b/net/ipv6/sit.c
+index 5a6fab9..3de6ffd 100644
+--- a/net/ipv6/sit.c
++++ b/net/ipv6/sit.c
+@@ -403,9 +403,8 @@ static void ipip6_tunnel_uninit(struct net_device *dev)
+ 
+ static int ipip6_err(struct sk_buff *skb, u32 info)
+ {
+-#ifndef I_WISH_WORLD_WERE_PERFECT
+ 
+-/* It is not :-( All the routers (except for Linux) return only
++/* All the routers (except for Linux) return only
+    8 bytes of packet payload. It means, that precise relaying of
+    ICMP in the real Internet is absolutely infeasible.
+  */
+@@ -462,92 +461,6 @@ static int ipip6_err(struct sk_buff *skb, u32 info)
+ out:
+ 	read_unlock(&ipip6_lock);
+ 	return err;
+-#else
+-	struct iphdr *iph = (struct iphdr*)dp;
+-	int hlen = iph->ihl<<2;
+-	struct ipv6hdr *iph6;
+-	const int type = icmp_hdr(skb)->type;
+-	const int code = icmp_hdr(skb)->code;
+-	int rel_type = 0;
+-	int rel_code = 0;
+-	int rel_info = 0;
+-	struct sk_buff *skb2;
+-	struct rt6_info *rt6i;
+-
+-	if (len < hlen + sizeof(struct ipv6hdr))
+-		return;
+-	iph6 = (struct ipv6hdr*)(dp + hlen);
+-
+-	switch (type) {
+-	default:
+-		return;
+-	case ICMP_PARAMETERPROB:
+-		if (icmp_hdr(skb)->un.gateway < hlen)
+-			return;
+-
+-		/* So... This guy found something strange INSIDE encapsulated
+-		   packet. Well, he is fool, but what can we do ?
+-		 */
+-		rel_type = ICMPV6_PARAMPROB;
+-		rel_info = icmp_hdr(skb)->un.gateway - hlen;
+-		break;
+-
+-	case ICMP_DEST_UNREACH:
+-		switch (code) {
+-		case ICMP_SR_FAILED:
+-		case ICMP_PORT_UNREACH:
+-			/* Impossible event. */
+-			return;
+-		case ICMP_FRAG_NEEDED:
+-			/* Too complicated case ... */
+-			return;
+-		default:
+-			/* All others are translated to HOST_UNREACH.
+-			   rfc2003 contains "deep thoughts" about NET_UNREACH,
+-			   I believe, it is just ether pollution. --ANK
+-			 */
+-			rel_type = ICMPV6_DEST_UNREACH;
+-			rel_code = ICMPV6_ADDR_UNREACH;
+-			break;
+-		}
+-		break;
+-	case ICMP_TIME_EXCEEDED:
+-		if (code != ICMP_EXC_TTL)
+-			return;
+-		rel_type = ICMPV6_TIME_EXCEED;
+-		rel_code = ICMPV6_EXC_HOPLIMIT;
+-		break;
+-	}
+-
+-	/* Prepare fake skb to feed it to icmpv6_send */
+-	skb2 = skb_clone(skb, GFP_ATOMIC);
+-	if (skb2 == NULL)
+-		return 0;
+-	dst_release(skb2->dst);
+-	skb2->dst = NULL;
+-	skb_pull(skb2, skb->data - (u8*)iph6);
+-	skb_reset_network_header(skb2);
+-
+-	/* Try to guess incoming interface */
+-	rt6i = rt6_lookup(dev_net(skb->dev), &iph6->saddr, NULL, NULL, 0);
+-	if (rt6i && rt6i->rt6i_dev) {
+-		skb2->dev = rt6i->rt6i_dev;
+-
+-		rt6i = rt6_lookup(dev_net(skb->dev),
+-				&iph6->daddr, &iph6->saddr, NULL, 0);
+-
+-		if (rt6i && rt6i->rt6i_dev && rt6i->rt6i_dev->type == ARPHRD_SIT) {
+-			struct ip_tunnel *t = netdev_priv(rt6i->rt6i_dev);
+-			if (rel_type == ICMPV6_TIME_EXCEED && t->parms.iph.ttl) {
+-				rel_type = ICMPV6_DEST_UNREACH;
+-				rel_code = ICMPV6_ADDR_UNREACH;
+-			}
+-			icmpv6_send(skb2, rel_type, rel_code, rel_info, skb2->dev);
+-		}
+-	}
+-	kfree_skb(skb2);
+-	return 0;
+-#endif
+ }
+ 
+ static inline void ipip6_ecn_decapsulate(struct iphdr *iph, struct sk_buff *skb)
+diff --git a/net/key/af_key.c b/net/key/af_key.c
+index 9e7236f..9bba7ac 100644
+--- a/net/key/af_key.c
++++ b/net/key/af_key.c
+@@ -1251,7 +1251,7 @@ static struct xfrm_state * pfkey_msg2xfrm_state(struct sadb_msg *hdr,
+ 		x->sel.prefixlen_s = addr->sadb_address_prefixlen;
+ 	}
+ 
+-	if (x->props.mode == XFRM_MODE_TRANSPORT)
++	if (!x->sel.family)
+ 		x->sel.family = x->props.family;
+ 
+ 	if (ext_hdrs[SADB_X_EXT_NAT_T_TYPE-1]) {
 diff --git a/net/mac80211/mlme.c b/net/mac80211/mlme.c
-index 4adba09..e470bf1 100644
+index 4adba09..7cfd12e 100644
 --- a/net/mac80211/mlme.c
 +++ b/net/mac80211/mlme.c
-@@ -3446,21 +3446,17 @@ static int ieee80211_sta_config_auth(struct net_device *dev,
+@@ -730,7 +730,17 @@ static void ieee80211_send_assoc(struct net_device *dev,
+ 		if (bss->wmm_ie) {
+ 			wmm = 1;
+ 		}
++
++		/* get all rates supported by the device and the AP as
++		 * some APs don't like getting a superset of their rates
++		 * in the association request (e.g. D-Link DAP 1353 in
++		 * b-only mode) */
++		rates_len = ieee80211_compatible_rates(bss, sband, &rates);
++
+ 		ieee80211_rx_bss_put(dev, bss);
++	} else {
++		rates = ~0;
++		rates_len = sband->n_bitrates;
+ 	}
+ 
+ 	mgmt = (struct ieee80211_mgmt *) skb_put(skb, 24);
+@@ -761,10 +771,7 @@ static void ieee80211_send_assoc(struct net_device *dev,
+ 	*pos++ = ifsta->ssid_len;
+ 	memcpy(pos, ifsta->ssid, ifsta->ssid_len);
+ 
+-	/* all supported rates should be added here but some APs
+-	 * (e.g. D-Link DAP 1353 in b-only mode) don't like that
+-	 * Therefore only add rates the AP supports */
+-	rates_len = ieee80211_compatible_rates(bss, sband, &rates);
++	/* add all rates which were marked to be used above */
+ 	supp_rates_len = rates_len;
+ 	if (supp_rates_len > 8)
+ 		supp_rates_len = 8;
+@@ -3446,21 +3453,17 @@ static int ieee80211_sta_config_auth(struct net_device *dev,
  	struct ieee80211_sta_bss *bss, *selected = NULL;
  	int top_rssi = 0, freq;
  
@@ -20474,6 +23951,18 @@ index 24a465c..131e9e6 100644
  }
 -EXPORT_SYMBOL_GPL(ieee80211_iterate_active_interfaces);
 +EXPORT_SYMBOL_GPL(ieee80211_iterate_active_interfaces_atomic);
+diff --git a/net/mac80211/wext.c b/net/mac80211/wext.c
+index 76e1de1..457ebf9 100644
+--- a/net/mac80211/wext.c
++++ b/net/mac80211/wext.c
+@@ -209,7 +209,6 @@ static int ieee80211_ioctl_giwrange(struct net_device *dev,
+ 	range->num_frequency = c;
+ 
+ 	IW_EVENT_CAPA_SET_KERNEL(range->event_capa);
+-	IW_EVENT_CAPA_SET(range->event_capa, SIOCGIWTHRSPY);
+ 	IW_EVENT_CAPA_SET(range->event_capa, SIOCGIWAP);
+ 	IW_EVENT_CAPA_SET(range->event_capa, SIOCGIWSCAN);
+ 
 diff --git a/net/sched/cls_api.c b/net/sched/cls_api.c
 index 1086df7..9360fc8 100644
 --- a/net/sched/cls_api.c
@@ -21432,6 +24921,30 @@ index af408fc..e132509 100644
 -
 -	return ret;
  }
+diff --git a/net/xfrm/xfrm_user.c b/net/xfrm/xfrm_user.c
+index a1b0fbe..b976d9e 100644
+--- a/net/xfrm/xfrm_user.c
++++ b/net/xfrm/xfrm_user.c
+@@ -50,19 +50,8 @@ static int verify_one_alg(struct nlattr **attrs, enum xfrm_attr_type_t type)
+ 
+ 	switch (type) {
+ 	case XFRMA_ALG_AUTH:
+-		if (!algp->alg_key_len &&
+-		    strcmp(algp->alg_name, "digest_null") != 0)
+-			return -EINVAL;
+-		break;
+-
+ 	case XFRMA_ALG_CRYPT:
+-		if (!algp->alg_key_len &&
+-		    strcmp(algp->alg_name, "cipher_null") != 0)
+-			return -EINVAL;
+-		break;
+-
+ 	case XFRMA_ALG_COMP:
+-		/* Zero length keys are legal.  */
+ 		break;
+ 
+ 	default:
 diff --git a/scripts/kallsyms.c b/scripts/kallsyms.c
 index 5d20a2e..ad2434b 100644
 --- a/scripts/kallsyms.c
@@ -21733,6 +25246,28 @@ index ac6238e..e341f3f 100644
  	.rates = SNDRV_PCM_RATE_KNOT,
  	.rate_min = PCSP_DEFAULT_SRATE,
  	.rate_max = PCSP_DEFAULT_SRATE,
+diff --git a/sound/oss/Kconfig b/sound/oss/Kconfig
+index 857008b..3be2dc1 100644
+--- a/sound/oss/Kconfig
++++ b/sound/oss/Kconfig
+@@ -79,7 +79,7 @@ config SOUND_TRIDENT
+ 
+ config SOUND_MSNDCLAS
+ 	tristate "Support for Turtle Beach MultiSound Classic, Tahiti, Monterey"
+-	depends on SOUND_PRIME && (m || !STANDALONE)
++	depends on SOUND_PRIME && (m || !STANDALONE) && ISA
+ 	help
+ 	  Say M here if you have a Turtle Beach MultiSound Classic, Tahiti or
+ 	  Monterey (not for the Pinnacle or Fiji).
+@@ -143,7 +143,7 @@ config MSNDCLAS_IO
+ 
+ config SOUND_MSNDPIN
+ 	tristate "Support for Turtle Beach MultiSound Pinnacle, Fiji"
+-	depends on SOUND_PRIME && (m || !STANDALONE)
++	depends on SOUND_PRIME && (m || !STANDALONE) && ISA
+ 	help
+ 	  Say M here if you have a Turtle Beach MultiSound Pinnacle or Fiji.
+ 	  See <file:Documentation/sound/oss/MultiSound> for important information
 diff --git a/sound/pci/hda/patch_realtek.c b/sound/pci/hda/patch_realtek.c
 index 6d4df45..864b2f5 100644
 --- a/sound/pci/hda/patch_realtek.c
@@ -21824,6 +25359,21 @@ index 6d4df45..864b2f5 100644
  	},
  	[ALC262_HP_BPC] = {
  		.mixers = { alc262_HP_BPC_mixer },
+diff --git a/sound/usb/caiaq/caiaq-device.c b/sound/usb/caiaq/caiaq-device.c
+index e97d8b2..a972f77 100644
+--- a/sound/usb/caiaq/caiaq-device.c
++++ b/sound/usb/caiaq/caiaq-device.c
+@@ -351,8 +351,8 @@ static struct snd_card* create_card(struct usb_device* usb_dev)
+ 	dev = caiaqdev(card);
+ 	dev->chip.dev = usb_dev;
+ 	dev->chip.card = card;
+-	dev->chip.usb_id = USB_ID(usb_dev->descriptor.idVendor,
+-					usb_dev->descriptor.idProduct);
++	dev->chip.usb_id = USB_ID(le16_to_cpu(usb_dev->descriptor.idVendor),
++				  le16_to_cpu(usb_dev->descriptor.idProduct));
+ 	spin_lock_init(&dev->spinlock);
+ 	snd_card_set_dev(card, &usb_dev->dev);
+ 
 diff --git a/virt/kvm/kvm_main.c b/virt/kvm/kvm_main.c
 index f7ba099..2d29e26 100644
 --- a/virt/kvm/kvm_main.c
