@@ -129,7 +129,7 @@ class Gencontrol(Base):
         for field in 'depends', 'provides', 'suggests', 'recommends', 'conflicts':
             image_relations[field] = PackageRelation(config_entry_image.get(field, None))
 
-        if vars.get('initramfs', True):
+        if config_entry_image.get('initramfs', True):
             generators = config_entry_image['initramfs-generators']
             config_entry_commands_initramfs = self.config.merge('commands-image-initramfs-generators', arch, featureset, flavour)
             commands = [config_entry_commands_initramfs[i] for i in generators if config_entry_commands_initramfs.has_key(i)]
