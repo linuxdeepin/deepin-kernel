@@ -13,11 +13,12 @@ int main (int argc, char *argv[])
   int opt;
   FILE *file;
 
-  while ((opt = getopt (argc, argv, "aci:I:K:mM:o:sSw")) != -1)
+  while ((opt = getopt (argc, argv, "acei:I:K:mM:o:sSw")) != -1)
   { 
     switch(opt)
     {
       case 'a':
+      case 'e':
       case 'i':
       case 'c':
       case 'I':
