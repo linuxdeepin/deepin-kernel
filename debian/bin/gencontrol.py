@@ -125,7 +125,7 @@ class Gencontrol(Base):
                 item.arches = [arch]
         packages['source']['Build-Depends'].extend(relations_compiler_build_dep)
 
-        image_fields = {}
+        image_fields = {'Description': PackageDescription()}
         for field in 'Depends', 'Provides', 'Suggests', 'Recommends', 'Conflicts':
             image_fields[field] = PackageRelation(config_entry_image.get(field.lower(), None))
 
@@ -143,6 +143,13 @@ class Gencontrol(Base):
                     a.operator = -a.operator
                     image_fields['Conflicts'].append(PackageRelationGroup([a]))
             image_fields['Depends'].append(l_depends)
+
+        if 'desc-parts' in config_entry_image:
+            desc = image_fields['Description']
+            parts = config_entry_image['desc-parts']
+            for part in parts:
+                desc.append(config_entry_image['desc-long-part-' + part])
+                desc.append_short(config_entry_image.get('desc-short-part-' + part, ''))
 
         packages_dummy = []
         packages_own = []

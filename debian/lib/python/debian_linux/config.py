@@ -82,6 +82,7 @@ class ConfigCoreHierarchy(ConfigCore):
         },
         'image': {
             'configs': SchemaItemList(),
+            'desc-parts': SchemaItemList(),
             'initramfs': SchemaItemBoolean(),
             'initramfs-generators': SchemaItemList(),
         },
