@@ -158,25 +158,38 @@ class PackageDescription(object):
     __slots__ = "short", "long"
 
     def __init__(self, value = None):
+        self.short = []
         self.long = []
         if value is not None:
-            self.short, long = value.split("\n", 1)
+            short, long = value.split("\n", 1)
             self.append(long)
-        else:
-            self.short = None
+            self.append_short(short)
 
     def __str__(self):
         wrap = utils.TextWrapper(width = 74, fix_sentence_endings = True).wrap
+        short = ', '.join(self.short)
         long_pars = []
         for i in self.long:
             long_pars.append(wrap(i))
         long = '\n .\n '.join(['\n '.join(i) for i in long_pars])
-        return self.short + '\n ' + long
+        return short + '\n ' + long
 
     def append(self, str):
         str = str.strip()
         if str:
             self.long.extend(str.split("\n.\n"))
+
+    def append_short(self, str):
+        for i in [i.strip() for i in str.split(",")]:
+            if i:
+                self.short.append(i)
+
+    def extend(self, desc):
+        if isinstance(desc, PackageDescription):
+            self.short.extend(desc.short)
+            self.long.extend(desc.long)
+        else:
+            raise TypeError
 
 class PackageRelation(list):
     def __init__(self, value = None):
