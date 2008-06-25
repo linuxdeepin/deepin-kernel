@@ -125,9 +125,9 @@ class Gencontrol(Base):
                 item.arches = [arch]
         packages['source']['Build-Depends'].extend(relations_compiler_build_dep)
 
-        image_relations = {}
-        for field in 'depends', 'provides', 'suggests', 'recommends', 'conflicts':
-            image_relations[field] = PackageRelation(config_entry_image.get(field, None))
+        image_fields = {}
+        for field in 'Depends', 'Provides', 'Suggests', 'Recommends', 'Conflicts':
+            image_fields[field] = PackageRelation(config_entry_image.get(field.lower(), None))
 
         if config_entry_image.get('initramfs', True):
             generators = config_entry_image['initramfs-generators']
@@ -141,8 +141,8 @@ class Gencontrol(Base):
                 a = PackageRelationEntry(i)
                 if a.operator is not None:
                     a.operator = -a.operator
-                    image_relations['conflicts'].append(PackageRelationGroup([a]))
-            image_relations['depends'].append(l_depends)
+                    image_fields['Conflicts'].append(PackageRelationGroup([a]))
+            image_fields['Depends'].append(l_depends)
 
         packages_dummy = []
         packages_own = []
@@ -169,7 +169,7 @@ class Gencontrol(Base):
 
         vars.setdefault('desc', None)
 
-        packages_own.append(self.process_real_image(image[0], image_relations, vars))
+        packages_own.append(self.process_real_image(image[0], image_fields, vars))
         packages_own.extend(self.process_packages(image[1:], vars))
 
         if build_modules:
@@ -280,13 +280,14 @@ class Gencontrol(Base):
         }
         self.config['version',] = {'source': self.version.complete, 'abiname': self.abiname}
 
-    def process_real_image(self, entry, relations, vars):
+    def process_real_image(self, entry, fields, vars):
         entry = self.process_package(entry, vars)
-        for field in 'Depends', 'Provides', 'Suggests', 'Recommends', 'Conflicts':
-            value = entry.get(field, PackageRelation())
-            value.extend(relations.get(field.lower(), []))
-            if value:
-                entry[field] = value
+        for key, value in fields.iteritems():
+            if key in entry:
+                real = entry[key]
+                real.extend(value)
+            elif value:
+                entry[key] = value
         return entry
 
     def process_real_tree(self, entry, vars):
