@@ -166,12 +166,12 @@ class PackageDescription(object):
             self.short = None
 
     def __str__(self):
-        ret = self.short + '\n'
-        w = utils.TextWrapper(width = 74, fix_sentence_endings = True)
-        pars = []
+        wrap = utils.TextWrapper(width = 74, fix_sentence_endings = True).wrap
+        long_pars = []
         for i in self.long:
-            pars.append('\n '.join(w.wrap(i)))
-        return self.short + '\n ' + '\n .\n '.join(pars)
+            long_pars.append(wrap(i))
+        long = '\n .\n '.join(['\n '.join(i) for i in long_pars])
+        return self.short + '\n ' + long
 
     def append(self, str):
         str = str.strip()
