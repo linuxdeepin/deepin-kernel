@@ -208,10 +208,7 @@ class Gencontrol(object):
         config_base = self.config.merge('base', arch, featureset, flavour)
 
         vars['class'] = config_base['class']
-        if not vars.has_key('longclass'):
-#            from warnings import warn
-#            warn("Image lacks longclass setting: %s, %s, %s" % (arch, featureset, flavour), UserWarning, stacklevel = 1)
-            vars['longclass'] = vars['class']
+        vars['longclass'] = config_base.get('longclass') or vars['class']
 
         vars['localversion'] += '-' + flavour
 
