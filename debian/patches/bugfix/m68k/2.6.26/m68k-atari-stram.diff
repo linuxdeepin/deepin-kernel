@@ -1,0 +1,99 @@
+diff -ru a/arch/m68k/atari/stram.c b/arch/m68k/atari/stram.c
+--- a/arch/m68k/atari/stram.c	2008-07-13 16:51:29.000000000 -0500
++++ b/arch/m68k/atari/stram.c	2008-07-29 09:29:04.000000000 -0500
+@@ -30,7 +30,7 @@
+ #include <asm/atari_stram.h>
+ #include <asm/io.h>
+ 
+-#undef DEBUG
++#define DEBUG
+ 
+ #ifdef DEBUG
+ #define	DPRINTK(fmt,args...) printk( fmt, ##args )
+@@ -90,11 +90,15 @@
+ /* values for flags field */
+ #define BLOCK_FREE	0x01	/* free structure in the BLOCKs pool */
+ #define BLOCK_KMALLOCED	0x02	/* structure allocated by kmalloc() */
++#define BLOCK_POOL	0x04	/* block allocated from static pool */
+ #define BLOCK_GFP	0x08	/* block allocated with __get_dma_pages() */
+ 
+ /* list of allocated blocks */
+ static BLOCK *alloc_list;
+ 
++static BLOCK *stram_free_list;
++static unsigned long stram_pool, stram_pool_start, stram_pool_end;
++
+ /* We can't always use kmalloc() to allocate BLOCK structures, since
+  * stram_alloc() can be called rather early. So we need some pool of
+  * statically allocated structures. 20 of them is more than enough, so in most
+@@ -155,6 +159,10 @@
+ 	if (!kernel_in_stram)
+ 		reserve_bootmem(0, PAGE_SIZE, BOOTMEM_DEFAULT);
+ 
++	stram_pool       = (unsigned long) alloc_bootmem_low(512*1024);
++	stram_pool_start = stram_pool;
++	stram_pool_end   = stram_pool + 512*1024 - 1;
++	DPRINTK("atari_stram pool, start=%08lx, end=%08lx\n", stram_pool, stram_pool_end);
+ }
+ 
+ void atari_stram_mem_init_hook (void)
+@@ -162,6 +170,38 @@
+ 	mem_init_done = 1;
+ }
+ 
++/* find a region (by size) in the free list */
++static void *find_free_stram( long size )
++{
++	BLOCK *p,*q,*r;
++	unsigned long item;
++
++	q=NULL;
++	r=stram_free_list;
++	for( p = stram_free_list; p; p = p->next ) {
++		if (p->size >= size) {
++			q=p;
++			break;
++		}
++		r=p;
++	}
++
++	/* remove from free list - FIXME, untested! */
++	if (q) {
++		item = (unsigned long) q->start;
++		r->next = q->next;
++		return (void *) item;
++	}
++	/* take from pool */
++	if ( (stram_pool_end - stram_pool) > size) {
++		item = stram_pool;
++		stram_pool += size;
++		return (void *) item;
++	}
++
++	return( NULL );
++}
++
+ 
+ /*
+  * This is main public interface: somehow allocate a ST-RAM block
+@@ -188,11 +228,17 @@
+ 	if (!mem_init_done)
+ 		return alloc_bootmem_low(size);
+ 	else {
++	        if ((addr = find_free_stram(size)) != NULL) {
++		  flags = BLOCK_POOL;
++		  DPRINTK( "atari_stram_alloc: after mem_init, "
++				 "find_free_Stram=%p\n", addr );
++	        } else {
+ 		/* After mem_init(): can only resort to __get_dma_pages() */
+-		addr = (void *)__get_dma_pages(GFP_KERNEL, get_order(size));
+-		flags = BLOCK_GFP;
+-		DPRINTK( "atari_stram_alloc: after mem_init, "
++		  addr = (void *)__get_dma_pages(GFP_KERNEL, get_order(size));
++		  flags = BLOCK_GFP;
++		  DPRINTK( "atari_stram_alloc: after mem_init, "
+ 				 "get_pages=%p\n", addr );
++		}
+ 	}
+ 
+ 	if (addr) {
