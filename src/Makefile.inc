@@ -19,17 +19,26 @@ all-recursive install-recursive:
 
 all-local: $(PROGS)
 
-install-local: $(PROGS)
-	@list='$(PROGS)'; for p in $$list; do \
-	  echo " install -D '$$p' '$(prefix)/scripts/$(OUTDIR)/$$p'"; \
-	  install -D -m755 "$$p" "$(prefix)/scripts/$(OUTDIR)/$$p"; \
+install-local: install-local-dir install-local-progs install-local-scripts install-local-data
+
+install-local-dir:
+	install -d "$(prefix)/scripts/$(OUTDIR)"
+
+install-local-progs: $(PROGS)
+	@for p in $^; do \
+	  echo " install -m755 '$$p' '$(prefix)/scripts/$(OUTDIR)'"; \
+	  install -m755 "$$p" "$(prefix)/scripts/$(OUTDIR)"; \
 	done
-	@list='$(SCRIPTS)'; for p in $$list; do \
-	  echo " install -D '$(top_srcdir)/scripts/$(OUTDIR)/$$p' '$(prefix)/scripts/$(OUTDIR)/$$p'"; \
-	  install -D -m755 "$(top_srcdir)/scripts/$(OUTDIR)/$$p" "$(prefix)/scripts/$(OUTDIR)/$$p"; \
+
+install-local-scripts: $(SCRIPTS)
+	@for p in $^; do \
+	  echo " install -m755 '$$p' '$(prefix)/scripts/$(OUTDIR)'"; \
+	  install -m755 "$$p" "$(prefix)/scripts/$(OUTDIR)"; \
 	done
-	@list='$(DATA)'; for p in $$list; do \
-	  echo " install -D '$(top_srcdir)/scripts/$(OUTDIR)/$$p' '$(prefix)/scripts/$(OUTDIR)/$$p'"; \
-	  install -D -m644 "$(top_srcdir)/scripts/$(OUTDIR)/$$p" "$(prefix)/scripts/$(OUTDIR)/$$p"; \
+
+install-local-data: $(DATA)
+	@for p in $^; do \
+	  echo " install -m644 '$$p' '$(prefix)/scripts/$(OUTDIR)'"; \
+	  install -m644 "$$p" "$(prefix)/scripts/$(OUTDIR)"; \
 	done
 
