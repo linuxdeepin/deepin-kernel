@@ -1,3 +1,5 @@
+SHELL = /bin/sh -e
+
 CC = gcc
 CXX = g++
 CFLAGS += -Wall -O2
@@ -7,7 +9,7 @@ all: all-local all-recursive
 install: install-local install-recursive
 
 all-recursive install-recursive:
-	@target=`echo $@ | sed s/-recursive//`; \
+	@target=$(echo $@ | sed s/-recursive//); \
 	list='$(SUBDIRS)'; \
 	for subdir in $$list; do \
 	  echo "Making $$target in $$subdir"; \
