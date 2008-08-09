@@ -15,11 +15,11 @@ DATA = \
 	mkversion
 
 SCRIPTS =  \
-	checkconfig.pl \
 	checkincludes.pl \
 	checkstack.pl \
 	checkversion.pl \
 	gcc-version.sh \
+	gcc-x86_64-has-stack-protector.sh \
 	gen_initramfs_list.sh \
 	kernel-doc \
 	Lindent \
@@ -28,8 +28,6 @@ SCRIPTS =  \
 	mkuboot.sh \
 	namespace.pl \
 	patch-kernel \
-	reference_discarded.pl \
-	reference_init.pl \
 	setlocalversion \
 	ver_linux
 
