@@ -1,4 +1,4 @@
-import os, shutil
+import glob, os, shutil
 
 class Operation(object):
     def __init__(self, name, data):
@@ -70,11 +70,12 @@ class SubOperationFilesRemove(SubOperation):
     operation = "remove"
 
     def do(self, dir):
-        dir = os.path.join(dir, self.name)
-        if os.path.isdir(dir):
-            shutil.rmtree(dir)
-        else:
-            os.unlink(dir)
+        name = os.path.join(dir, self.name)
+        for n in glob.iglob(name):
+            if os.path.isdir(n):
+                shutil.rmtree(n)
+            else:
+                os.unlink(n)
 
 class SubOperationFilesUnifdef(SubOperation):
     operation = "unifdef"
