@@ -1,16 +1,78 @@
-Otherwise the machine won't boot because of problems with PCI
-initalization.
+From: Lennert Buytenhek <buytenh@wantstofly.org>
+Date: Mon Aug 11 12:00:52 CEST 2008
+Subject: [ARM] Orion: Fix boot crash on Kurobox Pro
 
-diff --git a/arch/arm/mach-orion5x/kurobox_pro-setup.c b/arch/arm/mach-orion5x/kurobox_pro-setup.c
-index 84feac4..35706b4 100644
---- a/arch/arm/mach-orion5x/kurobox_pro-setup.c
-+++ b/arch/arm/mach-orion5x/kurobox_pro-setup.c
-@@ -137,7 +137,7 @@ static int __init kurobox_pro_pci_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
- }
+Per Andersson and Martin Michlmayr report that the Kurobox Pro
+crashes when any of the PCI controller registers are accessed.
+
+This patch adds a function to the Orion PCI handling code that board
+support code can call to disable enumerating the PCI bus entirely,
+and makes the Kurobox Pro PCI-related init code call this function.
+
+Signed-off-by: Lennert Buytenhek <buytenh@marvell.com>
+
+Index: linux-2.6.27-rc2/arch/arm/mach-orion5x/common.h
+===================================================================
+--- linux-2.6.27-rc2.orig/arch/arm/mach-orion5x/common.h
++++ linux-2.6.27-rc2/arch/arm/mach-orion5x/common.h
+@@ -41,6 +41,7 @@ struct pci_bus;
+ struct pci_sys_data;
  
- static struct hw_pci kurobox_pro_pci __initdata = {
--	.nr_controllers	= 2,
-+	.nr_controllers	= 1,
- 	.swizzle	= pci_std_swizzle,
- 	.setup		= orion5x_pci_sys_setup,
- 	.scan		= orion5x_pci_sys_scan_bus,
+ void orion5x_pcie_id(u32 *dev, u32 *rev);
++void orion5x_pci_disable(void);
+ void orion5x_pci_set_cardbus_mode(void);
+ int orion5x_pci_sys_setup(int nr, struct pci_sys_data *sys);
+ struct pci_bus *orion5x_pci_sys_scan_bus(int nr, struct pci_sys_data *sys);
+Index: linux-2.6.27-rc2/arch/arm/mach-orion5x/kurobox_pro-setup.c
+===================================================================
+--- linux-2.6.27-rc2.orig/arch/arm/mach-orion5x/kurobox_pro-setup.c
++++ linux-2.6.27-rc2/arch/arm/mach-orion5x/kurobox_pro-setup.c
+@@ -146,8 +146,10 @@ static struct hw_pci kurobox_pro_pci __i
+ 
+ static int __init kurobox_pro_pci_init(void)
+ {
+-	if (machine_is_kurobox_pro())
++	if (machine_is_kurobox_pro()) {
++		orion5x_pci_disable();
+ 		pci_common_init(&kurobox_pro_pci);
++	}
+ 
+ 	return 0;
+ }
+Index: linux-2.6.27-rc2/arch/arm/mach-orion5x/pci.c
+===================================================================
+--- linux-2.6.27-rc2.orig/arch/arm/mach-orion5x/pci.c
++++ linux-2.6.27-rc2/arch/arm/mach-orion5x/pci.c
+@@ -541,6 +541,13 @@ static void __devinit rc_pci_fixup(struc
+ }
+ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MARVELL, PCI_ANY_ID, rc_pci_fixup);
+ 
++static int orion5x_pci_disabled __initdata;
++
++void __init orion5x_pci_disable(void)
++{
++	orion5x_pci_disabled = 1;
++}
++
+ void __init orion5x_pci_set_cardbus_mode(void)
+ {
+ 	orion5x_pci_cardbus_mode = 1;
+@@ -553,7 +560,7 @@ int __init orion5x_pci_sys_setup(int nr,
+ 	if (nr == 0) {
+ 		orion_pcie_set_local_bus_nr(PCIE_BASE, sys->busnr);
+ 		ret = pcie_setup(sys);
+-	} else if (nr == 1) {
++	} else if (nr == 1 && !orion5x_pci_disabled) {
+ 		orion5x_pci_set_bus_nr(sys->busnr);
+ 		ret = pci_setup(sys);
+ 	}
+@@ -567,7 +574,7 @@ struct pci_bus __init *orion5x_pci_sys_s
+ 
+ 	if (nr == 0) {
+ 		bus = pci_scan_bus(sys->busnr, &pcie_ops, sys);
+-	} else if (nr == 1) {
++	} else if (nr == 1 && !orion5x_pci_disabled) {
+ 		bus = pci_scan_bus(sys->busnr, &pci_ops, sys);
+ 	} else {
+ 		bus = NULL;
+
