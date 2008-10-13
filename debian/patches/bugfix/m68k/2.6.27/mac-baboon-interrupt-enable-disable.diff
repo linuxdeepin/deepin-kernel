@@ -1,0 +1,134 @@
+From fthain@telegraphics.com.au Mon Oct  6 14:38:39 2008
+Date: Mon, 6 Oct 2008 23:29:50 +1100 (EST)
+From: Finn Thain <fthain@telegraphics.com.au>
+To: Geert Uytterhoeven <geert@linux-m68k.org>
+Cc: linux-m68k@vger.kernel.org
+Subject: [PATCH] mac baboon interrupt enable/disable
+
+
+No-one seems to know how to mask individual baboon interrupts, so we just 
+mask the umbrella IRQ. This will work as long as only the IDE driver uses 
+the baboon chip (it can't deadlock). Use mac_enable_irq/mac_disable_irq 
+rather than enable_irq/disable_irq because the latter routines count the 
+depth of nested calls which triggers a warning and call trace because 
+IRQ_NUBUS_C is enabled twice in a row (once when the baboon handler is 
+registered, and once when the IDE IRQ is registered).
+
+Signed-off-by: Finn Thain <fthain@telegraphics.com.au>
+
+---
+ arch/m68k/mac/baboon.c  |   42 +++++++++++++++++++++++++++++++-----------
+ arch/m68k/mac/macints.c |    8 ++++----
+ 2 files changed, 35 insertions(+), 15 deletions(-)
+
+--- a/arch/m68k/mac/baboon.c
++++ b/arch/m68k/mac/baboon.c
+@@ -18,11 +18,14 @@
+ #include <asm/macints.h>
+ #include <asm/mac_baboon.h>
+ 
+-/* #define DEBUG_BABOON */
+ /* #define DEBUG_IRQS */
+ 
++extern void mac_enable_irq(unsigned int);
++extern void mac_disable_irq(unsigned int);
++
+ int baboon_present;
+ static volatile struct baboon *baboon;
++static unsigned char baboon_disabled;
+ 
+ #if 0
+ extern int macide_ack_intr(struct ata_channel *);
+@@ -88,34 +91,51 @@ static irqreturn_t baboon_irq(int irq, v
+ 
+ void __init baboon_register_interrupts(void)
+ {
+-	request_irq(IRQ_NUBUS_C, baboon_irq, IRQ_FLG_LOCK|IRQ_FLG_FAST,
+-		    "baboon", (void *) baboon);
++	baboon_disabled = 0;
++	request_irq(IRQ_NUBUS_C, baboon_irq, 0, "baboon", (void *)baboon);
+ }
+ 
+-void baboon_irq_enable(int irq) {
++/*
++ * The means for masking individual baboon interrupts remains a mystery, so
++ * enable the umbrella interrupt only when no baboon interrupt is disabled.
++ */
++
++void baboon_irq_enable(int irq)
++{
++	int irq_idx = IRQ_IDX(irq);
++
+ #ifdef DEBUG_IRQUSE
+ 	printk("baboon_irq_enable(%d)\n", irq);
+ #endif
+-	/* FIXME: figure out how to mask and unmask baboon interrupt sources */
+-	enable_irq(IRQ_NUBUS_C);
++
++	baboon_disabled &= ~(1 << irq_idx);
++	if (!baboon_disabled)
++		mac_enable_irq(IRQ_NUBUS_C);
+ }
+ 
+-void baboon_irq_disable(int irq) {
++void baboon_irq_disable(int irq)
++{
++	int irq_idx = IRQ_IDX(irq);
++
+ #ifdef DEBUG_IRQUSE
+ 	printk("baboon_irq_disable(%d)\n", irq);
+ #endif
+-	disable_irq(IRQ_NUBUS_C);
++
++	baboon_disabled |= 1 << irq_idx;
++	if (baboon_disabled)
++		mac_disable_irq(IRQ_NUBUS_C);
+ }
+ 
+-void baboon_irq_clear(int irq) {
+-	int irq_idx	= IRQ_IDX(irq);
++void baboon_irq_clear(int irq)
++{
++	int irq_idx = IRQ_IDX(irq);
+ 
+ 	baboon->mb_ifr &= ~(1 << irq_idx);
+ }
+ 
+ int baboon_irq_pending(int irq)
+ {
+-	int irq_idx	= IRQ_IDX(irq);
++	int irq_idx = IRQ_IDX(irq);
+ 
+ 	return baboon->mb_ifr & (1 << irq_idx);
+ }
+--- a/arch/m68k/mac/macints.c
++++ b/arch/m68k/mac/macints.c
+@@ -214,8 +214,8 @@ irqreturn_t mac_debug_handler(int, void 
+ 
+ /* #define DEBUG_MACINTS */
+ 
+-static void mac_enable_irq(unsigned int irq);
+-static void mac_disable_irq(unsigned int irq);
++void mac_enable_irq(unsigned int irq);
++void mac_disable_irq(unsigned int irq);
+ 
+ static struct irq_controller mac_irq_controller = {
+ 	.name		= "mac",
+@@ -274,7 +274,7 @@ void __init mac_init_IRQ(void)
+  * These routines are just dispatchers to the VIA/OSS/PSC routines.
+  */
+ 
+-static void mac_enable_irq(unsigned int irq)
++void mac_enable_irq(unsigned int irq)
+ {
+ 	int irq_src = IRQ_SRC(irq);
+ 
+@@ -307,7 +307,7 @@ static void mac_enable_irq(unsigned int 
+ 	}
+ }
+ 
+-static void mac_disable_irq(unsigned int irq)
++void mac_disable_irq(unsigned int irq)
+ {
+ 	int irq_src = IRQ_SRC(irq);
+ 
