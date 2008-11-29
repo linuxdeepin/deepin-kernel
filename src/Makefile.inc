@@ -9,7 +9,7 @@ all: all-local all-recursive
 install: install-local install-recursive
 
 all-recursive install-recursive:
-	@target=$(shell echo $@ | sed s/-recursive//); \
+	+@target=$(shell echo $@ | sed s/-recursive//); \
 	list='$(SUBDIRS)'; \
 	for subdir in $$list; do \
 	  echo "Making $$target in $$subdir"; \
