@@ -144,10 +144,10 @@ class Gencontrol(Base):
                     image_fields['Conflicts'].append(PackageRelationGroup([a]))
             image_fields['Depends'].append(l_depends)
 
-        if 'desc-parts' in config_entry_image:
+        desc_parts = self.config.get_merge('image', arch, featureset, flavour, 'desc-parts')
+        if desc_parts:
             desc = image_fields['Description']
-            parts = config_entry_image['desc-parts']
-            for part in parts:
+            for part in desc_parts[::-1]:
                 desc.append(config_entry_image['desc-long-part-' + part])
                 desc.append_short(config_entry_image.get('desc-short-part-' + part, ''))
 
@@ -164,9 +164,12 @@ class Gencontrol(Base):
             if config_entry_xen.get('dom0-support', True):
                 p = self.process_packages(self.templates['control.xen-linux-system'], vars)
                 l = PackageRelationGroup()
-                for version in config_entry_xen['versions']:
-                    l.append("xen-hypervisor-%s-%s" % (version, config_entry_xen['flavour']))
-                makeflags['XEN_VERSIONS'] = ' '.join(['%s-%s' % (i, config_entry_xen['flavour']) for i in config_entry_xen['versions']])
+                xen_versions = []
+                for xen_flavour in config_entry_xen['flavours']:
+                    for version in config_entry_xen['versions']:
+                        l.append("xen-hypervisor-%s-%s" % (version, xen_flavour))
+                        xen_versions.append('%s-%s' % (version, xen_flavour))
+                makeflags['XEN_VERSIONS'] = ' '.join(xen_versions)
                 p[0]['Depends'].append(l)
                 packages_dummy.extend(p)
         else:

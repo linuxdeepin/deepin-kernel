@@ -1,0 +1,135 @@
+From: Kyle McMartin <kyle@mcmartin.ca>
+Date: Tue, 29 Jul 2008 04:09:22 +0000 (-0400)
+Subject: parisc: add pdc_coproc_cfg_unlocked and set_firmware_width_unlocked
+X-Git-Url: http://git.kernel.org/?p=linux%2Fkernel%2Fgit%2Fkyle%2Fparisc-2.6.git;a=commitdiff_plain;h=8735c10cff8486d58e03ee692ae9720f10cf9806
+
+parisc: add pdc_coproc_cfg_unlocked and set_firmware_width_unlocked
+
+These functions are called only when bringing up the monarch cpu,
+so it is safe to call them without taking the pdc spinlock. In the
+future, this may become relevant for lockdep, since these functions were
+taking spinlocks before start_kernel called the lockdep initializers.
+---
+
+Adjusted to apply to Debian's 2.6.26 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.26.orig/arch/parisc/kernel/firmware.c linux-source-2.6.26/arch/parisc/kernel/firmware.c
+--- linux-source-2.6.26.orig/arch/parisc/kernel/firmware.c	2008-07-13 15:51:29.000000000 -0600
++++ linux-source-2.6.26/arch/parisc/kernel/firmware.c	2008-09-18 16:28:07.000000000 -0600
+@@ -150,26 +150,40 @@ static void convert_to_wide(unsigned lon
+ #endif
+ }
+ 
++#ifdef CONFIG_64BIT
++void __init set_firmware_width_unlocked(void)
++{
++	int ret;
++
++	ret = mem_pdc_call(PDC_MODEL, PDC_MODEL_CAPABILITIES,
++		__pa(pdc_result), 0);
++	convert_to_wide(pdc_result);
++	if (pdc_result[0] != NARROW_FIRMWARE)
++		parisc_narrow_firmware = 0;
++}
++	
+ /**
+  * set_firmware_width - Determine if the firmware is wide or narrow.
+  * 
+- * This function must be called before any pdc_* function that uses the convert_to_wide
+- * function.
++ * This function must be called before any pdc_* function that uses the
++ * convert_to_wide function.
+  */
+ void __init set_firmware_width(void)
+ {
+-#ifdef CONFIG_64BIT
+-	int retval;
+ 	unsigned long flags;
++	spin_lock_irqsave(&pdc_lock, flags);
++	set_firmware_width_unlocked();
++	spin_unlock_irqrestore(&pdc_lock, flags);
++}
++#else
++void __init set_firmware_width_unlocked(void) {
++	return;
++}
+ 
+-        spin_lock_irqsave(&pdc_lock, flags);
+-	retval = mem_pdc_call(PDC_MODEL, PDC_MODEL_CAPABILITIES, __pa(pdc_result), 0);
+-	convert_to_wide(pdc_result);
+-	if(pdc_result[0] != NARROW_FIRMWARE)
+-		parisc_narrow_firmware = 0;
+-        spin_unlock_irqrestore(&pdc_lock, flags);
+-#endif
++void __init set_firmware_width(void) {
++	return;
+ }
++#endif /*CONFIG_64BIT*/
+ 
+ /**
+  * pdc_emergency_unlock - Unlock the linux pdc lock
+@@ -288,6 +302,20 @@ int pdc_chassis_warn(unsigned long *warn
+ 	return retval;
+ }
+ 
++int __init pdc_coproc_cfg_unlocked(struct pdc_coproc_cfg *pdc_coproc_info)
++{
++	int ret;
++
++	ret = mem_pdc_call(PDC_COPROC, PDC_COPROC_CFG, __pa(pdc_result));
++	convert_to_wide(pdc_result);
++	pdc_coproc_info->ccr_functional = pdc_result[0];
++	pdc_coproc_info->ccr_present = pdc_result[1];
++	pdc_coproc_info->revision = pdc_result[17];
++	pdc_coproc_info->model = pdc_result[18];
++
++	return ret;
++}
++
+ /**
+  * pdc_coproc_cfg - To identify coprocessors attached to the processor.
+  * @pdc_coproc_info: Return buffer address.
+@@ -297,19 +325,14 @@ int pdc_chassis_warn(unsigned long *warn
+  */
+ int __init pdc_coproc_cfg(struct pdc_coproc_cfg *pdc_coproc_info)
+ {
+-        int retval;
++	int ret;
+ 	unsigned long flags;
+ 
+-        spin_lock_irqsave(&pdc_lock, flags);
+-        retval = mem_pdc_call(PDC_COPROC, PDC_COPROC_CFG, __pa(pdc_result));
+-        convert_to_wide(pdc_result);
+-        pdc_coproc_info->ccr_functional = pdc_result[0];
+-        pdc_coproc_info->ccr_present = pdc_result[1];
+-        pdc_coproc_info->revision = pdc_result[17];
+-        pdc_coproc_info->model = pdc_result[18];
+-        spin_unlock_irqrestore(&pdc_lock, flags);
++	spin_lock_irqsave(&pdc_lock, flags);
++	ret = pdc_coproc_cfg_unlocked(pdc_coproc_info);
++	spin_unlock_irqrestore(&pdc_lock, flags);
+ 
+-        return retval;
++	return ret;
+ }
+ 
+ /**
+diff -urpN linux-source-2.6.26.orig/include/asm-parisc/pdc.h linux-source-2.6.26/include/asm-parisc/pdc.h
+--- linux-source-2.6.26.orig/include/asm-parisc/pdc.h	2008-07-13 15:51:29.000000000 -0600
++++ linux-source-2.6.26/include/asm-parisc/pdc.h	2008-09-18 16:28:07.000000000 -0600
+@@ -600,6 +600,7 @@ int pdc_chassis_info(struct pdc_chassis_
+ int pdc_chassis_disp(unsigned long disp);
+ int pdc_chassis_warn(unsigned long *warn);
+ int pdc_coproc_cfg(struct pdc_coproc_cfg *pdc_coproc_info);
++int pdc_coproc_cfg_unlocked(struct pdc_coproc_cfg *pdc_coproc_info);
+ int pdc_iodc_read(unsigned long *actcnt, unsigned long hpa, unsigned int index,
+ 		  void *iodc_data, unsigned int iodc_data_size);
+ int pdc_system_map_find_mods(struct pdc_system_map_mod_info *pdc_mod_info,
+@@ -638,6 +639,7 @@ int pdc_mem_mem_table(struct pdc_memory_
+ #endif
+ 
+ void set_firmware_width(void);
++void set_firmware_width_unlocked(void);
+ int pdc_do_firm_test_reset(unsigned long ftc_bitmap);
+ int pdc_do_reset(void);
+ int pdc_soft_power_info(unsigned long *power_reg);

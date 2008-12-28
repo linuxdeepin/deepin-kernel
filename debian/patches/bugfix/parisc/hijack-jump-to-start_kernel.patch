@@ -1,0 +1,68 @@
+From: Kyle McMartin <kyle@mcmartin.ca>
+Date: Tue, 29 Jul 2008 04:11:13 +0000 (-0400)
+Subject: parisc: hijack jump to start_kernel
+X-Git-Url: http://git.kernel.org/?p=linux%2Fkernel%2Fgit%2Fkyle%2Fparisc-2.6.git;a=commitdiff_plain;h=1a189c07f9f65305442d6e99efac9ac44f86bc04
+
+parisc: hijack jump to start_kernel
+
+Bang in our own start_parisc call, which initializes the PDC
+width, and turns on the FPU.
+
+Previously, if CONFIG_PRINTK_TIME was on, we'd attempt to use
+the FPU before we had enabled it, resulting in a difficult
+to diagnose panic.
+
+This patch causes init_per_cpu to redundantly set these for
+cpu0, but this is harmless.
+---
+
+diff --git a/arch/parisc/kernel/head.S b/arch/parisc/kernel/head.S
+index a84e31e..0e3d9f9 100644
+--- a/arch/parisc/kernel/head.S
++++ b/arch/parisc/kernel/head.S
+@@ -121,7 +121,7 @@ $pgt_fill_loop:
+ 	copy		%r0,%r2
+ 
+ 	/* And the RFI Target address too */
+-	load32		start_kernel,%r11
++	load32		start_parisc,%r11
+ 
+ 	/* And the initial task pointer */
+ 	load32		init_thread_union,%r6
+diff --git a/arch/parisc/kernel/setup.c b/arch/parisc/kernel/setup.c
+index 39e7c5a..a59b71e 100644
+--- a/arch/parisc/kernel/setup.c
++++ b/arch/parisc/kernel/setup.c
+@@ -368,6 +368,31 @@ static int __init parisc_init(void)
+ 
+ 	return 0;
+ }
+-
+ arch_initcall(parisc_init);
+ 
++void start_parisc(void)
++{
++	extern void start_kernel(void);
++
++	int ret, cpunum;
++	struct pdc_coproc_cfg coproc_cfg;
++
++	cpunum = smp_processor_id();
++
++	set_firmware_width_unlocked();
++
++	ret = pdc_coproc_cfg_unlocked(&coproc_cfg);
++	if (ret >= 0 && coproc_cfg.ccr_functional) {
++		mtctl(coproc_cfg.ccr_functional, 10);
++
++		cpu_data[cpunum].fp_rev = coproc_cfg.revision;
++		cpu_data[cpunum].fp_model = coproc_cfg.model;
++
++		asm volatile ("fstd	%fr0,8(%sp)");
++	} else {
++		panic("must have an fpu to boot linux");
++	}
++
++	start_kernel();
++	// not reached
++}

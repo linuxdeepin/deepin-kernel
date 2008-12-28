@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+import fnmatch
 import sys
 sys.path.append('debian/lib/python')
 
@@ -91,11 +92,21 @@ class checker(object):
         return ret
 
     def _ignore(self, add, change, remove):
-        config = self.config.merge('abi', self.arch, self.featureset, self.flavour)
-        ignores = config.get('ignore-changes', None)
-        if ignores is None:
-            return set()
-        return set(ignores.split())
+        all = set(add.keys() + change.keys() + remove.keys())
+        # TODO: let config merge this lists
+        configs = []
+        configs.append(self.config.get(('abi', self.arch, self.featureset, self.flavour), {}))
+        configs.append(self.config.get(('abi', self.arch, None, self.flavour), {}))
+        configs.append(self.config.get(('abi', self.arch, self.featureset), {}))
+        configs.append(self.config.get(('abi', self.arch), {}))
+        configs.append(self.config.get(('abi',), {}))
+        ignores = set()
+        for config in configs:
+            ignores.update(config.get('ignore-changes', []))
+        filtered = set()
+        for m in ignores:
+            filtered.update(fnmatch.filter(all, m))
+        return filtered
 
 if __name__ == '__main__':
     sys.exit(checker(*sys.argv[1:])(sys.stdout))

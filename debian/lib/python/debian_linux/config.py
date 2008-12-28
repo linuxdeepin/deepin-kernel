@@ -26,6 +26,35 @@ class SchemaItemList(object):
         return [j.strip() for j in re.split(self.type, i)]
 
 class ConfigCore(dict):
+    def get_merge(self, section, arch, featureset, flavour, key, default=None):
+        temp = []
+
+        if arch and featureset and flavour:
+            temp.append(self.get((section, arch, featureset, flavour), {}).get(key))
+            temp.append(self.get((section, arch, None, flavour), {}).get(key))
+        if arch and featureset:
+            temp.append(self.get((section, arch, featureset), {}).get(key))
+        if arch:
+            temp.append(self.get((section, arch), {}).get(key))
+        if featureset:
+            temp.append(self.get((section, None, featureset), {}).get(key))
+        temp.append(self.get((section,), {}).get(key))
+
+        ret = []
+
+        for i in temp:
+            if i is None:
+                continue
+            elif isinstance(i, (list, tuple)):
+                ret.extend(i)
+            elif ret:
+                # TODO
+                return ret
+            else:
+                return i
+
+        return ret or default
+
     def merge(self, section, arch = None, featureset = None, flavour = None):
         ret = {}
         ret.update(self.get((section,), {}))
@@ -73,6 +102,9 @@ class ConfigCoreHierarchy(ConfigCore):
     config_name = "defines"
 
     schemas = {
+        'abi': {
+            'ignore-changes': SchemaItemList(),
+        },
         'base': {
             'arches': SchemaItemList(),
             'enabled': SchemaItemBoolean(),
@@ -90,6 +122,7 @@ class ConfigCoreHierarchy(ConfigCore):
         },
         'xen': {
             'dom0-support': SchemaItemBoolean(),
+            'flavours': SchemaItemList(),
             'versions': SchemaItemList(),
         }
     }

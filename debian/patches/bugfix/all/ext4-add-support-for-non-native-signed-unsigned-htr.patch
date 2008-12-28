@@ -1,0 +1,191 @@
+From: Theodore Ts'o <tytso@mit.edu>
+Date: Mon, 20 Oct 2008 22:57:37 -0400
+Subject: [PATCH] ext4: Add support for non-native signed/unsigned htree hash algorithms
+
+The original ext3 hash algorithms assumed that variables of type char
+were signed, as God and K&R intended.  Unfortunately, this assumption
+is not true on some architectures.  Userspace support for marking
+filesystems with non-native signed/unsigned chars was added two years
+ago, but the kernel-side support was never added (until now).
+
+Signed-off-by: "Theodore Ts'o" <tytso@mit.edu>
+
+diff -urN a/fs/ext4/ext4.h b/fs/ext4/ext4.h
+--- a/fs/ext4/ext4.h	2008-10-28 19:43:40.000000000 +0000
++++ b/fs/ext4/ext4.h	2008-10-28 19:48:22.000000000 +0000
+@@ -872,6 +872,9 @@
+ #define DX_HASH_LEGACY		0
+ #define DX_HASH_HALF_MD4	1
+ #define DX_HASH_TEA		2
++#define DX_HASH_LEGACY_UNSIGNED	3
++#define DX_HASH_HALF_MD4_UNSIGNED	4
++#define DX_HASH_TEA_UNSIGNED		5
+ 
+ #ifdef __KERNEL__
+ 
+diff -urN a/fs/ext4/ext4_sb.h b/fs/ext4/ext4_sb.h
+--- a/fs/ext4/ext4_sb.h	2008-10-28 19:43:40.000000000 +0000
++++ b/fs/ext4/ext4_sb.h	2008-10-28 19:48:22.000000000 +0000
+@@ -56,6 +56,7 @@
+ 	u32 s_next_generation;
+ 	u32 s_hash_seed[4];
+ 	int s_def_hash_version;
++	int s_hash_unsigned;	/* 3 if hash should be signed, 0 if not */
+ 	struct percpu_counter s_freeblocks_counter;
+ 	struct percpu_counter s_freeinodes_counter;
+ 	struct percpu_counter s_dirs_counter;
+diff -urN a/fs/ext4/hash.c b/fs/ext4/hash.c
+--- a/fs/ext4/hash.c	2008-10-28 19:43:40.000000000 +0000
++++ b/fs/ext4/hash.c	2008-10-28 19:59:19.000000000 +0000
+@@ -35,11 +35,20 @@
+ 
+ 
+ /* The old legacy hash */
+-static __u32 dx_hack_hash (const char *name, int len)
++static __u32 dx_hack_hash(const char *name, int len, int unsigned_flag)
+ {
+-	__u32 hash0 = 0x12a3fe2d, hash1 = 0x37abe8f9;
++	__u32 hash, hash0 = 0x12a3fe2d, hash1 = 0x37abe8f9;
++	const unsigned char *ucp = (const unsigned char *) name;
++	const signed char *scp = (const signed char *) name;
++	int c;
++
+ 	while (len--) {
+-		__u32 hash = hash1 + (hash0 ^ (*name++ * 7152373));
++		if (unsigned_flag)
++			c = (int) *ucp++;
++		else
++			c = (int) *scp++;
++
++		hash = hash1 + (hash0 ^ (c * 7152373));
+ 
+ 		if (hash & 0x80000000) hash -= 0x7fffffff;
+ 		hash1 = hash0;
+@@ -48,10 +57,13 @@
+ 	return (hash0 << 1);
+ }
+ 
+-static void str2hashbuf(const char *msg, int len, __u32 *buf, int num)
++static void str2hashbuf(const char *msg, int len, __u32 *buf, int num,
++			int unsigned_flag)
+ {
+ 	__u32	pad, val;
+-	int	i;
++	int	i, c;
++	const unsigned char *ucp = (const unsigned char *) msg;
++	const signed char *scp = (const signed char *) msg;
+ 
+ 	pad = (__u32)len | ((__u32)len << 8);
+ 	pad |= pad << 16;
+@@ -62,7 +74,12 @@
+ 	for (i=0; i < len; i++) {
+ 		if ((i % 4) == 0)
+ 			val = pad;
+-		val = msg[i] + (val << 8);
++		if (unsigned_flag)
++			c = (int) ucp[i];
++		else
++			c = (int) scp[i];
++
++		val = c + (val << 8);
+ 		if ((i % 4) == 3) {
+ 			*buf++ = val;
+ 			val = pad;
+@@ -95,6 +112,7 @@
+ 	const char	*p;
+ 	int		i;
+ 	__u32		in[8], buf[4];
++	int		unsigned_flag = 0;
+ 
+ 	/* Initialize the default seed for the hash checksum functions */
+ 	buf[0] = 0x67452301;
+@@ -113,13 +131,17 @@
+ 	}
+ 
+ 	switch (hinfo->hash_version) {
++	case DX_HASH_LEGACY_UNSIGNED:
++		unsigned_flag++;
+ 	case DX_HASH_LEGACY:
+-		hash = dx_hack_hash(name, len);
++		hash = dx_hack_hash(name, len, unsigned_flag);
+ 		break;
++	case DX_HASH_HALF_MD4_UNSIGNED:
++		unsigned_flag++;
+ 	case DX_HASH_HALF_MD4:
+ 		p = name;
+ 		while (len > 0) {
+-			str2hashbuf(p, len, in, 8);
++			str2hashbuf(p, len, in, 8, unsigned_flag);
+ 			half_md4_transform(buf, in);
+ 			len -= 32;
+ 			p += 32;
+@@ -127,10 +149,12 @@
+ 		minor_hash = buf[2];
+ 		hash = buf[1];
+ 		break;
++	case DX_HASH_TEA_UNSIGNED:
++		unsigned_flag++;
+ 	case DX_HASH_TEA:
+ 		p = name;
+ 		while (len > 0) {
+-			str2hashbuf(p, len, in, 4);
++			str2hashbuf(p, len, in, 4, unsigned_flag);
+ 			TEA_transform(buf, in);
+ 			len -= 16;
+ 			p += 16;
+diff -urN a/fs/ext4/namei.c b/fs/ext4/namei.c
+--- a/fs/ext4/namei.c	2008-10-28 19:43:40.000000000 +0000
++++ b/fs/ext4/namei.c	2008-10-28 19:48:22.000000000 +0000
+@@ -361,6 +361,8 @@
+ 		goto fail;
+ 	}
+ 	hinfo->hash_version = root->info.hash_version;
++	if (hinfo->hash_version <= DX_HASH_TEA)
++		hinfo->hash_version += EXT4_SB(dir->i_sb)->s_hash_unsigned;
+ 	hinfo->seed = EXT4_SB(dir->i_sb)->s_hash_seed;
+ 	if (dentry)
+ 		ext4fs_dirhash(dentry->d_name.name, dentry->d_name.len, hinfo);
+@@ -639,6 +641,9 @@
+ 	dir = dir_file->f_path.dentry->d_inode;
+ 	if (!(EXT4_I(dir)->i_flags & EXT4_INDEX_FL)) {
+ 		hinfo.hash_version = EXT4_SB(dir->i_sb)->s_def_hash_version;
++		if (hinfo.hash_version <= DX_HASH_TEA)
++			hinfo.hash_version +=
++				EXT4_SB(dir->i_sb)->s_hash_unsigned;
+ 		hinfo.seed = EXT4_SB(dir->i_sb)->s_hash_seed;
+ 		count = htree_dirblock_to_tree(dir_file, dir, 0, &hinfo,
+ 					       start_hash, start_minor_hash);
+@@ -1415,6 +1420,8 @@
+ 
+ 	/* Initialize as for dx_probe */
+ 	hinfo.hash_version = root->info.hash_version;
++	if (hinfo.hash_version <= DX_HASH_TEA)
++		hinfo.hash_version += EXT4_SB(dir->i_sb)->s_hash_unsigned;
+ 	hinfo.seed = EXT4_SB(dir->i_sb)->s_hash_seed;
+ 	ext4fs_dirhash(name, namelen, &hinfo);
+ 	frame = frames;
+diff -urN a/fs/ext4/super.c b/fs/ext4/super.c
+--- a/fs/ext4/super.c	2008-10-28 19:43:40.000000000 +0000
++++ b/fs/ext4/super.c	2008-10-28 19:48:22.000000000 +0000
+@@ -2071,6 +2071,21 @@
+ 	for (i=0; i < 4; i++)
+ 		sbi->s_hash_seed[i] = le32_to_cpu(es->s_hash_seed[i]);
+ 	sbi->s_def_hash_version = es->s_def_hash_version;
++	i = le32_to_cpu(es->s_flags);
++	if (i & EXT2_FLAGS_UNSIGNED_HASH)
++		sbi->s_hash_unsigned = 3;
++	else if ((i & EXT2_FLAGS_SIGNED_HASH) == 0) {
++		char	c;
++
++		c = (char) 255;
++		if (((int) c) == -1) {
++			es->s_flags |= cpu_to_le32(EXT2_FLAGS_SIGNED_HASH);
++		} else {
++			es->s_flags |= cpu_to_le32(EXT2_FLAGS_UNSIGNED_HASH);
++			sbi->s_hash_unsigned = 3;
++		}
++		sb->s_dirt = 1;
++	}
+ 
+ 	if (sbi->s_blocks_per_group > blocksize * 8) {
+ 		printk (KERN_ERR
