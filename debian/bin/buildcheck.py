@@ -1,17 +1,21 @@
-#!/usr/bin/env python
+#!/usr/bin/python
 
-import fnmatch
 import sys
 sys.path.append('debian/lib/python')
+
+import fnmatch
+import stat
 
 from debian_linux.abi import *
 from debian_linux.config import ConfigCoreDump
 from debian_linux.debian import *
 
-class checker(object):
-    def __init__(self, dir, arch, featureset, flavour):
+
+class CheckAbi(object):
+    def __init__(self, config, dir, arch, featureset, flavour):
+        self.config = config
         self.arch, self.featureset, self.flavour = arch, featureset, flavour
-        self.config = ConfigCoreDump(fp = file("debian/config.defines.dump"))
+
         self.filename_new = "%s/Module.symvers" % dir
 
         changelog = Changelog(version = VersionLinux)[0]
@@ -107,6 +111,63 @@ class checker(object):
         for m in ignores:
             filtered.update(fnmatch.filter(all, m))
         return filtered
+ 
+
+class CheckImage(object):
+    def __init__(self, config, dir, arch, featureset, flavour):
+        self.dir = dir
+        self.arch, self.featureset, self.flavour = arch, featureset, flavour
+
+        self.config_entry_build = config.merge('build', arch, featureset, flavour)
+        self.config_entry_image = config.merge('image', arch, featureset, flavour)
+
+    def __call__(self, out):
+        image = self.config_entry_build.get('image-file')
+
+        if not image:
+            # TODO: Bail out
+            return 0
+
+        image = os.path.join(self.dir, image)
+
+        fail = 0
+
+        fail |= self.check_size(out, image)
+
+        return fail
+
+    def check_size(self, out, image):
+        value = self.config_entry_image.get('check-size')
+
+        if not value:
+            return 0
+
+        value = int(value)
+
+        s = os.stat(image)
+
+        if s[stat.ST_SIZE] > value:
+            out.write('Image too large (%d > %d)!  Refusing to continue.\n' % (s[stat.ST_SIZE], value))
+            return 1
+
+        out.write('Image fits (%d).  Continuing.\n' % value)
+        return 0
+
+
+class Main(object):
+    def __init__(self, dir, arch, featureset, flavour):
+        self.args = dir, arch, featureset, flavour
+
+        self.config = ConfigCoreDump(fp=file("debian/config.defines.dump"))
+
+    def __call__(self):
+        fail = 0
+
+        for c in CheckAbi, CheckImage:
+            fail |= c(self.config, *self.args)(sys.stdout)
+
+        return fail
+
 
 if __name__ == '__main__':
-    sys.exit(checker(*sys.argv[1:])(sys.stdout))
+    sys.exit(Main(*sys.argv[1:])())
