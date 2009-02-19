@@ -34,6 +34,14 @@ class Gencontrol(Base):
         config_libc_dev = self.config.merge('libc-dev', arch)
         makeflags['LIBC_DEV_ARCH'] = config_libc_dev.get('arch', config_base.get('kernel-arch'))
 
+        data = vars.copy()
+        data.update(config_base)
+
+        for i in (
+            ('kernel-arch', 'KERNEL_ARCH'),
+        ):
+            makeflags[i[1]] = data[i[0]]
+
     def do_arch_packages(self, packages, makefile, arch, vars, makeflags, extra):
         headers_arch = self.templates["control.headers.arch"]
         packages_headers_arch = self.process_packages(headers_arch, vars)
