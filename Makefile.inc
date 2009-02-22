@@ -30,13 +30,17 @@ install-local-progs: $(PROGS)
 	  install -m755 "$$p" "$(prefix)/$(OUTDIR)"; \
 	done
 
-install-local-scripts: $(SCRIPTS)
+SCRIPTS_REAL = $(addprefix $(top_srcdir)/kbuild/$(OUTDIR)/,$(SCRIPTS))
+
+install-local-scripts: $(SCRIPTS_REAL)
 	@for p in $^; do \
 	  echo " install -m755 '$$p' '$(prefix)/$(OUTDIR)'"; \
 	  install -m755 "$$p" "$(prefix)/$(OUTDIR)"; \
 	done
 
-install-local-data: $(DATA)
+DATA_REAL = $(addprefix $(top_srcdir)/kbuild/$(OUTDIR)/,$(DATA))
+
+install-local-data: $(DATA_REAL)
 	@for p in $^; do \
 	  echo " install -m644 '$$p' '$(prefix)/$(OUTDIR)'"; \
 	  install -m644 "$$p" "$(prefix)/$(OUTDIR)"; \
