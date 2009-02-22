@@ -5,7 +5,7 @@ PROGS = \
 	modpost.real-msb-32 \
 	modpost.real-msb-64
 
-OUTDIR = mod
+OUTDIR = scripts/mod
 
 modpost.real-%:
 	$(MAKE) -f Makefile.real TYPE=$* SOURCEDIR=$(top_srcdir)/kbuild/scripts/mod
@@ -13,7 +13,7 @@ modpost.real-%:
 %: %.o
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
 
-include ../Makefile.inc
+include $(top_srcdir)/Makefile.inc
 
 clean:
 	rm $(PROGS) *.o

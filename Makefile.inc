@@ -22,23 +22,23 @@ all-local: $(PROGS)
 install-local: install-local-dir install-local-progs install-local-scripts install-local-data
 
 install-local-dir:
-	install -d "$(prefix)/scripts/$(OUTDIR)"
+	install -d "$(prefix)/$(OUTDIR)"
 
 install-local-progs: $(PROGS)
 	@for p in $^; do \
-	  echo " install -m755 '$$p' '$(prefix)/scripts/$(OUTDIR)'"; \
-	  install -m755 "$$p" "$(prefix)/scripts/$(OUTDIR)"; \
+	  echo " install -m755 '$$p' '$(prefix)/$(OUTDIR)'"; \
+	  install -m755 "$$p" "$(prefix)/$(OUTDIR)"; \
 	done
 
 install-local-scripts: $(SCRIPTS)
 	@for p in $^; do \
-	  echo " install -m755 '$$p' '$(prefix)/scripts/$(OUTDIR)'"; \
-	  install -m755 "$$p" "$(prefix)/scripts/$(OUTDIR)"; \
+	  echo " install -m755 '$$p' '$(prefix)/$(OUTDIR)'"; \
+	  install -m755 "$$p" "$(prefix)/$(OUTDIR)"; \
 	done
 
 install-local-data: $(DATA)
 	@for p in $^; do \
-	  echo " install -m644 '$$p' '$(prefix)/scripts/$(OUTDIR)'"; \
-	  install -m644 "$$p" "$(prefix)/scripts/$(OUTDIR)"; \
+	  echo " install -m644 '$$p' '$(prefix)/$(OUTDIR)'"; \
+	  install -m644 "$$p" "$(prefix)/$(OUTDIR)"; \
 	done
 
