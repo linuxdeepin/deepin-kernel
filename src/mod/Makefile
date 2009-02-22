@@ -8,7 +8,7 @@ PROGS = \
 OUTDIR = mod
 
 modpost.real-%:
-	$(MAKE) -f Makefile.real TYPE=$* SOURCEDIR=$(top_srcdir)/scripts/mod
+	$(MAKE) -f Makefile.real TYPE=$* SOURCEDIR=$(top_srcdir)/kbuild/scripts/mod
 
 %: %.o
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^

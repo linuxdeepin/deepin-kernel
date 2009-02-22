@@ -71,11 +71,12 @@ class Main(object):
 
     def generate(self):
         self.log("Generate orig\n")
-        orig = os.path.join(self.dir, self.orig)
+        orig = os.path.join(self.dir, self.orig, 'kbuild')
         temp = os.path.join(self.dir, 'temp')
         os.makedirs(os.path.join(orig, 'include', 'linux'))
-        shutil.copyfile(os.path.join(temp, 'COPYING'), os.path.join(orig, 'COPYING'))
-        for i in ('input.h', 'license.h', 'mod_devicetable.h'):
+        for i in 'COPYING', 'Kbuild', 'Makefile':
+            shutil.copyfile(os.path.join(temp, i), os.path.join(orig, i))
+        for i in 'input.h', 'license.h', 'mod_devicetable.h':
             shutil.copyfile(os.path.join(temp, 'include', 'linux', i), os.path.join(orig, 'include', 'linux', i))
         shutil.copytree(os.path.join(temp, 'scripts'), os.path.join(orig, 'scripts'))
 

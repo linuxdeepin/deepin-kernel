@@ -37,6 +37,6 @@ SUBDIRS = \
 	kconfig \
 	mod
 
-VPATH = $(top_srcdir)/scripts
+VPATH = $(top_srcdir)/kbuild/scripts
 
 include Makefile.inc

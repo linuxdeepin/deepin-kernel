@@ -1,9 +1,9 @@
 PROGS = genksyms
 
 OUTDIR = genksyms
-VPATH = $(top_srcdir)/scripts/genksyms
+VPATH = $(top_srcdir)/kbuild/scripts/genksyms
 
-CFLAGS += -I$(top_srcdir)/scripts/genksyms
+CFLAGS += -I$(top_srcdir)/kbuild/scripts/genksyms
 
 genksyms: genksyms.o parse.o lex.o
 

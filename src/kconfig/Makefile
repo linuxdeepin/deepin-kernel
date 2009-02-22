@@ -1,18 +1,18 @@
 PROGS = conf
 
 OUTDIR = kconfig
-VPATH = $(top_srcdir)/scripts/kconfig
+VPATH = $(top_srcdir)/kbuild/scripts/kconfig
 
-CFLAGS += -I$(top_srcdir)/scripts/kconfig
+CFLAGS += -I$(top_srcdir)/kbuild/scripts/kconfig
 
 conf: conf.o zconf.tab.o
 
 zconf.tab.c: zconf.hash.c lex.zconf.c
 
 %.c: %.c_shipped
-	ln -s $< $@
+	ln -sf $< $@
 
 %.h: %.h_shipped
-	ln -s $< $@
+	ln -sf $< $@
 
 include ../Makefile.inc

@@ -3,6 +3,6 @@ PROGS = \
 	fixdep
 
 OUTDIR = basic
-VPATH = $(top_srcdir)/scripts/basic
+VPATH = $(top_srcdir)/kbuild/scripts/basic
 
 include ../Makefile.inc
