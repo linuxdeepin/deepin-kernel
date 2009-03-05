@@ -1,18 +1,14 @@
-commit b775a750c3afacbfac884537d466d34d50b1023b
+commit 3185588805914cbaedae010d9c7f238f119a4ed3
 Author: Ben Hutchings <ben@decadent.org.uk>
-Date:   Thu Feb 26 23:21:23 2009 -0800
+Date:   Sun Feb 22 19:25:27 2009 +0000
 
     typhoon: Use request_firmware()
     
-    Based on a patch by Jaswinder Singh <jaswinder@infradead.org>.
-    
-    Compile-tested only.
-    
-    Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
-    Signed-off-by: David S. Miller <davem@davemloft.net>
+    Based on a patch by Jaswinder Singh <jaswinder@infradead.org> and
+    fixes for my bugs by David Dillow <dave@thedillows.org>.
 
 diff --git a/drivers/net/Kconfig b/drivers/net/Kconfig
-index c639aea..334472d 100644
+index 05f99fd..6134136 100644
 --- a/drivers/net/Kconfig
 +++ b/drivers/net/Kconfig
 @@ -733,7 +733,7 @@ config VORTEX
@@ -25,10 +21,18 @@ index c639aea..334472d 100644
  	---help---
  	  This option enables driver support for the 3cr990 series of cards:
 diff --git a/drivers/net/typhoon.c b/drivers/net/typhoon.c
-index a8e5651..cd3283f 100644
+index 3af9a95..e907e86 100644
 --- a/drivers/net/typhoon.c
 +++ b/drivers/net/typhoon.c
-@@ -129,16 +129,18 @@ static const int multicast_filter_limit = 32;
+@@ -104,6 +104,7 @@ static const int multicast_filter_limit = 32;
+ #define DRV_MODULE_RELDATE	"06/11/09"
+ #define PFX			DRV_MODULE_NAME ": "
+ #define ERR_PFX			KERN_ERR PFX
++#define FIRMWARE_NAME		"3com/typhoon.bin"
+ 
+ #include <linux/module.h>
+ #include <linux/kernel.h>
+@@ -129,9 +130,9 @@ static const int multicast_filter_limit = 32;
  #include <asm/uaccess.h>
  #include <linux/in6.h>
  #include <linux/dma-mapping.h>
@@ -39,8 +43,7 @@ index a8e5651..cd3283f 100644
  
  static char version[] __devinitdata =
      "typhoon.c: version " DRV_MODULE_VERSION " (" DRV_MODULE_RELDATE ")\n";
- 
-+#define FIRMWARE_NAME		"3com/typhoon.bin"
+@@ -139,6 +140,7 @@ static char version[] __devinitdata =
  MODULE_AUTHOR("David Dillow <dave@thedillows.org>");
  MODULE_VERSION(DRV_MODULE_VERSION);
  MODULE_LICENSE("GPL");
@@ -48,7 +51,7 @@ index a8e5651..cd3283f 100644
  MODULE_DESCRIPTION("3Com Typhoon Family (3C990, 3CR990, and variants)");
  MODULE_PARM_DESC(rx_copybreak, "Packets smaller than this are copied and "
  			       "the buffer given back to the NIC. Default "
-@@ -1344,45 +1346,61 @@ typhoon_init_rings(struct typhoon *tp)
+@@ -1344,14 +1346,74 @@ typhoon_init_rings(struct typhoon *tp)
  	tp->txHiRing.lastRead = 0;
  }
  
@@ -57,6 +60,12 @@ index a8e5651..cd3283f 100644
 +static int
 +typhoon_request_firmware(struct typhoon *tp)
 +{
++	const struct typhoon_file_header *fHdr;
++	const struct typhoon_section_header *sHdr;
++	const u8 *image_data;
++	u32 numSections;
++	u32 section_len;
++	u32 remaining;
 +	int err;
 +
 +	if (typhoon_fw)
@@ -65,20 +74,45 @@ index a8e5651..cd3283f 100644
 +	err = request_firmware(&typhoon_fw, FIRMWARE_NAME, &tp->pdev->dev);
 +	if (err) {
 +		printk(KERN_ERR "%s: Failed to load firmware \"%s\"\n",
-+		       tp->name, FIRMWARE_NAME);
++				tp->name, FIRMWARE_NAME);
 +		return err;
 +	}
 +
-+	if (typhoon_fw->size < sizeof(struct typhoon_file_header) ||
-+	    memcmp(typhoon_fw->data, "TYPHOON", 8)) {
-+		printk(KERN_ERR "%s: Invalid firmware image\n",
-+		       tp->name);
-+		release_firmware(typhoon_fw);
-+		typhoon_fw = NULL;
-+		return -EINVAL;
++	image_data = (u8 *) typhoon_fw->data;
++	remaining = typhoon_fw->size;
++	if (remaining < sizeof(struct typhoon_file_header))
++		goto invalid_fw;
++
++	fHdr = (struct typhoon_file_header *) image_data;
++	if (memcmp(fHdr->tag, "TYPHOON", 8))
++		goto invalid_fw;
++
++	numSections = le32_to_cpu(fHdr->numSections);
++	image_data += sizeof(struct typhoon_file_header);
++	remaining -= sizeof(struct typhoon_file_header);
++
++	while (numSections--) {
++		if (remaining < sizeof(struct typhoon_section_header))
++			goto invalid_fw;
++
++		sHdr = (struct typhoon_section_header *) image_data;
++		image_data += sizeof(struct typhoon_section_header);
++		section_len = le32_to_cpu(sHdr->len);
++
++		if (remaining < section_len)
++			goto invalid_fw;
++
++		image_data += section_len;
++		remaining -= section_len;
 +	}
 +
 +	return 0;
++
++invalid_fw:
++	printk(KERN_ERR "%s: Invalid firmware image\n", tp->name);
++	release_firmware(typhoon_fw);
++	typhoon_fw = NULL;
++	return -EINVAL;
 +}
 +
  static int
@@ -89,20 +123,13 @@ index a8e5651..cd3283f 100644
 -	struct typhoon_file_header *fHdr;
 -	struct typhoon_section_header *sHdr;
 -	u8 *image_data;
--	void *dpage;
--	dma_addr_t dpage_dma;
 +	const struct typhoon_file_header *fHdr;
 +	const struct typhoon_section_header *sHdr;
 +	const u8 *image_data;
-+	dma_addr_t image_dma;
+ 	void *dpage;
+ 	dma_addr_t dpage_dma;
  	__sum16 csum;
- 	u32 irqEnabled;
- 	u32 irqMasked;
- 	u32 numSections;
- 	u32 section_len;
--	u32 len;
- 	u32 load_addr;
- 	u32 hmac;
+@@ -1365,20 +1427,12 @@ typhoon_download_firmware(struct typhoon *tp)
  	int i;
  	int err;
  
@@ -114,102 +141,20 @@ index a8e5651..cd3283f 100644
 -		printk(KERN_ERR "%s: Invalid firmware image!\n", tp->name);
 -		goto err_out;
 -	}
-+	image_data = typhoon_fw->data;
++	image_data = (u8 *) typhoon_fw->data;
 +	fHdr = (struct typhoon_file_header *) image_data;
  
--	/* Cannot just map the firmware image using pci_map_single() as
+ 	/* Cannot just map the firmware image using pci_map_single() as
 -	 * the firmware is part of the kernel/module image, so we allocate
 -	 * some consistent memory to copy the sections into, as it is simpler,
 -	 * and short-lived. If we ever split out and require a userland
 -	 * firmware loader, then we can revisit this.
--	 */
++	 * the firmware is vmalloc()'d and may not be physically contiguous,
++	 * so we allocate some consistent memory to copy the sections into.
+ 	 */
  	err = -ENOMEM;
--	dpage = pci_alloc_consistent(pdev, PAGE_SIZE, &dpage_dma);
--	if(!dpage) {
-+	image_dma = pci_map_single(pdev, (u8 *) typhoon_fw->data,
-+				   typhoon_fw->size, PCI_DMA_TODEVICE);
-+	if (pci_dma_mapping_error(pdev, image_dma)) {
- 		printk(KERN_ERR "%s: no DMA mem for firmware\n", tp->name);
- 		goto err_out;
- 	}
-@@ -1430,41 +1448,34 @@ typhoon_download_firmware(struct typhoon *tp)
- 		load_addr = le32_to_cpu(sHdr->startAddr);
- 		section_len = le32_to_cpu(sHdr->len);
- 
--		while(section_len) {
--			len = min_t(u32, section_len, PAGE_SIZE);
-+		if (typhoon_wait_interrupt(ioaddr) < 0 ||
-+		    ioread32(ioaddr + TYPHOON_REG_STATUS) !=
-+		    TYPHOON_STATUS_WAITING_FOR_SEGMENT) {
-+			printk(KERN_ERR "%s: segment ready timeout\n",
-+			       tp->name);
-+			goto err_out_irq;
-+		}
- 
--			if(typhoon_wait_interrupt(ioaddr) < 0 ||
--			   ioread32(ioaddr + TYPHOON_REG_STATUS) !=
--			   TYPHOON_STATUS_WAITING_FOR_SEGMENT) {
--				printk(KERN_ERR "%s: segment ready timeout\n",
--				       tp->name);
--				goto err_out_irq;
--			}
-+		/* Do an pseudo IPv4 checksum on the data -- first
-+		 * need to convert each u16 to cpu order before
-+		 * summing. Fortunately, due to the properties of
-+		 * the checksum, we can do this once, at the end.
-+		 */
-+		csum = csum_fold(csum_partial(image_data, section_len, 0));
-+
-+		iowrite32(section_len, ioaddr + TYPHOON_REG_BOOT_LENGTH);
-+		iowrite32(le16_to_cpu((__force __le16)csum),
-+			  ioaddr + TYPHOON_REG_BOOT_CHECKSUM);
-+		iowrite32(load_addr,
-+			  ioaddr + TYPHOON_REG_BOOT_DEST_ADDR);
-+		iowrite32(0, ioaddr + TYPHOON_REG_BOOT_DATA_HI);
-+		iowrite32(image_dma + (image_data - typhoon_fw->data),
-+			  ioaddr + TYPHOON_REG_BOOT_DATA_LO);
-+		typhoon_post_pci_writes(ioaddr);
-+		iowrite32(TYPHOON_BOOTCMD_SEG_AVAILABLE,
-+			  ioaddr + TYPHOON_REG_COMMAND);
- 
--			/* Do an pseudo IPv4 checksum on the data -- first
--			 * need to convert each u16 to cpu order before
--			 * summing. Fortunately, due to the properties of
--			 * the checksum, we can do this once, at the end.
--			 */
--			csum = csum_fold(csum_partial_copy_nocheck(image_data,
--								  dpage, len,
--								  0));
--
--			iowrite32(len, ioaddr + TYPHOON_REG_BOOT_LENGTH);
--			iowrite32(le16_to_cpu((__force __le16)csum),
--					ioaddr + TYPHOON_REG_BOOT_CHECKSUM);
--			iowrite32(load_addr,
--					ioaddr + TYPHOON_REG_BOOT_DEST_ADDR);
--			iowrite32(0, ioaddr + TYPHOON_REG_BOOT_DATA_HI);
--			iowrite32(dpage_dma, ioaddr + TYPHOON_REG_BOOT_DATA_LO);
--			typhoon_post_pci_writes(ioaddr);
--			iowrite32(TYPHOON_BOOTCMD_SEG_AVAILABLE,
--			       ioaddr + TYPHOON_REG_COMMAND);
--
--			image_data += len;
--			load_addr += len;
--			section_len -= len;
--		}
-+		image_data += section_len;
- 	}
- 
- 	if(typhoon_wait_interrupt(ioaddr) < 0 ||
-@@ -1488,7 +1499,7 @@ err_out_irq:
- 	iowrite32(irqMasked, ioaddr + TYPHOON_REG_INTR_MASK);
- 	iowrite32(irqEnabled, ioaddr + TYPHOON_REG_INTR_ENABLE);
- 
--	pci_free_consistent(pdev, PAGE_SIZE, dpage, dpage_dma);
-+	pci_unmap_single(pdev, image_dma,  typhoon_fw->size, PCI_DMA_TODEVICE);
- 
- err_out:
- 	return err;
-@@ -2086,6 +2097,10 @@ typhoon_open(struct net_device *dev)
+ 	dpage = pci_alloc_consistent(pdev, PAGE_SIZE, &dpage_dma);
+@@ -2086,6 +2140,10 @@ typhoon_open(struct net_device *dev)
  	struct typhoon *tp = netdev_priv(dev);
  	int err;
  
@@ -220,7 +165,7 @@ index a8e5651..cd3283f 100644
  	err = typhoon_wakeup(tp, WaitSleep);
  	if(err < 0) {
  		printk(KERN_ERR "%s: unable to wakeup device\n", dev->name);
-@@ -2624,6 +2639,8 @@ typhoon_init(void)
+@@ -2624,6 +2682,8 @@ typhoon_init(void)
  static void __exit
  typhoon_cleanup(void)
  {
