@@ -1,11 +1,17 @@
 diff --git a/scripts/kconfig/Makefile b/scripts/kconfig/Makefile
-index 32e8c5a..7e14c56 100644
+index fa8c2dd..7936c57 100644
 --- a/scripts/kconfig/Makefile
 +++ b/scripts/kconfig/Makefile
-@@ -5,1 +5,1 @@
+@@ -2,7 +2,7 @@
+ # Kernel configuration targets
+ # These targets are used from top-level makefile
+ 
 -PHONY += oldconfig xconfig gconfig menuconfig config silentoldconfig update-po-config
 +PHONY += oldconfig xconfig gconfig menuconfig config reportoldconfig silentoldconfig updateoldconfig update-po-config
-@@ -21,9 +21,15 @@ config: $(obj)/conf
+ 
+ ifdef KBUILD_KCONFIG
+ Kconfig := $(KBUILD_KCONFIG)
+@@ -25,9 +25,15 @@ config: $(obj)/conf
  oldconfig: $(obj)/conf
  	$< -o $(Kconfig)
  
@@ -22,7 +28,7 @@ index 32e8c5a..7e14c56 100644
  # Adjust charset to UTF-8 in .po file to accept UTF-8 in Kconfig files
  # The symlink is used to repair a deficiency in arch/um
 diff --git a/scripts/kconfig/conf.c b/scripts/kconfig/conf.c
-index fda6313..c9f3f3a 100644
+index 3e1057f..e526d00 100644
 --- a/scripts/kconfig/conf.c
 +++ b/scripts/kconfig/conf.c
 @@ -5,6 +5,7 @@
@@ -33,11 +39,80 @@ index fda6313..c9f3f3a 100644
  #include <stdio.h>
  #include <stdlib.h>
  #include <string.h>
-@@ -464,17 +465,106 @@ static void check_conf(struct menu *menu)
+@@ -433,12 +434,13 @@ int main(int ac, char **av)
+ 	int opt;
+ 	const char *name;
+ 	struct stat tmpstat;
++	bool report = false, update = false;
+ 
+ 	setlocale(LC_ALL, "");
+ 	bindtextdomain(PACKAGE, LOCALEDIR);
+ 	textdomain(PACKAGE);
+ 
+-	while ((opt = getopt(ac, av, "osdD:nmyrh")) != -1) {
++	while ((opt = getopt(ac, av, "osdD:nmyrRUh")) != -1) {
+ 		switch (opt) {
+ 		case 'o':
+ 			input_mode = ask_silent;
+@@ -467,6 +469,14 @@ int main(int ac, char **av)
+ 			input_mode = set_random;
+ 			srand(time(NULL));
+ 			break;
++		case 'R':
++			input_mode = set_default;
++			report = update = true;
++			break;
++		case 'U':
++			input_mode = set_default;
++			update = true;
++			break;
+ 		case 'h':
+ 			printf(_("See README for usage info\n"));
+ 			exit(0);
+@@ -498,13 +508,17 @@ int main(int ac, char **av)
+ 
+ 	switch (input_mode) {
+ 	case set_default:
+-		if (!defconfig_file)
+-			defconfig_file = conf_get_default_confname();
+-		if (conf_read(defconfig_file)) {
+-			printf(_("***\n"
+-				"*** Can't find default configuration \"%s\"!\n"
+-				"***\n"), defconfig_file);
+-			exit(1);
++		if (update)
++			conf_read(NULL);
++		else {
++			if (!defconfig_file)
++				defconfig_file = conf_get_default_confname();
++			if (conf_read(defconfig_file)) {
++				printf("***\n"
++					"*** Can't find default configuration \"%s\"!\n"
++					"***\n", defconfig_file);
++				exit(1);
++			}
+ 		}
+ 		break;
+ 	case ask_silent:
+@@ -580,6 +594,9 @@ int main(int ac, char **av)
+ 		break;
+ 	}
+ 
++	if (report)
++		conf_write_changes();
++
+ 	if (sync_kconfig) {
+ 		/* silentoldconfig is used during the build so we shall update autoconf.
+ 		 * All other commands are only used to generate a config.
+diff --git a/scripts/kconfig/confdata.c b/scripts/kconfig/confdata.c
+index 830d9ea..2e80693 100644
+--- a/scripts/kconfig/confdata.c
++++ b/scripts/kconfig/confdata.c
+@@ -786,6 +786,94 @@ int conf_write_autoconf(void)
  	return 0;
  }
  
-+void report_changes(void)
++void conf_write_changes(void)
 +{
 +	struct symbol *sym;
 +	struct menu *menu;
@@ -55,11 +130,11 @@ index fda6313..c9f3f3a 100644
 +				goto next;
 +		} else if (!(sym->flags & SYMBOL_CHOICE)) {
 +			sym_calc_value(sym);
-+			if ((sym->flags & (SYMBOL_WRITE | SYMBOL_CHANGED_REAL | SYMBOL_DEF_USER)) !=
-+			    (SYMBOL_WRITE | SYMBOL_CHANGED_REAL | SYMBOL_DEF_USER))
++			if ((sym->flags & (SYMBOL_WRITE | SYMBOL_NEW)) !=
++			    (SYMBOL_WRITE | SYMBOL_NEW))
 +				goto next;
-+                        if (sym->visible == no)
-+                                goto next;
++			if (sym->visible == no)
++				goto next;
 +			type = sym->type;
 +			if (type == S_TRISTATE) {
 +				sym_calc_value(modules_sym);
@@ -125,197 +200,38 @@ index fda6313..c9f3f3a 100644
 +	}
 +}
 +
- int main(int ac, char **av)
- {
- 	int opt;
- 	const char *name;
- 	struct stat tmpstat;
-+	bool report = false, update = false;
+ static int sym_change_count;
+ static void (*conf_changed_callback)(void);
  
- 	setlocale(LC_ALL, "");
- 	bindtextdomain(PACKAGE, LOCALEDIR);
- 	textdomain(PACKAGE);
- 
--	while ((opt = getopt(ac, av, "osdD:nmyrh")) != -1) {
-+	while ((opt = getopt(ac, av, "osdD:nmyrRUh")) != -1) {
- 		switch (opt) {
- 		case 'o':
- 			input_mode = ask_new;
-@@ -533,6 +623,14 @@ int main(int ac, char **av)
- 			input_mode = set_random;
- 			srand(time(NULL));
- 			break;
-+		case 'R':
-+			input_mode = set_default;
-+			report = update = true;
-+			break;
-+		case 'U':
-+			input_mode = set_default;
-+			update = true;
-+			break;
- 		case 'h':
- 			printf(_("See README for usage info\n"));
- 			exit(0);
-@@ -551,13 +649,17 @@ int main(int ac, char **av)
- 	//zconfdump(stdout);
- 	switch (input_mode) {
- 	case set_default:
--		if (!defconfig_file)
--			defconfig_file = conf_get_default_confname();
--		if (conf_read(defconfig_file)) {
--			printf(_("***\n"
--				"*** Can't find default configuration \"%s\"!\n"
--				"***\n"), defconfig_file);
--			exit(1);
-+		if (update)
-+			conf_read(NULL);
-+		else {
-+			if (!defconfig_file)
-+				defconfig_file = conf_get_default_confname();
-+			if (conf_read(defconfig_file)) {
-+				printf("***\n"
-+					"*** Can't find default configuration \"%s\"!\n"
-+					"***\n", defconfig_file);
-+				exit(1);
-+			}
- 		}
- 		break;
- 	case ask_silent:
-@@ -596,6 +698,9 @@ int main(int ac, char **av)
- 		break;
- 	}
- 
-+	if (report)
-+		report_changes();
-+
- 	if (sync_kconfig) {
- 		/* silentoldconfig is used during the build so we shall update autoconf.
- 		 * All other commands are only used to generate a config.
-diff --git a/scripts/kconfig/confdata.c b/scripts/kconfig/confdata.c
-index ee5fe94..3efce9f 100644
---- a/scripts/kconfig/confdata.c
-+++ b/scripts/kconfig/confdata.c
-@@ -366,8 +366,6 @@ int conf_read(const char *name)
- 			 * doesn't quite work if the Kconfig and the saved
- 			 * configuration disagree.
- 			 */
--			if (sym->visible == no && !conf_unsaved)
--				sym->flags &= ~SYMBOL_DEF_USER;
- 			switch (sym->type) {
- 			case S_STRING:
- 			case S_INT:
+@@ -824,6 +912,7 @@ void conf_set_all_new_symbols(enum conf_def_mode mode)
+ 	for_all_symbols(i, sym) {
+ 		if (sym_has_value(sym))
+ 			continue;
++		sym->flags |= SYMBOL_NEW;
+ 		switch (sym_get_type(sym)) {
+ 		case S_BOOLEAN:
+ 		case S_TRISTATE:
 diff --git a/scripts/kconfig/expr.h b/scripts/kconfig/expr.h
-index 6408fef..9d276f6 100644
+index 6408fef..fd025e1 100644
 --- a/scripts/kconfig/expr.h
 +++ b/scripts/kconfig/expr.h
 @@ -106,6 +106,7 @@ struct symbol {
  #define SYMBOL_DEF_AUTO   0x20000  /* symbol.def[S_DEF_AUTO] is valid */
  #define SYMBOL_DEF3       0x40000  /* symbol.def[S_DEF_3] is valid */
  #define SYMBOL_DEF4       0x80000  /* symbol.def[S_DEF_4] is valid */
-+#define SYMBOL_CHANGED_REAL    0x100000
++#define SYMBOL_NEW        0x100000
  
  #define SYMBOL_MAXLENGTH	256
  #define SYMBOL_HASHSIZE		257
-diff --git a/scripts/kconfig/lkc.h b/scripts/kconfig/lkc.h
-index 4bc68f2..4590130 100644
---- a/scripts/kconfig/lkc.h
-+++ b/scripts/kconfig/lkc.h
-@@ -110,7 +110,7 @@ extern struct expr *sym_env_list;
- void sym_init(void);
- void sym_clear_all_valid(void);
- void sym_set_all_changed(void);
--void sym_set_changed(struct symbol *sym);
-+void sym_set_changed(struct symbol *sym, bool real);
- struct symbol *sym_check_deps(struct symbol *sym);
- struct property *prop_alloc(enum prop_type type, struct symbol *sym);
- struct symbol *prop_get_symbol(struct property *prop);
-diff --git a/scripts/kconfig/symbol.c b/scripts/kconfig/symbol.c
-index 3929e5b..b035410 100644
---- a/scripts/kconfig/symbol.c
-+++ b/scripts/kconfig/symbol.c
-@@ -4,6 +4,7 @@
-  */
+diff --git a/scripts/kconfig/lkc_proto.h b/scripts/kconfig/lkc_proto.h
+index 8e69461..974acf0 100644
+--- a/scripts/kconfig/lkc_proto.h
++++ b/scripts/kconfig/lkc_proto.h
+@@ -5,6 +5,7 @@ P(conf_read,int,(const char *name));
+ P(conf_read_simple,int,(const char *name, int));
+ P(conf_write,int,(const char *name));
+ P(conf_write_autoconf,int,(void));
++P(conf_write_changes,void,(void));
+ P(conf_get_changed,bool,(void));
+ P(conf_set_changed_callback, void,(void (*fn)(void)));
  
- #include <ctype.h>
-+#include <stdbool.h>
- #include <stdlib.h>
- #include <string.h>
- #include <regex.h>
-@@ -201,7 +202,7 @@ static void sym_calc_visibility(struct symbol *sym)
- 		tri = yes;
- 	if (sym->visible != tri) {
- 		sym->visible = tri;
--		sym_set_changed(sym);
-+		sym_set_changed(sym, false);
- 	}
- 	if (sym_is_choice_value(sym))
- 		return;
-@@ -212,7 +213,7 @@ static void sym_calc_visibility(struct symbol *sym)
- 		tri = yes;
- 	if (sym->rev_dep.tri != tri) {
- 		sym->rev_dep.tri = tri;
--		sym_set_changed(sym);
-+		sym_set_changed(sym, false);
- 	}
- }
- 
-@@ -351,7 +352,7 @@ void sym_calc_value(struct symbol *sym)
- 	sym_validate_range(sym);
- 
- 	if (memcmp(&oldval, &sym->curr, sizeof(oldval))) {
--		sym_set_changed(sym);
-+		sym_set_changed(sym, false);
- 		if (modules_sym == sym) {
- 			sym_set_all_changed();
- 			modules_val = modules_sym->curr.tri;
-@@ -366,7 +367,7 @@ void sym_calc_value(struct symbol *sym)
- 		expr_list_for_each_sym(prop->expr, e, choice_sym) {
- 			choice_sym->flags |= flags;
- 			if (flags & SYMBOL_CHANGED)
--				sym_set_changed(choice_sym);
-+				sym_set_changed(choice_sym, false);
- 		}
- 	}
- 
-@@ -383,11 +384,13 @@ void sym_clear_all_valid(void)
- 		sym_calc_value(modules_sym);
- }
- 
--void sym_set_changed(struct symbol *sym)
-+void sym_set_changed(struct symbol *sym, bool real)
- {
- 	struct property *prop;
- 
- 	sym->flags |= SYMBOL_CHANGED;
-+	if (real)
-+		sym->flags |= SYMBOL_CHANGED_REAL;
- 	for (prop = sym->prop; prop; prop = prop->next) {
- 		if (prop->menu)
- 			prop->menu->flags |= MENU_CHANGED;
-@@ -400,7 +403,7 @@ void sym_set_all_changed(void)
- 	int i;
- 
- 	for_all_symbols(i, sym)
--		sym_set_changed(sym);
-+		sym_set_changed(sym, false);
- }
- 
- bool sym_tristate_within_range(struct symbol *sym, tristate val)
-@@ -431,7 +434,7 @@ bool sym_set_tristate_value(struct symbol *sym, tristate val)
- 
- 	if (!(sym->flags & SYMBOL_DEF_USER)) {
- 		sym->flags |= SYMBOL_DEF_USER;
--		sym_set_changed(sym);
-+		sym_set_changed(sym, true);
- 	}
- 	/*
- 	 * setting a choice value also resets the new flag of the choice
-@@ -593,7 +596,7 @@ bool sym_set_string_value(struct symbol *sym, const char *newval)
- 
- 	if (!(sym->flags & SYMBOL_DEF_USER)) {
- 		sym->flags |= SYMBOL_DEF_USER;
--		sym_set_changed(sym);
-+		sym_set_changed(sym, true);
- 	}
- 
- 	oldval = sym->def[S_DEF_USER].val;
