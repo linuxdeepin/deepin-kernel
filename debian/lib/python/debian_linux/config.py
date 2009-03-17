@@ -112,6 +112,7 @@ class ConfigCoreHierarchy(ConfigCore):
             'flavours': SchemaItemList(),
             'modules': SchemaItemBoolean(),
         },
+        'build': {},
         'image': {
             'configs': SchemaItemList(),
             'desc-parts': SchemaItemList(),
