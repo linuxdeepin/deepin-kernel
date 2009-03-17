@@ -144,13 +144,13 @@ class CheckImage(object):
 
         value = int(value)
 
-        s = os.stat(image)
+        size = os.stat(image)[stat.ST_SIZE]
 
-        if s[stat.ST_SIZE] > value:
-            out.write('Image too large (%d > %d)!  Refusing to continue.\n' % (s[stat.ST_SIZE], value))
+        if size > value:
+            out.write('Image too large (%d > %d)!  Refusing to continue.\n' % (size, value))
             return 1
 
-        out.write('Image fits (%d).  Continuing.\n' % value)
+        out.write('Image fits (%d <= %d).  Continuing.\n' % (size, value))
         return 0
 
 
