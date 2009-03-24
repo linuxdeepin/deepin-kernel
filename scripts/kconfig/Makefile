@@ -19,3 +19,6 @@ zconf.tab.c: zconf.hash.c lex.zconf.c
 
 %.h: %.h_shipped
 	ln -sf $< $@
+
+clean:
+	rm -f zconf.tab.c zconf.hash.c lex.zconf.c

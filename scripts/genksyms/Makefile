@@ -19,3 +19,6 @@ lex.o: keywords.c parse.h
 
 %.h: %.h_shipped
 	ln -s $< $@
+
+clean:
+	rm -f keywords.c parse.h
