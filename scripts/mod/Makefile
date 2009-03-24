@@ -23,5 +23,4 @@ modpost.h: $(top_srcdir)/kbuild/scripts/mod/modpost.c
 modpost.o: modpost.c modpost.h
 
 clean:
-	rm $(PROGS) modpost.h *.o
-
+	rm -f modpost.h
