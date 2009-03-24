@@ -18,7 +18,7 @@ modpost.real-%:
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
 
 modpost.h: $(top_srcdir)/kbuild/scripts/mod/modpost.c
-	./gendef.py $< > $@
+	python ./gendef.py $< > $@
 
 modpost.o: modpost.c modpost.h
 
