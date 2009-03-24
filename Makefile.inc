@@ -2,7 +2,7 @@ SHELL = /bin/sh -e
 
 CC = gcc
 CXX = g++
-CFLAGS += -Wall -O2
+CFLAGS ?= -O2 -Wall
 CXXFLAGS = $(CFLAGS)
 
 all: all-local all-recursive
