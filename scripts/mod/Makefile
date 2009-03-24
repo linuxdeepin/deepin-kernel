@@ -7,14 +7,21 @@ PROGS = \
 
 OUTDIR = scripts/mod
 
+top_srcdir = ../..
+
+include $(top_srcdir)/Makefile.inc
+
 modpost.real-%:
 	$(MAKE) -f Makefile.real TYPE=$* SOURCEDIR=$(top_srcdir)/kbuild/scripts/mod
 
 %: %.o
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
 
-include $(top_srcdir)/Makefile.inc
+modpost.h: $(top_srcdir)/kbuild/scripts/mod/modpost.c
+	./gendef.py $< > $@
+
+modpost.o: modpost.c modpost.h
 
 clean:
-	rm $(PROGS) *.o
+	rm $(PROGS) modpost.h *.o
 

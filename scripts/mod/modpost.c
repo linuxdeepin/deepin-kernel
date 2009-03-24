@@ -5,6 +5,8 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "modpost.h"
+
 int main (int argc, char *argv[])
 {
   char const *data, *class;
@@ -13,22 +15,11 @@ int main (int argc, char *argv[])
   int opt;
   FILE *file;
 
-  while ((opt = getopt (argc, argv, "acei:I:K:mM:o:sSw")) != -1)
+  while ((opt = getopt (argc, argv, GETOPT_OPTIONS)) != -1)
   { 
     switch(opt)
     {
-      case 'a':
-      case 'e':
-      case 'i':
-      case 'c':
-      case 'I':
-      case 'K':
-      case 'm':
-      case 'M':
-      case 'o':
-      case 's':
-      case 'S':
-      case 'w':
+      GETOPT_CASE
         break;
       default:
         return EXIT_FAILURE;
