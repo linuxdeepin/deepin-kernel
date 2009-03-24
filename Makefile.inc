@@ -19,15 +19,12 @@ all-recursive install-recursive:
 
 all-local: $(PROGS)
 
-install-local: install-local-dir install-local-progs install-local-scripts install-local-data
-
-install-local-dir:
-	install -d "$(prefix)/$(OUTDIR)"
+install-local: install-local-progs install-local-scripts install-local-data
 
 install-local-progs: $(PROGS)
 	@for p in $^; do \
 	  echo " install -m755 '$$p' '$(prefix)/$(OUTDIR)'"; \
-	  install -m755 "$$p" "$(prefix)/$(OUTDIR)"; \
+	  install -D -m755 "$$p" "$(prefix)/$(OUTDIR)/$$(basename $$p)"; \
 	done
 
 SCRIPTS_REAL = $(addprefix $(top_srcdir)/kbuild/$(OUTDIR)/,$(SCRIPTS))
@@ -35,7 +32,7 @@ SCRIPTS_REAL = $(addprefix $(top_srcdir)/kbuild/$(OUTDIR)/,$(SCRIPTS))
 install-local-scripts: $(SCRIPTS_REAL)
 	@for p in $^; do \
 	  echo " install -m755 '$$p' '$(prefix)/$(OUTDIR)'"; \
-	  install -m755 "$$p" "$(prefix)/$(OUTDIR)"; \
+	  install -D -m755 "$$p" "$(prefix)/$(OUTDIR)/$$(basename $$p)"; \
 	done
 
 DATA_REAL = $(addprefix $(top_srcdir)/kbuild/$(OUTDIR)/,$(DATA))
@@ -43,6 +40,6 @@ DATA_REAL = $(addprefix $(top_srcdir)/kbuild/$(OUTDIR)/,$(DATA))
 install-local-data: $(DATA_REAL)
 	@for p in $^; do \
 	  echo " install -m644 '$$p' '$(prefix)/$(OUTDIR)'"; \
-	  install -m644 "$$p" "$(prefix)/$(OUTDIR)"; \
+	  install -D -m644 "$$p" "$(prefix)/$(OUTDIR)/$$(basename $$p)"; \
 	done
 
