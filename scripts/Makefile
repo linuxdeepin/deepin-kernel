@@ -39,6 +39,8 @@ SUBDIRS = \
 
 OUTDIR = scripts
 
+top_srcdir = ..
+
 VPATH = $(top_srcdir)/kbuild/scripts
 
 include $(top_srcdir)/Makefile.inc

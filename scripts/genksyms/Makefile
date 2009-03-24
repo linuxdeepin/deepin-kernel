@@ -1,9 +1,14 @@
 PROGS = genksyms
 
 OUTDIR = scripts/genksyms
-VPATH = $(top_srcdir)/kbuild/scripts/genksyms
 
-CFLAGS += -I$(top_srcdir)/kbuild/scripts/genksyms
+top_srcdir = ../..
+
+VPATH = $(top_srcdir)/kbuild/$(OUTDIR)
+
+include $(top_srcdir)/Makefile.inc
+
+CFLAGS += -I$(VPATH)
 
 genksyms: genksyms.o parse.o lex.o
 
@@ -14,5 +19,3 @@ lex.o: keywords.c parse.h
 
 %.h: %.h_shipped
 	ln -s $< $@
-
-include $(top_srcdir)/Makefile.inc

@@ -7,4 +7,6 @@ SUBDIRS = \
 
 OUTDIR = .
 
+top_srcdir = .
+
 include $(top_srcdir)/Makefile.inc
