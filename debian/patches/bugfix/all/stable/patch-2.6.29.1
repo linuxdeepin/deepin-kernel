@@ -1,0 +1,1243 @@
+diff --git a/arch/arm/include/asm/elf.h b/arch/arm/include/asm/elf.h
+index a58378c..ce3b36e 100644
+--- a/arch/arm/include/asm/elf.h
++++ b/arch/arm/include/asm/elf.h
+@@ -50,6 +50,7 @@ typedef struct user_fp elf_fpregset_t;
+ #define R_ARM_ABS32	2
+ #define R_ARM_CALL	28
+ #define R_ARM_JUMP24	29
++#define R_ARM_V4BX	40
+ 
+ /*
+  * These are used to set parameters in the core dumps.
+diff --git a/arch/arm/kernel/module.c b/arch/arm/kernel/module.c
+index dab48f2..9f509fd 100644
+--- a/arch/arm/kernel/module.c
++++ b/arch/arm/kernel/module.c
+@@ -132,6 +132,15 @@ apply_relocate(Elf32_Shdr *sechdrs, const char *strtab, unsigned int symindex,
+ 			*(u32 *)loc |= offset & 0x00ffffff;
+ 			break;
+ 
++	       case R_ARM_V4BX:
++		       /* Preserve Rm and the condition code. Alter
++			* other bits to re-code instruction as
++			* MOV PC,Rm.
++			*/
++		       *(u32 *)loc &= 0xf000000f;
++		       *(u32 *)loc |= 0x01a0f000;
++		       break;
++
+ 		default:
+ 			printk(KERN_ERR "%s: unknown relocation: %u\n",
+ 			       module->name, ELF32_R_TYPE(rel->r_info));
+diff --git a/arch/arm/mach-iop13xx/pci.c b/arch/arm/mach-iop13xx/pci.c
+index 673b0db..4873f26 100644
+--- a/arch/arm/mach-iop13xx/pci.c
++++ b/arch/arm/mach-iop13xx/pci.c
+@@ -1026,8 +1026,10 @@ int iop13xx_pci_setup(int nr, struct pci_sys_data *sys)
+ 		which_atu = 0;
+ 	}
+ 
+-	if (!which_atu)
++	if (!which_atu) {
++		kfree(res);
+ 		return 0;
++	}
+ 
+ 	switch(which_atu) {
+ 	case IOP13XX_INIT_ATU_ATUX:
+@@ -1074,6 +1076,7 @@ int iop13xx_pci_setup(int nr, struct pci_sys_data *sys)
+ 		sys->map_irq = iop13xx_pcie_map_irq;
+ 		break;
+ 	default:
++		kfree(res);
+ 		return 0;
+ 	}
+ 
+diff --git a/arch/arm/mach-omap2/mmc-twl4030.c b/arch/arm/mach-omap2/mmc-twl4030.c
+index 437f520..e1dadf7 100644
+--- a/arch/arm/mach-omap2/mmc-twl4030.c
++++ b/arch/arm/mach-omap2/mmc-twl4030.c
+@@ -397,6 +397,7 @@ void __init twl4030_mmc_init(struct twl4030_hsmmc_info *controllers)
+ 			break;
+ 		default:
+ 			pr_err("MMC%d configuration not supported!\n", c->mmc);
++			kfree(mmc);
+ 			continue;
+ 		}
+ 		hsmmc_data[c->mmc - 1] = mmc;
+diff --git a/arch/arm/mm/mmu.c b/arch/arm/mm/mmu.c
+index d4d082c..5a89e57 100644
+--- a/arch/arm/mm/mmu.c
++++ b/arch/arm/mm/mmu.c
+@@ -694,7 +694,7 @@ static void __init sanity_check_meminfo(void)
+ 		 * the vmalloc area.
+ 		 */
+ 		if (__va(bank->start) >= VMALLOC_MIN ||
+-		    __va(bank->start) < PAGE_OFFSET) {
++		    __va(bank->start) < (void *)PAGE_OFFSET) {
+ 			printk(KERN_NOTICE "Ignoring RAM at %.8lx-%.8lx "
+ 			       "(vmalloc region overlap).\n",
+ 			       bank->start, bank->start + bank->size - 1);
+diff --git a/arch/sparc/include/asm/tlb_64.h b/arch/sparc/include/asm/tlb_64.h
+index ec81cde..0aaa086 100644
+--- a/arch/sparc/include/asm/tlb_64.h
++++ b/arch/sparc/include/asm/tlb_64.h
+@@ -58,6 +58,8 @@ static inline struct mmu_gather *tlb_gather_mmu(struct mm_struct *mm, unsigned i
+ static inline void tlb_flush_mmu(struct mmu_gather *mp)
+ {
+ 	if (mp->need_flush) {
++		if (!mp->fullmm)
++			flush_tlb_pending();
+ 		free_pages_and_swap_cache(mp->pages, mp->pages_nr);
+ 		mp->pages_nr = 0;
+ 		mp->need_flush = 0;
+@@ -78,8 +80,6 @@ static inline void tlb_finish_mmu(struct mmu_gather *mp, unsigned long start, un
+ 
+ 	if (mp->fullmm)
+ 		mp->fullmm = 0;
+-	else
+-		flush_tlb_pending();
+ 
+ 	/* keep the page table cache within bounds */
+ 	check_pgt_cache();
+diff --git a/arch/sparc/kernel/nmi.c b/arch/sparc/kernel/nmi.c
+index f357722..2c0cc72 100644
+--- a/arch/sparc/kernel/nmi.c
++++ b/arch/sparc/kernel/nmi.c
+@@ -13,6 +13,7 @@
+ #include <linux/module.h>
+ #include <linux/kprobes.h>
+ #include <linux/kernel_stat.h>
++#include <linux/reboot.h>
+ #include <linux/slab.h>
+ #include <linux/kdebug.h>
+ #include <linux/delay.h>
+@@ -206,13 +207,33 @@ void nmi_adjust_hz(unsigned int new_hz)
+ }
+ EXPORT_SYMBOL_GPL(nmi_adjust_hz);
+ 
++static int nmi_shutdown(struct notifier_block *nb, unsigned long cmd, void *p)
++{
++	on_each_cpu(stop_watchdog, NULL, 1);
++	return 0;
++}
++
++static struct notifier_block nmi_reboot_notifier = {
++	.notifier_call = nmi_shutdown,
++};
++
+ int __init nmi_init(void)
+ {
++	int err;
++
+ 	nmi_usable = 1;
+ 
+ 	on_each_cpu(start_watchdog, NULL, 1);
+ 
+-	return check_nmi_watchdog();
++	err = check_nmi_watchdog();
++	if (!err) {
++		err = register_reboot_notifier(&nmi_reboot_notifier);
++		if (err) {
++			nmi_usable = 0;
++			on_each_cpu(stop_watchdog, NULL, 1);
++		}
++	}
++	return err;
+ }
+ 
+ static int __init setup_nmi_watchdog(char *str)
+diff --git a/arch/sparc/kernel/smp_64.c b/arch/sparc/kernel/smp_64.c
+index 6cd1a5b..79457f6 100644
+--- a/arch/sparc/kernel/smp_64.c
++++ b/arch/sparc/kernel/smp_64.c
+@@ -1031,7 +1031,7 @@ void smp_fetch_global_regs(void)
+  *    If the address space is non-shared (ie. mm->count == 1) we avoid
+  *    cross calls when we want to flush the currently running process's
+  *    tlb state.  This is done by clearing all cpu bits except the current
+- *    processor's in current->active_mm->cpu_vm_mask and performing the
++ *    processor's in current->mm->cpu_vm_mask and performing the
+  *    flush locally only.  This will force any subsequent cpus which run
+  *    this task to flush the context from the local tlb if the process
+  *    migrates to another cpu (again).
+@@ -1074,7 +1074,7 @@ void smp_flush_tlb_pending(struct mm_struct *mm, unsigned long nr, unsigned long
+ 	u32 ctx = CTX_HWBITS(mm->context);
+ 	int cpu = get_cpu();
+ 
+-	if (mm == current->active_mm && atomic_read(&mm->mm_users) == 1)
++	if (mm == current->mm && atomic_read(&mm->mm_users) == 1)
+ 		mm->cpu_vm_mask = cpumask_of_cpu(cpu);
+ 	else
+ 		smp_cross_call_masked(&xcall_flush_tlb_pending,
+diff --git a/arch/x86/kernel/check.c b/arch/x86/kernel/check.c
+index 2ac0ab7..a7a50b2 100644
+--- a/arch/x86/kernel/check.c
++++ b/arch/x86/kernel/check.c
+@@ -86,12 +86,12 @@ void __init setup_bios_corruption_check(void)
+ 		if (addr == 0)
+ 			break;
+ 
++		if (addr >= corruption_check_size)
++			break;
++
+ 		if ((addr + size) > corruption_check_size)
+ 			size = corruption_check_size - addr;
+ 
+-		if (size == 0)
+-			break;
+-
+ 		e820_update_range(addr, size, E820_RAM, E820_RESERVED);
+ 		scan_areas[num_scan_areas].addr = addr;
+ 		scan_areas[num_scan_areas].size = size;
+diff --git a/arch/x86/kernel/cpu/mtrr/generic.c b/arch/x86/kernel/cpu/mtrr/generic.c
+index 0c0a455..6f557e0 100644
+--- a/arch/x86/kernel/cpu/mtrr/generic.c
++++ b/arch/x86/kernel/cpu/mtrr/generic.c
+@@ -41,6 +41,32 @@ static int __init mtrr_debug(char *opt)
+ }
+ early_param("mtrr.show", mtrr_debug);
+ 
++/**
++ * BIOS is expected to clear MtrrFixDramModEn bit, see for example
++ * "BIOS and Kernel Developer's Guide for the AMD Athlon 64 and AMD
++ * Opteron Processors" (26094 Rev. 3.30 February 2006), section
++ * "13.2.1.2 SYSCFG Register": "The MtrrFixDramModEn bit should be set
++ * to 1 during BIOS initalization of the fixed MTRRs, then cleared to
++ * 0 for operation."
++ */
++static inline void k8_check_syscfg_dram_mod_en(void)
++{
++	u32 lo, hi;
++
++	if (!((boot_cpu_data.x86_vendor == X86_VENDOR_AMD) &&
++	      (boot_cpu_data.x86 >= 0x0f)))
++		return;
++
++	rdmsr(MSR_K8_SYSCFG, lo, hi);
++	if (lo & K8_MTRRFIXRANGE_DRAM_MODIFY) {
++		printk(KERN_ERR FW_WARN "MTRR: CPU %u: SYSCFG[MtrrFixDramModEn]"
++		       " not cleared by BIOS, clearing this bit\n",
++		       smp_processor_id());
++		lo &= ~K8_MTRRFIXRANGE_DRAM_MODIFY;
++		mtrr_wrmsr(MSR_K8_SYSCFG, lo, hi);
++	}
++}
++
+ /*
+  * Returns the effective MTRR type for the region
+  * Error returns:
+@@ -174,6 +200,8 @@ get_fixed_ranges(mtrr_type * frs)
+ 	unsigned int *p = (unsigned int *) frs;
+ 	int i;
+ 
++	k8_check_syscfg_dram_mod_en();
++
+ 	rdmsr(MTRRfix64K_00000_MSR, p[0], p[1]);
+ 
+ 	for (i = 0; i < 2; i++)
+@@ -308,27 +336,10 @@ void mtrr_wrmsr(unsigned msr, unsigned a, unsigned b)
+ }
+ 
+ /**
+- * Enable and allow read/write of extended fixed-range MTRR bits on K8 CPUs
+- * see AMD publication no. 24593, chapter 3.2.1 for more information
+- */
+-static inline void k8_enable_fixed_iorrs(void)
+-{
+-	unsigned lo, hi;
+-
+-	rdmsr(MSR_K8_SYSCFG, lo, hi);
+-	mtrr_wrmsr(MSR_K8_SYSCFG, lo
+-				| K8_MTRRFIXRANGE_DRAM_ENABLE
+-				| K8_MTRRFIXRANGE_DRAM_MODIFY, hi);
+-}
+-
+-/**
+  * set_fixed_range - checks & updates a fixed-range MTRR if it differs from the value it should have
+  * @msr: MSR address of the MTTR which should be checked and updated
+  * @changed: pointer which indicates whether the MTRR needed to be changed
+  * @msrwords: pointer to the MSR values which the MSR should have
+- *
+- * If K8 extentions are wanted, update the K8 SYSCFG MSR also.
+- * See AMD publication no. 24593, chapter 7.8.1, page 233 for more information.
+  */
+ static void set_fixed_range(int msr, bool *changed, unsigned int *msrwords)
+ {
+@@ -337,10 +348,6 @@ static void set_fixed_range(int msr, bool *changed, unsigned int *msrwords)
+ 	rdmsr(msr, lo, hi);
+ 
+ 	if (lo != msrwords[0] || hi != msrwords[1]) {
+-		if (boot_cpu_data.x86_vendor == X86_VENDOR_AMD &&
+-		    (boot_cpu_data.x86 >= 0x0f && boot_cpu_data.x86 <= 0x11) &&
+-		    ((msrwords[0] | msrwords[1]) & K8_MTRR_RDMEM_WRMEM_MASK))
+-			k8_enable_fixed_iorrs();
+ 		mtrr_wrmsr(msr, msrwords[0], msrwords[1]);
+ 		*changed = true;
+ 	}
+@@ -419,6 +426,8 @@ static int set_fixed_ranges(mtrr_type * frs)
+ 	bool changed = false;
+ 	int block=-1, range;
+ 
++	k8_check_syscfg_dram_mod_en();
++
+ 	while (fixed_range_blocks[++block].ranges)
+ 	    for (range=0; range < fixed_range_blocks[block].ranges; range++)
+ 		set_fixed_range(fixed_range_blocks[block].base_msr + range,
+diff --git a/arch/x86/kernel/ptrace.c b/arch/x86/kernel/ptrace.c
+index 06ca07f..f7d38d6 100644
+--- a/arch/x86/kernel/ptrace.c
++++ b/arch/x86/kernel/ptrace.c
+@@ -690,9 +690,8 @@ static int ptrace_bts_config(struct task_struct *child,
+ 		if (!cfg.signal)
+ 			return -EINVAL;
+ 
+-		return -EOPNOTSUPP;
+-
+ 		child->thread.bts_ovfl_signal = cfg.signal;
++		return -EOPNOTSUPP;
+ 	}
+ 
+ 	if ((cfg.flags & PTRACE_BTS_O_ALLOC) &&
+diff --git a/arch/x86/kernel/tlb_uv.c b/arch/x86/kernel/tlb_uv.c
+index 6812b82..16e505a 100644
+--- a/arch/x86/kernel/tlb_uv.c
++++ b/arch/x86/kernel/tlb_uv.c
+@@ -742,7 +742,7 @@ static int __init uv_bau_init(void)
+ 	int node;
+ 	int nblades;
+ 	int last_blade;
+-	int cur_cpu = 0;
++	int cur_cpu;
+ 
+ 	if (!is_uv_system())
+ 		return 0;
+@@ -752,6 +752,7 @@ static int __init uv_bau_init(void)
+ 	uv_mmask = (1UL << uv_hub_info->n_val) - 1;
+ 	nblades = 0;
+ 	last_blade = -1;
++	cur_cpu = 0;
+ 	for_each_online_node(node) {
+ 		blade = uv_node_to_blade_id(node);
+ 		if (blade == last_blade)
+diff --git a/arch/x86/kvm/paging_tmpl.h b/arch/x86/kvm/paging_tmpl.h
+index 9fd78b6..c95a67d 100644
+--- a/arch/x86/kvm/paging_tmpl.h
++++ b/arch/x86/kvm/paging_tmpl.h
+@@ -314,9 +314,9 @@ static int FNAME(shadow_walk_entry)(struct kvm_shadow_walk *_sw,
+ 		return 0;
+ 
+ 	if (is_large_pte(*sptep)) {
++		rmap_remove(vcpu->kvm, sptep);
+ 		set_shadow_pte(sptep, shadow_trap_nonpresent_pte);
+ 		kvm_flush_remote_tlbs(vcpu->kvm);
+-		rmap_remove(vcpu->kvm, sptep);
+ 	}
+ 
+ 	if (level == PT_DIRECTORY_LEVEL && gw->level == PT_DIRECTORY_LEVEL) {
+diff --git a/arch/x86/kvm/svm.c b/arch/x86/kvm/svm.c
+index a9e769e..da56821 100644
+--- a/arch/x86/kvm/svm.c
++++ b/arch/x86/kvm/svm.c
+@@ -760,20 +760,37 @@ static void svm_get_segment(struct kvm_vcpu *vcpu,
+ 	var->db = (s->attrib >> SVM_SELECTOR_DB_SHIFT) & 1;
+ 	var->g = (s->attrib >> SVM_SELECTOR_G_SHIFT) & 1;
+ 
+-	/*
+-	 * SVM always stores 0 for the 'G' bit in the CS selector in
+-	 * the VMCB on a VMEXIT. This hurts cross-vendor migration:
+-	 * Intel's VMENTRY has a check on the 'G' bit.
+-	 */
+-	if (seg == VCPU_SREG_CS)
++	switch (seg) {
++	case VCPU_SREG_CS:
++		/*
++		 * SVM always stores 0 for the 'G' bit in the CS selector in
++		 * the VMCB on a VMEXIT. This hurts cross-vendor migration:
++		 * Intel's VMENTRY has a check on the 'G' bit.
++		 */
+ 		var->g = s->limit > 0xfffff;
+-
+-	/*
+-	 * Work around a bug where the busy flag in the tr selector
+-	 * isn't exposed
+-	 */
+-	if (seg == VCPU_SREG_TR)
++		break;
++	case VCPU_SREG_TR:
++		/*
++		 * Work around a bug where the busy flag in the tr selector
++		 * isn't exposed
++		 */
+ 		var->type |= 0x2;
++		break;
++	case VCPU_SREG_DS:
++	case VCPU_SREG_ES:
++	case VCPU_SREG_FS:
++	case VCPU_SREG_GS:
++		/*
++		 * The accessed bit must always be set in the segment
++		 * descriptor cache, although it can be cleared in the
++		 * descriptor, the cached bit always remains at 1. Since
++		 * Intel has a check on this, set it here to support
++		 * cross-vendor migration.
++		 */
++		if (!var->unusable)
++			var->type |= 0x1;
++		break;
++	}
+ 
+ 	var->unusable = !var->present;
+ }
+diff --git a/arch/x86/kvm/vmx.c b/arch/x86/kvm/vmx.c
+index 7611af5..90de444 100644
+--- a/arch/x86/kvm/vmx.c
++++ b/arch/x86/kvm/vmx.c
+@@ -928,11 +928,11 @@ static int vmx_set_msr(struct kvm_vcpu *vcpu, u32 msr_index, u64 data)
+ 	int ret = 0;
+ 
+ 	switch (msr_index) {
+-#ifdef CONFIG_X86_64
+ 	case MSR_EFER:
+ 		vmx_load_host_state(vmx);
+ 		ret = kvm_set_msr_common(vcpu, msr_index, data);
+ 		break;
++#ifdef CONFIG_X86_64
+ 	case MSR_FS_BASE:
+ 		vmcs_writel(GUEST_FS_BASE, data);
+ 		break;
+diff --git a/arch/x86/lguest/boot.c b/arch/x86/lguest/boot.c
+index 960a8d9..4175cb4 100644
+--- a/arch/x86/lguest/boot.c
++++ b/arch/x86/lguest/boot.c
+@@ -485,11 +485,17 @@ static void lguest_write_cr4(unsigned long val)
+  * into a process' address space.  We set the entry then tell the Host the
+  * toplevel and address this corresponds to.  The Guest uses one pagetable per
+  * process, so we need to tell the Host which one we're changing (mm->pgd). */
++static void lguest_pte_update(struct mm_struct *mm, unsigned long addr,
++			       pte_t *ptep)
++{
++	lazy_hcall(LHCALL_SET_PTE, __pa(mm->pgd), addr, ptep->pte_low);
++}
++
+ static void lguest_set_pte_at(struct mm_struct *mm, unsigned long addr,
+ 			      pte_t *ptep, pte_t pteval)
+ {
+ 	*ptep = pteval;
+-	lazy_hcall(LHCALL_SET_PTE, __pa(mm->pgd), addr, pteval.pte_low);
++	lguest_pte_update(mm, addr, ptep);
+ }
+ 
+ /* The Guest calls this to set a top-level entry.  Again, we set the entry then
+@@ -1034,6 +1040,8 @@ __init void lguest_init(void)
+ 	pv_mmu_ops.read_cr3 = lguest_read_cr3;
+ 	pv_mmu_ops.lazy_mode.enter = paravirt_enter_lazy_mmu;
+ 	pv_mmu_ops.lazy_mode.leave = lguest_leave_lazy_mode;
++	pv_mmu_ops.pte_update = lguest_pte_update;
++	pv_mmu_ops.pte_update_defer = lguest_pte_update;
+ 
+ #ifdef CONFIG_X86_LOCAL_APIC
+ 	/* apic read/write intercepts */
+diff --git a/arch/x86/mm/pat.c b/arch/x86/mm/pat.c
+index e0ab173..21bc1f7 100644
+--- a/arch/x86/mm/pat.c
++++ b/arch/x86/mm/pat.c
+@@ -641,10 +641,11 @@ static int reserve_pfn_range(u64 paddr, unsigned long size, pgprot_t *vma_prot,
+ 	is_ram = pat_pagerange_is_ram(paddr, paddr + size);
+ 
+ 	/*
+-	 * reserve_pfn_range() doesn't support RAM pages.
++	 * reserve_pfn_range() doesn't support RAM pages. Maintain the current
++	 * behavior with RAM pages by returning success.
+ 	 */
+ 	if (is_ram != 0)
+-		return -EINVAL;
++		return 0;
+ 
+ 	ret = reserve_memtype(paddr, paddr + size, want_flags, &flags);
+ 	if (ret)
+diff --git a/arch/x86/pci/i386.c b/arch/x86/pci/i386.c
+index 5ead808..f234a37 100644
+--- a/arch/x86/pci/i386.c
++++ b/arch/x86/pci/i386.c
+@@ -319,6 +319,9 @@ int pci_mmap_page_range(struct pci_dev *dev, struct vm_area_struct *vma,
+ 			return -EINVAL;
+ 		}
+ 		flags = new_flags;
++		vma->vm_page_prot = __pgprot(
++			(pgprot_val(vma->vm_page_prot) & ~_PAGE_CACHE_MASK) |
++			flags);
+ 	}
+ 
+ 	if (((vma->vm_pgoff < max_low_pfn_mapped) ||
+diff --git a/drivers/char/raw.c b/drivers/char/raw.c
+index 96adf28..20d90e6 100644
+--- a/drivers/char/raw.c
++++ b/drivers/char/raw.c
+@@ -90,6 +90,7 @@ out1:
+ 	blkdev_put(bdev, filp->f_mode);
+ out:
+ 	mutex_unlock(&raw_mutex);
++	unlock_kernel();
+ 	return err;
+ }
+ 
+diff --git a/drivers/lguest/page_tables.c b/drivers/lguest/page_tables.c
+index 576a831..82ff484 100644
+--- a/drivers/lguest/page_tables.c
++++ b/drivers/lguest/page_tables.c
+@@ -373,8 +373,10 @@ unsigned long guest_pa(struct lg_cpu *cpu, unsigned long vaddr)
+ 	/* First step: get the top-level Guest page table entry. */
+ 	gpgd = lgread(cpu, gpgd_addr(cpu, vaddr), pgd_t);
+ 	/* Toplevel not present?  We can't map it in. */
+-	if (!(pgd_flags(gpgd) & _PAGE_PRESENT))
++	if (!(pgd_flags(gpgd) & _PAGE_PRESENT)) {
+ 		kill_guest(cpu, "Bad address %#lx", vaddr);
++		return -1UL;
++	}
+ 
+ 	gpte = lgread(cpu, gpte_addr(gpgd, vaddr), pte_t);
+ 	if (!(pte_flags(gpte) & _PAGE_PRESENT))
+diff --git a/drivers/media/dvb/firewire/firedtv-avc.c b/drivers/media/dvb/firewire/firedtv-avc.c
+index b55d9cc..adc2ce9 100644
+--- a/drivers/media/dvb/firewire/firedtv-avc.c
++++ b/drivers/media/dvb/firewire/firedtv-avc.c
+@@ -135,6 +135,7 @@ static const char *debug_fcp_opcode(unsigned int opcode,
+ 	case SFE_VENDOR_OPCODE_REGISTER_REMOTE_CONTROL:	return "RegisterRC";
+ 	case SFE_VENDOR_OPCODE_LNB_CONTROL:		return "LNBControl";
+ 	case SFE_VENDOR_OPCODE_TUNE_QPSK:		return "TuneQPSK";
++	case SFE_VENDOR_OPCODE_TUNE_QPSK2:		return "TuneQPSK2";
+ 	case SFE_VENDOR_OPCODE_HOST2CA:			return "Host2CA";
+ 	case SFE_VENDOR_OPCODE_CA2HOST:			return "CA2Host";
+ 	}
+@@ -266,7 +267,10 @@ static void avc_tuner_tuneqpsk(struct firedtv *fdtv,
+ 	c->operand[0] = SFE_VENDOR_DE_COMPANYID_0;
+ 	c->operand[1] = SFE_VENDOR_DE_COMPANYID_1;
+ 	c->operand[2] = SFE_VENDOR_DE_COMPANYID_2;
+-	c->operand[3] = SFE_VENDOR_OPCODE_TUNE_QPSK;
++	if (fdtv->type == FIREDTV_DVB_S2)
++		c->operand[3] = SFE_VENDOR_OPCODE_TUNE_QPSK2;
++	else
++		c->operand[3] = SFE_VENDOR_OPCODE_TUNE_QPSK;
+ 
+ 	c->operand[4] = (params->frequency >> 24) & 0xff;
+ 	c->operand[5] = (params->frequency >> 16) & 0xff;
+diff --git a/drivers/media/video/v4l2-common.c b/drivers/media/video/v4l2-common.c
+index b8f2be8..907cd02 100644
+--- a/drivers/media/video/v4l2-common.c
++++ b/drivers/media/video/v4l2-common.c
+@@ -910,10 +910,10 @@ struct v4l2_subdev *v4l2_i2c_new_subdev(struct i2c_adapter *adapter,
+ 	struct i2c_board_info info;
+ 
+ 	BUG_ON(!dev);
+-#ifdef MODULE
++
+ 	if (module_name)
+ 		request_module(module_name);
+-#endif
++
+ 	/* Setup the i2c board info with the device type and
+ 	   the device address. */
+ 	memset(&info, 0, sizeof(info));
+@@ -958,10 +958,10 @@ struct v4l2_subdev *v4l2_i2c_new_probed_subdev(struct i2c_adapter *adapter,
+ 	struct i2c_board_info info;
+ 
+ 	BUG_ON(!dev);
+-#ifdef MODULE
++
+ 	if (module_name)
+ 		request_module(module_name);
+-#endif
++
+ 	/* Setup the i2c board info with the device type and
+ 	   the device address. */
+ 	memset(&info, 0, sizeof(info));
+diff --git a/drivers/net/dnet.c b/drivers/net/dnet.c
+index 1b40632..edf23c9 100644
+--- a/drivers/net/dnet.c
++++ b/drivers/net/dnet.c
+@@ -9,6 +9,7 @@
+  * published by the Free Software Foundation.
+  */
+ #include <linux/version.h>
++#include <linux/io.h>
+ #include <linux/module.h>
+ #include <linux/moduleparam.h>
+ #include <linux/kernel.h>
+diff --git a/drivers/net/wireless/ath5k/base.c b/drivers/net/wireless/ath5k/base.c
+index 1d77ee9..6cf69d3 100644
+--- a/drivers/net/wireless/ath5k/base.c
++++ b/drivers/net/wireless/ath5k/base.c
+@@ -1090,8 +1090,18 @@ ath5k_mode_setup(struct ath5k_softc *sc)
+ static inline int
+ ath5k_hw_to_driver_rix(struct ath5k_softc *sc, int hw_rix)
+ {
+-	WARN_ON(hw_rix < 0 || hw_rix > AR5K_MAX_RATES);
+-	return sc->rate_idx[sc->curband->band][hw_rix];
++	int rix;
++
++	/* return base rate on errors */
++	if (WARN(hw_rix < 0 || hw_rix >= AR5K_MAX_RATES,
++			"hw_rix out of bounds: %x\n", hw_rix))
++		return 0;
++
++	rix = sc->rate_idx[sc->curband->band][hw_rix];
++	if (WARN(rix < 0, "invalid hw_rix: %x\n", hw_rix))
++		rix = 0;
++
++	return rix;
+ }
+ 
+ /***************\
+@@ -1668,7 +1678,6 @@ ath5k_check_ibss_tsf(struct ath5k_softc *sc, struct sk_buff *skb,
+ 	}
+ }
+ 
+-
+ static void
+ ath5k_tasklet_rx(unsigned long data)
+ {
+@@ -2188,6 +2197,7 @@ static void
+ ath5k_beacon_config(struct ath5k_softc *sc)
+ {
+ 	struct ath5k_hw *ah = sc->ah;
++	unsigned long flags;
+ 
+ 	ath5k_hw_set_imr(ah, 0);
+ 	sc->bmisscount = 0;
+@@ -2211,9 +2221,9 @@ ath5k_beacon_config(struct ath5k_softc *sc)
+ 
+ 		if (sc->opmode == NL80211_IFTYPE_ADHOC) {
+ 			if (ath5k_hw_hasveol(ah)) {
+-				spin_lock(&sc->block);
++				spin_lock_irqsave(&sc->block, flags);
+ 				ath5k_beacon_send(sc);
+-				spin_unlock(&sc->block);
++				spin_unlock_irqrestore(&sc->block, flags);
+ 			}
+ 		} else
+ 			ath5k_beacon_update_timers(sc, -1);
+@@ -2259,7 +2269,7 @@ ath5k_init(struct ath5k_softc *sc, bool is_resume)
+ 	sc->curband = &sc->sbands[sc->curchan->band];
+ 	sc->imask = AR5K_INT_RXOK | AR5K_INT_RXERR | AR5K_INT_RXEOL |
+ 		AR5K_INT_RXORN | AR5K_INT_TXDESC | AR5K_INT_TXEOL |
+-		AR5K_INT_FATAL | AR5K_INT_GLOBAL | AR5K_INT_MIB;
++		AR5K_INT_FATAL | AR5K_INT_GLOBAL;
+ 	ret = ath5k_reset(sc, false, false);
+ 	if (ret)
+ 		goto done;
+diff --git a/drivers/net/wireless/ath5k/base.h b/drivers/net/wireless/ath5k/base.h
+index facc60d..d86ab39 100644
+--- a/drivers/net/wireless/ath5k/base.h
++++ b/drivers/net/wireless/ath5k/base.h
+@@ -112,7 +112,7 @@ struct ath5k_softc {
+ 	struct ieee80211_supported_band sbands[IEEE80211_NUM_BANDS];
+ 	struct ieee80211_channel channels[ATH_CHAN_MAX];
+ 	struct ieee80211_rate	rates[IEEE80211_NUM_BANDS][AR5K_MAX_RATES];
+-	u8			rate_idx[IEEE80211_NUM_BANDS][AR5K_MAX_RATES];
++	s8			rate_idx[IEEE80211_NUM_BANDS][AR5K_MAX_RATES];
+ 	enum nl80211_iftype	opmode;
+ 	struct ath5k_hw		*ah;		/* Atheros HW */
+ 
+diff --git a/drivers/net/wireless/ath9k/recv.c b/drivers/net/wireless/ath9k/recv.c
+index 462e08c..c114cb7 100644
+--- a/drivers/net/wireless/ath9k/recv.c
++++ b/drivers/net/wireless/ath9k/recv.c
+@@ -322,8 +322,13 @@ void ath_rx_cleanup(struct ath_softc *sc)
+ 
+ 	list_for_each_entry(bf, &sc->rx.rxbuf, list) {
+ 		skb = bf->bf_mpdu;
+-		if (skb)
++		if (skb) {
++			pci_unmap_single(sc->pdev,
++					 bf->bf_buf_addr,
++					 sc->rx.bufsize,
++					 DMA_FROM_DEVICE);
+ 			dev_kfree_skb(skb);
++		}
+ 	}
+ 
+ 	if (sc->rx.rxdma.dd_desc_len != 0)
+diff --git a/drivers/net/wireless/ath9k/xmit.c b/drivers/net/wireless/ath9k/xmit.c
+index c92f0c6..80af54e 100644
+--- a/drivers/net/wireless/ath9k/xmit.c
++++ b/drivers/net/wireless/ath9k/xmit.c
+@@ -2035,7 +2035,7 @@ struct ath_txq *ath_test_get_txq(struct ath_softc *sc, struct sk_buff *skb)
+ 
+ 	/* Try to avoid running out of descriptors */
+ 	if (txq->axq_depth >= (ATH_TXBUF - 20)) {
+-		DPRINTF(sc, ATH_DBG_FATAL,
++		DPRINTF(sc, ATH_DBG_XMIT,
+ 			"TX queue: %d is full, depth: %d\n",
+ 			qnum, txq->axq_depth);
+ 		ieee80211_stop_queue(sc->hw, skb_get_queue_mapping(skb));
+diff --git a/drivers/net/wireless/b43/xmit.c b/drivers/net/wireless/b43/xmit.c
+index eae9b80..12069e5 100644
+--- a/drivers/net/wireless/b43/xmit.c
++++ b/drivers/net/wireless/b43/xmit.c
+@@ -50,7 +50,7 @@ static int b43_plcp_get_bitrate_idx_cck(struct b43_plcp_hdr6 *plcp)
+ }
+ 
+ /* Extract the bitrate index out of an OFDM PLCP header. */
+-static u8 b43_plcp_get_bitrate_idx_ofdm(struct b43_plcp_hdr6 *plcp, bool aphy)
++static int b43_plcp_get_bitrate_idx_ofdm(struct b43_plcp_hdr6 *plcp, bool aphy)
+ {
+ 	int base = aphy ? 0 : 4;
+ 
+diff --git a/drivers/scsi/arm/cumana_2.c b/drivers/scsi/arm/cumana_2.c
+index 68a6412..ed502b7 100644
+--- a/drivers/scsi/arm/cumana_2.c
++++ b/drivers/scsi/arm/cumana_2.c
+@@ -318,7 +318,7 @@ cumanascsi_2_set_proc_info(struct Scsi_Host *host, char *buffer, int length)
+ {
+ 	int ret = length;
+ 
+-	if (length >= 11 && strcmp(buffer, "CUMANASCSI2") == 0) {
++	if (length >= 11 && strncmp(buffer, "CUMANASCSI2", 11) == 0) {
+ 		buffer += 11;
+ 		length -= 11;
+ 
+diff --git a/drivers/usb/core/message.c b/drivers/usb/core/message.c
+index 49e7f56..3922fa9 100644
+--- a/drivers/usb/core/message.c
++++ b/drivers/usb/core/message.c
+@@ -1719,7 +1719,8 @@ free_interfaces:
+ 	}
+ 	kfree(new_interfaces);
+ 
+-	if (cp->string == NULL)
++	if (cp->string == NULL &&
++			!(dev->quirks & USB_QUIRK_CONFIG_INTF_STRINGS))
+ 		cp->string = usb_cache_string(dev, cp->desc.iConfiguration);
+ 
+ 	/* Now that all the interfaces are set up, register them
+diff --git a/drivers/usb/core/quirks.c b/drivers/usb/core/quirks.c
+index c070b34..ab93918 100644
+--- a/drivers/usb/core/quirks.c
++++ b/drivers/usb/core/quirks.c
+@@ -54,6 +54,10 @@ static const struct usb_device_id usb_quirk_list[] = {
+ 	{ USB_DEVICE(0x0638, 0x0a13), .driver_info =
+ 	  USB_QUIRK_STRING_FETCH_255 },
+ 
++	/* Saitek Cyborg Gold Joystick */
++	{ USB_DEVICE(0x06a3, 0x0006), .driver_info =
++			USB_QUIRK_CONFIG_INTF_STRINGS },
++
+ 	/* M-Systems Flash Disk Pioneers */
+ 	{ USB_DEVICE(0x08ec, 0x1000), .driver_info = USB_QUIRK_RESET_RESUME },
+ 
+diff --git a/drivers/usb/core/sysfs.c b/drivers/usb/core/sysfs.c
+index 4cc2456..c667891 100644
+--- a/drivers/usb/core/sysfs.c
++++ b/drivers/usb/core/sysfs.c
+@@ -13,6 +13,7 @@
+ #include <linux/kernel.h>
+ #include <linux/string.h>
+ #include <linux/usb.h>
++#include <linux/usb/quirks.h>
+ #include "usb.h"
+ 
+ /* Active configuration fields */
+@@ -813,7 +814,8 @@ int usb_create_sysfs_intf_files(struct usb_interface *intf)
+ 	if (intf->sysfs_files_created || intf->unregistering)
+ 		return 0;
+ 
+-	if (alt->string == NULL)
++	if (alt->string == NULL &&
++			!(udev->quirks & USB_QUIRK_CONFIG_INTF_STRINGS))
+ 		alt->string = usb_cache_string(udev, alt->desc.iInterface);
+ 	if (alt->string)
+ 		retval = device_create_file(&intf->dev, &dev_attr_interface);
+diff --git a/drivers/usb/gadget/f_rndis.c b/drivers/usb/gadget/f_rndis.c
+index 3a8bb53..fd7b356 100644
+--- a/drivers/usb/gadget/f_rndis.c
++++ b/drivers/usb/gadget/f_rndis.c
+@@ -437,7 +437,7 @@ invalid:
+ 		DBG(cdev, "rndis req%02x.%02x v%04x i%04x l%d\n",
+ 			ctrl->bRequestType, ctrl->bRequest,
+ 			w_value, w_index, w_length);
+-		req->zero = 0;
++		req->zero = (value < w_length);
+ 		req->length = value;
+ 		value = usb_ep_queue(cdev->gadget->ep0, req, GFP_ATOMIC);
+ 		if (value < 0)
+diff --git a/drivers/usb/host/ehci-q.c b/drivers/usb/host/ehci-q.c
+index ecc9b66..01132ac 100644
+--- a/drivers/usb/host/ehci-q.c
++++ b/drivers/usb/host/ehci-q.c
+@@ -333,12 +333,40 @@ qh_completions (struct ehci_hcd *ehci, struct ehci_qh *qh)
+ 		token = hc32_to_cpu(ehci, qtd->hw_token);
+ 
+ 		/* always clean up qtds the hc de-activated */
++ retry_xacterr:
+ 		if ((token & QTD_STS_ACTIVE) == 0) {
+ 
+ 			/* on STALL, error, and short reads this urb must
+ 			 * complete and all its qtds must be recycled.
+ 			 */
+ 			if ((token & QTD_STS_HALT) != 0) {
++
++				/* retry transaction errors until we
++				 * reach the software xacterr limit
++				 */
++				if ((token & QTD_STS_XACT) &&
++						QTD_CERR(token) == 0 &&
++						--qh->xacterrs > 0 &&
++						!urb->unlinked) {
++					ehci_dbg(ehci,
++	"detected XactErr len %d/%d retry %d\n",
++	qtd->length - QTD_LENGTH(token), qtd->length,
++	QH_XACTERR_MAX - qh->xacterrs);
++
++					/* reset the token in the qtd and the
++					 * qh overlay (which still contains
++					 * the qtd) so that we pick up from
++					 * where we left off
++					 */
++					token &= ~QTD_STS_HALT;
++					token |= QTD_STS_ACTIVE |
++							(EHCI_TUNE_CERR << 10);
++					qtd->hw_token = cpu_to_hc32(ehci,
++							token);
++					wmb();
++					qh->hw_token = cpu_to_hc32(ehci, token);
++					goto retry_xacterr;
++				}
+ 				stopped = 1;
+ 
+ 			/* magic dummy for some short reads; qh won't advance.
+@@ -421,6 +449,9 @@ halt:
+ 		/* remove qtd; it's recycled after possible urb completion */
+ 		list_del (&qtd->qtd_list);
+ 		last = qtd;
++
++		/* reinit the xacterr counter for the next qtd */
++		qh->xacterrs = QH_XACTERR_MAX;
+ 	}
+ 
+ 	/* last urb's completion might still need calling */
+@@ -862,6 +893,7 @@ static void qh_link_async (struct ehci_hcd *ehci, struct ehci_qh *qh)
+ 	head->qh_next.qh = qh;
+ 	head->hw_next = dma;
+ 
++	qh->xacterrs = QH_XACTERR_MAX;
+ 	qh->qh_state = QH_STATE_LINKED;
+ 	/* qtd completions reported later by interrupt */
+ }
+diff --git a/drivers/usb/host/ehci.h b/drivers/usb/host/ehci.h
+index 262b00c..c7385f2 100644
+--- a/drivers/usb/host/ehci.h
++++ b/drivers/usb/host/ehci.h
+@@ -376,6 +376,9 @@ struct ehci_qh {
+ #define	QH_STATE_UNLINK_WAIT	4		/* LINKED and on reclaim q */
+ #define	QH_STATE_COMPLETING	5		/* don't touch token.HALT */
+ 
++	u8			xacterrs;	/* XactErr retry counter */
++#define	QH_XACTERR_MAX		32		/* XactErr retry limit */
++
+ 	/* periodic schedule info */
+ 	u8			usecs;		/* intr bandwidth */
+ 	u8			gap_uf;		/* uframes split/csplit gap */
+diff --git a/drivers/usb/storage/cypress_atacb.c b/drivers/usb/storage/cypress_atacb.c
+index 898e67d..9466a99 100644
+--- a/drivers/usb/storage/cypress_atacb.c
++++ b/drivers/usb/storage/cypress_atacb.c
+@@ -133,19 +133,18 @@ void cypress_atacb_passthrough(struct scsi_cmnd *srb, struct us_data *us)
+ 
+ 		/* build the command for
+ 		 * reading the ATA registers */
+-		scsi_eh_prep_cmnd(srb, &ses, NULL, 0, 0);
+-		srb->sdb.length = sizeof(regs);
+-		sg_init_one(&ses.sense_sgl, regs, srb->sdb.length);
+-		srb->sdb.table.sgl = &ses.sense_sgl;
+-		srb->sc_data_direction = DMA_FROM_DEVICE;
+-		srb->sdb.table.nents = 1;
++		scsi_eh_prep_cmnd(srb, &ses, NULL, 0, sizeof(regs));
++
+ 		/* we use the same command as before, but we set
+ 		 * the read taskfile bit, for not executing atacb command,
+ 		 * but reading register selected in srb->cmnd[4]
+ 		 */
++		srb->cmd_len = 16;
++		srb->cmnd = ses.cmnd;
+ 		srb->cmnd[2] = 1;
+ 
+ 		usb_stor_transparent_scsi_command(srb, us);
++		memcpy(regs, srb->sense_buffer, sizeof(regs));
+ 		tmp_result = srb->result;
+ 		scsi_eh_restore_cmnd(srb, &ses);
+ 		/* we fail to get registers, report invalid command */
+@@ -162,8 +161,8 @@ void cypress_atacb_passthrough(struct scsi_cmnd *srb, struct us_data *us)
+ 
+ 		/* XXX we should generate sk, asc, ascq from status and error
+ 		 * regs
+-		 * (see 11.1 Error translation ­ ATA device error to SCSI error map)
+-		 * and ata_to_sense_error from libata.
++		 * (see 11.1 Error translation ATA device error to SCSI error
++		 *  map, and ata_to_sense_error from libata.)
+ 		 */
+ 
+ 		/* Sense data is current and format is descriptor. */
+diff --git a/drivers/usb/storage/scsiglue.c b/drivers/usb/storage/scsiglue.c
+index 727c506..ed710bc 100644
+--- a/drivers/usb/storage/scsiglue.c
++++ b/drivers/usb/storage/scsiglue.c
+@@ -135,6 +135,12 @@ static int slave_configure(struct scsi_device *sdev)
+ 		if (sdev->request_queue->max_sectors > max_sectors)
+ 			blk_queue_max_sectors(sdev->request_queue,
+ 					      max_sectors);
++	} else if (sdev->type == TYPE_TAPE) {
++		/* Tapes need much higher max_sector limits, so just
++		 * raise it to the maximum possible (4 GB / 512) and
++		 * let the queue segment size sort out the real limit.
++		 */
++		blk_queue_max_sectors(sdev->request_queue, 0x7FFFFF);
+ 	}
+ 
+ 	/* Some USB host controllers can't do DMA; they have to use PIO.
+diff --git a/drivers/video/pxafb.c b/drivers/video/pxafb.c
+index 2552b9f..642c1d4 100644
+--- a/drivers/video/pxafb.c
++++ b/drivers/video/pxafb.c
+@@ -883,10 +883,21 @@ static void __devinit init_pxafb_overlay(struct pxafb_info *fbi,
+ 	init_completion(&ofb->branch_done);
+ }
+ 
++static inline int pxafb_overlay_supported(void)
++{
++	if (cpu_is_pxa27x() || cpu_is_pxa3xx())
++		return 1;
++
++	return 0;
++}
++
+ static int __devinit pxafb_overlay_init(struct pxafb_info *fbi)
+ {
+ 	int i, ret;
+ 
++	if (!pxafb_overlay_supported())
++		return 0;
++
+ 	for (i = 0; i < 2; i++) {
+ 		init_pxafb_overlay(fbi, &fbi->overlay[i], i);
+ 		ret = register_framebuffer(&fbi->overlay[i].fb);
+@@ -909,6 +920,9 @@ static void __devexit pxafb_overlay_exit(struct pxafb_info *fbi)
+ {
+ 	int i;
+ 
++	if (!pxafb_overlay_supported())
++		return;
++
+ 	for (i = 0; i < 2; i++)
+ 		unregister_framebuffer(&fbi->overlay[i].fb);
+ }
+diff --git a/fs/cifs/CHANGES b/fs/cifs/CHANGES
+index 851388f..6562eb0 100644
+--- a/fs/cifs/CHANGES
++++ b/fs/cifs/CHANGES
+@@ -7,6 +7,9 @@ are authenticated as guest, as reconnections, invalidating the earlier
+ user's smb session.  This fix allows cifs to mount multiple times to the
+ same server with different userids without risking invalidating earlier
+ established security contexts.
++Fix "redzone overwritten" bug in cifs_put_tcon (CIFSTcon may allocate too
++little memory for the "nativeFileSystem" field returned by the server
++during mount). 
+ 
+ Version 1.56
+ ------------
+diff --git a/fs/cifs/cifssmb.c b/fs/cifs/cifssmb.c
+index 939e2f7..71ae000 100644
+--- a/fs/cifs/cifssmb.c
++++ b/fs/cifs/cifssmb.c
+@@ -2356,8 +2356,10 @@ winCreateHardLinkRetry:
+ 				     PATH_MAX, nls_codepage, remap);
+ 		name_len++;	/* trailing null */
+ 		name_len *= 2;
+-		pSMB->OldFileName[name_len] = 0;	/* pad */
+-		pSMB->OldFileName[name_len + 1] = 0x04;
++
++		/* protocol specifies ASCII buffer format (0x04) for unicode */
++		pSMB->OldFileName[name_len] = 0x04;
++		pSMB->OldFileName[name_len + 1] = 0x00; /* pad */
+ 		name_len2 =
+ 		    cifsConvertToUCS((__le16 *)&pSMB->OldFileName[name_len + 2],
+ 				     toName, PATH_MAX, nls_codepage, remap);
+diff --git a/fs/cifs/connect.c b/fs/cifs/connect.c
+index da0f4ff..4b64f39 100644
+--- a/fs/cifs/connect.c
++++ b/fs/cifs/connect.c
+@@ -3667,7 +3667,7 @@ CIFSTCon(unsigned int xid, struct cifsSesInfo *ses,
+ 			    BCC(smb_buffer_response)) {
+ 				kfree(tcon->nativeFileSystem);
+ 				tcon->nativeFileSystem =
+-				    kzalloc(length + 2, GFP_KERNEL);
++				    kzalloc(2*(length + 1), GFP_KERNEL);
+ 				if (tcon->nativeFileSystem)
+ 					cifs_strfromUCS_le(
+ 						tcon->nativeFileSystem,
+diff --git a/fs/fuse/file.c b/fs/fuse/file.c
+index d9fdb7c..821d10f 100644
+--- a/fs/fuse/file.c
++++ b/fs/fuse/file.c
+@@ -1465,7 +1465,7 @@ static loff_t fuse_file_llseek(struct file *file, loff_t offset, int origin)
+ 	case SEEK_END:
+ 		retval = fuse_update_attributes(inode, NULL, file, NULL);
+ 		if (retval)
+-			return retval;
++			goto exit;
+ 		offset += i_size_read(inode);
+ 		break;
+ 	case SEEK_CUR:
+@@ -1479,6 +1479,7 @@ static loff_t fuse_file_llseek(struct file *file, loff_t offset, int origin)
+ 		}
+ 		retval = offset;
+ 	}
++exit:
+ 	mutex_unlock(&inode->i_mutex);
+ 	return retval;
+ }
+diff --git a/include/linux/mm.h b/include/linux/mm.h
+index 065cdf8..3daa05f 100644
+--- a/include/linux/mm.h
++++ b/include/linux/mm.h
+@@ -98,7 +98,7 @@ extern unsigned int kobjsize(const void *objp);
+ #define VM_HUGETLB	0x00400000	/* Huge TLB Page VM */
+ #define VM_NONLINEAR	0x00800000	/* Is non-linear (remap_file_pages) */
+ #define VM_MAPPED_COPY	0x01000000	/* T if mapped copy of data (nommu mmap) */
+-#define VM_INSERTPAGE	0x02000000	/* The vma has had "vm_insert_page()" done on it */
++#define VM_INSERTPAGE	0x02000000	/* The vma has had "vm_insert_page()" done on it. Refer note in VM_PFNMAP_AT_MMAP below */
+ #define VM_ALWAYSDUMP	0x04000000	/* Always include in core dumps */
+ 
+ #define VM_CAN_NONLINEAR 0x08000000	/* Has ->fault & does nonlinear pages */
+@@ -127,6 +127,17 @@ extern unsigned int kobjsize(const void *objp);
+ #define VM_SPECIAL (VM_IO | VM_DONTEXPAND | VM_RESERVED | VM_PFNMAP)
+ 
+ /*
++ * pfnmap vmas that are fully mapped at mmap time (not mapped on fault).
++ * Used by x86 PAT to identify such PFNMAP mappings and optimize their handling.
++ * Note VM_INSERTPAGE flag is overloaded here. i.e,
++ * VM_INSERTPAGE && !VM_PFNMAP implies
++ *     The vma has had "vm_insert_page()" done on it
++ * VM_INSERTPAGE && VM_PFNMAP implies
++ *     The vma is PFNMAP with full mapping at mmap time
++ */
++#define VM_PFNMAP_AT_MMAP (VM_INSERTPAGE | VM_PFNMAP)
++
++/*
+  * mapping from the currently active vm_flags protection bits (the
+  * low four bits) to a page protection mask..
+  */
+@@ -145,7 +156,7 @@ extern pgprot_t protection_map[16];
+  */
+ static inline int is_linear_pfn_mapping(struct vm_area_struct *vma)
+ {
+-	return ((vma->vm_flags & VM_PFNMAP) && vma->vm_pgoff);
++	return ((vma->vm_flags & VM_PFNMAP_AT_MMAP) == VM_PFNMAP_AT_MMAP);
+ }
+ 
+ static inline int is_pfn_mapping(struct vm_area_struct *vma)
+diff --git a/include/linux/usb/quirks.h b/include/linux/usb/quirks.h
+index 7f6c603..2526f3b 100644
+--- a/include/linux/usb/quirks.h
++++ b/include/linux/usb/quirks.h
+@@ -16,4 +16,7 @@
+ /* device can't handle Set-Interface requests */
+ #define USB_QUIRK_NO_SET_INTF		0x00000004
+ 
++/* device can't handle its Configuration or Interface strings */
++#define USB_QUIRK_CONFIG_INTF_STRINGS	0x00000008
++
+ #endif /* __LINUX_USB_QUIRKS_H */
+diff --git a/mm/memory.c b/mm/memory.c
+index baa999e..d7df5ba 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -1665,9 +1665,10 @@ int remap_pfn_range(struct vm_area_struct *vma, unsigned long addr,
+ 	 * behaviour that some programs depend on. We mark the "original"
+ 	 * un-COW'ed pages by matching them up with "vma->vm_pgoff".
+ 	 */
+-	if (addr == vma->vm_start && end == vma->vm_end)
++	if (addr == vma->vm_start && end == vma->vm_end) {
+ 		vma->vm_pgoff = pfn;
+-	else if (is_cow_mapping(vma->vm_flags))
++		vma->vm_flags |= VM_PFNMAP_AT_MMAP;
++	} else if (is_cow_mapping(vma->vm_flags))
+ 		return -EINVAL;
+ 
+ 	vma->vm_flags |= VM_IO | VM_RESERVED | VM_PFNMAP;
+@@ -1679,6 +1680,7 @@ int remap_pfn_range(struct vm_area_struct *vma, unsigned long addr,
+ 		 * needed from higher level routine calling unmap_vmas
+ 		 */
+ 		vma->vm_flags &= ~(VM_IO | VM_RESERVED | VM_PFNMAP);
++		vma->vm_flags &= ~VM_PFNMAP_AT_MMAP;
+ 		return -EINVAL;
+ 	}
+ 
+diff --git a/net/bridge/br_if.c b/net/bridge/br_if.c
+index 727c5c5..8a96672 100644
+--- a/net/bridge/br_if.c
++++ b/net/bridge/br_if.c
+@@ -426,7 +426,6 @@ err2:
+ err1:
+ 	kobject_del(&p->kobj);
+ err0:
+-	kobject_put(&p->kobj);
+ 	dev_set_promiscuity(dev, -1);
+ put_back:
+ 	dev_put(dev);
+diff --git a/net/core/dev.c b/net/core/dev.c
+index e3fe5c7..e438f54 100644
+--- a/net/core/dev.c
++++ b/net/core/dev.c
+@@ -2588,18 +2588,15 @@ static int process_backlog(struct napi_struct *napi, int quota)
+ 		local_irq_disable();
+ 		skb = __skb_dequeue(&queue->input_pkt_queue);
+ 		if (!skb) {
++			__napi_complete(napi);
+ 			local_irq_enable();
+-			napi_complete(napi);
+-			goto out;
++			break;
+ 		}
+ 		local_irq_enable();
+ 
+-		napi_gro_receive(napi, skb);
++		netif_receive_skb(skb);
+ 	} while (++work < quota && jiffies == start_time);
+ 
+-	napi_gro_flush(napi);
+-
+-out:
+ 	return work;
+ }
+ 
+diff --git a/net/ipv4/udp.c b/net/ipv4/udp.c
+index c47c989..c8bee18 100644
+--- a/net/ipv4/udp.c
++++ b/net/ipv4/udp.c
+@@ -1614,7 +1614,8 @@ static struct sock *udp_get_next(struct seq_file *seq, struct sock *sk)
+ 	} while (sk && (!net_eq(sock_net(sk), net) || sk->sk_family != state->family));
+ 
+ 	if (!sk) {
+-		spin_unlock_bh(&state->udp_table->hash[state->bucket].lock);
++		if (state->bucket < UDP_HTABLE_SIZE)
++			spin_unlock_bh(&state->udp_table->hash[state->bucket].lock);
+ 		return udp_get_first(seq, state->bucket + 1);
+ 	}
+ 	return sk;
+@@ -1632,6 +1633,9 @@ static struct sock *udp_get_idx(struct seq_file *seq, loff_t pos)
+ 
+ static void *udp_seq_start(struct seq_file *seq, loff_t *pos)
+ {
++	struct udp_iter_state *state = seq->private;
++	state->bucket = UDP_HTABLE_SIZE;
++
+ 	return *pos ? udp_get_idx(seq, *pos-1) : SEQ_START_TOKEN;
+ }
+ 
+diff --git a/net/ipv6/ip6_input.c b/net/ipv6/ip6_input.c
+index f171e8d..8f04bd9 100644
+--- a/net/ipv6/ip6_input.c
++++ b/net/ipv6/ip6_input.c
+@@ -75,8 +75,7 @@ int ipv6_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt
+ 	if ((skb = skb_share_check(skb, GFP_ATOMIC)) == NULL ||
+ 	    !idev || unlikely(idev->cnf.disable_ipv6)) {
+ 		IP6_INC_STATS_BH(net, idev, IPSTATS_MIB_INDISCARDS);
+-		rcu_read_unlock();
+-		goto out;
++		goto drop;
+ 	}
+ 
+ 	memset(IP6CB(skb), 0, sizeof(struct inet6_skb_parm));
+@@ -147,7 +146,6 @@ err:
+ drop:
+ 	rcu_read_unlock();
+ 	kfree_skb(skb);
+-out:
+ 	return 0;
+ }
+ 
+diff --git a/net/netfilter/nf_conntrack_proto_tcp.c b/net/netfilter/nf_conntrack_proto_tcp.c
+index f3fd154..56ac4ee 100644
+--- a/net/netfilter/nf_conntrack_proto_tcp.c
++++ b/net/netfilter/nf_conntrack_proto_tcp.c
+@@ -15,6 +15,7 @@
+ #include <linux/skbuff.h>
+ #include <linux/ipv6.h>
+ #include <net/ip6_checksum.h>
++#include <asm/unaligned.h>
+ 
+ #include <net/tcp.h>
+ 
+@@ -466,7 +467,7 @@ static void tcp_sack(const struct sk_buff *skb, unsigned int dataoff,
+ 				for (i = 0;
+ 				     i < (opsize - TCPOLEN_SACK_BASE);
+ 				     i += TCPOLEN_SACK_PERBLOCK) {
+-					tmp = ntohl(*((__be32 *)(ptr+i)+1));
++					tmp = get_unaligned_be32((__be32 *)(ptr+i)+1);
+ 
+ 					if (after(tmp, *sack))
+ 						*sack = tmp;
+diff --git a/net/wireless/reg.c b/net/wireless/reg.c
+index bd0a16c..4f9ff2a 100644
+--- a/net/wireless/reg.c
++++ b/net/wireless/reg.c
+@@ -1083,6 +1083,8 @@ EXPORT_SYMBOL(regulatory_hint);
+ static bool reg_same_country_ie_hint(struct wiphy *wiphy,
+ 			u32 country_ie_checksum)
+ {
++	if (unlikely(last_request->initiator != REGDOM_SET_BY_COUNTRY_IE))
++		return false;
+ 	if (!last_request->wiphy)
+ 		return false;
+ 	if (likely(last_request->wiphy != wiphy))
+@@ -1133,7 +1135,9 @@ void regulatory_hint_11d(struct wiphy *wiphy,
+ 	/* We will run this for *every* beacon processed for the BSSID, so
+ 	 * we optimize an early check to exit out early if we don't have to
+ 	 * do anything */
+-	if (likely(last_request->wiphy)) {
++	if (likely(last_request->initiator ==
++	    REGDOM_SET_BY_COUNTRY_IE &&
++	    likely(last_request->wiphy))) {
+ 		struct cfg80211_registered_device *drv_last_ie;
+ 
+ 		drv_last_ie = wiphy_to_dev(last_request->wiphy);
+@@ -1469,13 +1473,20 @@ int regulatory_init(void)
+ 
+ 	printk(KERN_INFO "cfg80211: Using static regulatory domain info\n");
+ 	print_regdomain_info(cfg80211_regdomain);
+-	/* The old code still requests for a new regdomain and if
++	/*
++	 * The old code still requests for a new regdomain and if
+ 	 * you have CRDA you get it updated, otherwise you get
+ 	 * stuck with the static values. We ignore "EU" code as
+-	 * that is not a valid ISO / IEC 3166 alpha2 */
+-	if (ieee80211_regdom[0] != 'E' || ieee80211_regdom[1] != 'U')
+-		err = __regulatory_hint(NULL, REGDOM_SET_BY_CORE,
+-					ieee80211_regdom, 0, ENVIRON_ANY);
++	 * that is not a valid ISO / IEC 3166 alpha2
++	 * stuck with the static values. Since "EU" is not a valid
++	 * ISO / IEC 3166 alpha2 code we can't expect userpace to
++	 * give us a regulatory domain for it. We need last_request
++	 * iniitalized though so lets just send a request which we
++	 * know will be ignored... this crap will be removed once
++	 * OLD_REG dies.
++	 */
++	err = __regulatory_hint(NULL, REGDOM_SET_BY_CORE,
++				ieee80211_regdom, 0, ENVIRON_ANY);
+ #else
+ 	cfg80211_regdomain = cfg80211_world_regdom;
+ 
+diff --git a/net/xfrm/xfrm_state.c b/net/xfrm/xfrm_state.c
+index 62a5425..8227172 100644
+--- a/net/xfrm/xfrm_state.c
++++ b/net/xfrm/xfrm_state.c
+@@ -1615,7 +1615,7 @@ void xfrm_state_walk_done(struct xfrm_state_walk *walk)
+ 
+ 	spin_lock_bh(&xfrm_state_lock);
+ 	list_del(&walk->all);
+-	spin_lock_bh(&xfrm_state_lock);
++	spin_unlock_bh(&xfrm_state_lock);
+ }
+ EXPORT_SYMBOL(xfrm_state_walk_done);
+ 
