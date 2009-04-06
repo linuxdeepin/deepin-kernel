@@ -266,7 +266,7 @@ class Gencontrol(Base):
         apply = self.templates['patch.apply']
 
         vars = {
-            'revisions': 'orig ' + ' '.join([i.revision for i in self.versions[::-1]]),
+            'revisions': 'orig base ' + ' '.join([i.revision for i in self.versions[::-1]]),
             'upstream': self.version.upstream,
             'linux_upstream': self.version.linux_upstream,
             'abiname': self.abiname,
