@@ -1,0 +1,229 @@
+From: Lennert Buytenhek <buytenh@marvell.com>
+Date: Mon, 9 Mar 2009 18:30:09 +0000 (-0400)
+Subject: [ARM] alternative copy_to_user/clear_user implementation
+X-Git-Url: http://git.marvell.com/?p=orion.git;a=commitdiff_plain;h=d3ba043cc30dcef3bd5baf29584d53681e66eafc
+
+[ARM] alternative copy_to_user/clear_user implementation
+
+This implements {copy_to,clear}_user() by faulting in the userland
+pages and then using the regular kernel mem{cpy,set}() to copy the
+data (while holding the page table lock).  This is a win if the regular
+mem{cpy,set}() implementations are faster than the user copy functions,
+which is the case e.g. on Feroceon, where 8-word STMs (which memcpy()
+uses under the right conditions) give significantly higher memory write
+throughput than a sequence of individual 32bit stores.
+
+Here are numbers for page sized buffers on some Feroceon cores:
+
+ - copy_to_user on Orion5x goes from 51 MB/s to 83 MB/s
+ - clear_user on Orion5x goes from 89MB/s to 314MB/s
+ - copy_to_user on Kirkwood goes from 240 MB/s to 356 MB/s
+ - clear_user on Kirkwood goes from 367 MB/s to 1108 MB/s
+ - copy_to_user on Disco-Duo goes from 248 MB/s to 398 MB/s
+ - clear_user on Disco-Duo goes from 328 MB/s to 1741 MB/s
+
+Because the setup cost is non negligible, this is worthwhile only if
+the amount of data to copy is large enough.  The operation falls back
+to the standard implementation when the amount of data is below a certain
+treshold. This treshold was determined empirically, however some targets
+could benefit from a lower runtime determined value for optimal results
+eventually.
+
+In the copy_from_user() case, this technique does not provide any
+worthwhile performance gain due to the fact that any kind of read access
+allocates the cache and subsequent 32bit loads are just as fast as the
+equivalent 8-word LDM.
+
+[ Nicolas Pitre came with the idea, Lennert Buytenhek wrote the code. ]
+
+Tested-by: Martin Michlmayr <tbm@cyrius.com>
+Signed-off-by: Lennert Buytenhek <buytenh@marvell.com>
+Signed-off-by: Nicolas Pitre <nico@marvell.com>
+---
+
+diff --git a/arch/arm/Kconfig b/arch/arm/Kconfig
+index dbfdf87..0d1c72b 100644
+--- a/arch/arm/Kconfig
++++ b/arch/arm/Kconfig
+@@ -983,6 +983,22 @@ config ALIGNMENT_TRAP
+ 	  correct operation of some network protocols. With an IP-only
+ 	  configuration it is safe to say N, otherwise say Y.
+ 
++config UACCESS_WITH_MEMCPY
++	bool "Use kernel mem{cpy,set}() for {copy_to,clear}_user() (EXPERIMENTAL)"
++	depends on MMU && EXPERIMENTAL
++	default y if CPU_FEROCEON
++	help
++	  Implement faster copy_to_user and clear_user methods for CPU
++	  cores where a 8-word STM instruction give significantly higher
++	  memory write throughput than a sequence of individual 32bit stores.
++
++	  A possible side effect is a slight increase in scheduling latency
++	  between threads sharing the same address space if they invoke
++	  such copy operations with large buffers.
++
++	  However, if the CPU data cache is using a write-allocate mode,
++	  this option is unlikely to provide any performance gain.
++
+ endmenu
+ 
+ menu "Boot options"
+diff --git a/arch/arm/lib/Makefile b/arch/arm/lib/Makefile
+index 866f84a..030ba72 100644
+--- a/arch/arm/lib/Makefile
++++ b/arch/arm/lib/Makefile
+@@ -29,6 +29,9 @@ else
+ endif
+ endif
+ 
++# using lib_ here won't override already available weak symbols
++obj-$(CONFIG_UACCESS_WITH_MEMCPY) += uaccess_with_memcpy.o
++
+ lib-$(CONFIG_MMU) += $(mmu-y)
+ 
+ ifeq ($(CONFIG_CPU_32v3),y)
+diff --git a/arch/arm/lib/uaccess_with_memcpy.c b/arch/arm/lib/uaccess_with_memcpy.c
+new file mode 100644
+index 0000000..8bd9fc7
+--- /dev/null
++++ b/arch/arm/lib/uaccess_with_memcpy.c
+@@ -0,0 +1,139 @@
++/*
++ *  linux/arch/arm/lib/uaccess_with_memcpy.c
++ *
++ *  Copyright (C) 2009 Lennert Buytenhek <buytenh@wantstofly.org>
++ *  Copyright (C) 2009 Marvell Semiconductor
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ */
++
++#include <linux/kernel.h>
++#include <linux/ctype.h>
++#include <linux/uaccess.h>
++#include <linux/rwsem.h>
++#include <linux/mm.h>
++#include <linux/sched.h>
++#include <linux/hardirq.h> /* for in_atomic() */
++#include <asm/current.h>
++#include <asm/page.h>
++
++static int
++pin_page_for_write(const void __user *_addr, pte_t **ptep, spinlock_t **ptlp)
++{
++	unsigned long addr = (unsigned long)_addr;
++	pgd_t *pgd;
++	pmd_t *pmd;
++	pte_t *pte;
++	spinlock_t *ptl;
++
++	pgd = pgd_offset(current->mm, addr);
++	if (unlikely(pgd_none(*pgd) || pgd_bad(*pgd)))
++		return 0;
++
++	pmd = pmd_offset(pgd, addr);
++	if (unlikely(pmd_none(*pmd) || pmd_bad(*pmd)))
++		return 0;
++
++	pte = pte_offset_map_lock(current->mm, pmd, addr, &ptl);
++	if (unlikely(!pte_present(*pte) || !pte_young(*pte) ||
++	    !pte_write(*pte) || !pte_dirty(*pte))) {
++		pte_unmap_unlock(pte, ptl);
++		return 0;
++	}
++
++	*ptep = pte;
++	*ptlp = ptl;
++
++	return 1;
++}
++
++unsigned long
++__copy_to_user(void __user *to, const void *from, unsigned long n)
++{
++	int atomic;
++
++	if (n < 1024)
++		return __copy_to_user_std(to, from, n);
++
++	if (unlikely(segment_eq(get_fs(), KERNEL_DS))) {
++		memcpy((void *)to, from, n);
++		return 0;
++	}
++
++	/* the mmap semaphore is taken only if not in an atomic context */
++	atomic = in_atomic();
++
++	if (!atomic)
++		down_read(&current->mm->mmap_sem);
++	while (n) {
++		pte_t *pte;
++		spinlock_t *ptl;
++		int tocopy;
++
++		while (!pin_page_for_write(to, &pte, &ptl)) {
++			if (!atomic)
++				up_read(&current->mm->mmap_sem);
++			if (__put_user(0, (char __user *)to))
++				goto out;
++			if (!atomic)
++				down_read(&current->mm->mmap_sem);
++		}
++
++		tocopy = (~(unsigned long)to & ~PAGE_MASK) + 1;
++		if (tocopy > n)
++			tocopy = n;
++
++		memcpy((void *)to, from, tocopy);
++		to += tocopy;
++		from += tocopy;
++		n -= tocopy;
++
++		pte_unmap_unlock(pte, ptl);
++	}
++	if (!atomic)
++		up_read(&current->mm->mmap_sem);
++
++out:
++	return n;
++}
++
++unsigned long __clear_user(void __user *addr, unsigned long n)
++{
++	if (n < 256)
++		return __clear_user_std(addr, n);
++
++	if (unlikely(segment_eq(get_fs(), KERNEL_DS))) {
++		memset((void *)addr, 0, n);
++		return 0;
++	}
++
++	down_read(&current->mm->mmap_sem);
++	while (n) {
++		pte_t *pte;
++		spinlock_t *ptl;
++		int tocopy;
++
++		while (!pin_page_for_write(addr, &pte, &ptl)) {
++			up_read(&current->mm->mmap_sem);
++			if (__put_user(0, (char __user *)addr))
++				goto out;
++			down_read(&current->mm->mmap_sem);
++		}
++
++		tocopy = (~(unsigned long)addr & ~PAGE_MASK) + 1;
++		if (tocopy > n)
++			tocopy = n;
++
++		memset((void *)addr, 0, tocopy);
++		addr += tocopy;
++		n -= tocopy;
++
++		pte_unmap_unlock(pte, ptl);
++	}
++	up_read(&current->mm->mmap_sem);
++
++out:
++	return n;
++}
