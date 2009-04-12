@@ -1,16 +1,16 @@
-From 02df6f973eb21fe94fac2c580f71912fbb961c6c Mon Sep 17 00:00:00 2001
-From: Darren Salt <linux@youmustbejoking.demon.co.uk>
-Date: Sat, 11 Apr 2009 16:01:56 +0100
+From 1322d21f7d160924ac9dec88a7088bee22447250 Mon Sep 17 00:00:00 2001
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Sun, 12 Apr 2009 21:07:48 +0100
 Subject: [PATCH] rt2860sta: use the firmware loader interface and library CRC code
 
-Signed-off-by: Darren Salt <linux@youmustbejoking.demon.co.uk>
+Based on work by Darren Salt <linux@youmustbejoking.demon.co.uk>.
 ---
  drivers/staging/rt2860/Kconfig            |    3 +-
- drivers/staging/rt2860/common/rtmp_init.c |  305 ++++++----------------------
- 2 files changed, 68 insertions(+), 240 deletions(-)
+ drivers/staging/rt2860/common/rtmp_init.c |  309 ++++++-----------------------
+ 2 files changed, 64 insertions(+), 248 deletions(-)
 
 diff --git a/drivers/staging/rt2860/Kconfig b/drivers/staging/rt2860/Kconfig
-index a282fa4..d75a87a 100644
+index 9fb130d..d75a87a 100644
 --- a/drivers/staging/rt2860/Kconfig
 +++ b/drivers/staging/rt2860/Kconfig
 @@ -1,6 +1,7 @@
@@ -23,7 +23,7 @@ index a282fa4..d75a87a 100644
  	---help---
  	  This is an experimental driver for the Ralink 2860 wireless chip.
 diff --git a/drivers/staging/rt2860/common/rtmp_init.c b/drivers/staging/rt2860/common/rtmp_init.c
-index 8a00cee..138e81b 100644
+index 8a00cee..bdcdef6 100644
 --- a/drivers/staging/rt2860/common/rtmp_init.c
 +++ b/drivers/staging/rt2860/common/rtmp_init.c
 @@ -38,8 +38,8 @@
@@ -81,16 +81,25 @@ index 8a00cee..138e81b 100644
  //
  // BBP register initialization set
  //
-@@ -178,6 +141,8 @@ RTMP_REG_PAIR	STAMACRegTable[] =	{
+@@ -178,14 +141,11 @@ RTMP_REG_PAIR	STAMACRegTable[] =	{
  #endif // CONFIG_STA_SUPPORT //
  
  
+-// New 8k byte firmware size for RT3071/RT3072
 +#define FW_FILENAME "rt2860.bin"
++MODULE_FIRMWARE(FW_FILENAME);
 +
- // New 8k byte firmware size for RT3071/RT3072
  #define FIRMWAREIMAGE_MAX_LENGTH	0x2000
- #define FIRMWAREIMAGE_LENGTH		(sizeof (FirmwareImage) / sizeof(UCHAR))
-@@ -2643,186 +2608,61 @@ VOID NICEraseFirmware(
+-#define FIRMWAREIMAGE_LENGTH		(sizeof (FirmwareImage) / sizeof(UCHAR))
+ #define FIRMWARE_MAJOR_VERSION	0
+-
+-#define FIRMWAREIMAGEV1_LENGTH	0x1000
+-#define FIRMWAREIMAGEV2_LENGTH	0x1000
+-
+ #define FIRMWARE_MINOR_VERSION	2
+ 
+ 
+@@ -2643,186 +2603,54 @@ VOID NICEraseFirmware(
  NDIS_STATUS NICLoadFirmware(
  	IN PRTMP_ADAPTER pAd)
  {
@@ -144,11 +153,7 @@ index 8a00cee..138e81b 100644
 -		memset(pFirmwareImage, 0x00, MAX_FIRMWARE_IMAGE_SIZE);
 -	} /* End of if */
 -
-+	const struct firmware *fw;
-+	const uint8_t *fwdata = NULL;
-+	int ret, i;
-+	NDIS_STATUS Status = NDIS_STATUS_SUCCESS;
- 
+-
 -	/* if ok, read firmware file from *.bin file */
 -	if (flg_default_firm_use == FALSE)
 -	{
@@ -156,9 +161,7 @@ index 8a00cee..138e81b 100644
 -		{
 -			/* open the bin file */
 -			srcf = filp_open(src, O_RDONLY, 0);
-+	ret = request_firmware(&fw, FW_FILENAME,
-+			       &((POS_COOKIE)pAd->OS_Cookie)->pci_dev->dev);
- 
+-
 -			if (IS_ERR(srcf))
 -			{
 -				printk("%s - Error %ld opening %s\n",
@@ -192,20 +195,22 @@ index 8a00cee..138e81b 100644
 -			{
 -				PUCHAR ptr = pFirmwareImage;
 -				USHORT crc = 0xffff;
-+	/* successfully received? */
-+	if (ret || !fw) {
++	const struct firmware *fw;
++	int ret, i;
++	NDIS_STATUS Status = NDIS_STATUS_SUCCESS;
+ 
++	ret = request_firmware(&fw, FW_FILENAME,
++			       &((POS_COOKIE)pAd->OS_Cookie)->pci_dev->dev);
++	if (ret) {
 +		printk(KERN_ERR "rt2860sta: firmware file %s request failed (%d)\n",
 +		       FW_FILENAME, ret);
 +		goto fail;
 +	}
  
-+	fwdata = (const uint8_t *)fw->data;
- 
 -				/* calculate firmware CRC */
 -				for(i=0; i<(MAX_FIRMWARE_IMAGE_SIZE-2); i++, ptr++)
 -					crc = ByteCRC16(bitrev8(*ptr), crc);
 -				/* End of for */
-+	/* is the size correct? */
 +	if (fw->size != MAX_FIRMWARE_IMAGE_SIZE) {
 +		printk(KERN_ERR "rt2860sta: firmware file %s size is wrong\n",
 +		       FW_FILENAME);
@@ -253,8 +258,8 @@ index 8a00cee..138e81b 100644
 -			break;
 -		} while(TRUE);
 +	/* is it new enough? */
-+	pAd->FirmwareVersion = fwdata[fw->size - 4] << 8 |
-+			       fwdata[fw->size - 3];
++	pAd->FirmwareVersion = (fw->data[fw->size - 4] << 8 |
++				fw->data[fw->size - 3]);
  
 -		/* close firmware file */
 -		if (IS_ERR(srcf))
@@ -269,15 +274,17 @@ index 8a00cee..138e81b 100644
 -			} /* End of if */
 -		} /* End of if */
 -	} /* End of if */
-+	if (pAd->FirmwareVersion < (FIRMWARE_MAJOR_VERSION << 8 | FIRMWARE_MINOR_VERSION)) {
++	if (pAd->FirmwareVersion <
++	    (FIRMWARE_MAJOR_VERSION << 8 | FIRMWARE_MINOR_VERSION)) {
 +		printk(KERN_ERR "rt2860sta: firmware file %s is too old\n",
 +		       FW_FILENAME);
 +		goto fail;
 +	}
  
 +	/* is the internal CRC correct? */
-+	if (crc_itu_t_bitreversed(0xffff, fwdata, fw->size - 2) !=
-+	    (bitrev8(fwdata[fw->size - 2]) << 8 | bitrev8(fwdata[fw->size - 1]))) {
++	if (crc_itu_t_bitreversed(0xffff, fw->data, fw->size - 2) !=
++	    (bitrev8(fw->data[fw->size - 2]) << 8 |
++	     bitrev8(fw->data[fw->size - 1]))) {
 +		/* CRC fail */
 +		printk(KERN_ERR "rt2860sta: firmware file %s failed internal CRC\n",
 +		       FW_FILENAME);
@@ -308,17 +315,14 @@ index 8a00cee..138e81b 100644
 -			   (pFirmwareImage[i+1] << 8);
 -
 +	for (i = 0; i < fw->size; i += 4) {
-+		uint32_t firm = fwdata[i] |
-+				fwdata[i+1] << 8 |
-+				fwdata[i+2] << 16 |
-+				fwdata[i+3] << 24;
++		u32 firm = le32_to_cpup((const __le32 *)(fw->data + i));
  		RTMP_IO_WRITE32(pAd, FIRMWARE_IMAGE_BASE + i, firm);
 -	} /* End of for */
 +	}
  
  	RTMP_IO_WRITE32(pAd, PBF_SYS_CTRL, 0x00000);
  	RTMP_IO_WRITE32(pAd, PBF_SYS_CTRL, 0x00001);
-@@ -2831,51 +2671,38 @@ NDIS_STATUS NICLoadFirmware(
+@@ -2831,51 +2659,38 @@ NDIS_STATUS NICLoadFirmware(
  	RTMP_IO_WRITE32(pAd, H2M_BBP_AGENT, 0);
  	RTMP_IO_WRITE32(pAd, H2M_MAILBOX_CSR, 0);
  
@@ -329,8 +333,7 @@ index 8a00cee..138e81b 100644
 -			kfree(pFirmwareImage);
 -		/* End of if */
 -	} /* End of if */
-+	release_firmware(fw);
- 
+-
 -	set_fs(orgfs);
 -	current->fsuid = orgfsuid;
 -	current->fsgid = orgfsgid;
@@ -341,7 +344,8 @@ index 8a00cee..138e81b 100644
 -	ULONG			FileLength, Index;
 -	//ULONG			firm;
 -	UINT32			MacReg = 0;
--
++	release_firmware(fw);
+ 
 -	pFirmwareImage = FirmwareImage;
 -	FileLength = sizeof(FirmwareImage);
 -	RT28XX_WRITE_FIRMWARE(pAd, pFirmwareImage, FileLength);
