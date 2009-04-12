@@ -33,15 +33,17 @@ class SortedDict(dict):
         for i in iter(self._list):
             yield self[i]
 
-class Templates(dict):
+class Templates(object):
     def __init__(self, dirs = ["debian/templates"]):
         self.dirs = dirs
 
-    def __getitem__(self, key):
-        return self.get(key)
+        self._cache = {}
 
-    def __setitem__(self, key, value):
-        raise NotImplemented()
+    def __getitem__(self, key):
+        ret = self.get(key)
+        if ret is not None:
+            return ret
+        raise KeyError(key)
 
     def _read(self, name):
         prefix, id = name.split('.', 1)
@@ -89,16 +91,13 @@ class Templates(dict):
 
         return entries
 
-    def get(self, key, default = _marker):
-        ret = super(Templates, self).get(key, _marker)
-        if ret is not _marker:
-            return ret
-        value = self._read(key)
+    def get(self, key, default=None):
+        if key in self._cache:
+            return self._cache[key]
+
+        value = self._cache.setdefault(key, self._read(key))
         if value is None:
-            if default is _marker:
-                raise KeyError(key)
             return default
-        super(Templates, self).__setitem__(key, value)
         return value
 
 class TextWrapper(textwrap.TextWrapper):
