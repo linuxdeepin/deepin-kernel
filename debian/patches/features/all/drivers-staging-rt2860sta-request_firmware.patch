@@ -1,0 +1,396 @@
+From 02df6f973eb21fe94fac2c580f71912fbb961c6c Mon Sep 17 00:00:00 2001
+From: Darren Salt <linux@youmustbejoking.demon.co.uk>
+Date: Sat, 11 Apr 2009 16:01:56 +0100
+Subject: [PATCH] rt2860sta: use the firmware loader interface and library CRC code
+
+Signed-off-by: Darren Salt <linux@youmustbejoking.demon.co.uk>
+---
+ drivers/staging/rt2860/Kconfig            |    3 +-
+ drivers/staging/rt2860/common/rtmp_init.c |  305 ++++++----------------------
+ 2 files changed, 68 insertions(+), 240 deletions(-)
+
+diff --git a/drivers/staging/rt2860/Kconfig b/drivers/staging/rt2860/Kconfig
+index a282fa4..d75a87a 100644
+--- a/drivers/staging/rt2860/Kconfig
++++ b/drivers/staging/rt2860/Kconfig
+@@ -1,6 +1,7 @@
+ config RT2860
+ 	tristate "Ralink 2860 wireless support"
+-	depends on BROKEN
+ 	depends on PCI && X86 && WLAN_80211
++	select CRC_ITU_T
++	select FW_LOADER
+ 	---help---
+ 	  This is an experimental driver for the Ralink 2860 wireless chip.
+diff --git a/drivers/staging/rt2860/common/rtmp_init.c b/drivers/staging/rt2860/common/rtmp_init.c
+index 8a00cee..138e81b 100644
+--- a/drivers/staging/rt2860/common/rtmp_init.c
++++ b/drivers/staging/rt2860/common/rtmp_init.c
+@@ -38,8 +38,8 @@
+     Jan Lee  2006-09-15    RT2860. Change for 802.11n , EEPROM, Led, BA, HT.
+ */
+ #include "../rt_config.h"
+-#include 	"firmware.h"
+-#include <linux/bitrev.h>
++#include <linux/firmware.h>
++#include <linux/crc-itu-t.h>
+ 
+ UCHAR    BIT8[] = {0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80};
+ ULONG    BIT32[] = {0x00000001, 0x00000002, 0x00000004, 0x00000008,
+@@ -53,43 +53,6 @@ ULONG    BIT32[] = {0x00000001, 0x00000002, 0x00000004, 0x00000008,
+ 
+ char*   CipherName[] = {"none","wep64","wep128","TKIP","AES","CKIP64","CKIP128"};
+ 
+-const unsigned short ccitt_16Table[] = {
+-	0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50A5, 0x60C6, 0x70E7,
+-	0x8108, 0x9129, 0xA14A, 0xB16B, 0xC18C, 0xD1AD, 0xE1CE, 0xF1EF,
+-	0x1231, 0x0210, 0x3273, 0x2252, 0x52B5, 0x4294, 0x72F7, 0x62D6,
+-	0x9339, 0x8318, 0xB37B, 0xA35A, 0xD3BD, 0xC39C, 0xF3FF, 0xE3DE,
+-	0x2462, 0x3443, 0x0420, 0x1401, 0x64E6, 0x74C7, 0x44A4, 0x5485,
+-	0xA56A, 0xB54B, 0x8528, 0x9509, 0xE5EE, 0xF5CF, 0xC5AC, 0xD58D,
+-	0x3653, 0x2672, 0x1611, 0x0630, 0x76D7, 0x66F6, 0x5695, 0x46B4,
+-	0xB75B, 0xA77A, 0x9719, 0x8738, 0xF7DF, 0xE7FE, 0xD79D, 0xC7BC,
+-	0x48C4, 0x58E5, 0x6886, 0x78A7, 0x0840, 0x1861, 0x2802, 0x3823,
+-	0xC9CC, 0xD9ED, 0xE98E, 0xF9AF, 0x8948, 0x9969, 0xA90A, 0xB92B,
+-	0x5AF5, 0x4AD4, 0x7AB7, 0x6A96, 0x1A71, 0x0A50, 0x3A33, 0x2A12,
+-	0xDBFD, 0xCBDC, 0xFBBF, 0xEB9E, 0x9B79, 0x8B58, 0xBB3B, 0xAB1A,
+-	0x6CA6, 0x7C87, 0x4CE4, 0x5CC5, 0x2C22, 0x3C03, 0x0C60, 0x1C41,
+-	0xEDAE, 0xFD8F, 0xCDEC, 0xDDCD, 0xAD2A, 0xBD0B, 0x8D68, 0x9D49,
+-	0x7E97, 0x6EB6, 0x5ED5, 0x4EF4, 0x3E13, 0x2E32, 0x1E51, 0x0E70,
+-	0xFF9F, 0xEFBE, 0xDFDD, 0xCFFC, 0xBF1B, 0xAF3A, 0x9F59, 0x8F78,
+-	0x9188, 0x81A9, 0xB1CA, 0xA1EB, 0xD10C, 0xC12D, 0xF14E, 0xE16F,
+-	0x1080, 0x00A1, 0x30C2, 0x20E3, 0x5004, 0x4025, 0x7046, 0x6067,
+-	0x83B9, 0x9398, 0xA3FB, 0xB3DA, 0xC33D, 0xD31C, 0xE37F, 0xF35E,
+-	0x02B1, 0x1290, 0x22F3, 0x32D2, 0x4235, 0x5214, 0x6277, 0x7256,
+-	0xB5EA, 0xA5CB, 0x95A8, 0x8589, 0xF56E, 0xE54F, 0xD52C, 0xC50D,
+-	0x34E2, 0x24C3, 0x14A0, 0x0481, 0x7466, 0x6447, 0x5424, 0x4405,
+-	0xA7DB, 0xB7FA, 0x8799, 0x97B8, 0xE75F, 0xF77E, 0xC71D, 0xD73C,
+-	0x26D3, 0x36F2, 0x0691, 0x16B0, 0x6657, 0x7676, 0x4615, 0x5634,
+-	0xD94C, 0xC96D, 0xF90E, 0xE92F, 0x99C8, 0x89E9, 0xB98A, 0xA9AB,
+-	0x5844, 0x4865, 0x7806, 0x6827, 0x18C0, 0x08E1, 0x3882, 0x28A3,
+-	0xCB7D, 0xDB5C, 0xEB3F, 0xFB1E, 0x8BF9, 0x9BD8, 0xABBB, 0xBB9A,
+-	0x4A75, 0x5A54, 0x6A37, 0x7A16, 0x0AF1, 0x1AD0, 0x2AB3, 0x3A92,
+-	0xFD2E, 0xED0F, 0xDD6C, 0xCD4D, 0xBDAA, 0xAD8B, 0x9DE8, 0x8DC9,
+-	0x7C26, 0x6C07, 0x5C64, 0x4C45, 0x3CA2, 0x2C83, 0x1CE0, 0x0CC1,
+-	0xEF1F, 0xFF3E, 0xCF5D, 0xDF7C, 0xAF9B, 0xBFBA, 0x8FD9, 0x9FF8,
+-	0x6E17, 0x7E36, 0x4E55, 0x5E74, 0x2E93, 0x3EB2, 0x0ED1, 0x1EF0
+-};
+-#define ByteCRC16(v, crc) \
+-	(unsigned short)((crc << 8) ^  ccitt_16Table[((crc >> 8) ^ (v)) & 255])
+-
+ //
+ // BBP register initialization set
+ //
+@@ -178,6 +141,8 @@ RTMP_REG_PAIR	STAMACRegTable[] =	{
+ #endif // CONFIG_STA_SUPPORT //
+ 
+ 
++#define FW_FILENAME "rt2860sta.fw"
++
+ // New 8k byte firmware size for RT3071/RT3072
+ #define FIRMWAREIMAGE_MAX_LENGTH	0x2000
+ #define FIRMWAREIMAGE_LENGTH		(sizeof (FirmwareImage) / sizeof(UCHAR))
+@@ -2643,186 +2608,61 @@ VOID NICEraseFirmware(
+ NDIS_STATUS NICLoadFirmware(
+ 	IN PRTMP_ADAPTER pAd)
+ {
+-#ifdef BIN_IN_FILE
+-#define NICLF_DEFAULT_USE()	\
+-	flg_default_firm_use = TRUE; \
+-	printk("%s - Use default firmware!\n", __func__);
+-
+-	NDIS_STATUS		Status = NDIS_STATUS_SUCCESS;
+-	PUCHAR			src;
+-	struct file		*srcf;
+-	INT 			retval, orgfsuid, orgfsgid, i;
+-   	mm_segment_t	orgfs;
+-	PUCHAR			pFirmwareImage;
+-	UINT			FileLength = 0;
+-	UINT32			MacReg;
+-	ULONG			Index;
+-	ULONG			firm;
+-	BOOLEAN			flg_default_firm_use = FALSE;
+-
+-
+-	DBGPRINT(RT_DEBUG_TRACE, ("===> %s\n", __func__));
+-
+-	/* init */
+-	pFirmwareImage = NULL;
+-	src = RTMP_FIRMWARE_FILE_NAME;
+-
+-	/* save uid and gid used for filesystem access.
+-	   set user and group to 0 (root) */
+-	orgfsuid = current->fsuid;
+-	orgfsgid = current->fsgid;
+-	current->fsuid = current->fsgid = 0;
+-    orgfs = get_fs();
+-    set_fs(KERNEL_DS);
+-
+-	pAd->FirmwareVersion = (FIRMWARE_MAJOR_VERSION << 8) + \
+-						   FIRMWARE_MINOR_VERSION;
+-
+-
+-	/* allocate firmware buffer */
+-    pFirmwareImage = kmalloc(MAX_FIRMWARE_IMAGE_SIZE, MEM_ALLOC_FLAG);
+-    if (pFirmwareImage == NULL)
+-	{
+-		/* allocate fail, use default firmware array in firmware.h */
+-		printk("%s - Allocate memory fail!\n", __func__);
+-		NICLF_DEFAULT_USE();
+-    }
+-	else
+-	{
+-		/* allocate ok! zero the firmware buffer */
+-		memset(pFirmwareImage, 0x00, MAX_FIRMWARE_IMAGE_SIZE);
+-	} /* End of if */
+-
++	const struct firmware *fw;
++	const uint8_t *fwdata = NULL;
++	int ret, i;
++	NDIS_STATUS Status = NDIS_STATUS_SUCCESS;
+ 
+-	/* if ok, read firmware file from *.bin file */
+-	if (flg_default_firm_use == FALSE)
+-	{
+-		do
+-		{
+-			/* open the bin file */
+-			srcf = filp_open(src, O_RDONLY, 0);
++	ret = request_firmware(&fw, FW_FILENAME,
++			       &((POS_COOKIE)pAd->OS_Cookie)->pci_dev->dev);
+ 
+-			if (IS_ERR(srcf))
+-			{
+-				printk("%s - Error %ld opening %s\n",
+-					   __func__, -PTR_ERR(srcf), src);
+-				NICLF_DEFAULT_USE();
+-				break;
+-			} /* End of if */
+-
+-			/* the object must have a read method */
+-			if ((srcf->f_op == NULL) || (srcf->f_op->read == NULL))
+-			{
+-				printk("%s - %s does not have a write method\n", __func__, src);
+-				NICLF_DEFAULT_USE();
+-				break;
+-			} /* End of if */
+-
+-			/* read the firmware from the file *.bin */
+-			FileLength = srcf->f_op->read(srcf,
+-										  pFirmwareImage,
+-										  MAX_FIRMWARE_IMAGE_SIZE,
+-										  &srcf->f_pos);
+-
+-			if (FileLength != MAX_FIRMWARE_IMAGE_SIZE)
+-			{
+-				printk("%s: error file length (=%d) in RT2860AP.BIN\n",
+-					   __func__, FileLength);
+-				NICLF_DEFAULT_USE();
+-				break;
+-			}
+-			else
+-			{
+-				PUCHAR ptr = pFirmwareImage;
+-				USHORT crc = 0xffff;
++	/* successfully received? */
++	if (ret || !fw) {
++		printk(KERN_ERR "rt2860sta: firmware file %s request failed (%d)\n",
++		       FW_FILENAME, ret);
++		goto fail;
++	}
+ 
++	fwdata = (const uint8_t *)fw->data;
+ 
+-				/* calculate firmware CRC */
+-				for(i=0; i<(MAX_FIRMWARE_IMAGE_SIZE-2); i++, ptr++)
+-					crc = ByteCRC16(bitrev8(*ptr), crc);
+-				/* End of for */
++	/* is the size correct? */
++	if (fw->size != MAX_FIRMWARE_IMAGE_SIZE) {
++		printk(KERN_ERR "rt2860sta: firmware file %s size is wrong\n",
++		       FW_FILENAME);
++		goto fail;
++	}
+ 
+-				if ((pFirmwareImage[MAX_FIRMWARE_IMAGE_SIZE-2] != \
+-								(UCHAR)bitrev8((UCHAR)(crc>>8))) ||
+-					(pFirmwareImage[MAX_FIRMWARE_IMAGE_SIZE-1] != \
+-								(UCHAR)bitrev8((UCHAR)crc)))
+-				{
+-					/* CRC fail */
+-					printk("%s: CRC = 0x%02x 0x%02x "
+-						   "error, should be 0x%02x 0x%02x\n",
+-						   __func__,
+-						   pFirmwareImage[MAX_FIRMWARE_IMAGE_SIZE-2],
+-						   pFirmwareImage[MAX_FIRMWARE_IMAGE_SIZE-1],
+-						   (UCHAR)(crc>>8), (UCHAR)(crc));
+-					NICLF_DEFAULT_USE();
+-					break;
+-				}
+-				else
+-				{
+-					/* firmware is ok */
+-					pAd->FirmwareVersion = \
+-						(pFirmwareImage[MAX_FIRMWARE_IMAGE_SIZE-4] << 8) +
+-						pFirmwareImage[MAX_FIRMWARE_IMAGE_SIZE-3];
+-
+-					/* check if firmware version of the file is too old */
+-					if ((pAd->FirmwareVersion) < \
+-											((FIRMWARE_MAJOR_VERSION << 8) +
+-									  	 	 FIRMWARE_MINOR_VERSION))
+-					{
+-						printk("%s: firmware version too old!\n", __func__);
+-						NICLF_DEFAULT_USE();
+-						break;
+-					} /* End of if */
+-				} /* End of if */
+-
+-				DBGPRINT(RT_DEBUG_TRACE,
+-						 ("NICLoadFirmware: CRC ok, ver=%d.%d\n",
+-						  pFirmwareImage[MAX_FIRMWARE_IMAGE_SIZE-4],
+-						  pFirmwareImage[MAX_FIRMWARE_IMAGE_SIZE-3]));
+-			} /* End of if (FileLength == MAX_FIRMWARE_IMAGE_SIZE) */
+-			break;
+-		} while(TRUE);
++	/* is it new enough? */
++	pAd->FirmwareVersion = fwdata[fw->size - 4] << 8 |
++			       fwdata[fw->size - 3];
+ 
+-		/* close firmware file */
+-		if (IS_ERR(srcf))
+-			;
+-		else
+-		{
+-			retval = filp_close(srcf, NULL);
+-			if (retval)
+-			{
+-				DBGPRINT(RT_DEBUG_ERROR,
+-						 ("--> Error %d closing %s\n", -retval, src));
+-			} /* End of if */
+-		} /* End of if */
+-	} /* End of if */
++	if (pAd->FirmwareVersion < (FIRMWARE_MAJOR_VERSION << 8 | FIRMWARE_MINOR_VERSION)) {
++		printk(KERN_ERR "rt2860sta: firmware file %s is too old\n",
++		       FW_FILENAME);
++		goto fail;
++	}
+ 
++	/* is the internal CRC correct? */
++	if (crc_itu_t_bitreversed(0xffff, fwdata, fw->size - 2) !=
++	    (bitrev8(fwdata[fw->size - 2]) << 8 | bitrev8(fwdata[fw->size - 1]))) {
++		/* CRC fail */
++		printk(KERN_ERR "rt2860sta: firmware file %s failed internal CRC\n",
++		       FW_FILENAME);
++		goto fail;
++	}
+ 
+ 	/* write firmware to ASIC */
+-	if (flg_default_firm_use == TRUE)
+-	{
+-		/* use default fimeware, free allocated buffer */
+-		if (pFirmwareImage != NULL)
+-			kfree(pFirmwareImage);
+-		/* End of if */
+-
+-		/* use default *.bin array */
+-		pFirmwareImage = FirmwareImage;
+-		FileLength = sizeof(FirmwareImage);
+-	} /* End of if */
+ 
+ 	/* enable Host program ram write selection */
+ 	RTMP_IO_WRITE32(pAd, PBF_SYS_CTRL, 0x10000);
+ 
+-	for(i=0; i<FileLength; i+=4)
+-	{
+-		firm = pFirmwareImage[i] +
+-			   (pFirmwareImage[i+3] << 24) +
+-			   (pFirmwareImage[i+2] << 16) +
+-			   (pFirmwareImage[i+1] << 8);
+-
++	for (i = 0; i < fw->size; i += 4) {
++		uint32_t firm = fwdata[i] |
++				fwdata[i+1] << 8 |
++				fwdata[i+2] << 16 |
++				fwdata[i+3] << 24;
+ 		RTMP_IO_WRITE32(pAd, FIRMWARE_IMAGE_BASE + i, firm);
+-	} /* End of for */
++	}
+ 
+ 	RTMP_IO_WRITE32(pAd, PBF_SYS_CTRL, 0x00000);
+ 	RTMP_IO_WRITE32(pAd, PBF_SYS_CTRL, 0x00001);
+@@ -2831,51 +2671,38 @@ NDIS_STATUS NICLoadFirmware(
+ 	RTMP_IO_WRITE32(pAd, H2M_BBP_AGENT, 0);
+ 	RTMP_IO_WRITE32(pAd, H2M_MAILBOX_CSR, 0);
+ 
+-	if (flg_default_firm_use == FALSE)
+-	{
+-		/* use file firmware, free allocated buffer */
+-		if (pFirmwareImage != NULL)
+-			kfree(pFirmwareImage);
+-		/* End of if */
+-	} /* End of if */
++	release_firmware(fw);
+ 
+-	set_fs(orgfs);
+-	current->fsuid = orgfsuid;
+-	current->fsgid = orgfsgid;
+-#else
+-
+-	NDIS_STATUS		Status = NDIS_STATUS_SUCCESS;
+-	PUCHAR			pFirmwareImage;
+-	ULONG			FileLength, Index;
+-	//ULONG			firm;
+-	UINT32			MacReg = 0;
+-
+-	pFirmwareImage = FirmwareImage;
+-	FileLength = sizeof(FirmwareImage);
+-	RT28XX_WRITE_FIRMWARE(pAd, pFirmwareImage, FileLength);
+-#endif
+-
+-	/* check if MCU is ready */
+-	Index = 0;
+-	do
+-	{
++	/* Check if MCU is ready - this may work even if firmware load
++	 * failed: specifically, if firmware was loaded some time ago & the
++	 * device hasn't been powered down since.
++	 * There is the possibility of failure here...
++	 */
++	i = 0;
++	do {
++		UINT32 MacReg;
+ 		RTMP_IO_READ32(pAd, PBF_SYS_CTRL, &MacReg);
+ 
+ 		if (MacReg & 0x80)
+ 			break;
+ 
+ 		RTMPusecDelay(1000);
+-	} while (Index++ < 1000);
++	} while (++i < 1000);
+ 
+-    if (Index >= 1000)
+-	{
++	if (i >= 1000) {
+ 		Status = NDIS_STATUS_FAILURE;
+-		DBGPRINT(RT_DEBUG_ERROR, ("NICLoadFirmware: MCU is not ready\n\n\n"));
+-	} /* End of if */
++		printk(KERN_ERR "rt2860sta: failed to install firmware: MCU is not ready\n");
++	} else if (Status == NDIS_STATUS_SUCCESS) {
++		printk(KERN_INFO "rt2860sta: firmware loaded\n");
++	}
+ 
+-    DBGPRINT(RT_DEBUG_TRACE,
++	DBGPRINT(RT_DEBUG_TRACE,
+ 			 ("<=== %s (status=%d)\n", __func__, Status));
+-    return Status;
++	return Status;
++
++fail:
++	release_firmware(fw);
++	return NDIS_STATUS_FAILURE;
+ } /* End of NICLoadFirmware */
+ 
+ 
+-- 
+1.5.6.5
+
