@@ -1,0 +1,1014 @@
+From 90425f3723c6cdf0ba0e8dd168b7d2914dc36ba3 Mon Sep 17 00:00:00 2001
+From: Michael Schmitz <schmitz@biophys.uni-duesseldorf.de>
+Date: Tue, 18 Nov 2008 21:07:40 +0100
+Subject: [PATCH 14/90] m68k: Atari EtherNAT updates
+
+Here's my EtherNAT update (goes on top of your patch queue as of Oct. 18),
+fixing the various compile errors and generally cleaning up the patch. This
+brings the EtherNAT driver in sync with smc91x.c again (actually, I started
+from a clean slate and patched in only the bare essentials).
+
+Works OK, and can be trimmed a bit further if I preset the interrupt to timer
+D in the platform code. Should be replaced by smc91x.c altogether once I have
+real interrupts sorted. How's that for a perspective?
+
+Signed-off-by: Michael Schmitz <schmitz@debian.org>
+Signed-off-by: Geert Uytterhoeven <geert@linux-m68k.org>
+---
+ drivers/net/atari_91C111.c |  404 +++++++++++++++----------------------------
+ drivers/net/smc91x.h       |   61 +++++++
+ 2 files changed, 202 insertions(+), 263 deletions(-)
+
+diff --git a/drivers/net/atari_91C111.c b/drivers/net/atari_91C111.c
+index 9b87d04..f6f8a45 100644
+--- a/drivers/net/atari_91C111.c
++++ b/drivers/net/atari_91C111.c
+@@ -60,8 +60,6 @@
+ static const char version[] =
+ 	"smc91x.c: v1.1, sep 22 2004 by Nicolas Pitre <nico@cam.org>\n";
+ 
+-#define SMC_DEBUG 1
+-
+ /* Debugging level */
+ #ifndef SMC_DEBUG
+ #define SMC_DEBUG		0
+@@ -106,7 +104,7 @@ static unsigned int smc_portlist[] __initdata = {
+ 	0x300, 0x320, 0x340, 0x360, 0x380, 0x3A0, 0x3C0, 0x3E0, 0
+ };
+ 
+-#endif  /* CONFIG_ISA */
++/* MSch FIXME: endif CONFIG_ISA here? */
+ 
+ #ifndef SMC_IOADDR
+ # define SMC_IOADDR		-1
+@@ -122,6 +120,7 @@ static int irq = SMC_IRQ;
+ module_param(irq, int, 0400);
+ MODULE_PARM_DESC(irq, "IRQ number");
+ 
++#endif  /* CONFIG_ISA */
+ 
+ #ifndef SMC_NOWAIT
+ # define SMC_NOWAIT		0
+@@ -172,7 +171,7 @@ MODULE_ALIAS("platform:smc91x");
+  * but to the expense of reduced TX throughput and increased IRQ overhead.
+  * Note this is not a cure for a too slow data bus or too high IRQ latency.
+  */
+-#define THROTTLE_TX_PKTS	1
++#define THROTTLE_TX_PKTS	0	/* MSch FIXME 1 */
+ 
+ /*
+  * The MII clock high/low times.  2x this number gives the MII clock period
+@@ -227,7 +226,7 @@ static void PRINT_PKT(u_char *buf, int length)
+ 
+ 
+ /* this enables an interrupt in the interrupt mask register */
+-#define SMC_ENABLE_INT(lp, x) do {						\
++#define SMC_ENABLE_INT(lp, x) do {					\
+ 	unsigned char mask;						\
+ 	spin_lock_irq(&lp->lock);					\
+ 	mask = SMC_GET_INT_MASK(lp);					\
+@@ -237,7 +236,7 @@ static void PRINT_PKT(u_char *buf, int length)
+ } while (0)
+ 
+ /* this disables an interrupt from the interrupt mask register */
+-#define SMC_DISABLE_INT(lp, x) do {						\
++#define SMC_DISABLE_INT(lp, x) do {					\
+ 	unsigned char mask;						\
+ 	spin_lock_irq(&lp->lock);					\
+ 	mask = SMC_GET_INT_MASK(lp);					\
+@@ -252,9 +251,9 @@ static void PRINT_PKT(u_char *buf, int length)
+  * decides to go south.
+  */
+ #define SMC_WAIT_MMU_BUSY(lp) do {					\
+-	if (unlikely(SMC_GET_MMU_CMD(lp) & MC_BUSY)) {			\
++	if (unlikely(SMC_GET_MMU_CMD(lp) & MC_BUSY)) {		\
+ 		unsigned long timeout = jiffies + 2;			\
+-		while (SMC_GET_MMU_CMD(lp) & MC_BUSY) {			\
++		while (SMC_GET_MMU_CMD(lp) & MC_BUSY) {		\
+ 			if (time_after(jiffies, timeout)) {		\
+ 				printk("%s: timeout %s line %d\n",	\
+ 					dev->name, __FILE__, __LINE__);	\
+@@ -266,70 +265,25 @@ static void PRINT_PKT(u_char *buf, int length)
+ } while (0)
+ 
+ /*
+- * Timer based operation on Atari
+- */
+-static irqreturn_t smc_interrupt(int irq, void *dev_id);
+-
+-static int use_poll = 0;
+-module_param(use_poll, int, 0);
+-MODULE_PARM_DESC(use_poll, "Use scheduling timer to poll driver");
+-
+-/* This is used by cleanup, to prevent the module from being unloaded while
+- * intrpt_routine is still in the task queue
++ * MSch: Interrupt wrapper to prevent calling the main interrupt handler
++ *       from MFP timer D routine before device has been opened.
+  */
+-static wait_queue_head_t WaitQ;
+-
+-static struct delayed_work tqueue;
+ 
+-static struct net_device *poll_dev = NULL;
++static irqreturn_t smc_interrupt(int irq, void *dev_id);
+ 
+-static void atari_ethernat_int(struct work_struct *work)
++static irqreturn_t atari_ethernat_interrupt(int irq, void *dev_id)
+ {
+-	struct net_device *dev  = poll_dev;
+-
+-        if(!dev) {
+-	        /* If cleanup wants us to die */
+-                if (waitqueue_active(&WaitQ))
+-                  wake_up(&WaitQ);               /* Now cleanup_module can return */
+-                else
+-                  /* Put ourselves back in the task queue */
+-                  schedule_delayed_work(&tqueue, 1);
+-		return;
+-        }
+-
+-        /* This actually does not appear to work during probe */
++	struct net_device *dev = (struct net_device *) dev_id;
+ 	if (netif_running(dev)) {
+-		smc_interrupt(dev->irq, dev);
+-        }
+-
+-	/* If cleanup wants us to die */
+-	if (waitqueue_active(&WaitQ))
+-		wake_up(&WaitQ);               /* Now cleanup_module can return */
+-	else
+-		/* Put ourselves back in the task queue */
+-		schedule_delayed_work(&tqueue, 0); /* reduced delay from 1 */
+-}
+-
+-static void atari_ethernat_start_poll(struct net_device *dev)
+-{
+-	poll_dev = dev;
+-
+-	init_waitqueue_head(&WaitQ);
+-
+-	/* MSch: need to insert dev into work struct?? */
+-
+-	INIT_DELAYED_WORK(&tqueue, atari_ethernat_int);
+-	schedule_delayed_work(&tqueue, 1);
+-}
+-
+-static void atari_ethernat_stop_poll(struct net_device *dev)
+-{
+-	if (dev && (dev == poll_dev)) {
+-	        sleep_on(&WaitQ);
++		return smc_interrupt(dev->irq, dev);
+ 	}
+-	poll_dev = NULL;
++	return IRQ_HANDLED;
+ }
+ 
++static int period = 0;
++module_param(period, int, 0);
++MODULE_PARM_DESC(period, "Timer D period (123 for 200Hz)");
++
+ /*
+  * this does a soft reset on the device
+  */
+@@ -340,7 +294,7 @@ static void smc_reset(struct net_device *dev)
+ 	unsigned int ctl, cfg;
+ 	struct sk_buff *pending_skb;
+ 
+-	DBG(2, "%s: %s\n", dev->name, __FUNCTION__);
++	DBG(2, "%s: %s\n", dev->name, __func__);
+ 
+ 	/* Disable all interrupts, block TX tasklet */
+ 	spin_lock_irq(&lp->lock);
+@@ -378,7 +332,7 @@ static void smc_reset(struct net_device *dev)
+ 	 * can't handle it then there will be no recovery except for
+ 	 * a hard reset or power cycle
+ 	 */
+-	if (nowait)
++	if (lp->cfg.flags & SMC91X_NOWAIT)
+ 		cfg |= CONFIG_NO_WAIT;
+ 
+ 	/*
+@@ -433,7 +387,7 @@ static void smc_enable(struct net_device *dev)
+ 	void __iomem *ioaddr = lp->base;
+ 	int mask;
+ 
+-	DBG(2, "%s: %s\n", dev->name, __FUNCTION__);
++	DBG(2, "%s: %s\n", dev->name, __func__);
+ 
+ 	/* see the header file for options in TCR/RCR DEFAULT */
+ 	SMC_SELECT_BANK(lp, 0);
+@@ -467,7 +421,7 @@ static void smc_shutdown(struct net_device *dev)
+ 	void __iomem *ioaddr = lp->base;
+ 	struct sk_buff *pending_skb;
+ 
+-	DBG(2, "%s: %s\n", CARDNAME, __FUNCTION__);
++	DBG(2, "%s: %s\n", CARDNAME, __func__);
+ 
+ 	/* no more interrupts for me */
+ 	spin_lock_irq(&lp->lock);
+@@ -500,7 +454,7 @@ static inline void  smc_rcv(struct net_device *dev)
+ 	void __iomem *ioaddr = lp->base;
+ 	unsigned int packet_number, status, packet_len;
+ 
+-	DBG(3, "%s: %s\n", dev->name, __FUNCTION__);
++	DBG(3, "%s: %s\n", dev->name, __func__);
+ 
+ 	packet_number = SMC_GET_RXFIFO(lp);
+ 	if (unlikely(packet_number & RXFIFO_REMPTY)) {
+@@ -635,44 +589,10 @@ static inline void  smc_rcv(struct net_device *dev)
+ #define smc_special_unlock(lock)	do { } while (0)
+ #endif
+ 
+-
+ /*
+- * MSch: EtherNAT is 32 bit, so the misaligned data buffer hack applies. 
+- * This appears to hurt quite a lot ... need to fudge with the data pointer
+- * to compensate
++ * MSch FIXME: add SMC_PUSH_DATA_BE(lp, p, l)
+  */
+ 
+-#define SMC_outw_be(v, a, r)	writew_be(v, (a) + (r))
+-
+-#define SMC_PUSH_DATA_BE(lp, p, l)					\
+-	do {								\
+-		if (SMC_32BIT(lp)) {				\
+-			void *__ptr = (p);				\
+-			int __len = (l);				\
+-			void __iomem *__ioaddr = ioaddr;		\
+-			if (__len >= 2 && (unsigned long)__ptr & 2) {	\
+-				__len -= 2;				\
+-				SMC_outw_be(*(u16 *)__ptr, ioaddr,		\
+-					DATA_REG(lp));		\
+-				__ptr += 2;				\
+-			}						\
+-			if (SMC_CAN_USE_DATACS && lp->datacs)		\
+-				__ioaddr = lp->datacs;			\
+-			SMC_outsl(__ioaddr, DATA_REG(lp), __ptr, __len>>2); \
+-			if (__len & 2) {				\
+-				__ptr += (__len & ~3);			\
+-				SMC_outw_be(*((u16 *)__ptr), ioaddr,	\
+-					 DATA_REG(lp));		\
+-			}						\
+-		} else if (SMC_16BIT(lp))				\
+-			SMC_outsw(ioaddr, DATA_REG(lp), (u16 *) p, (l) >> 1);	\
+-		else if (SMC_8BIT(lp))				\
+-			SMC_outsb(ioaddr, DATA_REG(lp), p, l);	\
+-	} while (0)
+-
+-
+-
+-
+ /*
+  * This is called to actually send a packet to the chip.
+  */
+@@ -685,7 +605,7 @@ static void smc_hardware_send_pkt(unsigned long data)
+ 	unsigned int packet_no, len;
+ 	unsigned char *buf;
+ 
+-	DBG(3, "%s: %s\n", dev->name, __FUNCTION__);
++	DBG(3, "%s: %s\n", dev->name, __func__);
+ 
+ 	if (!smc_special_trylock(&lp->lock)) {
+ 		netif_stop_queue(dev);
+@@ -726,7 +646,7 @@ static void smc_hardware_send_pkt(unsigned long data)
+ 	SMC_PUT_PKT_HDR(lp, 0, len + 6);
+ 
+ 	/* send the actual data */
+-	SMC_PUSH_DATA_BE(lp, buf, len & ~1);
++	SMC_PUSH_DATA(lp, buf, len & ~1);
+ 
+ 	/* Send final ctl word with the last byte if there is one */
+ 	SMC_outw(((len & 1) ? (0x2000 | buf[len-1]) : 0), ioaddr, DATA_REG(lp));
+@@ -770,7 +690,7 @@ static int smc_hard_start_xmit(struct sk_buff *skb, struct net_device *dev)
+ 	void __iomem *ioaddr = lp->base;
+ 	unsigned int numPages, poll_count, status;
+ 
+-	DBG(3, "%s: %s\n", dev->name, __FUNCTION__);
++	DBG(3, "%s: %s\n", dev->name, __func__);
+ 
+ 	BUG_ON(lp->pending_tx_skb != NULL);
+ 
+@@ -842,7 +762,7 @@ static void smc_tx(struct net_device *dev)
+ 	void __iomem *ioaddr = lp->base;
+ 	unsigned int saved_packet, packet_no, tx_status, pkt_len;
+ 
+-	DBG(3, "%s: %s\n", dev->name, __FUNCTION__);
++	DBG(3, "%s: %s\n", dev->name, __func__);
+ 
+ 	/* If the TX FIFO is empty then nothing to do */
+ 	packet_no = SMC_GET_TXFIFO(lp);
+@@ -964,7 +884,7 @@ static int smc_phy_read(struct net_device *dev, int phyaddr, int phyreg)
+ 	SMC_SET_MII(lp, SMC_GET_MII(lp) & ~(MII_MCLK|MII_MDOE|MII_MDO));
+ 
+ 	DBG(3, "%s: phyaddr=0x%x, phyreg=0x%x, phydata=0x%x\n",
+-		__FUNCTION__, phyaddr, phyreg, phydata);
++		__func__, phyaddr, phyreg, phydata);
+ 
+ 	SMC_SELECT_BANK(lp, 2);
+ 	return phydata;
+@@ -991,7 +911,7 @@ static void smc_phy_write(struct net_device *dev, int phyaddr, int phyreg,
+ 	SMC_SET_MII(lp, SMC_GET_MII(lp) & ~(MII_MCLK|MII_MDOE|MII_MDO));
+ 
+ 	DBG(3, "%s: phyaddr=0x%x, phyreg=0x%x, phydata=0x%x\n",
+-		__FUNCTION__, phyaddr, phyreg, phydata);
++		__func__, phyaddr, phyreg, phydata);
+ 
+ 	SMC_SELECT_BANK(lp, 2);
+ }
+@@ -1004,7 +924,7 @@ static void smc_phy_detect(struct net_device *dev)
+ 	struct smc_local *lp = netdev_priv(dev);
+ 	int phyaddr;
+ 
+-	DBG(2, "%s: %s\n", dev->name, __FUNCTION__);
++	DBG(2, "%s: %s\n", dev->name, __func__);
+ 
+ 	lp->phy_type = 0;
+ 
+@@ -1043,7 +963,7 @@ static int smc_phy_fixed(struct net_device *dev)
+ 	int phyaddr = lp->mii.phy_id;
+ 	int bmcr, cfg1;
+ 
+-	DBG(3, "%s: %s\n", dev->name, __FUNCTION__);
++	DBG(3, "%s: %s\n", dev->name, __func__);
+ 
+ 	/* Enter Link Disable state */
+ 	cfg1 = smc_phy_read(dev, phyaddr, PHY_CFG1_REG);
+@@ -1276,7 +1196,7 @@ static void smc_phy_interrupt(struct net_device *dev)
+ 	int phyaddr = lp->mii.phy_id;
+ 	int phy18;
+ 
+-	DBG(2, "%s: %s\n", dev->name, __FUNCTION__);
++	DBG(2, "%s: %s\n", dev->name, __func__);
+ 
+ 	if (lp->phy_type == 0)
+ 		return;
+@@ -1344,7 +1264,7 @@ static irqreturn_t smc_interrupt(int irq, void *dev_id)
+ 	int status, mask, timeout, card_stats;
+ 	int saved_pointer;
+ 
+-	DBG(3, "%s: %s\n", dev->name, __FUNCTION__);
++	DBG(3, "%s: %s\n", dev->name, __func__);
+ 
+ 	spin_lock(&lp->lock);
+ 
+@@ -1363,7 +1283,7 @@ static irqreturn_t smc_interrupt(int irq, void *dev_id)
+ 	do {
+ 		status = SMC_GET_INT(lp);
+ 
+-		DBG(3, "%s: INT 0x%02x MASK 0x%02x MEM 0x%04x FIFO 0x%04x\n",
++		DBG(2, "%s: INT 0x%02x MASK 0x%02x MEM 0x%04x FIFO 0x%04x\n",
+ 			dev->name, status, mask,
+ 			({ int meminfo; SMC_SELECT_BANK(lp, 0);
+ 			   meminfo = SMC_GET_MIR(lp);
+@@ -1376,20 +1296,20 @@ static irqreturn_t smc_interrupt(int irq, void *dev_id)
+ 
+ 		if (status & IM_TX_INT) {
+ 			/* do this before RX as it will free memory quickly */
+-			DBG(2, "%s: TX int\n", dev->name);
++			DBG(3, "%s: TX int\n", dev->name);
+ 			smc_tx(dev);
+ 			SMC_ACK_INT(lp, IM_TX_INT);
+ 			if (THROTTLE_TX_PKTS)
+ 				netif_wake_queue(dev);
+ 		} else if (status & IM_RCV_INT) {
+-			DBG(2, "%s: RX irq\n", dev->name);
++			DBG(3, "%s: RX irq\n", dev->name);
+ 			smc_rcv(dev);
+ 		} else if (status & IM_ALLOC_INT) {
+-			DBG(1, "%s: Allocation irq\n", dev->name);
++			DBG(3, "%s: Allocation irq\n", dev->name);
+ 			tasklet_hi_schedule(&lp->tx_task);
+ 			mask &= ~IM_ALLOC_INT;
+ 		} else if (status & IM_TX_EMPTY_INT) {
+-			DBG(2, "%s: TX empty\n", dev->name);
++			DBG(3, "%s: TX empty\n", dev->name);
+ 			mask &= ~IM_TX_EMPTY_INT;
+ 
+ 			/* update stats */
+@@ -1407,15 +1327,13 @@ static irqreturn_t smc_interrupt(int irq, void *dev_id)
+ 			DBG(1, "%s: RX overrun (EPH_ST 0x%04x)\n", dev->name,
+ 			       ({ int eph_st; SMC_SELECT_BANK(lp, 0);
+ 				  eph_st = SMC_GET_EPH_STATUS(lp);
+-				  SMC_SELECT_BANK(lp, 2); eph_st; }) );
++				  SMC_SELECT_BANK(lp, 2); eph_st; }));
+ 			SMC_ACK_INT(lp, IM_RX_OVRN_INT);
+ 			dev->stats.rx_errors++;
+ 			dev->stats.rx_fifo_errors++;
+ 		} else if (status & IM_EPH_INT) {
+-			DBG(1, "%s: eph interrupt\n", dev->name);
+ 			smc_eph_interrupt(dev);
+ 		} else if (status & IM_MDINT) {
+-			DBG(1, "%s: phy interrupt\n", dev->name);
+ 			SMC_ACK_INT(lp, IM_MDINT);
+ 			smc_phy_interrupt(dev);
+ 		} else if (status & IM_ERCV_INT) {
+@@ -1430,12 +1348,10 @@ static irqreturn_t smc_interrupt(int irq, void *dev_id)
+ 	spin_unlock(&lp->lock);
+ 
+ #ifndef CONFIG_NET_POLL_CONTROLLER
+-#if 0
+-	if (timeout == MAX_IRQ_LOOPS)
++	if (timeout == MAX_IRQ_LOOPS && dev->irq != IRQ_MFP_TIMD)
+ 		PRINTK("%s: spurious interrupt (mask = 0x%02x)\n",
+ 		       dev->name, mask);
+ #endif
+-#endif
+ 	DBG(3, "%s: Interrupt done (%d loops)\n",
+ 	       dev->name, MAX_IRQ_LOOPS - timeout);
+ 
+@@ -1470,7 +1386,7 @@ static void smc_timeout(struct net_device *dev)
+ 	void __iomem *ioaddr = lp->base;
+ 	int status, mask, eph_st, meminfo, fifo;
+ 
+-	DBG(2, "%s: %s\n", dev->name, __FUNCTION__);
++	DBG(2, "%s: %s\n", dev->name, __func__);
+ 
+ 	spin_lock_irq(&lp->lock);
+ 	status = SMC_GET_INT(lp);
+@@ -1493,7 +1409,7 @@ static void smc_timeout(struct net_device *dev)
+ 	 * smc_phy_configure() calls msleep() which calls schedule_timeout()
+ 	 * which calls schedule().  Hence we use a work queue.
+ 	 */
+-	if (lp->phy_type != 0) 
++	if (lp->phy_type != 0)
+ 		schedule_work(&lp->phy_configure);
+ 
+ 	/* We can accept TX packets again */
+@@ -1514,7 +1430,7 @@ static void smc_set_multicast_list(struct net_device *dev)
+ 	unsigned char multicast_table[8];
+ 	int update_multicast = 0;
+ 
+-	DBG(2, "%s: %s\n", dev->name, __FUNCTION__);
++	DBG(2, "%s: %s\n", dev->name, __func__);
+ 
+ 	if (dev->flags & IFF_PROMISC) {
+ 		DBG(2, "%s: RCR_PRMS\n", dev->name);
+@@ -1617,7 +1533,7 @@ smc_open(struct net_device *dev)
+ {
+ 	struct smc_local *lp = netdev_priv(dev);
+ 
+-	DBG(2, "%s: %s\n", dev->name, __FUNCTION__);
++	DBG(2, "%s: %s\n", dev->name, __func__);
+ 
+ 	/*
+ 	 * Check that the address is valid.  If its not, refuse
+@@ -1625,14 +1541,16 @@ smc_open(struct net_device *dev)
+ 	 * address using ifconfig eth0 hw ether xx:xx:xx:xx:xx:xx
+ 	 */
+ 	if (!is_valid_ether_addr(dev->dev_addr)) {
+-		PRINTK("%s: no valid ethernet hw addr\n", __FUNCTION__);
++		PRINTK("%s: no valid ethernet hw addr\n", __func__);
+ 		return -EINVAL;
+ 	}
+ 
+ 	/* Setup the default Register Modes */
+ 	lp->tcr_cur_mode = TCR_DEFAULT;
+ 	lp->rcr_cur_mode = RCR_DEFAULT;
+-	lp->rpc_cur_mode = RPC_DEFAULT;
++	lp->rpc_cur_mode = RPC_DEFAULT |
++				lp->cfg.leda << RPC_LSXA_SHFT |
++				lp->cfg.ledb << RPC_LSXB_SHFT;
+ 
+ 	/*
+ 	 * If we are not using a MII interface, we need to
+@@ -1669,7 +1587,7 @@ static int smc_close(struct net_device *dev)
+ {
+ 	struct smc_local *lp = netdev_priv(dev);
+ 
+-	DBG(2, "%s: %s\n", dev->name, __FUNCTION__);
++	DBG(2, "%s: %s\n", dev->name, __func__);
+ 
+ 	netif_stop_queue(dev);
+ 	netif_carrier_off(dev);
+@@ -1812,7 +1730,7 @@ static int __init smc_findirq(struct smc_local *lp)
+ 	int timeout = 20;
+ 	unsigned long cookie;
+ 
+-	DBG(2, "%s: %s\n", CARDNAME, __FUNCTION__);
++	DBG(2, "%s: %s\n", CARDNAME, __func__);
+ 
+ 	cookie = probe_irq_on();
+ 
+@@ -1881,7 +1799,7 @@ static int __init smc_findirq(struct smc_local *lp)
+  * o  GRAB the region
+  */
+ static int __init smc_probe(struct net_device *dev, void __iomem *ioaddr,
+-			   unsigned long irq_flags)
++			    unsigned long irq_flags)
+ {
+ 	struct smc_local *lp = netdev_priv(dev);
+ 	static int version_printed = 0;
+@@ -1890,8 +1808,9 @@ static int __init smc_probe(struct net_device *dev, void __iomem *ioaddr,
+ 	const char *version_string;
+ 	DECLARE_MAC_BUF(mac);
+ 
+-	DBG(2, "%s: %s\n", CARDNAME, __FUNCTION__);
++	DBG(2, "%s: %s\n", CARDNAME, __func__);
+ 
++	/* First, see if there is a card at the expected address! */
+         if (!hwreg_present( ioaddr + BANK_SELECT )) {
+ 		retval = -ENODEV;
+ 		goto err_out;
+@@ -2052,14 +1971,15 @@ static int __init smc_probe(struct net_device *dev, void __iomem *ioaddr,
+ 	}
+ 
+ 	/* Grab the IRQ */
+-      	retval = request_irq(dev->irq, &smc_interrupt, irq_flags, dev->name, dev);
+-      	if (retval) {
+-      		use_poll = 1;
+-      		//goto err_out;
+-	}
++	retval = request_irq(dev->irq, &atari_ethernat_interrupt, irq_flags, dev->name, dev);
++	if (retval)
++		goto err_out;
+ 
+-#ifdef SMC_USE_PXA_DMA
+-	{
++#ifdef CONFIG_ARCH_PXA
++#  ifdef SMC_USE_PXA_DMA
++	lp->cfg.flags |= SMC91X_USE_DMA;
++#  endif
++	if (lp->cfg.flags & SMC91X_USE_DMA) {
+ 		int dma = pxa_request_dma(dev->name, DMA_PRIO_LOW,
+ 					  smc_pxa_dma_irq, NULL);
+ 		if (dma >= 0)
+@@ -2077,14 +1997,15 @@ static int __init smc_probe(struct net_device *dev, void __iomem *ioaddr,
+ 		if (dev->dma != (unsigned char)-1)
+ 			printk(" DMA %d", dev->dma);
+ 
+-		printk("%s%s\n", nowait ? " [nowait]" : "",
++		printk(KERN_INFO "%s%s\n",
++			lp->cfg.flags & SMC91X_NOWAIT ? " [nowait]" : "",
+ 			THROTTLE_TX_PKTS ? " [throttle_tx]" : "");
+ 
+ 		if (!is_valid_ether_addr(dev->dev_addr)) {
+ 			printk("%s: Invalid ethernet MAC address.  Please "
+-			       "set proper address using ifconfig\n", dev->name);
++			       "set using ifconfig\n", dev->name);
+ 			random_ether_addr(dev->dev_addr);
+-			printk("%s: Ethernet addr (random): %s\n",
++			printk(KERN_INFO "%s: Ethernet addr set (random): %s\n",
+ 			       dev->name, print_mac(mac, dev->dev_addr));
+ 		} else {
+ 			/* Print the Ethernet address */
+@@ -2099,19 +2020,10 @@ static int __init smc_probe(struct net_device *dev, void __iomem *ioaddr,
+ 		} else if ((lp->phy_type & 0xfffffff0) == 0x02821c50) {
+ 			PRINTK("%s: PHY LAN83C180\n", dev->name);
+ 		}
+-
+-		if (SMC_32BIT(lp)) {
+-			printk("%s: using 32 bit access\n", dev->name);
+-		} else if (SMC_16BIT(lp)) {
+-			printk("%s: using 16 bit access\n", dev->name);
+-		} else {
+-			printk("%s: using 8 bit access\n", dev->name);
+-		}
+-
+ 	}
+ 
+ err_out:
+-#ifdef SMC_USE_PXA_DMA
++#ifdef CONFIG_ARCH_PXA
+ 	if (retval && dev->dma != (unsigned char)-1)
+ 		pxa_free_dma(dev->dma);
+ #endif
+@@ -2128,24 +2040,17 @@ static int smc_enable_device(struct platform_device *pdev)
+ 	struct resource * res;
+ 
+ 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "smc91x-attrib");
+-	if (!res) {
+-		printk("smc_enable_device: smc91x-attrib resource not found !\n");
++	if (!res)
+ 		return 0;
+-	}
+-
+-        printk("smc_enable_device: smc91x-attrib resource found, start=%x !\n", res->start);
+ 
+ 	/*
+ 	 * Map the attribute space.  This is overkill, but clean.
+ 	 */
+ 	addr = ioremap(res->start, ATTRIB_SIZE);
+-	if (!addr) {
++	if (!addr)
+ 		return -ENOMEM;
+-	} 
+ 
+-        printk("smc_enable_device :smc91x-attrib resource remapped, start=%p !\n", addr);
+-
+-        /*
++	/*
+ 	 * Reset the device.  We must disable IRQs around this
+ 	 * since a reset causes the IRQ line become active.
+ 	 */
+@@ -2188,23 +2093,26 @@ static int smc_enable_device(struct platform_device *pdev)
+ 	return 0;
+ }
+ 
+-static int smc_request_attrib(struct platform_device *pdev)
++static int smc_request_attrib(struct platform_device *pdev,
++			      struct net_device *ndev)
+ {
+ 	struct resource * res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "smc91x-attrib");
++	struct smc_local *lp = netdev_priv(ndev);
+ 
+ 	if (!res)
+ 		return 0;
+ 
+-	if (!request_mem_region(res->start, ATTRIB_SIZE, CARDNAME)) {
++	if (!request_mem_region(res->start, ATTRIB_SIZE, CARDNAME))
+ 		return -EBUSY;
+-	}
+-	
++
+ 	return 0;
+ }
+ 
+-static void smc_release_attrib(struct platform_device *pdev)
++static void smc_release_attrib(struct platform_device *pdev,
++			       struct net_device *ndev)
+ {
+ 	struct resource * res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "smc91x-attrib");
++	struct smc_local *lp = netdev_priv(ndev);
+ 
+ 	if (res)
+ 		release_mem_region(res->start, ATTRIB_SIZE);
+@@ -2245,25 +2153,6 @@ static void smc_release_datacs(struct platform_device *pdev, struct net_device *
+ }
+ 
+ /*
+- * Resources defined and added to platform data in arch/m68k/atari/config.c
+- * These are left here for reference only!
+- */
+-
+-struct resource ethernat_attr = {
+-	.start	= 0x80000000,
+-	.end	= 0x800000FF,
+-	.name	= "smc91x-attrib",
+-	.flags	= IORESOURCE_MEM
+-};
+-
+-struct resource ethernat_datacs = {
+-	.start	= 0,
+-	.end	= 0,
+-	.name	= "smc91x-data32",
+-	.flags	= IORESOURCE_MEM
+-};
+-
+-/*
+  * smc_init(void)
+  *   Input parameters:
+  *	dev->base_addr == 0, try to find all possible locations
+@@ -2274,38 +2163,21 @@ struct resource ethernat_datacs = {
+  *	0 --> there is a device
+  *	anything else, error
+  */
+-
+-static int __init atari_ethernat_pdev_probe(struct platform_device *pdev)
++static int smc_drv_probe(struct platform_device *pdev)
+ {
+ 	struct smc91x_platdata *pd = pdev->dev.platform_data;
+ 	struct smc_local *lp;
+ 	struct net_device *ndev;
+ 	struct resource *res, *ires;
+ 	unsigned int __iomem *addr;
++	unsigned long irq_flags = SMC_IRQ_FLAGS;
+ 	int ret;
+ 
+-	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "smc91x-regs");
+-	if (!res)
+-		res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+-	if (!res) {
+-		printk("smc91x-regs resource not found!\n");
+-		ret = -ENODEV;
+-		goto out;
+-	}
+-
+-	printk("smc91x-regs resource found, start=%x !\n", res->start);
+-
+-	if (!request_mem_region(res->start, SMC_IO_EXTENT, CARDNAME)) {
+-		printk("could not request smc91x-regs resource at %ul!\n", res->start);
+-		ret = -EBUSY;
+-		goto out;
+-	}
+-
+ 	ndev = alloc_etherdev(sizeof(struct smc_local));
+ 	if (!ndev) {
+ 		printk("%s: could not allocate device.\n", CARDNAME);
+ 		ret = -ENOMEM;
+-		goto out_release_io;
++		goto out;
+ 	}
+ 	SET_NETDEV_DEV(ndev, &pdev->dev);
+ 
+@@ -2314,32 +2186,47 @@ static int __init atari_ethernat_pdev_probe(struct platform_device *pdev)
+ 	 */
+ 
+ 	lp = netdev_priv(ndev);
+-	lp->cfg.irq_flags = SMC_IRQ_FLAGS;
+ 
+-#ifdef SMC_DYNAMIC_BUS_CONFIG
+-	if (pd)
++	if (pd) {
+ 		memcpy(&lp->cfg, pd, sizeof(lp->cfg));
+-	else {
+-		lp->cfg.flags = SMC91X_USE_8BIT;  
+-		lp->cfg.flags |= SMC91X_USE_16BIT;
+-		lp->cfg.flags |= SMC91X_USE_32BIT;
++		lp->io_shift = SMC91X_IO_SHIFT(lp->cfg.flags);
++	} else {
++		lp->cfg.flags |= (SMC_CAN_USE_8BIT)  ? SMC91X_USE_8BIT  : 0;
++		lp->cfg.flags |= (SMC_CAN_USE_16BIT) ? SMC91X_USE_16BIT : 0;
++		lp->cfg.flags |= (SMC_CAN_USE_32BIT) ? SMC91X_USE_32BIT : 0;
++		lp->cfg.flags |= (nowait) ? SMC91X_NOWAIT : 0;
+ 	}
+ 
+-	lp->cfg.flags &= ~(SMC_CAN_USE_8BIT ? 0 : SMC91X_USE_8BIT);  
+-	lp->cfg.flags &= ~(SMC_CAN_USE_16BIT ? 0 : SMC91X_USE_16BIT);
+-	lp->cfg.flags &= ~(SMC_CAN_USE_32BIT ? 0 : SMC91X_USE_32BIT);
+-#endif
++	if (!lp->cfg.leda && !lp->cfg.ledb) {
++		lp->cfg.leda = RPC_LSA_DEFAULT;
++		lp->cfg.ledb = RPC_LSB_DEFAULT;
++	}
+ 
+ 	ndev->dma = (unsigned char)-1;
+ 
++	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "smc91x-regs");
++	if (!res)
++		res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
++	if (!res) {
++		ret = -ENODEV;
++		goto out_free_netdev;
++	}
++
++
++	if (!request_mem_region(res->start, SMC_IO_EXTENT, CARDNAME)) {
++		ret = -EBUSY;
++		goto out_free_netdev;
++	}
++
+ 	ires = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
+ 	if (!ires) {
+-		printk("atari_91C111: IRQ resource not found!\n");
+ 		ret = -ENODEV;
+-		goto out_free_netdev;
++		goto out_release_io;
+ 	}
+ 
+ 	ndev->irq = ires->start;
++
++	if (ndev->irq != IRQ_MFP_TIMD) {
+ 	printk("atari_91C111: IRQ resource specified irq=%d\n", ndev->irq);
+ 
+ 	/*
+@@ -2356,35 +2243,27 @@ static int __init atari_ethernat_pdev_probe(struct platform_device *pdev)
+ 	ndev->irq = IRQ_MFP_TIMD;
+ 	ires->start = IRQ_MFP_TIMD;
+ 	printk("atari_91C111: IRQ forced to irq=%d\n", ndev->irq);
++	}
+ 
+-	if (SMC_IRQ_FLAGS == -1)
+-		lp->cfg.irq_flags = ires->flags & IRQF_TRIGGER_MASK;
++	if (ires->flags & IRQF_TRIGGER_MASK)
++		irq_flags = ires->flags & IRQF_TRIGGER_MASK;
+ 
+-	if (ndev->irq < 0) {
+-		printk("atari_91C111: cannot determine interrupt! Using timer D poll...\n");
+-		ndev->irq = IRQ_MFP_TIMD;
+-		/* timer actually set up later */
+-	}
+ 
+ 	if (ndev->irq == IRQ_MFP_TIMD) {
+-		printk("atari_91C111: Using timer D interrupt - do share!\n");
+-		lp->cfg.irq_flags = IRQF_SHARED;
++		printk(KERN_INFO "atari_91C111: Using timer D interrupt - do share!\n");
++		irq_flags |= IRQF_SHARED;
+ 	}
+ 
+-	ret = smc_request_attrib(pdev);
+-	if (ret) {
+-		printk("atari_91C111: attrib resource not found!\n");
+-		goto out_free_netdev;
+-	}
++	ret = smc_request_attrib(pdev, ndev);
++	if (ret)
++		goto out_release_io;
+ #if defined(CONFIG_SA1100_ASSABET)
+ 	NCR_0 |= NCR_ENET_OSC_EN;
+ #endif
+ 	platform_set_drvdata(pdev, ndev);
+ 	ret = smc_enable_device(pdev);
+-	if (ret) {
+-		printk("atari_91C111: failed to enable card!\n");
++	if (ret)
+ 		goto out_release_attrib;
+-	}
+ 
+ 	addr = ioremap(res->start, SMC_IO_EXTENT);
+ 	if (!addr) {
+@@ -2392,7 +2271,7 @@ static int __init atari_ethernat_pdev_probe(struct platform_device *pdev)
+ 		goto out_release_attrib;
+ 	}
+ 
+-#ifdef SMC_USE_PXA_DMA
++#ifdef CONFIG_ARCH_PXA
+ 	{
+ 		struct smc_local *lp = netdev_priv(ndev);
+ 		lp->device = &pdev->dev;
+@@ -2400,46 +2279,47 @@ static int __init atari_ethernat_pdev_probe(struct platform_device *pdev)
+ 	}
+ #endif
+ 
+-	printk("smc91x-regs resource remapped, start=%p!\n", addr);
+-
+ 	/*
+ 	 * about to probe for device; need to enable net IRQ here!
+ 	 * EtherNAT has interrupt enable register at 0x20 or 0x23 
+ 	 * probe for base address + 0x23 or 0x20
+ 	 */
+ 
+-	ret = smc_probe(ndev, addr, lp->cfg.irq_flags);
++	ret = smc_probe(ndev, addr, irq_flags);
+ 	if (ret != 0)
+ 		goto out_iounmap;
+ 
+-	printk("smc91x probe done, irq %d!\n", ndev->irq);
+-	ndev->irq = IRQ_MFP_TIMD;
++	smc_request_datacs(pdev, ndev);
+ 
+-	if (ndev->irq < 0) {
+-		if (use_poll)
+-			atari_ethernat_start_poll(ndev);
+-	} else if (ndev->irq == IRQ_MFP_TIMD) {
++	if (ndev->irq == IRQ_MFP_TIMD) {
+         	/* maybe instead use MFP timer C ?? */
+ 		/* init timer if not already running */
++
++		int timd = period * 4;
++		if (timd == 0)
++			timd = 192;     /* 200 Hz */
++		else if (timd < 80)
++			timd = 80;
++		else if (timd > 255)
++			timd = 255;
++		printk(KERN_INFO "Timer D frequency: %d Hz\n", (38400UL/(unsigned int)timd));
+ 		/* set Timer D data Register */
+-		mfp.tim_dt_d = 123;	/* 200 Hz */
++		mfp.tim_dt_d = timd;	/* 200 Hz */
+ 		/* start timer D, div = 1:100 */
+-		mfp.tim_ct_cd = (mfp.tim_ct_cd & 0xf0) | 0x6;
++		mfp.tim_ct_cd = (mfp.tim_ct_cd & 0xf0) | 0x5;
+ 	}
+ 
+-	smc_request_datacs(pdev, ndev);
+-
+ 	return 0;
+ 
+  out_iounmap:
+ 	platform_set_drvdata(pdev, NULL);
+ 	iounmap(addr);
+  out_release_attrib:
+-	smc_release_attrib(pdev);
+- out_free_netdev:
+-	free_netdev(ndev);
++	smc_release_attrib(pdev, ndev);
+  out_release_io:
+ 	release_mem_region(res->start, SMC_IO_EXTENT);
++ out_free_netdev:
++	free_netdev(ndev);
+  out:
+ 	printk("%s: not found (%d).\n", CARDNAME, ret);
+ 
+@@ -2454,25 +2334,22 @@ static int smc_drv_remove(struct platform_device *pdev)
+ 
+ 	platform_set_drvdata(pdev, NULL);
+ 
+-	if (use_poll)
+-		atari_ethernat_stop_poll(ndev);
+-
+ 	unregister_netdev(ndev);
+ 
+ 	free_irq(ndev->irq, ndev);
+ 
+-#ifdef SMC_USE_PXA_DMA
++#ifdef CONFIG_ARCH_PXA
+ 	if (ndev->dma != (unsigned char)-1)
+ 		pxa_free_dma(ndev->dma);
+ #endif
+ 	iounmap(lp->base);
+ 
+ 	smc_release_datacs(pdev,ndev);
+-	smc_release_attrib(pdev);
++	smc_release_attrib(pdev, ndev);
+ 
+ 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "smc91x-regs");
+ 	if (!res)
+-		platform_get_resource(pdev, IORESOURCE_MEM, 0);
++		res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+ 	release_mem_region(res->start, SMC_IO_EXTENT);
+ 
+ 	free_netdev(ndev);
+@@ -2513,12 +2390,13 @@ static int smc_drv_resume(struct platform_device *dev)
+ }
+ 
+ static struct platform_driver smc_driver = {
+-	.probe		= atari_ethernat_pdev_probe,
++	.probe		= smc_drv_probe,
+ 	.remove		= smc_drv_remove,
+ 	.suspend	= smc_drv_suspend,
+ 	.resume		= smc_drv_resume,
+ 	.driver		= {
+ 		.name	= CARDNAME,
++		.owner	= THIS_MODULE,
+ 	},
+ };
+ 
+diff --git a/drivers/net/smc91x.h b/drivers/net/smc91x.h
+index c4ccd12..d9285f2 100644
+--- a/drivers/net/smc91x.h
++++ b/drivers/net/smc91x.h
+@@ -402,6 +402,32 @@ static inline void LPD7_SMC_outsw (unsigned char* a, int r,
+ 
+ #include <asm/unit/smc91111.h>
+ 
++#elif defined(CONFIG_ATARI_ETHERNAT) || defined(CONFIG_ATARI_ETHERNAT_MODULE)
++
++#define SMC_CAN_USE_8BIT        1
++#define SMC_CAN_USE_16BIT       1
++#define SMC_CAN_USE_32BIT       1
++#define SMC_NOWAIT              1
++
++#define writew_be(val, addr) out_be16((addr), (val))
++
++#define SMC_inb(a, r)           readb((a) + (r))
++#define SMC_inw(a, r)           readw((a) + (r))
++#define SMC_inl(a, r)           readl((a) + (r))
++#define SMC_outb(v, a, r)       writeb(v, (a) + (r))
++#define SMC_outw(v, a, r)       writew(v, (a) + (r))
++#define SMC_outw_be(v, a, r)    writew_be(v, (a) + (r))
++#define SMC_outl(v, a, r)       writel(v, (a) + (r))
++#define SMC_insw(a, r, p, l)    readsw((a) + (r), p, l)
++#define SMC_outsw(a, r, p, l)   writesw((a) + (r), p, l)
++#define SMC_insl(a, r, p, l)    readsl((a) + (r), p, l)
++#define SMC_outsl(a, r, p, l)   writesl((a) + (r), p, l)
++
++#define RPC_LSA_DEFAULT         RPC_LED_100_10
++#define RPC_LSB_DEFAULT         RPC_LED_TX_RX
++
++#define SMC_DYNAMIC_BUS_CONFIG
++
+ #else
+ 
+ /*
+@@ -1237,6 +1263,40 @@ static const char * chip_ids[ 16 ] =  {
+ 		}							\
+ 	} while (0)
+ 
++#if defined(CONFIG_ATARI_ETHERNAT) || defined(CONFIG_ATARI_ETHERNAT_MODULE)
++/*
++ * MSch: EtherNAT is 32 bit, so the misaligned data buffer hack applies.
++ * This appears to hurt quite a lot ... we actually need to byte swap the
++ * misaligned write because the data end up in the packet buffer swapped
++ * otherwise (resulting in the first two bytes of the target MAC address
++ * being swapped)
++ */
++#define SMC_PUSH_DATA(lp, p, l)					\
++	do {								\
++		if (SMC_32BIT(lp)) {				\
++			void *__ptr = (p);				\
++			int __len = (l);				\
++			void __iomem *__ioaddr = ioaddr;		\
++			if (__len >= 2 && (unsigned long)__ptr & 2) {	\
++				__len -= 2;				\
++				SMC_outw_be(*(u16 *)__ptr, ioaddr,	\
++					DATA_REG(lp));		\
++				__ptr += 2;				\
++			}						\
++			if (SMC_CAN_USE_DATACS && lp->datacs)		\
++				__ioaddr = lp->datacs;			\
++			SMC_outsl(__ioaddr, DATA_REG(lp), __ptr, __len>>2); \
++			if (__len & 2) {				\
++				__ptr += (__len & ~3);			\
++				SMC_outw_be(*((u16 *)__ptr), ioaddr,	\
++					 DATA_REG(lp));		\
++			}						\
++		} else if (SMC_16BIT(lp))				\
++			SMC_outsw(ioaddr, DATA_REG(lp), (u16 *) p, (l) >> 1); \
++		else if (SMC_8BIT(lp))				\
++			SMC_outsb(ioaddr, DATA_REG(lp), p, l);	\
++	} while (0)
++#else
+ #define SMC_PUSH_DATA(lp, p, l)					\
+ 	do {								\
+ 		if (SMC_32BIT(lp)) {				\
+@@ -1262,6 +1322,7 @@ static const char * chip_ids[ 16 ] =  {
+ 		else if (SMC_8BIT(lp))				\
+ 			SMC_outsb(ioaddr, DATA_REG(lp), p, l);	\
+ 	} while (0)
++#endif
+ 
+ #define SMC_PULL_DATA(lp, p, l)					\
+ 	do {								\
+-- 
+1.6.2.3
+

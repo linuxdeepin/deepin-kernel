@@ -1,0 +1,1336 @@
+From 421afc5a33e28b469bc776f79fad6d3eefd3c4d2 Mon Sep 17 00:00:00 2001
+From: Geert Uytterhoeven <geert@linux-m68k.org>
+Date: Tue, 18 Nov 2008 20:54:06 +0100
+Subject: [PATCH 24/90] m68k: Atari SCC serial driver checkpatch cleanups
+
+Signed-off-by: Geert Uytterhoeven <geert@linux-m68k.org>
+---
+ arch/m68k/atari/ataints.c       |    2 -
+ arch/m68k/atari/debug.c         |    6 +-
+ arch/m68k/include/asm/atarihw.h |    3 +
+ drivers/char/atari_scc.c        |  570 +++++++++++++++------------------------
+ 4 files changed, 232 insertions(+), 349 deletions(-)
+
+diff --git a/arch/m68k/atari/ataints.c b/arch/m68k/atari/ataints.c
+index 39478dd..eaa23c7 100644
+--- a/arch/m68k/atari/ataints.c
++++ b/arch/m68k/atari/ataints.c
+@@ -318,8 +318,6 @@ __ALIGN_STR "\n\t"
+ 
+ extern void atari_microwire_cmd(int cmd);
+ 
+-extern int atari_SCC_reset_done;
+-
+ static int atari_startup_irq(unsigned int irq)
+ {
+ 	m68k_irq_startup(irq);
+diff --git a/arch/m68k/atari/debug.c b/arch/m68k/atari/debug.c
+index 24dd582..422770f 100644
+--- a/arch/m68k/atari/debug.c
++++ b/arch/m68k/atari/debug.c
+@@ -20,6 +20,11 @@
+ #include <asm/atarihw.h>
+ #include <asm/atariints.h>
+ 
++/*
++ * Flags to indicate one of the serial ports has already been initialized by the
++ * serial debug driver. We may want to hold off reinitializing ...
++ */
++
+ /* Flag that Modem1 port is already initialized and used */
+ int atari_SCC_init_done;
+ EXPORT_SYMBOL(atari_SCC_init_done);
+@@ -206,7 +211,6 @@ static void __init atari_init_mfp_port(int cflag)
+ 
+ static void __init atari_init_scc_port(int cflag)
+ {
+-	extern int atari_SCC_reset_done;
+ 	static int clksrc_table[9] =
+ 		/* reg 11: 0x50 = BRG, 0x00 = RTxC, 0x28 = TRxC */
+ 		{ 0x50, 0x50, 0x50, 0x50, 0x50, 0x50, 0x50, 0x00, 0x00 };
+diff --git a/arch/m68k/include/asm/atarihw.h b/arch/m68k/include/asm/atarihw.h
+index a714e1a..141e544 100644
+--- a/arch/m68k/include/asm/atarihw.h
++++ b/arch/m68k/include/asm/atarihw.h
+@@ -30,6 +30,9 @@ extern u_long atari_switches;
+ extern int atari_rtc_year_offset;
+ extern int atari_dont_touch_floppy_select;
+ 
++extern int atari_SCC_init_done;
++extern int atari_SCC_reset_done;
++
+ /* convenience macros for testing machine type */
+ #define MACH_IS_ST	((atari_mch_cookie >> 16) == ATARI_MCH_ST)
+ #define MACH_IS_STE	((atari_mch_cookie >> 16) == ATARI_MCH_STE && \
+diff --git a/drivers/char/atari_scc.c b/drivers/char/atari_scc.c
+index 08cb523..982de52 100644
+--- a/drivers/char/atari_scc.c
++++ b/drivers/char/atari_scc.c
+@@ -22,7 +22,7 @@
+ 
+ #include <linux/module.h>
+ #include <linux/kdev_t.h>
+-#include <asm/io.h>
++#include <linux/io.h>
+ #include <linux/kernel.h>
+ #include <linux/sched.h>
+ #include <linux/ioport.h>
+@@ -39,14 +39,14 @@
+ #include <linux/miscdevice.h>
+ #include <linux/console.h>
+ #include <linux/init.h>
++#include <linux/uaccess.h>
++#include <linux/generic_serial.h>
++
+ #include <asm/setup.h>
+-#include <asm/uaccess.h>
+ #include <asm/bootinfo.h>
+-
+ #include <asm/atarihw.h>
+ #include <asm/atariints.h>
+ 
+-#include <linux/generic_serial.h>
+ #include "scc.h"
+ 
+ #define CONFIG_TT_SCC     1
+@@ -61,7 +61,7 @@
+ static unsigned char scc_shadow[2][16];
+ 
+ /* Location to access for SCC register access delay */
+-static volatile unsigned char *scc_del = NULL;
++static volatile unsigned char *scc_del;
+ 
+ /* To keep track of STATUS_REG state for detection of Ext/Status int source */
+ static unsigned char scc_last_status_reg[2];
+@@ -95,16 +95,6 @@ static struct tty_driver *scc_driver;
+ 
+ static struct scc_port scc_ports[2];
+ 
+-/*
+- * Flags to indicate one of the serial ports has already been initialized by the
+- * serial debug driver. We may want to hold off reinitializing ...
+- */
+-
+-/* Flag that Modem1 port is already initialized and used */
+-extern int atari_SCC_init_done;
+-/* Can be set somewhere, if a SCC master reset has already be done and should
+- * not be repeated; used by kgdb */
+-extern int atari_SCC_reset_done;
+ 
+ /*---------------------------------------------------------------------------
+  * Interface from generic_serial.c back here
+@@ -144,17 +134,17 @@ static struct tty_operations scc_ops = {
+ 
+ /* BRG values for the standard speeds and the various clock sources */
+ 
+-typedef struct {
+-	unsigned clksrc;		/* clock source to use or -1 for not possible */
+-	unsigned div;			/* divisor: 1, 2 and 4 correspond to
+-					 * direct 1:16, 1:32 and 1:64 modes,
+-					 * divisors >= 4 yield a BRG value of
+-					 * div/2-2 (in 1:16 mode)
+-					 */
+-} BAUD_ENTRY;
++struct baud_entry {
++	unsigned clksrc;	/* clock source to use or -1 for not possible */
++	unsigned div;		/* divisor: 1, 2 and 4 correspond to
++				 * direct 1:16, 1:32 and 1:64 modes,
++				 * divisors >= 4 yield a BRG value of
++				 * div/2-2 (in 1:16 mode)
++				 */
++};
+ 
+ /* A pointer for each channel to the current baud table */
+-static BAUD_ENTRY *scc_baud_table[2];
++static struct baud_entry *scc_baud_table[2];
+ 
+ /* Baud table format:
+  *
+@@ -174,7 +164,7 @@ static BAUD_ENTRY *scc_baud_table[2];
+  * channel A and for both channels on the Mega STE/Falcon. (TRxC is unused)
+  */
+ 
+-static BAUD_ENTRY bdtab_norm[20] = {
++static struct baud_entry bdtab_norm[20] = {
+ 	/* B0      */ { 0, 0 },
+ 	/* B50     */ { CLK_RTxC, 4590 },
+ 	/* B75     */ { CLK_RTxC, 3060 },
+@@ -200,7 +190,7 @@ static BAUD_ENTRY bdtab_norm[20] = {
+ /* This is a special table for the TT channel B with 307.2 kHz at RTxC
+  * and 2.4576 MHz at TRxC
+  */
+-static BAUD_ENTRY bdtab_TTChB[20] = {
++static struct baud_entry bdtab_TTChB[20] = {
+ 	/* B0      */ { 0, 0 },
+ 	/* B50     */ { CLK_RTxC, 384 },
+ 	/* B75     */ { CLK_RTxC, 256 },
+@@ -217,8 +207,10 @@ static BAUD_ENTRY bdtab_TTChB[20] = {
+ 	/* B9600   */ { CLK_RTxC, 2 },
+ 	/* B19200  */ { CLK_RTxC, 1 },
+ 	/* B38400  */ { CLK_TRxC, 4 },
+-	/* B57600  */ { CLK_TRxC, 2 }, /* 57600 is not possible, use 76800 instead */
+-	/* B115200 */ { CLK_TRxC, 1 }, /* 115200 is not possible, use 153600 instead */
++	/* 57600 is not possible, use 76800 instead */
++	/* B57600  */ { CLK_TRxC, 2 },
++	/* 115200 is not possible, use 153600 instead */
++	/* B115200 */ { CLK_TRxC, 1 },
+ 	/* B230400 */ { 0, 0 },        /* #18 spd_shi: Impossible  */
+ 	/* B460800 */ { 0, 0 }         /* #19 spd_warp: Impossible */
+ };
+@@ -248,8 +240,9 @@ static int scc_init_drivers(void)
+ 
+ 	tty_set_operations(scc_driver, &scc_ops);
+ 
+-	if ((error = tty_register_driver(scc_driver))) {
+-		printk(KERN_ERR "scc: Couldn't register scc driver, error = %d\n",
++	error = tty_register_driver(scc_driver);
++	if (error) {
++		pr_err("scc: Couldn't register scc driver, error = %d\n",
+ 		       error);
+ 		put_tty_driver(scc_driver);
+ 		return 1;
+@@ -287,23 +280,19 @@ static int atari_tt_scc_init(void)
+ {
+ 	struct scc_port *port;
+ 
+-	printk(KERN_INFO "SCC: Atari TT Serial Driver\n");
++	pr_info("SCC: Atari TT Serial Driver\n");
+ 	/* FIXME channel A may be switchable between modem and LAN port */
+ 	/* Init channel A */
+ 	if (atari_SCC_init_done)
+-		printk(KERN_INFO "SCC: already initialized, expect trouble!\n");
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: init channel A\n");
+-#endif
++		pr_warning("SCC: already initialized, expect trouble!\n");
++	pr_debug("SCC: init channel A\n");
+ 	port = &scc_ports[0];
+ 	port->channel = CHANNEL_A;
+ 	port->ctrlp = (volatile unsigned char *)&scc.cha_a_ctrl;
+ 	port->datap = port->ctrlp + 1;
+ 	port->port_a = &scc_ports[0];
+ 	port->port_b = &scc_ports[1];
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: request channel A irqs, port = %p\n", port);
+-#endif
++	pr_debug("SCC: request channel A irqs, port = %p\n", port);
+ 	request_irq(IRQ_SCCA_TX, scc_tx_int, IRQ_TYPE_PRIO, "SCC-A TX", port);
+ 	request_irq(IRQ_SCCA_STAT, scc_stat_int, IRQ_TYPE_PRIO,
+ 		    "SCC-A status", port);
+@@ -312,14 +301,13 @@ static int atari_tt_scc_init(void)
+ 		    "SCC-A special cond", port);
+ 	{
+ 		SCC_ACCESS_INIT(port);
+-#ifdef DEBUG
+-		printk(KERN_INFO "SCC: read SCC status\n");
+-#endif
+-		/* on the first access, read status register to reset internal pointers */
++		pr_debug("SCC: read SCC status\n");
++		/*
++		 * on the first access, read status register to reset internal
++		 * pointers
++		 */
+ 		SCCread(STATUS_REG);
+-#ifdef DEBUG
+-		printk(KERN_INFO "SCC: reset SCC\n");
+-#endif
++		pr_debug("SCC: reset SCC\n");
+ 		/* FIXME: master reset, once only */
+ 		SCCwrite(MASTER_INT_CTRL, MIC_HARD_RESET);
+ 		udelay(40);
+@@ -338,18 +326,14 @@ static int atari_tt_scc_init(void)
+ 
+ 	if (!atari_SCC_init_done) {
+ 		/* Init channel B */
+-#ifdef DEBUG
+-		printk(KERN_INFO "SCC: init channel B\n");
+-#endif
++		pr_debug("SCC: init channel B\n");
+ 		port = &scc_ports[1];
+ 		port->channel = CHANNEL_B;
+ 		port->ctrlp = (volatile unsigned char *)&scc.cha_b_ctrl;
+ 		port->datap = port->ctrlp + 1;
+ 		port->port_a = &scc_ports[0];
+ 		port->port_b = &scc_ports[1];
+-#ifdef DEBUG
+-		printk(KERN_INFO "SCC: request channel B irqs, port = %p\n", port);
+-#endif
++		pr_debug("SCC: request channel B irqs, port = %p\n", port);
+ 		request_irq(IRQ_SCCB_TX, scc_tx_int, IRQ_TYPE_PRIO,
+ 			    "SCC-B TX", port);
+ 		request_irq(IRQ_SCCB_STAT, scc_stat_int, IRQ_TYPE_PRIO,
+@@ -382,13 +366,9 @@ static int atari_tt_scc_init(void)
+ 	scc_baud_table[CHANNEL_B] = bdtab_TTChB;
+ 
+ 	/* Initialise the tty driver structures and register */
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: scc_init_portstructs()\n");
+-#endif
++	pr_debug("SCC: scc_init_portstructs()\n");
+ 	scc_init_portstructs();
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: scc_init_drivers()\n");
+-#endif
++	pr_debug("SCC: scc_init_drivers()\n");
+ 	scc_init_drivers();
+ 
+ 	return 0;
+@@ -401,9 +381,9 @@ static int atari_falcon_scc_init(void)
+ {
+ 	struct scc_port *port;
+ 
+-	printk(KERN_INFO "SCC: Atari Falcon Serial Driver\n");
++	pr_info("SCC: Atari Falcon Serial Driver\n");
+ 	if (atari_SCC_init_done)
+-		printk(KERN_INFO "SCC: already initialized, expect trouble!\n");
++		pr_warning("SCC: already initialized, expect trouble!\n");
+ 
+ 	/* Init channel A */
+ 	port = &scc_ports[0];
+@@ -421,7 +401,10 @@ static int atari_falcon_scc_init(void)
+ 	{
+ 		SCC_ACCESS_INIT(port);
+ 
+-		/* on the first access, read status register to reset internal pointers */
++		/*
++		 * on the first access, read status register to reset internal
++		 * pointers
++		 */
+ 		SCCread(STATUS_REG);
+ 
+ 		/* FIXME: master reset, once only */
+@@ -476,15 +459,15 @@ static int atari_falcon_scc_init(void)
+ static int atari_st_scc_init(void)
+ {
+ 	struct scc_port *port;
+-
+ 	int escc = ATARIHW_PRESENT(ST_ESCC);
+ 
+-	printk(KERN_INFO "SCC: Atari MegaST/E Serial Driver\n");
++	pr_info("SCC: Atari MegaST/E Serial Driver\n");
+ 	/* FIXME: ports reversed logic */
+ 	/* Init channel A */
+ 	port = &scc_ports[1];
+ 	port->channel = CHANNEL_A;
+-	port->ctrlp = (volatile unsigned char *)(escc ? &st_escc.cha_a_ctrl : &scc.cha_a_ctrl);
++	port->ctrlp = (volatile unsigned char *)(escc ? &st_escc.cha_a_ctrl
++						      : &scc.cha_a_ctrl);
+ 	port->datap = port->ctrlp + 4;
+ 	port->port_a = &scc_ports[1];
+ 	port->port_b = &scc_ports[0];
+@@ -497,7 +480,10 @@ static int atari_st_scc_init(void)
+ 	{
+ 		SCC_ACCESS_INIT(port);
+ 
+-		/* on the first access, read status register to reset internal pointers */
++		/*
++		 * on the first access, read status register to reset internal
++		 * pointers
++		 */
+ 		SCCread(STATUS_REG);
+ 
+ 		/* FIXME: master reset, once only */
+@@ -516,7 +502,8 @@ static int atari_st_scc_init(void)
+ 	/* Init channel B */
+ 	port = &scc_ports[0];
+ 	port->channel = CHANNEL_B;
+-	port->ctrlp = (volatile unsigned char *)(escc ? &st_escc.cha_b_ctrl : &scc.cha_b_ctrl);
++	port->ctrlp = (volatile unsigned char *)(escc ? &st_escc.cha_b_ctrl
++						      : &scc.cha_b_ctrl);
+ 	port->datap = port->ctrlp + 4;
+ 	port->port_a = &scc_ports[0];
+ 	port->port_b = &scc_ports[1];
+@@ -550,7 +537,7 @@ static int atari_st_scc_init(void)
+ int atari_scc_init(void)
+ {
+ 	int res = -ENODEV;
+-	static int called = 0;
++	static int called;
+ 
+ 	if (called)
+ 		return res;
+@@ -582,18 +569,14 @@ void atari_scc_cleanup(void)
+ 
+ 	tty_unregister_driver(scc_driver);
+ 	port = &scc_ports[0];
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: free channel A irqs, port = %p\n", port);
+-#endif
++	pr_debug("SCC: free channel A irqs, port = %p\n", port);
+ 	free_irq(IRQ_SCCA_TX, port);
+ 	free_irq(IRQ_SCCA_STAT, port);
+ 	free_irq(IRQ_SCCA_RX, port);
+ 	free_irq(IRQ_SCCA_SPCOND, port);
+ 
+ 	port = &scc_ports[1];
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: free channel A irqs, port = %p\n", port);
+-#endif
++	pr_debug("SCC: free channel A irqs, port = %p\n", port);
+ 	free_irq(IRQ_SCCB_TX, port);
+ 	free_irq(IRQ_SCCB_STAT, port);
+ 	free_irq(IRQ_SCCB_RX, port);
+@@ -613,13 +596,12 @@ static irqreturn_t scc_rx_int(int irq, void *data)
+ 	unsigned char ch;
+ 	struct scc_port *port = data;
+ 	struct tty_struct *tty = port->gs.tty;
++
+ 	SCC_ACCESS_INIT(port);
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: rx_int ...\n");
+-#endif
++	pr_debug("SCC: rx_int ...\n");
+ 	ch = SCCread_NB(RX_DATA_REG);
+ 	if (!tty) {
+-		printk(KERN_WARNING "scc_rx_int with NULL tty!\n");
++		pr_warning("scc_rx_int with NULL tty!\n");
+ 		SCCwrite_NB(COMMAND_REG, CR_HIGHEST_IUS_RESET);
+ 		return IRQ_HANDLED;
+ 	}
+@@ -633,9 +615,11 @@ static irqreturn_t scc_rx_int(int irq, void *data)
+ 		tty->flip.count++;
+ 	}
+ #endif
+-	/* Check if another character is already ready; in that case, the
+-	 * spcond_int() function must be used, because this character may have an
+-	 * error condition that isn't signalled by the interrupt vector used!
++	/*
++	 * Check if another character is already ready; in that case, the
++	 * spcond_int() function must be used, because this character may have
++	 * an * error condition that isn't signalled by the interrupt vector
++	 * used!
+ 	 */
+ 	if (SCCread(INT_PENDING_REG) &
+ 	    (port->channel == CHANNEL_A ? IPR_A_RX : IPR_B_RX)) {
+@@ -646,9 +630,7 @@ static irqreturn_t scc_rx_int(int irq, void *data)
+ 	SCCwrite_NB(COMMAND_REG, CR_HIGHEST_IUS_RESET);
+ 
+ 	tty_flip_buffer_push(tty);
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: rx_int done\n");
+-#endif
++	pr_debug("SCC: rx_int done\n");
+ 	return IRQ_HANDLED;
+ }
+ 
+@@ -661,11 +643,9 @@ static irqreturn_t scc_spcond_int(int irq, void *data)
+ 	int int_pending_mask = port->channel == CHANNEL_A ? IPR_A_RX : IPR_B_RX;
+ 
+ 	SCC_ACCESS_INIT(port);
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: spcond_int ...\n");
+-#endif
++	pr_debug("SCC: spcond_int ...\n");
+ 	if (!tty) {
+-		printk(KERN_WARNING "scc_spcond_int with NULL tty!\n");
++		pr_warning("scc_spcond_int with NULL tty!\n");
+ 		SCCwrite(COMMAND_REG, CR_ERROR_RESET);
+ 		SCCwrite_NB(COMMAND_REG, CR_HIGHEST_IUS_RESET);
+ 		return IRQ_HANDLED;
+@@ -704,9 +684,7 @@ static irqreturn_t scc_spcond_int(int irq, void *data)
+ 	SCCwrite_NB(COMMAND_REG, CR_HIGHEST_IUS_RESET);
+ 
+ 	tty_flip_buffer_push(tty);
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: spcond_int done\n");
+-#endif
++	pr_debug("SCC: spcond_int done\n");
+ 	return IRQ_HANDLED;
+ }
+ 
+@@ -724,12 +702,11 @@ static void scc_ri_int(int irq, void *data)
+ static irqreturn_t scc_tx_int(int irq, void *data)
+ {
+ 	struct scc_port *port = data;
++
+ 	SCC_ACCESS_INIT(port);
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: tx_int irq %d port %p ...\n", irq, data);
+-#endif
++	pr_debug("SCC: tx_int irq %d port %p ...\n", irq, data);
+ 	if (!port->gs.tty) {
+-		printk(KERN_WARNING "scc_tx_int with NULL tty!\n");
++		pr_warning("scc_tx_int with NULL tty!\n");
+ 		SCCmod(INT_AND_DMA_REG, ~IDR_TX_INT_ENAB, 0);
+ 		SCCwrite(COMMAND_REG, CR_TX_PENDING_RESET);
+ 		SCCwrite_NB(COMMAND_REG, CR_HIGHEST_IUS_RESET);
+@@ -737,50 +714,40 @@ static irqreturn_t scc_tx_int(int irq, void *data)
+ 	}
+ 	while ((SCCread_NB(STATUS_REG) & SR_TX_BUF_EMPTY)) {
+ 		if (port->x_char) {
+-#ifdef DEBUG
+-			printk(KERN_INFO "SCC: tx_int writing char %c\n",
+-			       port->x_char);
+-#endif
++			pr_debug("SCC: tx_int writing char %c\n", port->x_char);
+ 			SCCwrite(TX_DATA_REG, port->x_char);
+ 			port->x_char = 0;
+ 		} else if ((port->gs.xmit_cnt <= 0) || port->gs.tty->stopped ||
+ 			   port->gs.tty->hw_stopped) {
+-#ifdef DEBUG
+-			printk(KERN_INFO "SCC: nothing to do!\n");
+-#endif
++			pr_debug("SCC: nothing to do!\n");
+ 			break;
+ 		} else {
+-#ifdef DEBUG
+-			printk(KERN_INFO "SCC: tx_int writing buf %c\n",
+-			       port->gs.xmit_buf[port->gs.xmit_tail]);
+-#endif
+-			SCCwrite(TX_DATA_REG, port->gs.xmit_buf[port->gs.xmit_tail++]);
+-			port->gs.xmit_tail = port->gs.xmit_tail & (SERIAL_XMIT_SIZE-1);
++			pr_debug("SCC: tx_int writing buf %c\n",
++				 port->gs.xmit_buf[port->gs.xmit_tail]);
++			SCCwrite(TX_DATA_REG,
++				 port->gs.xmit_buf[port->gs.xmit_tail++]);
++			port->gs.xmit_tail = port->gs.xmit_tail &
++					     (SERIAL_XMIT_SIZE-1);
+ 			if (--port->gs.xmit_cnt <= 0)
+ 				break;
+ 		}
+ 	}
+ 	if ((port->gs.xmit_cnt <= 0) || port->gs.tty->stopped ||
+ 	    port->gs.tty->hw_stopped) {
+-#ifdef DEBUG
+-		printk(KERN_INFO "SCC: nothing to do, disabling int\n");
+-#endif
++		pr_debug("SCC: nothing to do, disabling int\n");
+ 		/* disable tx interrupts */
+ 		SCCmod(INT_AND_DMA_REG, ~IDR_TX_INT_ENAB, 0);
+-		SCCwrite(COMMAND_REG, CR_TX_PENDING_RESET);	/* disable tx_int on next tx underrun? */
++		/* disable tx_int on next tx underrun? */
++		SCCwrite(COMMAND_REG, CR_TX_PENDING_RESET);
+ 		port->gs.flags &= ~GS_TX_INTEN;
+ 	}
+ 	if (port->gs.tty && port->gs.xmit_cnt <= port->gs.wakeup_chars) {
+-#ifdef DEBUG
+-		printk(KERN_INFO "SCC: waking up tty!\n");
+-#endif
++		pr_debug("SCC: waking up tty!\n");
+ 		tty_wakeup(port->gs.tty);
+ 	}
+ 
+ 	SCCwrite_NB(COMMAND_REG, CR_HIGHEST_IUS_RESET);
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: tx_int done\n");
+-#endif
++	pr_debug("SCC: tx_int done\n");
+ 	return IRQ_HANDLED;
+ }
+ 
+@@ -790,10 +757,9 @@ static irqreturn_t scc_stat_int(int irq, void *data)
+ 	struct scc_port *port = data;
+ 	unsigned channel = port->channel;
+ 	unsigned char last_sr, sr, changed;
++
+ 	SCC_ACCESS_INIT(port);
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: stat_int ...\n");
+-#endif
++	pr_debug("SCC: stat_int ...\n");
+ 	last_sr = scc_last_status_reg[channel];
+ 	sr = scc_last_status_reg[channel] = SCCread_NB(STATUS_REG);
+ 	changed = last_sr ^ sr;
+@@ -811,13 +777,11 @@ static irqreturn_t scc_stat_int(int irq, void *data)
+ 		}
+ 	}
+ 
+-	// FIXME: CTS and DSR status changes?
++	/* FIXME: CTS and DSR status changes? */
+ 
+ 	SCCwrite(COMMAND_REG, CR_EXTSTAT_RESET);
+ 	SCCwrite_NB(COMMAND_REG, CR_HIGHEST_IUS_RESET);
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: stat_int done\n");
+-#endif
++	pr_debug("SCC: stat_int done\n");
+ 	return IRQ_HANDLED;
+ }
+ 
+@@ -830,17 +794,14 @@ static void scc_disable_tx_interrupts(void *ptr)
+ {
+ 	struct scc_port *port = ptr;
+ 	unsigned long flags;
++
+ 	SCC_ACCESS_INIT(port);
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: disable_tx_int ...\n");
+-#endif
++	pr_debug("SCC: disable_tx_int ...\n");
+ 	local_irq_save(flags);
+ 	SCCmod(INT_AND_DMA_REG, ~IDR_TX_INT_ENAB, 0);
+ 	port->gs.flags &= ~GS_TX_INTEN;
+ 	local_irq_restore(flags);
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: disable_tx_int done!\n");
+-#endif
++	pr_debug("SCC: disable_tx_int done!\n");
+ }
+ 
+ 
+@@ -850,17 +811,13 @@ static void scc_enable_tx_interrupts(void *ptr)
+ 	unsigned long flags;
+ 
+ 	SCC_ACCESS_INIT(port);
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: enable_tx_int ...\n");
+-#endif
++	pr_debug("SCC: enable_tx_int ...\n");
+ 	local_irq_save(flags);
+ 	SCCmod(INT_AND_DMA_REG, 0xff, IDR_TX_INT_ENAB);
+ 	/* restart the transmitter */
+ 	scc_tx_int(0, port);
+ 	local_irq_restore(flags);
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: enable_tx_int done!\n");
+-#endif
++	pr_debug("SCC: enable_tx_int done!\n");
+ }
+ 
+ 
+@@ -870,16 +827,12 @@ static void scc_disable_rx_interrupts(void *ptr)
+ 	unsigned long flags;
+ 
+ 	SCC_ACCESS_INIT(port);
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: disable_rx_int ...\n");
+-#endif
++	pr_debug("SCC: disable_rx_int ...\n");
+ 	local_irq_save(flags);
+ 	SCCmod(INT_AND_DMA_REG,
+ 	       ~(IDR_RX_INT_MASK|IDR_PARERR_AS_SPCOND|IDR_EXTSTAT_INT_ENAB), 0);
+ 	local_irq_restore(flags);
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: disable_rx_int done!\n");
+-#endif
++	pr_debug("SCC: disable_rx_int done!\n");
+ }
+ 
+ 
+@@ -889,16 +842,12 @@ static void scc_enable_rx_interrupts(void *ptr)
+ 	unsigned long flags;
+ 
+ 	SCC_ACCESS_INIT(port);
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: enable_rx_int ...\n");
+-#endif
++	pr_debug("SCC: enable_rx_int ...\n");
+ 	local_irq_save(flags);
+ 	SCCmod(INT_AND_DMA_REG, 0xff,
+ 	       IDR_EXTSTAT_INT_ENAB|IDR_PARERR_AS_SPCOND|IDR_RX_INT_ALL);
+ 	local_irq_restore(flags);
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: enable_rx_int done!\n");
+-#endif
++	pr_debug("SCC: enable_rx_int done!\n");
+ }
+ 
+ 
+@@ -906,9 +855,8 @@ static int scc_get_CD(void *ptr)
+ {
+ 	struct scc_port *port = ptr;
+ 	unsigned channel = port->channel;
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: get_CD!\n");
+-#endif
++
++	pr_debug("SCC: get_CD!\n");
+ 	return !!(scc_last_status_reg[channel] & SR_DCD);
+ }
+ 
+@@ -916,15 +864,12 @@ static int scc_get_CD(void *ptr)
+ static void scc_shutdown_port(void *ptr)
+ {
+ 	struct scc_port *port = ptr;
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: shutdown_port ...\n");
+-#endif
++
++	pr_debug("SCC: shutdown_port ...\n");
+ 	port->gs.flags &= ~GS_ACTIVE;
+ 	if (port->gs.tty && port->gs.tty->termios->c_cflag & HUPCL)
+ 		scc_setsignals(port, 0, 0);
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: shutdown_port done!\n");
+-#endif
++	pr_debug("SCC: shutdown_port done!\n");
+ }
+ 
+ 
+@@ -936,15 +881,14 @@ static int scc_set_real_termios(void *ptr)
+ 	unsigned int clkmode, clksrc, div, chsize, channel, brgval = 0;
+ 	unsigned long flags;
+ 	struct scc_port *port = ptr;
++
+ 	SCC_ACCESS_INIT(port);
+ 
+ 	if (!port->gs.tty || !port->gs.tty->termios)
+ 		return 0;
+ 
+ 	channel = port->channel;
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: termios for channel %p\n", channel);
+-#endif
++	pr_debug("SCC: termios for channel %u\n", channel);
+ 	cflag = port->gs.tty->termios->c_cflag;
+ 	baud = port->gs.baud;
+ 	baudbits = cflag & CBAUD;
+@@ -958,7 +902,7 @@ static int scc_set_real_termios(void *ptr)
+ 		return 0;
+ 	} else if ((MACH_IS_TT && (baud < 50 || baud > 115200)) ||
+ 		   (MACH_IS_FALCON && (baud < 50 || baud > 230400))) {
+-		printk(KERN_NOTICE "SCC: Bad speed requested, %d\n", baud);
++		pr_debug("SCC: Bad speed requested, %d\n", baud);
+ 		return 0;
+ 	}
+ 
+@@ -967,10 +911,12 @@ static int scc_set_real_termios(void *ptr)
+ 	else
+ 		port->gs.flags |= ASYNC_CHECK_CD;
+ 
+-	// calculate brgval for Atari; enable direct modes!
+-
+-	/* convert baud rate from gs.baud to table index, set custom divisor eventually */
++	/* calculate brgval for Atari; enable direct modes! */
+ 
++	/*
++	 * convert baud rate from gs.baud to table index, set custom divisor
++	 * eventually
++	 */
+ 	div     = 0;
+ 	clksrc  = 0;
+ 	baudidx = 0;
+@@ -1042,14 +988,12 @@ static int scc_set_real_termios(void *ptr)
+ 		clksrc = scc_baud_table[channel][baudidx].clksrc;
+ 		div = scc_baud_table[channel][baudidx].div;
+ 		if (!div) {
+-			printk(" SCC_change_speed: divisor = 0 !!!");
++			pr_debug("SCC_change_speed: divisor = 0 !!!\n");
+ 			return 0;
+ 		}
+ 	}
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: termios baud %d baudbits %d baudidx %d \n clksrc %d div %d\n",
+-		baud, baudbits, baudidx, clksrc, div);
+-#endif
++	pr_debug("SCC: termios baud %d baudbits %d baudidx %d \n clksrc %d "
++		 "div %d\n", baud, baudbits, baudidx, clksrc, div);
+ 	/* compute the SCC's clock source, clock mode, BRG mode and BRG
+ 	 * value from clksrc and div
+ 	 */
+@@ -1070,18 +1014,19 @@ static int scc_set_real_termios(void *ptr)
+ 		clksrc  = CCR_TXCLK_BRG | CCR_RXCLK_BRG;
+ 	}
+ 
+-	//printk(KERN_INFO "SCC: termios baud %d baudbits %d baudidx %d \n clksrc %d clkmode %d div %d brgval %d brgmode %d\n",
+-	//	baud, baudbits, baudidx, clksrc, clkmode, div, brgval, brgmode);
++	/*
++	 * pr_info("SCC: termios baud %d baudbits %d baudidx %d \n clksrc %d "
++	 *         "clkmode %d div %d brgval %d brgmode %d\n", baud, baudbits,
++	 *         baudidx, clksrc, clkmode, div, brgval, brgmode);
++	 */
+ 
+ 	/* Now we have all parameters and can go to set them: */
+ 	local_irq_save(flags);
+ 
+-#ifdef DEBUG
+-	printk("  brgval=%d brgmode=%02x clkmode=%02x clksrc=%02x\n",
+-		brgval, brgmode, clkmode, clksrc);
+-#endif
++	pr_debug("  brgval=%d brgmode=%02x clkmode=%02x clksrc=%02x\n", brgval,
++		 brgmode, clkmode, clksrc);
+ 	/* receiver's character size and auto-enables */
+-#if 0	// auto-enable considered harmful ...
++#if 0	/* auto-enable considered harmful ... */
+ 	SCCmod(RX_CTRL_REG, ~(RCR_CHSIZE_MASK|RCR_AUTO_ENAB_MODE),
+ 	       (chsize_map[chsize] << 6) |
+ 	       ((cflag & CRTSCTS) ? RCR_AUTO_ENAB_MODE : 0));
+@@ -1089,11 +1034,9 @@ static int scc_set_real_termios(void *ptr)
+ 	/* receiver's character size */
+ 	SCCmod(RX_CTRL_REG, ~RCR_CHSIZE_MASK, chsize_map[chsize] << 6);
+ #endif
+-#ifdef DEBUG
+-	printk("  RX_CTRL_REG <- %02x\n", SCCread( RX_CTRL_REG ));
+-#endif
++	pr_debug("  RX_CTRL_REG <- %02x\n", SCCread(RX_CTRL_REG));
+ 
+-	// clock mode changes depending on baud rate
++	/* clock mode changes depending on baud rate */
+ 	/* parity and stop bits (both, Tx and Rx) and clock mode */
+ 	SCCmod(AUX1_CTRL_REG,
+ 		~(A1CR_PARITY_MASK | A1CR_MODE_MASK | A1CR_CLKMODE_MASK),
+@@ -1103,22 +1046,17 @@ static int scc_set_real_termios(void *ptr)
+ 		 | (cflag & CSTOPB ? A1CR_MODE_ASYNC_2 : A1CR_MODE_ASYNC_1)
+ 		 | clkmode));
+ 
+-#ifdef DEBUG
+-	printk("  AUX1_CTRL_REG <- %02x\n", SCCread(AUX1_CTRL_REG));
+-#endif
++	pr_debug("  AUX1_CTRL_REG <- %02x\n", SCCread(AUX1_CTRL_REG));
+ 	/* sender's character size, set DTR for valid baud rate */
+-	SCCmod(TX_CTRL_REG, ~TCR_CHSIZE_MASK, chsize_map[chsize] << 5 | TCR_DTR);
+-#ifdef DEBUG
+-	printk("  TX_CTRL_REG <- %02x\n", SCCread(TX_CTRL_REG));
+-#endif
++	SCCmod(TX_CTRL_REG, ~TCR_CHSIZE_MASK,
++	       chsize_map[chsize] << 5 | TCR_DTR);
++	pr_debug("  TX_CTRL_REG <- %02x\n", SCCread(TX_CTRL_REG));
+ 
+-	// clock sources change for TT !!
++	/* clock sources change for TT !! */
+ 	/* clock sources never change */
+ 	/* clock sources */
+ 	SCCmod(CLK_CTRL_REG, ~(CCR_TXCLK_MASK | CCR_RXCLK_MASK), clksrc);
+-#ifdef DEBUG
+-	printk("  CLK_CTRL_REG <- %02x\n", SCCread(CLK_CTRL_REG));
+-#endif
++	pr_debug("  CLK_CTRL_REG <- %02x\n", SCCread(CLK_CTRL_REG));
+ 
+ 	/* disable BRG before changing the value */
+ 	SCCmod(DPLL_CTRL_REG, ~DCR_BRG_ENAB, 0);
+@@ -1126,20 +1064,14 @@ static int scc_set_real_termios(void *ptr)
+ 	SCCwrite(TIMER_LOW_REG, brgval & 0xff);
+ 	SCCwrite(TIMER_HIGH_REG, (brgval >> 8) & 0xff);
+ 	/* BRG enable, and clock source never changes */
+-	//SCCmod(DPLL_CTRL_REG, 0xff, DCR_BRG_ENAB);
++	/* SCCmod(DPLL_CTRL_REG, 0xff, DCR_BRG_ENAB); */
+ 	SCCmod(DPLL_CTRL_REG, ~(DCR_BRG_ENAB | DCR_BRG_USE_PCLK), brgmode);
+-#ifdef DEBUG
+-	printk("  TIMER_LOW_REG <- %02x\n", SCCread(TIMER_LOW_REG));
+-	printk("  TIMER_HIGH_REG <- %02x\n", SCCread(TIMER_HIGH_REG));
+-#endif
+-#ifdef DEBUG
+-	printk("  DPLL_CTRL_REG <- %02x\n", SCCread(DPLL_CTRL_REG));
+-#endif
++	pr_debug("  TIMER_LOW_REG <- %02x\n", SCCread(TIMER_LOW_REG));
++	pr_debug("  TIMER_HIGH_REG <- %02x\n", SCCread(TIMER_HIGH_REG));
++	pr_debug("  DPLL_CTRL_REG <- %02x\n", SCCread(DPLL_CTRL_REG));
+ 
+ 	local_irq_restore(flags);
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: done termios for channel %d\n", channel);
+-#endif
++	pr_debug("SCC: done termios for channel %d\n", channel);
+ 	return 0;
+ }
+ 
+@@ -1150,10 +1082,11 @@ static int scc_chars_in_buffer(void *ptr)
+ #ifdef DEBUG
+ 	int rv;
+ #endif
++
+ 	SCC_ACCESS_INIT(port);
+ #ifdef DEBUG
+ 	rv = (SCCread(SPCOND_STATUS_REG) & SCSR_ALL_SENT) ? 0  : 1;
+-	printk(KERN_INFO "SCC: chars_in_buffer: %d\n", rv);
++	pr_debug("SCC: chars_in_buffer: %d\n", rv);
+ 	return rv;
+ #else
+ 	return (SCCread(SPCOND_STATUS_REG) & SCSR_ALL_SENT) ? 0  : 1;
+@@ -1172,27 +1105,19 @@ static int scc_chars_in_buffer(void *ptr)
+ 
+ static void scc_hungup(void *ptr)
+ {
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: hungup ...\n");
+-#endif
++	pr_debug("SCC: hungup ...\n");
+ 	scc_disable_tx_interrupts(ptr);
+ 	scc_disable_rx_interrupts(ptr);
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: hungup done\n");
+-#endif
++	pr_debug("SCC: hungup done\n");
+ }
+ 
+ 
+ static void scc_close(void *ptr)
+ {
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: close ...\n");
+-#endif
++	pr_debug("SCC: close ...\n");
+ 	scc_disable_tx_interrupts(ptr);
+ 	scc_disable_rx_interrupts(ptr);
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: close done\n");
+-#endif
++	pr_debug("SCC: close done\n");
+ }
+ 
+ 
+@@ -1204,10 +1129,9 @@ static void scc_setsignals(struct scc_port *port, int dtr, int rts)
+ {
+ 	unsigned long flags;
+ 	unsigned char t;
++
+ 	SCC_ACCESS_INIT(port);
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: setsignals dtr %d rts %d...\n", dtr, rts);
+-#endif
++	pr_debug("SCC: setsignals dtr %d rts %d...\n", dtr, rts);
+ 	local_irq_save(flags);
+ 	t = SCCread(TX_CTRL_REG);
+ 	if (dtr >= 0)
+@@ -1216,24 +1140,19 @@ static void scc_setsignals(struct scc_port *port, int dtr, int rts)
+ 		t = rts? (t | TCR_RTS): (t & ~TCR_RTS);
+ 	SCCwrite(TX_CTRL_REG, t);
+ 	local_irq_restore(flags);
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: setsignals done\n");
+-#endif
++	pr_debug("SCC: setsignals done\n");
+ }
+ 
+ 
+ static void scc_send_xchar(struct tty_struct *tty, char ch)
+ {
+ 	struct scc_port *port = (struct scc_port *)tty->driver_data;
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: send_xchar ...\n");
+-#endif
++
++	pr_debug("SCC: send_xchar ...\n");
+ 	port->x_char = ch;
+ 	if (ch)
+ 		scc_enable_tx_interrupts(port);
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: send_xchar done\n");
+-#endif
++	pr_debug("SCC: send_xchar done\n");
+ }
+ 
+ 
+@@ -1254,7 +1173,8 @@ static int scc_open(struct tty_struct *tty, struct file *filp)
+ 		unsigned reg, val;
+ 	} scc_init_tab[] = {
+ 		/* no parity, 1 stop bit, async, 1:16 */
+-		{ AUX1_CTRL_REG, A1CR_PARITY_NONE|A1CR_MODE_ASYNC_1|A1CR_CLKMODE_x64 },
++		{ AUX1_CTRL_REG,
++		  A1CR_PARITY_NONE|A1CR_MODE_ASYNC_1|A1CR_CLKMODE_x64 },
+ 		/* parity error is special cond, ints disabled, no DMA */
+ 		{ INT_AND_DMA_REG, IDR_PARERR_AS_SPCOND | IDR_RX_INT_DISAB },
+ 		/* Rx 8 bits/char, no auto enable, Rx off */
+@@ -1264,14 +1184,16 @@ static int scc_open(struct tty_struct *tty, struct file *filp)
+ 		/* special features off */
+ 		{ AUX2_CTRL_REG, 0 },
+ 		/* RTxC is XTAL, TRxC is input, both clocks = RTxC */
+-		{ CLK_CTRL_REG, CCR_TRxCOUT_XTAL | CCR_TXCLK_RTxC | CCR_RXCLK_RTxC },
++		{ CLK_CTRL_REG,
++		  CCR_TRxCOUT_XTAL | CCR_TXCLK_RTxC | CCR_RXCLK_RTxC },
+ 		{ DPLL_CTRL_REG, 0 },
+ 		/* Start Rx */
+ 		{ RX_CTRL_REG, RCR_RX_ENAB | RCR_CHSIZE_8 },
+ 		/* Start Tx */
+ 		{ TX_CTRL_REG, TCR_TX_ENAB | TCR_RTS | TCR_DTR | TCR_CHSIZE_8 },
+ 		/* Ext/Stat ints: CTS, DCD, SYNC (DSR) */
+-		{ INT_CTRL_REG, ICR_ENAB_DCD_INT | ICR_ENAB_CTS_INT | ICR_ENAB_SYNC_INT },
++		{ INT_CTRL_REG,
++		  ICR_ENAB_DCD_INT | ICR_ENAB_CTS_INT | ICR_ENAB_SYNC_INT },
+ 		/* Reset Ext/Stat ints */
+ 		{ COMMAND_REG, CR_EXTSTAT_RESET },
+ 		/* ...again */
+@@ -1284,57 +1206,46 @@ static int scc_open(struct tty_struct *tty, struct file *filp)
+ 	if (atari_SCC_init_done && line == 1)
+ 		return -ENODEV;
+ 
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: open port ...\n");
+-#endif
++	pr_debug("SCC: open port ...\n");
+ 	if (!(port->gs.flags & ASYNC_INITIALIZED)) {
+-#ifdef DEBUG
+-		printk(KERN_INFO "SCC: init port ...\n");
+-#endif
++		pr_debug("SCC: init port ...\n");
+ 		local_irq_save(flags);
+ 
+ 		SCCmod(MASTER_INT_CTRL, 0x3f,
+ 		       channel == 0 ? MIC_CH_A_RESET : MIC_CH_B_RESET);
+ 		udelay(40);		/* extra delay after a reset */
+ 
+-		for (i = 0; i < sizeof(scc_init_tab)/sizeof(*scc_init_tab); ++i)
++		for (i = 0; i < ARRAY_SIZE(scc_init_tab); ++i)
+ 			SCCwrite(scc_init_tab[i].reg, scc_init_tab[i].val);
+ 
+ 
+-		/* remember status register for detection of DCD and CTS changes */
++		/*
++		 * remember status register for detection of DCD and CTS
++		 * changes
++		 */
+ 		scc_last_status_reg[channel] = SCCread(STATUS_REG);
+ 
+ 		port->c_dcd = 0;	/* Prevent initial 1->0 interrupt */
+ 		scc_setsignals(port, 1, 1);
+ 		local_irq_restore(flags);
+-#ifdef DEBUG
+-		printk(KERN_INFO "SCC: init port done!\n");
+-#endif
++		pr_debug("SCC: init port done!\n");
+ 	}
+ 
+ 	tty->driver_data = port;
+ 	port->gs.tty = tty;
+ 	port->gs.count++;
+-#ifdef DEBUG
+-	printk(KERN_WARNING "SCC: gs init port ...\n");
+-#endif
++	pr_debug(KERN_WARNING "SCC: gs init port ...\n");
+ 	retval = gs_init_port(&port->gs);
+ 	if (retval) {
+ 		port->gs.count--;
+ 		return retval;
+ 	}
+-#ifdef DEBUG
+-	printk(KERN_WARNING "SCC: gs init port done!\n");
+-#endif
++	pr_debug(KERN_WARNING "SCC: gs init port done!\n");
+ 	port->gs.flags |= GS_ACTIVE;
+ 
+-#ifdef DEBUG
+-	printk(KERN_WARNING "SCC: gs wait ready ...\n");
+-#endif
++	pr_debug(KERN_WARNING "SCC: gs wait ready ...\n");
+ 	retval = gs_block_til_ready(port, filp);
+-#ifdef DEBUG
+-	printk(KERN_WARNING "SCC: gs wait ready done!\n");
+-#endif
++	pr_debug(KERN_WARNING "SCC: gs wait ready done!\n");
+ 	if (retval) {
+ 		port->gs.count--;
+ 		return retval;
+@@ -1342,15 +1253,10 @@ static int scc_open(struct tty_struct *tty, struct file *filp)
+ 
+ 	port->c_dcd = scc_get_CD(port);
+ 
+-#ifdef DEBUG
+-	printk(KERN_WARNING "SCC: enable rx ints ...\n");
+-#endif
++	pr_debug(KERN_WARNING "SCC: enable rx ints ...\n");
+ 	scc_enable_rx_interrupts(port);
+-#ifdef DEBUG
+-	printk(KERN_WARNING "SCC: enable rx ints done!\n");
+-
+-	printk(KERN_INFO "SCC: open port done!\n");
+-#endif
++	pr_debug(KERN_WARNING "SCC: enable rx ints done!\n");
++	pr_info("SCC: open port done!\n");
+ 	return 0;
+ }
+ 
+@@ -1359,10 +1265,9 @@ static void scc_throttle(struct tty_struct *tty)
+ {
+ 	struct scc_port *port = (struct scc_port *)tty->driver_data;
+ 	unsigned long flags;
++
+ 	SCC_ACCESS_INIT(port);
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: throttle ...\n");
+-#endif
++	pr_debug("SCC: throttle ...\n");
+ 	if (tty->termios->c_cflag & CRTSCTS) {
+ 		local_irq_save(flags);
+ 		SCCmod(TX_CTRL_REG, ~TCR_RTS, 0);
+@@ -1370,9 +1275,7 @@ static void scc_throttle(struct tty_struct *tty)
+ 	}
+ 	if (I_IXOFF(tty))
+ 		scc_send_xchar(tty, STOP_CHAR(tty));
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: throttle done!\n");
+-#endif
++	pr_debug("SCC: throttle done!\n");
+ }
+ 
+ 
+@@ -1380,10 +1283,9 @@ static void scc_unthrottle(struct tty_struct *tty)
+ {
+ 	struct scc_port *port = (struct scc_port *)tty->driver_data;
+ 	unsigned long flags;
++
+ 	SCC_ACCESS_INIT(port);
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: unthrottle ...\n");
+-#endif
++	pr_debug("SCC: unthrottle ...\n");
+ 	if (tty->termios->c_cflag & CRTSCTS) {
+ 		local_irq_save(flags);
+ 		SCCmod(TX_CTRL_REG, 0xff, TCR_RTS);
+@@ -1391,9 +1293,7 @@ static void scc_unthrottle(struct tty_struct *tty)
+ 	}
+ 	if (I_IXOFF(tty))
+ 		scc_send_xchar(tty, START_CHAR(tty));
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: unthrottle done!\n");
+-#endif
++	pr_debug("SCC: unthrottle done!\n");
+ }
+ 
+ 
+@@ -1402,11 +1302,10 @@ static int scc_ioctl(struct tty_struct *tty, struct file *file,
+ {
+ 	struct scc_port *port = (struct scc_port *)tty->driver_data;
+ 	int retval;
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: ioctl! cmd %d, arg %p \n", cmd, arg);
+-#endif
+-	//if (serial_paranoia_check(info, tty->device, "zs_ioctl"))
+-	//	return -ENODEV;
++
++	pr_debug("SCC: ioctl! cmd %d, arg %lu\n", cmd, arg);
++	/* if (serial_paranoia_check(info, tty->device, "zs_ioctl")) */
++	/*	return -ENODEV; */
+ 
+ 	if ((cmd != TIOCGSERIAL) && (cmd != TIOCSSERIAL) &&
+ 	    (cmd != TIOCSERCONFIG) && (cmd != TIOCSERGWILD) &&
+@@ -1417,37 +1316,29 @@ static int scc_ioctl(struct tty_struct *tty, struct file *file,
+ 
+ 	switch (cmd) {
+ 	case TCSBRK:	/* SVID version: non-zero arg --> no break */
+-#ifdef DEBUG
+-		printk(KERN_INFO "SCC: ioctl TCSBRK\n");
+-#endif
++		pr_debug("SCC: ioctl TCSBRK\n");
+ 		retval = tty_check_change(tty);
+ 		if (retval)
+ 			return retval;
+ 		tty_wait_until_sent(tty, 0);
+-		//if (!arg)
+-		//	send_break(info, HZ/4);	/* 1/4 second */
++		/* if (!arg) */
++		/*	send_break(info, HZ/4);	*/
+ 		return 0;
+ 	case TCSBRKP:	/* support for POSIX tcsendbreak() */
+-#ifdef DEBUG
+-		printk(KERN_INFO "SCC: ioctl TCSBRKP\n");
+-#endif
++		pr_debug("SCC: ioctl TCSBRKP\n");
+ 		retval = tty_check_change(tty);
+ 		if (retval)
+ 			return retval;
+ 		tty_wait_until_sent(tty, 0);
+-		//send_break(info, arg ? arg*(HZ/10) : HZ/4);
++		/* send_break(info, arg ? arg*(HZ/10) : HZ/4); */
+ 		return 0;
+ 	case TIOCGSOFTCAR:
+-#ifdef DEBUG
+-		printk(KERN_INFO "SCC: ioctl TIOCGSOFTCAR\n");
+-#endif
++		pr_debug("SCC: ioctl TIOCGSOFTCAR\n");
+ 		if (put_user(C_CLOCAL(tty) ? 1 : 0, (unsigned long *) arg))
+ 			return -EFAULT;
+ 		return 0;
+ 	case TIOCSSOFTCAR:
+-#ifdef DEBUG
+-		printk(KERN_INFO "SCC: ioctl TIOCSSOFTCAR\n");
+-#endif
++		pr_debug("SCC: ioctl TIOCSSOFTCAR\n");
+ 		if (get_user(arg, (unsigned long *)arg))
+ 			return -EFAULT;
+ 		tty->termios->c_cflag =
+@@ -1455,54 +1346,38 @@ static int scc_ioctl(struct tty_struct *tty, struct file *file,
+ 			 (arg ? CLOCAL : 0));
+ 		return 0;
+ 	case TIOCMGET:
+-#ifdef DEBUG
+-		printk(KERN_INFO "SCC: ioctl TIOCMGET\n");
+-#endif
+-		//return get_modem_info(info, (unsigned int *)arg);
++		pr_debug("SCC: ioctl TIOCMGET\n");
++		/* return get_modem_info(info, (unsigned int *)arg); */
+ 		return 0;
+ 	case TIOCMBIS:
+ 	case TIOCMBIC:
+ 	case TIOCMSET:
+-#ifdef DEBUG
+-		printk(KERN_INFO "SCC: ioctl TIOCMSET\n");
+-#endif
+-		//return set_modem_info(info, cmd, (unsigned int *)arg);
++		pr_debug("SCC: ioctl TIOCMSET\n");
++		/* return set_modem_info(info, cmd, (unsigned int *)arg); */
+ 		return 0;
+ 	case TIOCGSERIAL:
+-#ifdef DEBUG
+-		printk(KERN_INFO "SCC: ioctl TIOCGSERIAL\n");
+-#endif
++		pr_debug("SCC: ioctl TIOCGSERIAL\n");
+ 		return 0;
+-		//return get_serial_info(info,
+-		//		       (struct serial_struct *)arg);
++		/* return get_serial_info(info, (struct serial_struct *)arg); */
+ 	case TIOCSSERIAL:
+-#ifdef DEBUG
+-		printk(KERN_INFO "SCC: ioctl TIOCSSERIAL\n");
+-#endif
++		pr_debug("SCC: ioctl TIOCSSERIAL\n");
+ 		return 0;
+-		//return set_serial_info(info,
+-		//		       (struct serial_struct *)arg);
++		/* return set_serial_info(info, (struct serial_struct *)arg); */
+ 	case TIOCSERGETLSR: /* Get line status register */
+-#ifdef DEBUG
+-		printk(KERN_INFO "SCC: ioctl TIOCSERGETLSR\n");
+-#endif
++		pr_debug("SCC: ioctl TIOCSERGETLSR\n");
+ 		return 0;
+-		//return get_lsr_info(info, (unsigned int *)arg);
++		/* return get_lsr_info(info, (unsigned int *)arg); */
+ 
+ 	case TIOCSERGSTRUCT:
+-#ifdef DEBUG
+-		printk(KERN_INFO "SCC: ioctl TIOCSERGSTRUCT\n");
+-#endif
++		pr_debug("SCC: ioctl TIOCSERGSTRUCT\n");
+ 		return 0;
+-		if (copy_to_user((struct scc_port *)arg,
+-				 port, sizeof(struct scc_port)))
++		if (copy_to_user((struct scc_port *)arg, port,
++				 sizeof(struct scc_port)))
+ 			return -EFAULT;
+ 		return 0;
+ 
+ 	default:
+-#ifdef DEBUG
+-		printk(KERN_INFO "SCC: ioctl default\n");
+-#endif
++		pr_debug("SCC: ioctl default\n");
+ 		return -ENOIOCTLCMD;
+ 	}
+ 	return 0;
+@@ -1513,16 +1388,13 @@ static void scc_break_ctl(struct tty_struct *tty, int break_state)
+ {
+ 	struct scc_port *port = (struct scc_port *)tty->driver_data;
+ 	unsigned long flags;
++
+ 	SCC_ACCESS_INIT(port);
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: break ctl ...\n");
+-#endif
++	pr_debug("SCC: break ctl ...\n");
+ 	local_irq_save(flags);
+ 	SCCmod(TX_CTRL_REG, ~TCR_SEND_BREAK, break_state ? TCR_SEND_BREAK : 0);
+ 	local_irq_restore(flags);
+-#ifdef DEBUG
+-	printk(KERN_INFO "SCC: break ctl done!\n");
+-#endif
++	pr_debug("SCC: break ctl done!\n");
+ }
+ 
+ 
+@@ -1541,18 +1413,19 @@ static void scc_break_ctl(struct tty_struct *tty, int break_state)
+ 		scc_delay();				\
+ 	} while (0)
+ 
+-/* loops_per_jiffy isn't initialized yet, so we can't use udelay(). This does a
+- * delay of ~ 60us. */
++/*
++ * loops_per_jiffy isn't initialized yet, so we can't use udelay().
++ * This does a delay of ~ 60us.
++ */
+ #define LONG_DELAY()					\
+ 	do {						\
+ 		int i;					\
+-		for (i = 100; i > 0; --i)		\
++		for (i = 100; i > 0; i--)		\
+ 			scc_delay();			\
+ 	} while (0)
+ 
+ static void atari_init_scc_port(int cflag)
+ {
+-	extern int atari_SCC_reset_done;
+ 	static int clksrc_table[9] =
+ 		/* reg 11: 0x50 = BRG, 0x00 = RTxC, 0x28 = TRxC */
+ 		{ 0x50, 0x50, 0x50, 0x50, 0x50, 0x50, 0x50, 0x00, 0x00 };
+@@ -1573,15 +1446,20 @@ static void atari_init_scc_port(int cflag)
+ 
+ 	if (cflag & CBAUDEX)
+ 		baud += B38400;
+-	if (baud < B1200 || baud > B38400+2)
+-		baud = B9600;		/* use default 9600bps for non-implemented rates */
++	if (baud < B1200 || baud > B38400+2) {
++		/* use default 9600bps for non-implemented rates */
++		baud = B9600;
++	}
+ 	baud -= B1200;			/* tables starts at 1200bps */
+ 
+ 	clksrc  = clksrc_table[baud];
+ 	clkmode = clkmode_table[baud];
+ 	div     = div_table[baud];
+ 	if (ATARIHW_PRESENT(TT_MFP) && baud >= 6) {
+-		/* special treatment for TT, where rates >= 38400 are done via TRxC */
++		/*
++		 * special treatment for TT, where rates >= 38400 are done via
++		 * TRxC
++		 */
+ 		clksrc = 0x28; /* TRxC */
+ 		clkmode = baud == 6 ? 0xc0 :
+ 			  baud == 7 ? 0x80 : /* really 76800bps */
+@@ -1630,21 +1508,21 @@ static void scc_ch_write(char ch)
+ 
+ 	do {
+ 		scc_delay();
+-	}
+-	while (!(*p & 4));
+-	// scc_delay();
+-	// *p = 8;
++	} while (!(*p & 4));
++	/* scc_delay(); */
++	/* *p = 8; */
+ 	scc_delay();
+ 	*(p+1) = ch;
+ }
+ 
+ /* The console must be locked when we get here. */
+ 
+-static void scc_console_write(struct console *co, const char *str, unsigned count)
++static void scc_console_write(struct console *co, const char *str,
++			      unsigned count)
+ {
+ 	unsigned long flags;
+ 
+-	//printk("scc_console_write: %s\n", str);
++	/* printk("scc_console_write: %s\n", str); */
+ 	local_irq_save(flags);
+ 
+ 	while (count--) {
+@@ -1653,7 +1531,7 @@ static void scc_console_write(struct console *co, const char *str, unsigned coun
+ 		scc_ch_write(*str++);
+ 	}
+ 	local_irq_restore(flags);
+-	//printk("scc_console_write done!\n");
++	/* printk("scc_console_write done!\n"); */
+ }
+ 
+ static struct tty_driver *scc_console_device(struct console *c, int *index)
+@@ -1665,9 +1543,9 @@ static struct tty_driver *scc_console_device(struct console *c, int *index)
+ 
+ static int __init scc_console_setup(struct console *co, char *options)
+ {
+-	printk("scc_console_setup: initializing SCC port B\n");
++	pr_debug("scc_console_setup: initializing SCC port B\n");
+ 	atari_init_scc_port(B9600|CS8);
+-	printk("scc_console_setup: done!\n");
++	pr_debug("scc_console_setup: done!\n");
+ 	return 0;
+ }
+ 
+@@ -1682,14 +1560,14 @@ static struct console sercons = {
+ };
+ 
+ 
+-static int __init vme_scc_console_init(void)
++static int __init atari_scc_console_init(void)
+ {
+ 	if (MACH_IS_TT || MACH_IS_ST || MACH_IS_FALCON)
+ 		register_console(&sercons);
+ 	return 0;
+ }
+ 
+-console_initcall(vme_scc_console_init);
++console_initcall(atari_scc_console_init);
+ #endif
+ 
+ /***************************** End of Functions *********************/
+-- 
+1.6.2.3
+

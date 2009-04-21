@@ -1,0 +1,105 @@
+From f06bfe51e1a5ad3292c232919ac0f7e56c483bc3 Mon Sep 17 00:00:00 2001
+From: Linux/m68k legacy <xxx@linux-m68k.org>
+Date: Tue, 18 Nov 2008 20:59:14 +0100
+Subject: [PATCH 32/90] Atari FAT updates
+
+Add support for the Atari-variant of the FAT filesystem
+---
+ fs/fat/inode.c |   46 +++++++++++++++++++++++++++++++++++++++++++---
+ 1 files changed, 43 insertions(+), 3 deletions(-)
+
+diff --git a/fs/fat/inode.c b/fs/fat/inode.c
+index de0004f..54503a2 100644
+--- a/fs/fat/inode.c
++++ b/fs/fat/inode.c
+@@ -27,6 +27,7 @@
+ #include <linux/writeback.h>
+ #include <linux/log2.h>
+ #include <linux/hash.h>
++#include <linux/major.h>
+ #include <asm/unaligned.h>
+ #include "fat.h"
+ 
+@@ -838,7 +839,7 @@ enum {
+ 	Opt_check_n, Opt_check_r, Opt_check_s, Opt_uid, Opt_gid,
+ 	Opt_umask, Opt_dmask, Opt_fmask, Opt_allow_utime, Opt_codepage,
+ 	Opt_usefree, Opt_nocase, Opt_quiet, Opt_showexec, Opt_debug,
+-	Opt_immutable, Opt_dots, Opt_nodots,
++	Opt_immutable, Opt_dots, Opt_nodots, Opt_atari_no, Opt_atari_yes,
+ 	Opt_charset, Opt_shortname_lower, Opt_shortname_win95,
+ 	Opt_shortname_winnt, Opt_shortname_mixed, Opt_utf8_no, Opt_utf8_yes,
+ 	Opt_uni_xl_no, Opt_uni_xl_yes, Opt_nonumtail_no, Opt_nonumtail_yes,
+@@ -865,6 +866,9 @@ static const match_table_t fat_tokens = {
+ 	{Opt_showexec, "showexec"},
+ 	{Opt_debug, "debug"},
+ 	{Opt_immutable, "sys_immutable"},
++	{Opt_atari_yes, "atari=yes"},
++	{Opt_atari_yes, "atari"},
++	{Opt_atari_no, "atari=no"},
+ 	{Opt_obsolate, "conv=binary"},
+ 	{Opt_obsolate, "conv=text"},
+ 	{Opt_obsolate, "conv=auto"},
+@@ -947,6 +951,13 @@ static int parse_options(char *options, int is_vfat, int silent, int *debug,
+ 	opts->numtail = 1;
+ 	opts->usefree = opts->nocase = 0;
+ 	opts->tz_utc = 0;
++	opts->atari = 0;
++
++#ifdef CONFIG_ATARI
++	if (MACH_IS_ATARI)
++	/* make Atari GEMDOS format the default if machine is an Atari */
++		opts->atari = 1;
++#endif
+ 	*debug = 0;
+ 
+ 	if (!options)
+@@ -998,6 +1009,12 @@ static int parse_options(char *options, int is_vfat, int silent, int *debug,
+ 		case Opt_immutable:
+ 			opts->sys_immutable = 1;
+ 			break;
++		case Opt_atari_yes:
++			opts->atari = 1;
++			break;
++		case Opt_atari_no:
++			opts->atari = 0;
++			break;
+ 		case Opt_uid:
+ 			if (match_int(&args[0], &option))
+ 				return 0;
+@@ -1354,8 +1371,31 @@ int fat_fill_super(struct super_block *sb, void *data, int silent,
+ 
+ 	total_clusters = (total_sectors - sbi->data_start) / sbi->sec_per_clus;
+ 
+-	if (sbi->fat_bits != 32)
+-		sbi->fat_bits = (total_clusters > MAX_FAT12) ? 16 : 12;
++	if (!sbi->options.atari) {
++		if (sbi->fat_bits != 32)
++			sbi->fat_bits = (total_clusters > MAX_FAT12) ? 16 : 12;
++	} else {
++		int sectors;
++		/* Atari GEMDOS partitions always have 16-bit fat */
++		if (sbi->fat_bits != 32)
++			sbi->fat_bits = 16;
++		/* If more clusters than fat entries in 16-bit fat, we assume
++		 * it's a real MSDOS partition with 12-bit fat.
++		 */
++		if (sbi->fat_bits != 32 && total_clusters+2 > sbi->
++			fat_length*SECTOR_SIZE*8/sbi->fat_bits)
++			sbi->fat_bits = 12;
++		/* if it's a floppy disk --> 12bit fat */
++		if (sbi->fat_bits != 32 && MAJOR(sb->s_dev) == FLOPPY_MAJOR)
++			sbi->fat_bits = 12;
++		/* if it's a ramdisk or loopback device and has one of the usual
++		 * floppy sizes -> 12bit FAT  */
++		sectors = total_sectors + sbi->data_start;
++		if (sbi->fat_bits != 32 && (MAJOR(sb->s_dev) == RAMDISK_MAJOR ||
++			 MAJOR(sb->s_dev) == LOOP_MAJOR) &&
++			(sectors == 720 || sectors == 1440 || sectors == 2880))
++			sbi->fat_bits = 12;
++	}
+ 
+ 	/* check that FAT table does not overflow */
+ 	fat_clusters = sbi->fat_length * sb->s_blocksize * 8 / sbi->fat_bits;
+-- 
+1.6.2.3
+

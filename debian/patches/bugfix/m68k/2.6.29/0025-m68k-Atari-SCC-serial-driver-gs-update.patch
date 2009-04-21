@@ -1,0 +1,197 @@
+From 176ff3ea66243e305f40e76638e7a6dced0f0cb8 Mon Sep 17 00:00:00 2001
+From: Geert Uytterhoeven <geert@linux-m68k.org>
+Date: Tue, 18 Nov 2008 20:54:07 +0100
+Subject: [PATCH 25/90] m68k: Atari SCC serial driver gs update
+
+Update for commit commit b5391e29f428d11755ca2c91074c6db6f5c69d7c ("gs: use
+tty_port"), which moved some fields
+
+Signed-off-by: Geert Uytterhoeven <geert@linux-m68k.org>
+---
+ drivers/char/atari_scc.c |   59 +++++++++++++++++++++++----------------------
+ 1 files changed, 30 insertions(+), 29 deletions(-)
+
+diff --git a/drivers/char/atari_scc.c b/drivers/char/atari_scc.c
+index 982de52..335aeca 100644
+--- a/drivers/char/atari_scc.c
++++ b/drivers/char/atari_scc.c
+@@ -269,8 +269,8 @@ static void scc_init_portstructs(void)
+ #ifdef NEW_WRITE_LOCKING
+ 		port->gs.port_write_sem = MUTEX;
+ #endif
+-		init_waitqueue_head(&port->gs.open_wait);
+-		init_waitqueue_head(&port->gs.close_wait);
++		init_waitqueue_head(&port->gs.port.open_wait);
++		init_waitqueue_head(&port->gs.port.close_wait);
+ 	}
+ }
+ 
+@@ -595,7 +595,7 @@ static irqreturn_t scc_rx_int(int irq, void *data)
+ {
+ 	unsigned char ch;
+ 	struct scc_port *port = data;
+-	struct tty_struct *tty = port->gs.tty;
++	struct tty_struct *tty = port->gs.port.tty;
+ 
+ 	SCC_ACCESS_INIT(port);
+ 	pr_debug("SCC: rx_int ...\n");
+@@ -638,7 +638,7 @@ static irqreturn_t scc_rx_int(int irq, void *data)
+ static irqreturn_t scc_spcond_int(int irq, void *data)
+ {
+ 	struct scc_port *port = data;
+-	struct tty_struct *tty = port->gs.tty;
++	struct tty_struct *tty = port->gs.port.tty;
+ 	unsigned char stat, ch, err;
+ 	int int_pending_mask = port->channel == CHANNEL_A ? IPR_A_RX : IPR_B_RX;
+ 
+@@ -705,7 +705,7 @@ static irqreturn_t scc_tx_int(int irq, void *data)
+ 
+ 	SCC_ACCESS_INIT(port);
+ 	pr_debug("SCC: tx_int irq %d port %p ...\n", irq, data);
+-	if (!port->gs.tty) {
++	if (!port->gs.port.tty) {
+ 		pr_warning("scc_tx_int with NULL tty!\n");
+ 		SCCmod(INT_AND_DMA_REG, ~IDR_TX_INT_ENAB, 0);
+ 		SCCwrite(COMMAND_REG, CR_TX_PENDING_RESET);
+@@ -717,8 +717,9 @@ static irqreturn_t scc_tx_int(int irq, void *data)
+ 			pr_debug("SCC: tx_int writing char %c\n", port->x_char);
+ 			SCCwrite(TX_DATA_REG, port->x_char);
+ 			port->x_char = 0;
+-		} else if ((port->gs.xmit_cnt <= 0) || port->gs.tty->stopped ||
+-			   port->gs.tty->hw_stopped) {
++		} else if ((port->gs.xmit_cnt <= 0) ||
++			   port->gs.port.tty->stopped ||
++			   port->gs.port.tty->hw_stopped) {
+ 			pr_debug("SCC: nothing to do!\n");
+ 			break;
+ 		} else {
+@@ -732,18 +733,18 @@ static irqreturn_t scc_tx_int(int irq, void *data)
+ 				break;
+ 		}
+ 	}
+-	if ((port->gs.xmit_cnt <= 0) || port->gs.tty->stopped ||
+-	    port->gs.tty->hw_stopped) {
++	if ((port->gs.xmit_cnt <= 0) || port->gs.port.tty->stopped ||
++	    port->gs.port.tty->hw_stopped) {
+ 		pr_debug("SCC: nothing to do, disabling int\n");
+ 		/* disable tx interrupts */
+ 		SCCmod(INT_AND_DMA_REG, ~IDR_TX_INT_ENAB, 0);
+ 		/* disable tx_int on next tx underrun? */
+ 		SCCwrite(COMMAND_REG, CR_TX_PENDING_RESET);
+-		port->gs.flags &= ~GS_TX_INTEN;
++		port->gs.port.flags &= ~GS_TX_INTEN;
+ 	}
+-	if (port->gs.tty && port->gs.xmit_cnt <= port->gs.wakeup_chars) {
++	if (port->gs.port.tty && port->gs.xmit_cnt <= port->gs.wakeup_chars) {
+ 		pr_debug("SCC: waking up tty!\n");
+-		tty_wakeup(port->gs.tty);
++		tty_wakeup(port->gs.port.tty);
+ 	}
+ 
+ 	SCCwrite_NB(COMMAND_REG, CR_HIGHEST_IUS_RESET);
+@@ -766,14 +767,14 @@ static irqreturn_t scc_stat_int(int irq, void *data)
+ 
+ 	if (changed & SR_DCD) {
+ 		port->c_dcd = !!(sr & SR_DCD);
+-		if (!(port->gs.flags & ASYNC_CHECK_CD))
++		if (!(port->gs.port.flags & ASYNC_CHECK_CD))
+ 			;	/* Don't report DCD changes */
+ 		else if (port->c_dcd) {
+ 			/* Are we blocking in open? */
+-			wake_up_interruptible(&port->gs.open_wait);
++			wake_up_interruptible(&port->gs.port.open_wait);
+ 		} else {
+-			if (port->gs.tty)
+-				tty_hangup(port->gs.tty);
++			if (port->gs.port.tty)
++				tty_hangup(port->gs.port.tty);
+ 		}
+ 	}
+ 
+@@ -799,7 +800,7 @@ static void scc_disable_tx_interrupts(void *ptr)
+ 	pr_debug("SCC: disable_tx_int ...\n");
+ 	local_irq_save(flags);
+ 	SCCmod(INT_AND_DMA_REG, ~IDR_TX_INT_ENAB, 0);
+-	port->gs.flags &= ~GS_TX_INTEN;
++	port->gs.port.flags &= ~GS_TX_INTEN;
+ 	local_irq_restore(flags);
+ 	pr_debug("SCC: disable_tx_int done!\n");
+ }
+@@ -866,8 +867,8 @@ static void scc_shutdown_port(void *ptr)
+ 	struct scc_port *port = ptr;
+ 
+ 	pr_debug("SCC: shutdown_port ...\n");
+-	port->gs.flags &= ~GS_ACTIVE;
+-	if (port->gs.tty && port->gs.tty->termios->c_cflag & HUPCL)
++	port->gs.port.flags &= ~GS_ACTIVE;
++	if (port->gs.port.tty && port->gs.port.tty->termios->c_cflag & HUPCL)
+ 		scc_setsignals(port, 0, 0);
+ 	pr_debug("SCC: shutdown_port done!\n");
+ }
+@@ -884,12 +885,12 @@ static int scc_set_real_termios(void *ptr)
+ 
+ 	SCC_ACCESS_INIT(port);
+ 
+-	if (!port->gs.tty || !port->gs.tty->termios)
++	if (!port->gs.port.tty || !port->gs.port.tty->termios)
+ 		return 0;
+ 
+ 	channel = port->channel;
+ 	pr_debug("SCC: termios for channel %u\n", channel);
+-	cflag = port->gs.tty->termios->c_cflag;
++	cflag = port->gs.port.tty->termios->c_cflag;
+ 	baud = port->gs.baud;
+ 	baudbits = cflag & CBAUD;
+ 	chsize = (cflag & CSIZE) >> 4;
+@@ -907,9 +908,9 @@ static int scc_set_real_termios(void *ptr)
+ 	}
+ 
+ 	if (cflag & CLOCAL)
+-		port->gs.flags &= ~ASYNC_CHECK_CD;
++		port->gs.port.flags &= ~ASYNC_CHECK_CD;
+ 	else
+-		port->gs.flags |= ASYNC_CHECK_CD;
++		port->gs.port.flags |= ASYNC_CHECK_CD;
+ 
+ 	/* calculate brgval for Atari; enable direct modes! */
+ 
+@@ -1207,7 +1208,7 @@ static int scc_open(struct tty_struct *tty, struct file *filp)
+ 		return -ENODEV;
+ 
+ 	pr_debug("SCC: open port ...\n");
+-	if (!(port->gs.flags & ASYNC_INITIALIZED)) {
++	if (!(port->gs.port.flags & ASYNC_INITIALIZED)) {
+ 		pr_debug("SCC: init port ...\n");
+ 		local_irq_save(flags);
+ 
+@@ -1232,22 +1233,22 @@ static int scc_open(struct tty_struct *tty, struct file *filp)
+ 	}
+ 
+ 	tty->driver_data = port;
+-	port->gs.tty = tty;
+-	port->gs.count++;
++	port->gs.port.tty = tty;
++	port->gs.port.count++;
+ 	pr_debug(KERN_WARNING "SCC: gs init port ...\n");
+ 	retval = gs_init_port(&port->gs);
+ 	if (retval) {
+-		port->gs.count--;
++		port->gs.port.count--;
+ 		return retval;
+ 	}
+ 	pr_debug(KERN_WARNING "SCC: gs init port done!\n");
+-	port->gs.flags |= GS_ACTIVE;
++	port->gs.port.flags |= GS_ACTIVE;
+ 
+ 	pr_debug(KERN_WARNING "SCC: gs wait ready ...\n");
+ 	retval = gs_block_til_ready(port, filp);
+ 	pr_debug(KERN_WARNING "SCC: gs wait ready done!\n");
+ 	if (retval) {
+-		port->gs.count--;
++		port->gs.port.count--;
+ 		return retval;
+ 	}
+ 
+-- 
+1.6.2.3
+
