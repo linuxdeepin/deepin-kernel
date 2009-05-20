@@ -1,4 +1,6 @@
-import debian, re, os, textwrap
+from __future__ import absolute_import
+
+import re, os, textwrap
 
 _marker = object
 
@@ -57,10 +59,12 @@ class Templates(object):
                 return f.read()
 
     def _read_control(self, f):
+        from .debian import Package
+
         entries = []
 
         while True:
-            e = debian.Package()
+            e = Package()
             last = None
             lines = []
             while True:
