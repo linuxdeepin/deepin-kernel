@@ -1,3 +1,7 @@
+from __future__ import absolute_import
+
+from .utils import SortedDict
+
 __all__ = (
     "KconfigFile",
 )
@@ -37,7 +41,7 @@ class EntryTristate(object):
         elif self.value == self.VALUE_MOD:
             return "%s=m" % conf
 
-class KconfigFile(dict):
+class KconfigFile(SortedDict):
     def __str__(self):
         ret = []
         for i in self.str_iter():
