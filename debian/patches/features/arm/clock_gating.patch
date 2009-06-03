@@ -1,0 +1,236 @@
+From: Rabeeh Khoury <rabeeh@marvell.com>
+Date: Sun, 22 Mar 2009 15:30:32 +0000 (+0200)
+Subject: [ARM] Kirkwood: clock gating for unused peripherals
+X-Git-Url:
+http://git.marvell.com/?p=orion.git;a=commitdiff_plain;h=80d8a1c2acd885a69259640fa6d789b714c9f7b9
+
+[ARM] Kirkwood: clock gating for unused peripherals
+
+To save power:
+
+1. Enabling clock gating of unused peripherals
+
+2. PLL and PHY of the units are also disabled (when possible.
+
+Signed-off-by: Rabeeh Khoury <rabeeh@marvell.com>
+Signed-off-by: Nicolas Pitre <nico@marvell.com>
+---
+
+diff --git a/arch/arm/mach-kirkwood/common.c b/arch/arm/mach-kirkwood/common.c
+index 6e3eb1a..d127731 100644
+--- a/arch/arm/mach-kirkwood/common.c
++++ b/arch/arm/mach-kirkwood/common.c
+@@ -55,6 +55,13 @@ void __init kirkwood_map_io(void)
+ 	iotable_init(kirkwood_io_desc, ARRAY_SIZE(kirkwood_io_desc));
+ }
+ 
++/*
++ * Default clock control bits.  Any bit _not_ set in this variable
++ * will be cleared from the hardware after platform devices have been
++ * registered.  Some reserved bits must be set to 1.
++ */
++unsigned int kirkwood_clk_ctrl = CGC_DUNIT | CGC_RESERVED;
++	
+ 
+ /*****************************************************************************
+  * EHCI
+@@ -96,6 +103,7 @@ static struct platform_device kirkwood_ehci = {
+ 
+ void __init kirkwood_ehci_init(void)
+ {
++	kirkwood_clk_ctrl |= CGC_USB0;
+ 	platform_device_register(&kirkwood_ehci);
+ }
+ 
+@@ -152,6 +160,7 @@ static struct platform_device kirkwood_ge00 = {
+ 
+ void __init kirkwood_ge00_init(struct mv643xx_eth_platform_data *eth_data)
+ {
++	kirkwood_clk_ctrl |= CGC_GE0;
+ 	eth_data->shared = &kirkwood_ge00_shared;
+ 	kirkwood_ge00.dev.platform_data = eth_data;
+ 
+@@ -213,6 +222,7 @@ static struct platform_device kirkwood_ge01 = {
+ 
+ void __init kirkwood_ge01_init(struct mv643xx_eth_platform_data *eth_data)
+ {
++	kirkwood_clk_ctrl |= CGC_GE1;
+ 	eth_data->shared = &kirkwood_ge01_shared;
+ 	kirkwood_ge01.dev.platform_data = eth_data;
+ 
+@@ -287,6 +297,7 @@ static struct platform_device kirkwood_nand_flash = {
+ void __init kirkwood_nand_init(struct mtd_partition *parts, int nr_parts,
+ 			       int chip_delay)
+ {
++	kirkwood_clk_ctrl |= CGC_RUNIT;
+ 	kirkwood_nand_data.parts = parts;
+ 	kirkwood_nand_data.nr_parts = nr_parts;
+ 	kirkwood_nand_data.chip_delay = chip_delay;
+@@ -338,6 +349,9 @@ static struct platform_device kirkwood_sata = {
+ 
+ void __init kirkwood_sata_init(struct mv_sata_platform_data *sata_data)
+ {
++	kirkwood_clk_ctrl |= CGC_SATA0;
++	if (sata_data->n_ports > 1)
++		kirkwood_clk_ctrl |= CGC_SATA1;
+ 	sata_data->dram = &kirkwood_mbus_dram_info;
+ 	kirkwood_sata.dev.platform_data = sata_data;
+ 	platform_device_register(&kirkwood_sata);
+@@ -383,6 +397,7 @@ void __init kirkwood_sdio_init(struct mvsdio_platform_data *mvsdio_data)
+ 	else
+ 		mvsdio_data->clock = 200000000;
+ 	mvsdio_data->dram = &kirkwood_mbus_dram_info;
++	kirkwood_clk_ctrl |= CGC_SDIO;
+ 	kirkwood_sdio.dev.platform_data = mvsdio_data;
+ 	platform_device_register(&kirkwood_sdio);
+ }
+@@ -414,6 +429,7 @@ static struct platform_device kirkwood_spi = {
+ 
+ void __init kirkwood_spi_init()
+ {
++	kirkwood_clk_ctrl |= CGC_RUNIT;
+ 	platform_device_register(&kirkwood_spi);
+ }
+ 
+@@ -634,6 +650,7 @@ static struct platform_device kirkwood_xor01_channel = {
+ 
+ static void __init kirkwood_xor0_init(void)
+ {
++	kirkwood_clk_ctrl |= CGC_XOR0;
+ 	platform_device_register(&kirkwood_xor0_shared);
+ 
+ 	/*
+@@ -732,6 +749,7 @@ static struct platform_device kirkwood_xor11_channel = {
+ 
+ static void __init kirkwood_xor1_init(void)
+ {
++	kirkwood_clk_ctrl |= CGC_XOR1;
+ 	platform_device_register(&kirkwood_xor1_shared);
+ 
+ 	/*
+@@ -844,3 +862,44 @@ void __init kirkwood_init(void)
+ 	kirkwood_xor0_init();
+ 	kirkwood_xor1_init();
+ }
++
++static int __init kirkwood_clock_gate(void)
++{
++	unsigned int curr = readl(CLOCK_GATING_CTRL);
++
++	printk(KERN_DEBUG "Gating clock of unused units\n");
++	printk(KERN_DEBUG "before: 0x%08x\n", curr);
++
++	/* Make sure those units are accessible */
++	writel(curr | CGC_SATA0 | CGC_SATA1 | CGC_PEX0, CLOCK_GATING_CTRL);
++
++	/* For SATA: first shutdown the phy */
++	if (!(kirkwood_clk_ctrl & CGC_SATA0)) {
++		/* Disable PLL and IVREF */
++		writel(readl(SATA0_PHY_MODE_2) & ~0xf, SATA0_PHY_MODE_2);
++		/* Disable PHY */
++		writel(readl(SATA0_IF_CTRL) | 0x200, SATA0_IF_CTRL);
++	}
++	if (!(kirkwood_clk_ctrl & CGC_SATA1)) {
++		/* Disable PLL and IVREF */
++		writel(readl(SATA1_PHY_MODE_2) & ~0xf, SATA1_PHY_MODE_2);
++		/* Disable PHY */
++		writel(readl(SATA1_IF_CTRL) | 0x200, SATA1_IF_CTRL);
++	}
++	
++	/* For PCIe: first shutdown the phy */
++	if (!(kirkwood_clk_ctrl & CGC_PEX0)) {
++		writel(readl(PCIE_LINK_CTRL) | 0x10, PCIE_LINK_CTRL);
++		while (1)
++			if (readl(PCIE_STATUS) & 0x1)
++				break;
++		writel(readl(PCIE_LINK_CTRL) & ~0x10, PCIE_LINK_CTRL);
++	}
++
++	/* Now gate clock the required units */
++	writel(kirkwood_clk_ctrl, CLOCK_GATING_CTRL);
++	printk(KERN_DEBUG " after: 0x%08x\n", readl(CLOCK_GATING_CTRL));
++
++	return 0;
++}
++late_initcall(kirkwood_clock_gate);
+diff --git a/arch/arm/mach-kirkwood/include/mach/bridge-regs.h b/arch/arm/mach-kirkwood/include/mach/bridge-regs.h
+index 4f7029f..00d96ab 100644
+--- a/arch/arm/mach-kirkwood/include/mach/bridge-regs.h
++++ b/arch/arm/mach-kirkwood/include/mach/bridge-regs.h
+@@ -39,4 +39,22 @@
+ #define L2_CONFIG_REG		(BRIDGE_VIRT_BASE | 0x0128)
+ #define L2_WRITETHROUGH		0x00000010
+ 
++#define CLOCK_GATING_CTRL	(BRIDGE_VIRT_BASE | 0x11c)
++#define CGC_GE0			(1 << 0)
++#define CGC_PEX0		(1 << 2)
++#define CGC_USB0		(1 << 3)
++#define CGC_SDIO		(1 << 4)
++#define CGC_TSU			(1 << 5)
++#define CGC_DUNIT		(1 << 6)
++#define CGC_RUNIT		(1 << 7)
++#define CGC_XOR0		(1 << 8)
++#define CGC_AUDIO		(1 << 9)
++#define CGC_SATA0		(1 << 14)
++#define CGC_SATA1		(1 << 15)
++#define CGC_XOR1		(1 << 16)
++#define CGC_CRYPTO		(1 << 17)
++#define CGC_GE1			(1 << 19)
++#define CGC_TDM			(1 << 20)
++#define CGC_RESERVED		((1 << 18) | (0x6 << 21))
++
+ #endif
+diff --git a/arch/arm/mach-kirkwood/include/mach/kirkwood.h b/arch/arm/mach-kirkwood/include/mach/kirkwood.h
+index b3e1395..fa87ce6 100644
+--- a/arch/arm/mach-kirkwood/include/mach/kirkwood.h
++++ b/arch/arm/mach-kirkwood/include/mach/kirkwood.h
+@@ -65,6 +65,8 @@
+ #define BRIDGE_VIRT_BASE	(KIRKWOOD_REGS_VIRT_BASE | 0x20000)
+ 
+ #define PCIE_VIRT_BASE		(KIRKWOOD_REGS_VIRT_BASE | 0x40000)
++#define PCIE_LINK_CTRL		(PCIE_VIRT_BASE | 0x70)
++#define PCIE_STATUS		(PCIE_VIRT_BASE | 0x1a04)
+ 
+ #define USB_PHYS_BASE		(KIRKWOOD_REGS_PHYS_BASE | 0x50000)
+ 
+@@ -81,6 +83,11 @@
+ #define GE01_PHYS_BASE		(KIRKWOOD_REGS_PHYS_BASE | 0x74000)
+ 
+ #define SATA_PHYS_BASE		(KIRKWOOD_REGS_PHYS_BASE | 0x80000)
++#define SATA_VIRT_BASE		(KIRKWOOD_REGS_VIRT_BASE | 0x80000)
++#define SATA0_IF_CTRL		(SATA_VIRT_BASE | 0x2050)
++#define SATA0_PHY_MODE_2	(SATA_VIRT_BASE | 0x2330)
++#define SATA1_IF_CTRL		(SATA_VIRT_BASE | 0x4050)
++#define SATA1_PHY_MODE_2	(SATA_VIRT_BASE | 0x4330)
+ 
+ #define SDIO_PHYS_BASE		(KIRKWOOD_REGS_PHYS_BASE | 0x90000)
+ 
+diff --git a/arch/arm/mach-kirkwood/pcie.c b/arch/arm/mach-kirkwood/pcie.c
+index 73fccac..d90b9aa 100644
+--- a/arch/arm/mach-kirkwood/pcie.c
++++ b/arch/arm/mach-kirkwood/pcie.c
+@@ -14,6 +14,7 @@
+ #include <asm/irq.h>
+ #include <asm/mach/pci.h>
+ #include <plat/pcie.h>
++#include <mach/bridge-regs.h>
+ #include "common.h"
+ 
+ 
+@@ -95,6 +96,7 @@ static struct pci_ops pcie_ops = {
+ static int kirkwood_pcie_setup(int nr, struct pci_sys_data *sys)
+ {
+ 	struct resource *res;
++	extern unsigned int kirkwood_clk_ctrl;
+ 
+ 	/*
+ 	 * Generic PCIe unit setup.
+@@ -133,6 +135,8 @@ static int kirkwood_pcie_setup(int nr, struct pci_sys_data *sys)
+ 	sys->resource[2] = NULL;
+ 	sys->io_offset = 0;
+ 
++	kirkwood_clk_ctrl |= CGC_PEX0;
++
+ 	return 1;
+ }
+ 
