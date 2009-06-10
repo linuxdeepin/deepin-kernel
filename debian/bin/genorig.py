@@ -3,7 +3,11 @@
 import sys
 sys.path.append("debian/lib/python")
 
-import os, os.path, re, shutil
+import os
+import os.path
+import re
+import shutil
+
 from debian_linux.debian import Changelog, VersionLinux
 from debian_linux.patches import PatchSeries
 
