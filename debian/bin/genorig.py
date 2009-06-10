@@ -7,6 +7,7 @@ import os
 import os.path
 import re
 import shutil
+import subprocess
 
 from debian_linux.debian import Changelog, VersionLinux
 from debian_linux.patches import PatchSeries
@@ -50,13 +51,17 @@ class Main(object):
         match = re.match(r'(^|.*/)(?P<dir>linux-\d+\.\d+\.\d+(-\S+)?)\.tar(\.(?P<extension>(bz2|gz)))?$', self.input_tar)
         if not match:
             raise RuntimeError("Can't identify name of tarball")
-        cmdline = ['tar -xf', self.input_tar, '-C', self.dir]
+
+        cmdline = ['tar', '-xf', self.input_tar, '-C', self.dir]
         if match.group('extension') == 'bz2':
             cmdline.append('-j')
         elif match.group('extension') == 'gz':
             cmdline.append('-z')
-        if os.spawnv(os.P_WAIT, '/bin/sh', ['sh', '-c', ' '.join(cmdline)]):
+
+        print cmdline
+        if subprocess.Popen(cmdline).wait():
             raise RuntimeError("Can't extract tarball")
+
         os.rename(os.path.join(self.dir, match.group('dir')), os.path.join(self.dir, self.orig))
 
     def upstream_patch(self):
