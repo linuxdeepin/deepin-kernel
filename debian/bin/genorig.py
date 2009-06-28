@@ -58,7 +58,6 @@ class Main(object):
         elif match.group('extension') == 'gz':
             cmdline.append('-z')
 
-        print cmdline
         if subprocess.Popen(cmdline).wait():
             raise RuntimeError("Can't extract tarball")
 
