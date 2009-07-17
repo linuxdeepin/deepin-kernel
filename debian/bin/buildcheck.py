@@ -6,19 +6,48 @@ sys.path.append('debian/lib/python')
 import fnmatch
 import stat
 
-from debian_linux.abi import *
+from debian_linux.abi import Symbols
 from debian_linux.config import ConfigCoreDump
 from debian_linux.debian import *
 
 
 class CheckAbi(object):
+    class SymbolInfo(object):
+        def __init__(self, symbol):
+            self.symbol = symbol
+
+        def write(self, out, ignored):
+            info = []
+            if ignored:
+                info.append("ignored")
+            for i in ('module', 'version', 'export'):
+                info.append("%s: %s" % (i, getattr(self.symbol, i)))
+            out.write("%-48s %s\n" % (self.symbol.name, ", ".join(info)))
+
+    class SymbolChangeInfo(object):
+        def __init__(self, symbol_ref, symbol_new):
+            self.symbol_ref, self.symbol_new = symbol_ref, symbol_new
+
+        def write(self, out, ignored):
+            info = []
+            if ignored:
+                info.append("ignored")
+            for i in ('module', 'version', 'export'):
+                d_ref = getattr(self.symbol_ref, i)
+                d_new = getattr(self.symbol_new, i)
+                if d_ref != d_new:
+                    info.append("%s: %s -> %s" % (i, d_ref, d_new))
+                else:
+                    info.append("%s: %s" % (i, d_new))
+            out.write("%-48s %s\n" % (self.symbol_new.name, ", ".join(info)))
+
     def __init__(self, config, dir, arch, featureset, flavour):
         self.config = config
         self.arch, self.featureset, self.flavour = arch, featureset, flavour
 
         self.filename_new = "%s/Module.symvers" % dir
 
-        changelog = Changelog(version = VersionLinux)[0]
+        changelog = Changelog(version=VersionLinux)[0]
         version = changelog.version.linux_version
         abiname = self.config['abi',]['abiname']
         self.filename_ref = "debian/abi/%s-%s/%s_%s_%s" % (version, abiname, arch, featureset, flavour)
@@ -26,18 +55,16 @@ class CheckAbi(object):
     def __call__(self, out):
         ret = 0
 
-        new = symbols(self.filename_new)
+        new = Symbols(open(self.filename_new))
         try:
-            ref = symbols(self.filename_ref)
+            ref = Symbols(open(self.filename_ref))
         except IOError:
             out.write("Can't read ABI reference.  ABI not checked!  Continuing.\n")
             return 0
 
-        add_info, change_info, remove_info = ref.cmp(new)
-        add = set(add_info.keys())
-        change = set(change_info.keys())
-        remove = set(remove_info.keys())
-        ignore = self._ignore(add_info, change_info, remove_info)
+        symbols, add, change, remove = self._cmp(ref, new)
+
+        ignore = self._ignore(symbols.keys())
 
         add_effective = add - ignore
         change_effective = change - ignore
@@ -54,49 +81,60 @@ class CheckAbi(object):
             out.write("New symbols have been added but have been ignored.  Continuing.\n")
         else:
             out.write("No ABI changes.\n")
+
         if add:
             out.write("\nAdded symbols:\n")
             t = list(add)
             t.sort()
-            for symbol in t:
-                info = []
-                if symbol in ignore:
-                    info.append("ignored")
-                for i in ('module', 'version', 'export'):
-                    info.append("%s: %s" % (i, add_info[symbol][i]))
-                out.write("%-48s %s\n" % (symbol, ", ".join(info)))
+            for name in t:
+                symbols[name].write(out, name in ignore)
+
         if change:
             out.write("\nChanged symbols:\n")
             t = list(change)
             t.sort()
-            for symbol in t:
-                info = []
-                if symbol in ignore:
-                    info.append("ignored")
-                s = change_info[symbol]
-                changes = s['changes']
-                for i in ('module', 'version', 'export'):
-                    if changes.has_key(i):
-                        info.append("%s: %s -> %s" % (i, s['ref'][i], s['new'][i]))
-                    else:
-                        info.append("%s: %s" % (i, new[symbol][i]))
-                out.write("%-48s %s\n" % (symbol, ", ".join(info)))
+            for name in t:
+                symbols[name].write(out, name in ignore)
+
         if remove:
             out.write("\nRemoved symbols:\n")
             t = list(remove)
             t.sort()
-            for symbol in t:
-                info = []
-                if symbol in ignore:
-                    info.append("ignored")
-                for i in ('module', 'version', 'export'):
-                    info.append("%s: %s" % (i, remove_info[symbol][i]))
-                out.write("%-48s %s\n" % (symbol, ", ".join(info)))
+            for name in t:
+                symbols[name].write(out, name in ignore)
 
         return ret
 
-    def _ignore(self, add, change, remove):
-        all = set(add.keys() + change.keys() + remove.keys())
+    def _cmp(self, ref, new):
+        ref_names = set(ref.keys())
+        new_names = set(new.keys())
+
+        add = set()
+        change = set()
+        remove = set()
+
+        symbols = {}
+
+        for name in new_names - ref_names:
+            add.add(name)
+            symbols[name] = self.SymbolInfo(new[name])
+
+        for name in ref_names.intersection(new_names):
+            s_ref = ref[name]
+            s_new = new[name]
+
+            if s_ref != s_new:
+                print "cmp", s_ref.__dict__, s_new.__dict__
+                change.add(name)
+                symbols[name] = self.SymbolChangeInfo(s_ref, s_new)
+
+        for name in ref_names - new_names:
+            remove.add(name)
+            symbols[name] = self.SymbolInfo(ref[name])
+
+        return symbols, add, change, remove
+
+    def _ignore(self, all):
         # TODO: let config merge this lists
         configs = []
         configs.append(self.config.get(('abi', self.arch, self.featureset, self.flavour), {}))

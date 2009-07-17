@@ -1,51 +1,37 @@
-class symbols(dict):
-    def __init__(self, filename = None):
-        self.modules = {}
-        if filename is not None:
-            self.read(file(filename))
+class Symbol(object):
+    def __init__(self, name, module, version, export):
+        self.name, self.module = name, module
+        self.version, self.export = version, export
 
-    def cmp(self, new):
-        symbols_ref = set(self.keys())
-        symbols_new = set(new.keys())
+    def __eq__(self, other):
+        if not isinstance(other, Symbol):
+            return NotImplemented
 
-        symbols_add = {}
-        symbols_remove = {}
+        if self.name != other.name: return False
+        if self.module != other.module: return False
+        if self.version != other.version: return False
+        if self.export != other.export: return False
 
-        symbols_change = {}
+        return True
 
-        for symbol in symbols_new - symbols_ref:
-            symbols_add[symbol] = new[symbol]
+    def __ne__(self, other):
+        ret = self.__eq__(other)
+        if ret is NotImplemented:
+            return ret
+        return not ret
 
-        for symbol in symbols_ref.intersection(symbols_new):
-            symbol_ref = self[symbol]
-            symbol_new = new[symbol]
-
-            ent = {'ref': symbol_ref, 'new': symbol_new, 'changes': {}}
-            for i in ('module', 'version', 'export'):
-                if symbol_ref[i] != symbol_new[i]:
-                    ent['changes'][i] = {'ref': symbol_ref, 'new': symbol_new}
-            if ent['changes']:
-                symbols_change[symbol] = ent
-
-        for symbol in symbols_ref - symbols_new:
-            symbols_remove[symbol] = self[symbol]
-
-        return symbols_add, symbols_change, symbols_remove
+class Symbols(dict):
+    def __init__(self, file=None):
+        if file:
+            self.read(file)
 
     def read(self, file):
-        for line in file.readlines():
-            version, symbol, module, export = line.strip().split()
-
-            if self.has_key(symbol):
-                pass
-            symbols = self.modules.get(module, set())
-            symbols.add(symbol)
-            self.modules[module] = symbols
-            self[symbol] = {'symbol': symbol, 'module': module, 'version': version, 'export': export}
+        for line in file:
+            version, name, module, export = line.strip().split()
+            self[name] = Symbol(name, module, version, export)
 
     def write(self, file):
-        symbols = self.items()
-        symbols.sort()
-        for symbol, info in symbols:
-            file.write("%(version)s %(symbol)s %(module)s %(export)s\n" % info)
-
+        symbols = self.values()
+        symbols.sort(key=lambda i: i.name)
+        for s in symbols:
+            file.write("%s %s %s %s\n" % (s.version, s.name, s.module, s.export))
