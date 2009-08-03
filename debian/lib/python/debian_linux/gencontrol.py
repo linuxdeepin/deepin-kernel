@@ -243,6 +243,8 @@ class Gencontrol(object):
         for groups in dep:
             for item in groups:
                 item.name = self.substitute(item.name, vars)
+                if item.version:
+                    item.version = self.substitute(item.version, vars)
         return dep
 
     def process_description(self, in_desc, vars):
