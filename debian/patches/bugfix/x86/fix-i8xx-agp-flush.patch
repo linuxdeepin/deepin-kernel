@@ -1,0 +1,113 @@
+From: Eric Anholt <eric@anholt.net>
+Date: Fri, 11 Sep 2009 00:48:48 +0000 (-0700)
+Subject: agp/intel: Fix the pre-9xx chipset flush.
+X-Git-Url: http://git.kernel.org/?p=linux%2Fkernel%2Fgit%2Fanholt%2Fdrm-intel.git;a=commitdiff_plain;h=e517a5e97080bbe52857bd0d7df9b66602d53c4d;hp=8082400327d8d2ca54254b593644942bed0edd25
+
+agp/intel: Fix the pre-9xx chipset flush.
+
+Ever since we enabled GEM, the pre-9xx chipsets (particularly 865) have had
+serious stability issues.  Back in May a wbinvd was added to the DRM to
+work around much of the problem.  Some failure remained -- easily visible
+by dragging a window around on an X -retro desktop, or by looking at bugzilla.
+
+The chipset flush was on the right track -- hitting the right amount of
+memory, and it appears to be the only way to flush on these chipsets, but the
+flush page was mapped uncached.  As a result, the writes trying to clear the
+writeback cache ended up bypassing the cache, and not flushing anything!  The
+wbinvd would flush out other writeback data and often cause the data we wanted
+to get flushed, but not always.  By removing the setting of the page to UC
+and instead just clflushing the data we write to try to flush it, we get the
+desired behavior with no wbinvd.
+
+This exports clflush_cache_range(), which was laying around and happened to
+basically match the code I was otherwise going to copy from the DRM.
+
+Signed-off-by: Eric Anholt <eric@anholt.net>
+Signed-off-by: Brice Goglin <Brice.Goglin@ens-lyon.org>
+Cc: stable@kernel.org
+---
+
+diff --git a/arch/x86/mm/pageattr.c b/arch/x86/mm/pageattr.c
+index 7e600c1..5866b28 100644
+--- a/arch/x86/mm/pageattr.c
++++ b/arch/x86/mm/pageattr.c
+@@ -143,6 +143,7 @@ void clflush_cache_range(void *vaddr, unsigned int size)
+ 
+ 	mb();
+ }
++EXPORT_SYMBOL_GPL(clflush_cache_range);
+ 
+ static void __cpa_flush_all(void *arg)
+ {
+diff --git a/drivers/char/agp/intel-agp.c b/drivers/char/agp/intel-agp.c
+index c172917..e8dc75f 100644
+--- a/drivers/char/agp/intel-agp.c
++++ b/drivers/char/agp/intel-agp.c
+@@ -682,23 +682,39 @@ static void intel_i830_setup_flush(void)
+ 	if (!intel_private.i8xx_page)
+ 		return;
+ 
+-	/* make page uncached */
+-	map_page_into_agp(intel_private.i8xx_page);
+-
+ 	intel_private.i8xx_flush_page = kmap(intel_private.i8xx_page);
+ 	if (!intel_private.i8xx_flush_page)
+ 		intel_i830_fini_flush();
+ }
+ 
++static void
++do_wbinvd(void *null)
++{
++	wbinvd();
++}
++
++/* The chipset_flush interface needs to get data that has already been
++ * flushed out of the CPU all the way out to main memory, because the GPU
++ * doesn't snoop those buffers.
++ *
++ * The 8xx series doesn't have the same lovely interface for flushing the
++ * chipset write buffers that the later chips do. According to the 865
++ * specs, it's 64 octwords, or 1KB.  So, to get those previous things in
++ * that buffer out, we just fill 1KB and clflush it out, on the assumption
++ * that it'll push whatever was in there out.  It appears to work.
++ */
+ static void intel_i830_chipset_flush(struct agp_bridge_data *bridge)
+ {
+ 	unsigned int *pg = intel_private.i8xx_flush_page;
+-	int i;
+ 
+-	for (i = 0; i < 256; i += 2)
+-		*(pg + i) = i;
++	memset(pg, 0, 1024);
+ 
+-	wmb();
++	if (cpu_has_clflush) {
++		clflush_cache_range(pg, 1024);
++	} else {
++		if (on_each_cpu(do_wbinvd, NULL, 1) != 0)
++			printk(KERN_ERR "Timed out waiting for cache flush.\n");
++	}
+ }
+ 
+ /* The intel i830 automatically initializes the agp aperture during POST.
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index f3758f9..30ea4b6 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -2511,16 +2511,6 @@ i915_gem_clflush_object(struct drm_gem_object *obj)
+ 	if (obj_priv->pages == NULL)
+ 		return;
+ 
+-	/* XXX: The 865 in particular appears to be weird in how it handles
+-	 * cache flushing.  We haven't figured it out, but the
+-	 * clflush+agp_chipset_flush doesn't appear to successfully get the
+-	 * data visible to the PGU, while wbinvd + agp_chipset_flush does.
+-	 */
+-	if (IS_I865G(obj->dev)) {
+-		wbinvd();
+-		return;
+-	}
+-
+ 	drm_clflush_pages(obj_priv->pages, obj->size / PAGE_SIZE);
+ }
+ 
