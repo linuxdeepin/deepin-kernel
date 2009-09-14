@@ -8,6 +8,15 @@ from debian_linux.debian import *
 from debian_linux.gencontrol import Gencontrol as Base
 from debian_linux.utils import Templates
 
+def add_arch_package(packages, arch, package):
+    name = package['Package']
+    if packages.has_key(name):
+        package = packages.get(name)
+        package['Architecture'].append(arch)
+    else:
+        package['Architecture'] = [arch]
+        packages.append(package)
+
 class Gencontrol(Base):
     def __init__(self, config_dirs = ["debian/config"], template_dirs = ["debian/templates"]):
         super(Gencontrol, self).__init__(ConfigCoreHierarchy(config_dirs), Templates(template_dirs), VersionLinux)
@@ -52,13 +61,7 @@ class Gencontrol(Base):
         extra['headers_arch_depends'] = packages_headers_arch[-1]['Depends'] = PackageRelation()
 
         for package in packages_headers_arch:
-            name = package['Package']
-            if packages.has_key(name):
-                package = packages.get(name)
-                package['Architecture'].append(arch)
-            else:
-                package['Architecture'] = [arch]
-                packages.append(package)
+            add_arch_package(packages, arch, package)
 
         cmds_binary_arch = ["$(MAKE) -f debian/rules.real binary-arch-arch %s" % makeflags]
         cmds_source = ["$(MAKE) -f debian/rules.real source-arch %s" % makeflags]
@@ -72,15 +75,8 @@ class Gencontrol(Base):
 
     def do_featureset_packages(self, packages, makefile, arch, featureset, vars, makeflags, extra):
         headers_featureset = self.templates["control.headers.featureset"]
-        package_headers = self.process_package(headers_featureset[0], vars)
-
-        name = package_headers['Package']
-        if packages.has_key(name):
-            package_headers = packages.get(name)
-            package_headers['Architecture'].append(arch)
-        else:
-            package_headers['Architecture'] = [arch]
-            packages.append(package_headers)
+        add_arch_package(packages, arch,
+                         self.process_package(headers_featureset[0], vars))
 
         cmds_binary_arch = ["$(MAKE) -f debian/rules.real binary-arch-featureset %s" % makeflags]
         cmds_source = ["$(MAKE) -f debian/rules.real source-featureset %s" % makeflags]
@@ -197,14 +193,10 @@ class Gencontrol(Base):
             packages_own.append(package_headers)
             extra['headers_arch_depends'].append('%s (= ${binary:Version})' % packages_own[-1]['Package'])
 
-        for package in packages_own + packages_dummy:
-            name = package['Package']
-            if packages.has_key(name):
-                package = packages.get(name)
-                package['Architecture'].append(arch)
-            else:
-                package['Architecture'] = [arch]
-                packages.append(package)
+        for package in packages_own:
+            add_arch_package(packages, arch, package)
+        for package in packages_dummy:
+            add_arch_package(packages, arch, package)
 
         if config_entry_image['type'] == 'plain-xen':
             for i in ('postinst', 'postrm', 'prerm'):
