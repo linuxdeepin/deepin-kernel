@@ -8,69 +8,6 @@ from debian_linux.debian import *
 from debian_linux.gencontrol import Gencontrol as Base
 from debian_linux.utils import Templates
 
-def maxzip(*its):
-    '''Variant of zip() that continues until all iterators are exhausted,
-    padding with None as necessary.'''
-    its = [iter(it) for it in its]
-    while True:
-        value = []
-        stop = True
-        for it in its:
-            try:
-                value.append(it.next())
-            except StopIteration:
-                value.append(None)
-            else:
-                stop = False
-        if stop:
-            break
-        yield value
-
-def add_arch_relation(merged_arches, merged_rel, arch, rel):
-    # Add arch-qualification as necessary
-    for m_group, group in maxzip(merged_rel, rel):
-        for m_entry, entry in maxzip(m_group or [], group or []):
-            # Is either entry unqualified?
-            if m_entry and not m_entry.arches or entry and not entry.arches:
-                # Are they equal?
-                if (m_entry and not m_entry.arches and
-                    entry and not entry.arches and
-                    m_entry.name == entry.name and 
-                    str(m_entry.operator) == str(entry.operator) and
-                    m_entry.version == entry.version):
-                    # Merged entry remains applicable to all architectures
-                    pass
-                else:
-                    # Entries must be arch-qualified
-                    if m_entry:
-                        m_entry.arches = merged_arches[:]
-                    if entry:
-                        entry.arches = [arch]
-    # And now apply the standard merge
-    merged_rel.extend(rel)
-
-def add_arch_package(packages, arch, package):
-    package['Architecture'] = [arch]
-    name = package['Package']
-    if packages.has_key(name):
-        merged_package = packages.get(name)
-        assert str(package['Description']) == str(merged_package['Description'])
-        for field in 'Depends', 'Provides', 'Suggests', 'Recommends', 'Conflicts':
-            try:
-                merged_rel = merged_package[field]
-            except KeyError:
-                merged_rel = PackageRelation()
-            try:
-                rel = package[field]
-            except KeyError:
-                pass
-            else:
-                add_arch_relation(merged_package['Architecture'], merged_rel,
-                                  arch, rel)
-        merged_package['Architecture'].append(arch)
-    else:
-        packages.append(package)
-
 class Gencontrol(Base):
     def __init__(self, config_dirs = ["debian/config"], template_dirs = ["debian/templates"]):
         super(Gencontrol, self).__init__(ConfigCoreHierarchy(config_dirs), Templates(template_dirs), VersionLinux)
@@ -114,8 +51,7 @@ class Gencontrol(Base):
         
         extra['headers_arch_depends'] = packages_headers_arch[-1]['Depends'] = PackageRelation()
 
-        for package in packages_headers_arch:
-            add_arch_package(packages, arch, package)
+        self.merge_packages(packages, packages_headers_arch, arch)
 
         cmds_binary_arch = ["$(MAKE) -f debian/rules.real binary-arch-arch %s" % makeflags]
         cmds_source = ["$(MAKE) -f debian/rules.real source-arch %s" % makeflags]
@@ -129,8 +65,9 @@ class Gencontrol(Base):
 
     def do_featureset_packages(self, packages, makefile, arch, featureset, vars, makeflags, extra):
         headers_featureset = self.templates["control.headers.featureset"]
-        add_arch_package(packages, arch,
-                         self.process_package(headers_featureset[0], vars))
+        package_headers = self.process_package(headers_featureset[0], vars)
+
+        self.merge_packages(packages, (package_headers,), arch)
 
         cmds_binary_arch = ["$(MAKE) -f debian/rules.real binary-arch-featureset %s" % makeflags]
         cmds_source = ["$(MAKE) -f debian/rules.real source-featureset %s" % makeflags]
@@ -185,7 +122,7 @@ class Gencontrol(Base):
 
         image_fields = {'Description': PackageDescription()}
         for field in 'Depends', 'Provides', 'Suggests', 'Recommends', 'Conflicts':
-            image_fields[field] = PackageRelation(config_entry_image.get(field.lower(), None))
+            image_fields[field] = PackageRelation(config_entry_image.get(field.lower(), None), override_arches=(arch,))
 
         if config_entry_image.get('initramfs', True):
             generators = config_entry_image['initramfs-generators']
@@ -247,10 +184,7 @@ class Gencontrol(Base):
             packages_own.append(package_headers)
             extra['headers_arch_depends'].append('%s (= ${binary:Version})' % packages_own[-1]['Package'])
 
-        for package in packages_own:
-            add_arch_package(packages, arch, package)
-        for package in packages_dummy:
-            add_arch_package(packages, arch, package)
+        self.merge_packages(packages, packages_own + packages_dummy, arch)
 
         if config_entry_image['type'] == 'plain-xen':
             for i in ('postinst', 'postrm', 'prerm'):
@@ -321,6 +255,25 @@ class Gencontrol(Base):
         apply = self.substitute(apply, vars)
 
         file('debian/bin/patch.apply', 'w').write(apply)
+
+    def merge_packages(self, packages, new, arch):
+        for new_package in new:
+            name = new_package['Package']
+            if name in packages:
+                package = packages.get(name)
+                package['Architecture'].append(arch)
+
+                for field in 'Depends', 'Provides', 'Suggests', 'Recommends', 'Conflicts':
+                    if field in new_package:
+                        if field in package:
+                            v = package[field]
+                            v.extend(new_package[field])
+                        else:
+                            package[field] = new_package[field]
+
+            else:
+                new_package['Architecture'] = [arch]
+                packages.append(new_package)
 
     def process_changelog(self):
         act_upstream = self.changelog[0].version.linux_upstream
