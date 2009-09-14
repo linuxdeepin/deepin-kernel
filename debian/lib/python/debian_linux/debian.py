@@ -192,9 +192,9 @@ class PackageDescription(object):
             raise TypeError
 
 class PackageRelation(list):
-    def __init__(self, value=None):
-        if value is not None:
-            self.extend(value)
+    def __init__(self, value=None, override_arches=None):
+        if value:
+            self.extend(value, override_arches)
 
     def __str__(self):
         return ', '.join([str(i) for i in self])
@@ -205,9 +205,9 @@ class PackageRelation(list):
                 return i
         return None
 
-    def append(self, value):
+    def append(self, value, override_arches=None):
         if isinstance(value, basestring):
-            value = PackageRelationGroup(value)
+            value = PackageRelationGroup(value, override_arches)
         elif not isinstance(value, PackageRelationGroup):
             raise ValueError, "got %s" % type(value)
         j = self._search_value(value)
@@ -216,18 +216,18 @@ class PackageRelation(list):
         else:
             super(PackageRelation, self).append(value)
 
-    def extend(self, value):
+    def extend(self, value, override_arches=None):
         if isinstance(value, basestring):
             value = [j.strip() for j in re.split(',', value.strip())]
         elif not isinstance(value, (list, tuple)):
             raise ValueError, "got %s" % type(value)
         for i in value:
-            self.append(i)
+            self.append(i, override_arches)
 
 class PackageRelationGroup(list):
-    def __init__(self, value = None):
-        if value is not None:
-            self.extend(value)
+    def __init__(self, value=None, override_arches=None):
+        if value:
+            self.extend(value, override_arches)
 
     def __str__(self):
         return ' | '.join([str(i) for i in self])
@@ -245,20 +245,20 @@ class PackageRelationGroup(list):
                     if arch not in i.arches:
                         i.arches.append(arch)
 
-    def append(self, value):
+    def append(self, value, override_arches=None):
         if isinstance(value, basestring):
-            value = PackageRelationEntry(value)
+            value = PackageRelationEntry(value, override_arches)
         elif not isinstance(value, PackageRelationEntry):
             raise ValueError
         super(PackageRelationGroup, self).append(value)
 
-    def extend(self, value):
+    def extend(self, value, override_arches=None):
         if isinstance(value, basestring):
             value = [j.strip() for j in re.split('\|', value.strip())]
         elif not isinstance(value, (list, tuple)):
             raise ValueError
         for i in value:
-            self.append(i)
+            self.append(i, override_arches)
 
 class PackageRelationEntry(object):
     __slots__ = "name", "operator", "version", "arches"
@@ -282,11 +282,14 @@ class PackageRelationEntry(object):
         def __str__(self):
             return self.operators_text[self._op]
 
-    def __init__(self, value = None):
-        if isinstance(value, basestring):
-            self.parse(value)
-        else:
+    def __init__(self, value=None, override_arches=None):
+        if not isinstance(value, basestring):
             raise ValueError
+
+        self.parse(value)
+
+        if override_arches:
+            self.arches = list(override_arches)
 
     def __str__(self):
         ret = [self.name]
