@@ -31,8 +31,6 @@ class Gencontrol(Base):
 
     def do_arch_setup(self, vars, makeflags, arch, extra):
         config_base = self.config.merge('base', arch)
-        config_libc_dev = self.config.merge('libc-dev', arch)
-        makeflags['LIBC_DEV_ARCH'] = config_libc_dev.get('arch', config_base.get('kernel-arch'))
 
         data = vars.copy()
         data.update(config_base)
