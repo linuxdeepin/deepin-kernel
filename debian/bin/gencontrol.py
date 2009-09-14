@@ -8,13 +8,67 @@ from debian_linux.debian import *
 from debian_linux.gencontrol import Gencontrol as Base
 from debian_linux.utils import Templates
 
+def maxzip(*its):
+    '''Variant of zip() that continues until all iterators are exhausted,
+    padding with None as necessary.'''
+    its = [iter(it) for it in its]
+    while True:
+        value = []
+        stop = True
+        for it in its:
+            try:
+                value.append(it.next())
+            except StopIteration:
+                value.append(None)
+            else:
+                stop = False
+        if stop:
+            break
+        yield value
+
+def add_arch_relation(merged_arches, merged_rel, arch, rel):
+    # Add arch-qualification as necessary
+    for m_group, group in maxzip(merged_rel, rel):
+        for m_entry, entry in maxzip(m_group or [], group or []):
+            # Is either entry unqualified?
+            if m_entry and not m_entry.arches or entry and not entry.arches:
+                # Are they equal?
+                if (m_entry and not m_entry.arches and
+                    entry and not entry.arches and
+                    m_entry.name == entry.name and 
+                    str(m_entry.operator) == str(entry.operator) and
+                    m_entry.version == entry.version):
+                    # Merged entry remains applicable to all architectures
+                    pass
+                else:
+                    # Entries must be arch-qualified
+                    if m_entry:
+                        m_entry.arches = merged_arches[:]
+                    if entry:
+                        entry.arches = [arch]
+    # And now apply the standard merge
+    merged_rel.extend(rel)
+
 def add_arch_package(packages, arch, package):
+    package['Architecture'] = [arch]
     name = package['Package']
     if packages.has_key(name):
-        package = packages.get(name)
-        package['Architecture'].append(arch)
+        merged_package = packages.get(name)
+        assert str(package['Description']) == str(merged_package['Description'])
+        for field in 'Depends', 'Provides', 'Suggests', 'Recommends', 'Conflicts':
+            try:
+                merged_rel = merged_package[field]
+            except KeyError:
+                merged_rel = PackageRelation()
+            try:
+                rel = package[field]
+            except KeyError:
+                pass
+            else:
+                add_arch_relation(merged_package['Architecture'], merged_rel,
+                                  arch, rel)
+        merged_package['Architecture'].append(arch)
     else:
-        package['Architecture'] = [arch]
         packages.append(package)
 
 class Gencontrol(Base):
