@@ -58,7 +58,6 @@ class Gencontrol(Base):
 
     def do_featureset_setup(self, vars, makeflags, arch, featureset, extra):
         config_base = self.config.merge('base', arch, featureset)
-        makeflags['KERNEL_HEADER_DIRS'] = config_base.get('kernel-header-dirs', config_base.get('kernel-arch'))
         makeflags['LOCALVERSION_HEADERS'] = vars['localversion_headers'] = vars['localversion']
 
     def do_featureset_packages(self, packages, makefile, arch, featureset, vars, makeflags, extra):
