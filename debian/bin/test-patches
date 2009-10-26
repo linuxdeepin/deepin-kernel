@@ -1,0 +1,81 @@
+#!/bin/bash
+
+set -e
+shopt -s extglob
+
+# Set defaults from the running kernel
+arch="$(dpkg --print-architecture)"
+kernelabi="$(uname -r)"
+ff="${kernelabi#+([^-])-@(trunk|+([0-9]))-}"
+if [ "x$ff" != "x$kernelabi" ]; then
+    flavour="${ff#@(openvz|vserver|xen)-}"
+    if [ "x$flavour" != "x$ff" ]; then
+	featureset="${ff%-$flavour}"
+    else
+	featureset=none
+    fi
+else
+    flavour=
+    featureset=none
+fi
+
+eval "set -- $(getopt -n "$0" -- "f:j:s:" "$@")"
+while true; do
+    case "$1" in
+	-f) flavour="$2"; shift 2 ;;
+	-j) export DEBIAN_KERNEL_JOBS="$2"; shift 2 ;;
+	-s) featureset="$2"; shift 2 ;;
+	--) shift 1; break ;;
+    esac
+done
+	    
+if [ $# -lt 1 ]; then
+    echo >&2 "Usage: $0 [<options>] <patch>..."
+    cat >&2 <<EOF
+Options:
+     -f <flavour>     specify the 'flavour' of kernel to build, e.g. 686
+     -j <jobs>        specify number of compiler jobs to run in parallel
+     -s <featureset>  specify an optional featureset to apply, e.g. xen
+EOF
+    exit 2
+fi
+
+if [ -z "$flavour" ]; then
+    echo >&2 "You must specify a flavour to build with the -f option"
+    exit 2
+fi
+
+dpkg-checkbuilddeps -B
+
+# Append 'a~test' to Debian version; this should be less than any official
+# successor and easily recognisable
+version="$(dpkg-parsechangelog | sed 's/^Version: //; t; d')"
+if [ "${version%a~test}" = "$version" ]; then
+    version="$version"a~test
+    dch -v "$version" "Testing patches $*"
+fi
+debversion="${version##*-}"
+
+# Copy all patches into a new directory
+rm -rf debian/patches/test/
+mkdir debian/patches/test
+cp -t debian/patches/test/ "$@"
+
+# Generate patch series for the new version
+>debian/patches/series/"$debversion"
+for patch in "$@"; do
+    echo "+ test/$(basename "$patch")" >>debian/patches/series/"$debversion"
+done
+
+# Regenerate control and included rules
+rm debian/control debian/rules.gen
+debian/rules debian/control-real && exit 1 || true
+test -f debian/control
+test -f debian/rules.gen
+
+# Clean and patch source
+debian/rules clean
+debian/rules source
+
+# Build selected binaries
+fakeroot make -f debian/rules.gen binary-arch_"$arch"_"$featureset"_"$flavour"
