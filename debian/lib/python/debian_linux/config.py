@@ -113,9 +113,11 @@ class ConfigCoreHierarchy(ConfigCore):
             'modules': SchemaItemBoolean(),
         },
         'build': {},
+        'description': {
+            'parts': SchemaItemList(),
+        },
         'image': {
             'configs': SchemaItemList(),
-            'desc-parts': SchemaItemList(),
             'initramfs': SchemaItemBoolean(),
             'initramfs-generators': SchemaItemList(),
         },

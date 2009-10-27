@@ -207,9 +207,6 @@ class Gencontrol(object):
     def do_flavour(self, packages, makefile, arch, featureset, flavour, vars, makeflags, extra):
         config_base = self.config.merge('base', arch, featureset, flavour)
 
-        vars['class'] = config_base['class']
-        vars['longclass'] = config_base.get('longclass') or vars['class']
-
         vars['localversion'] += '-' + flavour
 
         self.do_flavour_setup(vars, makeflags, arch, featureset, flavour, extra)

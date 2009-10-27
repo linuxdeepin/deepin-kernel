@@ -73,7 +73,11 @@ class Gencontrol(Base):
 
     def do_flavour_setup(self, vars, makeflags, arch, featureset, flavour, extra):
         config_base = self.config.merge('base', arch, featureset, flavour)
+        config_description = self.config.merge('description', arch, featureset, flavour)
         config_image = self.config.merge('image', arch, featureset, flavour)
+
+        vars['class'] = config_description['hardware']
+        vars['longclass'] = config_description.get('hardware-long') or vars['class']
 
         vars['localversion-image'] = vars['localversion']
         override_localversion = config_image.get('override-localversion', None)
@@ -106,6 +110,7 @@ class Gencontrol(Base):
         headers = self.templates["control.headers"]
 
         config_entry_base = self.config.merge('base', arch, featureset, flavour)
+        config_entry_description = self.config.merge('description', arch, featureset, flavour)
         config_entry_image = self.config.merge('image', arch, featureset, flavour)
         config_entry_relations = self.config.merge('relations', arch, featureset, flavour)
 
@@ -136,12 +141,12 @@ class Gencontrol(Base):
                     image_fields['Conflicts'].append(PackageRelationGroup([a]))
             image_fields['Depends'].append(l_depends)
 
-        desc_parts = self.config.get_merge('image', arch, featureset, flavour, 'desc-parts')
+        desc_parts = self.config.get_merge('description', arch, featureset, flavour, 'parts')
         if desc_parts:
             desc = image_fields['Description']
             for part in desc_parts[::-1]:
-                desc.append(config_entry_image['desc-long-part-' + part])
-                desc.append_short(config_entry_image.get('desc-short-part-' + part, ''))
+                desc.append(config_entry_description['part-long-' + part])
+                desc.append_short(config_entry_description.get('part-short-' + part, ''))
 
         packages_dummy = []
         packages_own = []
