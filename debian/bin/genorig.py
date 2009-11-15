@@ -13,11 +13,10 @@ from debian_linux.debian import Changelog, VersionLinux
 from debian_linux.patches import PatchSeries
 
 class Main(object):
-    def __init__(self, input_tar, input_patch, override_version):
+    def __init__(self, input_files, override_version):
         self.log = sys.stdout.write
 
-        self.input_tar = input_tar
-        self.input_patch = input_patch
+        self.input_files = input_files
 
         changelog = Changelog(version = VersionLinux)[0]
         source = changelog.source
@@ -34,25 +33,43 @@ class Main(object):
 
         self.orig = '%s-%s' % (source, version.upstream)
         self.orig_tar = '%s_%s.orig.tar.gz' % (source, version.upstream)
+        self.tag = 'v' + version.upstream.replace('~', '-')
 
     def __call__(self):
         import tempfile
         self.dir = tempfile.mkdtemp(prefix = 'genorig', dir = 'debian')
         try:
-            self.upstream_extract()
-            self.upstream_patch()
+            if os.path.isdir(self.input_files[0]):
+                self.upstream_export(self.input_files[0])
+            else:
+                self.upstream_extract(self.input_files[0])
+            if len(self.input_files) > 1:
+                self.upstream_patch(self.input_files[1])
             self.debian_patch()
             self.tar()
         finally:
             shutil.rmtree(self.dir)
 
-    def upstream_extract(self):
-        self.log("Extracting tarball %s\n" % self.input_tar)
-        match = re.match(r'(^|.*/)(?P<dir>linux-\d+\.\d+\.\d+(-\S+)?)\.tar(\.(?P<extension>(bz2|gz)))?$', self.input_tar)
+    def upstream_export(self, input_repo):
+        self.log("Exporting %s from %s\n" % (self.tag, input_repo))
+
+        archive_proc = subprocess.Popen(['git', 'archive', '--format=tar',
+                                         '--prefix=%s/' % self.orig, self.tag],
+                                        cwd=input_repo,
+                                        stdout=subprocess.PIPE)
+        extract_proc = subprocess.Popen(['tar', '-xf', '-'], cwd=self.dir,
+                                        stdin=archive_proc.stdout)
+
+        if extract_proc.wait():
+            raise RuntimeError("Can't extract tarball")
+
+    def upstream_extract(self, input_tar):
+        self.log("Extracting tarball %s\n" % input_tar)
+        match = re.match(r'(^|.*/)(?P<dir>linux-\d+\.\d+\.\d+(-\S+)?)\.tar(\.(?P<extension>(bz2|gz)))?$', input_tar)
         if not match:
             raise RuntimeError("Can't identify name of tarball")
 
-        cmdline = ['tar', '-xf', self.input_tar, '-C', self.dir]
+        cmdline = ['tar', '-xf', input_tar, '-C', self.dir]
         if match.group('extension') == 'bz2':
             cmdline.append('-j')
         elif match.group('extension') == 'gz':
@@ -63,11 +80,9 @@ class Main(object):
 
         os.rename(os.path.join(self.dir, match.group('dir')), os.path.join(self.dir, self.orig))
 
-    def upstream_patch(self):
-        if self.input_patch is None:
-            return
-        self.log("Patching source with %s\n" % self.input_patch)
-        match = re.match(r'(^|.*/)patch-\d+\.\d+\.\d+(-\S+?)?(\.(?P<extension>(bz2|gz)))?$', self.input_patch)
+    def upstream_patch(self, input_patch):
+        self.log("Patching source with %s\n" % input_patch)
+        match = re.match(r'(^|.*/)patch-\d+\.\d+\.\d+(-\S+?)?(\.(?P<extension>(bz2|gz)))?$', input_patch)
         if not match:
             raise RuntimeError("Can't identify name of patch")
         cmdline = []
@@ -77,7 +92,7 @@ class Main(object):
             cmdline.append('zcat')
         else:
             cmdline.append('cat')
-        cmdline.append(self.input_patch)
+        cmdline.append(input_patch)
         cmdline.append('| (cd %s; patch -p1 -f -s -t --no-backup-if-mismatch)' % os.path.join(self.dir, self.orig))
         if os.spawnv(os.P_WAIT, '/bin/sh', ['sh', '-c', ' '.join(cmdline)]):
             raise RuntimeError("Can't patch source")
@@ -113,13 +128,9 @@ class Main(object):
 
 if __name__ == '__main__':
     from optparse import OptionParser
-    parser = OptionParser(usage = "%prog [OPTION]... TAR [PATCH]")
+    parser = OptionParser(usage = "%prog [OPTION]... {TAR [PATCH] | REPO}")
     parser.add_option("-V", "--override-version", dest = "override_version", help = "Override version", metavar = "VERSION")
     options, args = parser.parse_args()
 
-    input_tar = args[0]
-    input_patch = None
-    if len(args) > 1:
-        input_patch = args[1]
-
-    Main(input_tar, input_patch, options.override_version)()
+    assert 1 <= len(args) <= 2
+    Main(args, options.override_version)()
