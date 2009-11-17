@@ -124,7 +124,6 @@ class CheckAbi(object):
             s_new = new[name]
 
             if s_ref != s_new:
-                print "cmp", s_ref.__dict__, s_new.__dict__
                 change.add(name)
                 symbols[name] = self.SymbolChangeInfo(s_ref, s_new)
 
