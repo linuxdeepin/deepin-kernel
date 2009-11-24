@@ -118,6 +118,7 @@ class VersionLinux(Version):
 )?
 -
 \d+
+(\.\d+)?
 (?:
     (?P<revision_experimental>
         ~experimental\.\d+
@@ -125,7 +126,7 @@ class VersionLinux(Version):
     |
     (?P<revision_other>
         [^-]+
-    )?
+    )
 )?
 $
 """
