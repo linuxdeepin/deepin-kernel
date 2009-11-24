@@ -285,7 +285,7 @@ class Gencontrol(Base):
                 break
             versions.append(i.version)
         self.versions = versions
-        self.version = self.changelog[0].version
+        version = self.version = self.changelog[0].version
         if self.version.linux_modifier is not None:
             self.abiname = ''
         else:
@@ -298,6 +298,17 @@ class Gencontrol(Base):
             'abiname': self.abiname,
         }
         self.config['version',] = {'source': self.version.complete, 'abiname': self.abiname}
+
+        distribution = self.changelog[0].distribution
+        if distribution in ('unstable', ):
+            if (version.linux_revision_experimental or
+                    version.linux_revision_other):
+                raise RuntimeError("Can't upload to %s with a version of %s" %
+                        (distribution, version))
+        if distribution in ('experimental', ):
+            if not version.linux_revision_experimental:
+                raise RuntimeError("Can't upload to %s with a version of %s" %
+                        (distribution, version))
 
     def process_real_image(self, entry, fields, vars):
         entry = self.process_package(entry, vars)
