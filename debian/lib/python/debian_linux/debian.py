@@ -117,7 +117,16 @@ class VersionLinux(Version):
     )
 )?
 -
-(?:[^-]+)
+\d+
+(?:
+    (?P<revision_experimental>
+        ~experimental\.\d+
+    )
+    |
+    (?P<revision_other>
+        [^-]+
+    )?
+)?
 $
 """
     _version_linux_re = re.compile(_version_linux_rules, re.X)
@@ -136,6 +145,8 @@ $
         else:
             self.linux_upstream = d['version']
         self.linux_dfsg = d['dfsg']
+        self.linux_revision_experimental = match.group('revision_experimental') and True
+        self.linux_revision_other = match.group('revision_other') and True
  
 class PackageFieldList(list):
     def __init__(self, value = None):
