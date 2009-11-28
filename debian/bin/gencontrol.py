@@ -27,7 +27,6 @@ class Gencontrol(Base):
     def do_main_packages(self, packages, vars, makeflags, extra):
         packages.extend(self.process_packages(self.templates["control.main"], self.vars))
         packages.append(self.process_real_tree(self.templates["control.tree"][0], self.vars))
-        packages.extend(self.process_packages(self.templates["control.support"], self.vars))
 
     def do_arch_setup(self, vars, makeflags, arch, extra):
         config_base = self.config.merge('base', arch)
