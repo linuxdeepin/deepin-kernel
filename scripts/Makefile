@@ -27,6 +27,7 @@ SCRIPTS =  \
 	makelst \
 	mksysmap \
 	mkuboot.sh \
+	module-common.lds \
 	namespace.pl \
 	patch-kernel \
 	setlocalversion \
