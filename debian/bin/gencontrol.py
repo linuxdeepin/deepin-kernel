@@ -26,7 +26,6 @@ class Gencontrol(Base):
 
     def do_main_packages(self, packages, vars, makeflags, extra):
         packages.extend(self.process_packages(self.templates["control.main"], self.vars))
-        packages.append(self.process_real_tree(self.templates["control.tree"][0], self.vars))
 
     def do_arch_setup(self, vars, makeflags, arch, extra):
         config_base = self.config.merge('base', arch)
@@ -317,19 +316,6 @@ class Gencontrol(Base):
                 real.extend(value)
             elif value:
                 entry[key] = value
-        return entry
-
-    def process_real_tree(self, entry, vars):
-        entry = self.process_package(entry, vars)
-        version = self.changelog[0].version
-
-        value = entry.setdefault('Depends', PackageRelation())
-        value.append("linux-patch-debian-%s (= %s)" % (version.linux_version, version.complete))
-        value.append(PackageRelationGroup(["linux-source-%s (= %s)" % (v.linux_version, v.complete) for v in self.versions]))
-
-        value = entry.setdefault('Provides', PackageRelation())
-        value.extend(["linux-tree-%s" % v.complete.replace('~', '-') for v in self.versions])
-
         return entry
 
     def write(self, packages, makefile):
