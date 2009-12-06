@@ -242,10 +242,10 @@ index 0000000..96307bb
 +#endif /* __AUFS_H__ */
 diff --git a/fs/aufs/branch.c b/fs/aufs/branch.c
 new file mode 100644
-index 0000000..102786d
+index 0000000..bb7ad86
 --- /dev/null
 +++ b/fs/aufs/branch.c
-@@ -0,0 +1,970 @@
+@@ -0,0 +1,988 @@
 +/*
 + * Copyright (C) 2005-2009 Junjiro R. Okajima
 + *
@@ -269,6 +269,7 @@ index 0000000..102786d
 + */
 +
 +#include <linux/file.h>
++#include <linux/statfs.h>
 +#include "aufs.h"
 +
 +/*
@@ -544,7 +545,9 @@ index 0000000..102786d
 +		       int perm, struct path *path)
 +{
 +	int err;
++	struct kstatfs kst;
 +	struct au_wbr *wbr;
++	struct dentry *h_dentry;
 +
 +	wbr = br->br_wbr;
 +	au_rw_init(&wbr->wbr_wh_rwsem);
@@ -552,8 +555,23 @@ index 0000000..102786d
 +	atomic_set(&wbr->wbr_wh_running, 0);
 +	wbr->wbr_bytes = 0;
 +
-+	err = au_br_init_wh(sb, br, perm, path->dentry);
++	/*
++	 * a limit for rmdir/rename a dir
++	 * cf. AUFS_MAX_NAMELEN in include/linux/aufs_type.h
++	 */
++	h_dentry = path->dentry;
++	err = vfs_statfs(h_dentry, &kst);
++	if (unlikely(err))
++		goto out;
++	err = -EINVAL;
++	if (kst.f_namelen >= NAME_MAX)
++		err = au_br_init_wh(sb, br, perm, h_dentry);
++	else
++		pr_err("%.*s(%s), unsupported namelen %ld\n",
++		       AuDLNPair(h_dentry), au_sbtype(h_dentry->d_sb),
++		       kst.f_namelen);
 +
++ out:
 +	return err;
 +}
 +
@@ -4032,10 +4050,10 @@ index 0000000..312e1af
 +#endif /* __AUFS_DEBUG_H__ */
 diff --git a/fs/aufs/dentry.c b/fs/aufs/dentry.c
 new file mode 100644
-index 0000000..8bf218b
+index 0000000..28525d4
 --- /dev/null
 +++ b/fs/aufs/dentry.c
-@@ -0,0 +1,879 @@
+@@ -0,0 +1,880 @@
 +/*
 + * Copyright (C) 2005-2009 Junjiro R. Okajima
 + *
@@ -4108,6 +4126,7 @@ index 0000000..8bf218b
 +		path_put(&h_nd.path);
 +	}
 +
++	AuTraceErrPtr(h_dentry);
 +	return h_dentry;
 +}
 +
@@ -7011,10 +7030,10 @@ index 0000000..5b5c2c4
 +}
 diff --git a/fs/aufs/f_op.c b/fs/aufs/f_op.c
 new file mode 100644
-index 0000000..1065559
+index 0000000..7601012
 --- /dev/null
 +++ b/fs/aufs/f_op.c
-@@ -0,0 +1,826 @@
+@@ -0,0 +1,827 @@
 +/*
 + * Copyright (C) 2005-2009 Junjiro R. Okajima
 + *
@@ -7515,7 +7534,8 @@ index 0000000..1065559
 +	if (unlikely(err))
 +		goto out;
 +
-+	vm_ops = vma->vm_ops;
++	/* oops, it became 'const' */
++	vm_ops = (struct vm_operations_struct *)vma->vm_ops;
 +	err = do_munmap(current->mm, vma->vm_start,
 +			vma->vm_end - vma->vm_start);
 +	if (unlikely(err)) {
@@ -7843,10 +7863,10 @@ index 0000000..1065559
 +};
 diff --git a/fs/aufs/file.c b/fs/aufs/file.c
 new file mode 100644
-index 0000000..5821834
+index 0000000..a4f33aa
 --- /dev/null
 +++ b/fs/aufs/file.c
-@@ -0,0 +1,587 @@
+@@ -0,0 +1,591 @@
 +/*
 + * Copyright (C) 2005-2009 Junjiro R. Okajima
 + *
@@ -8412,6 +8432,9 @@ index 0000000..5821834
 +				      read_descriptor_t *desc,
 +				      unsigned long from)
 +{ AuUnsupport(); return 0; }
++static int aufs_error_remove_page(struct address_space *mapping,
++				  struct page *page)
++{ AuUnsupport(); return 0; }
 +#endif /* CONFIG_AUFS_DEBUG */
 +
 +struct address_space_operations aufs_aop = {
@@ -8431,7 +8454,8 @@ index 0000000..5821834
 +	.get_xip_mem		= aufs_get_xip_mem,	/* todo */
 +	.migratepage		= aufs_migratepage,
 +	.launder_page		= aufs_launder_page,
-+	.is_partially_uptodate	= aufs_is_partially_uptodate
++	.is_partially_uptodate	= aufs_is_partially_uptodate,
++	.error_remove_page	= aufs_error_remove_page
 +#endif /* CONFIG_AUFS_DEBUG */
 +};
 diff --git a/fs/aufs/file.h b/fs/aufs/file.h
@@ -10891,10 +10915,10 @@ index 0000000..a7f3bc7
 +};
 diff --git a/fs/aufs/i_op_add.c b/fs/aufs/i_op_add.c
 new file mode 100644
-index 0000000..39b7a48
+index 0000000..813890f
 --- /dev/null
 +++ b/fs/aufs/i_op_add.c
-@@ -0,0 +1,649 @@
+@@ -0,0 +1,658 @@
 +/*
 + * Copyright (C) 2005-2009 Junjiro R. Okajima
 + *
@@ -10990,6 +11014,10 @@ index 0000000..39b7a48
 +	struct dentry *h_dentry;
 +	struct inode *h_inode;
 +
++	err = -ENAMETOOLONG;
++	if (unlikely(dentry->d_name.len > AUFS_MAX_NAMELEN))
++		goto out;
++
 +	h_dentry = au_h_dptr(dentry, bindex);
 +	h_inode = h_dentry->d_inode;
 +	if (!dentry->d_inode) {
@@ -11020,6 +11048,7 @@ index 0000000..39b7a48
 +	err = 0;
 +
 + out:
++	AuTraceErr(err);
 +	return err;
 +}
 +
@@ -11040,6 +11069,8 @@ index 0000000..39b7a48
 +	unsigned int udba;
 +	aufs_bindex_t bcpup;
 +
++	AuDbg("%.*s\n", AuDLNPair(dentry));
++
 +	err = au_wr_dir(dentry, src_dentry, wr_dir_args);
 +	bcpup = err;
 +	wh_dentry = ERR_PTR(err);
@@ -11056,13 +11087,14 @@ index 0000000..39b7a48
 +
 +	h_parent = au_pinned_h_parent(pin);
 +	if (udba != AuOpt_UDBA_NONE
-+	    && au_dbstart(dentry) == bcpup) {
++	    && au_dbstart(dentry) == bcpup)
 +		err = au_may_add(dentry, bcpup, h_parent,
 +				 au_ftest_wrdir(wr_dir_args->flags, ISDIR));
-+		wh_dentry = ERR_PTR(err);
-+		if (unlikely(err))
-+			goto out_unpin;
-+	}
++	else if (unlikely(dentry->d_name.len > AUFS_MAX_NAMELEN))
++		err = -ENAMETOOLONG;
++	wh_dentry = ERR_PTR(err);
++	if (unlikely(err))
++		goto out_unpin;
 +
 +	br = au_sbr(sb, bcpup);
 +	if (dt) {
@@ -11122,6 +11154,7 @@ index 0000000..39b7a48
 +		.flags		= AuWrDir_ADD_ENTRY
 +	};
 +
++	AuDbg("%.*s\n", AuDLNPair(dentry));
 +	IMustLock(dir);
 +
 +	parent = dentry->d_parent; /* dir inode is locked */
@@ -11546,10 +11579,10 @@ index 0000000..39b7a48
 +}
 diff --git a/fs/aufs/i_op_del.c b/fs/aufs/i_op_del.c
 new file mode 100644
-index 0000000..c0ee77d
+index 0000000..d47ddfb
 --- /dev/null
 +++ b/fs/aufs/i_op_del.c
-@@ -0,0 +1,468 @@
+@@ -0,0 +1,470 @@
 +/*
 + * Copyright (C) 2005-2009 Junjiro R. Okajima
 + *
@@ -11801,6 +11834,7 @@ index 0000000..c0ee77d
 +	}
 +
 + out:
++	AuTraceErr(err);
 +	return err;
 +}
 +
@@ -12016,14 +12050,15 @@ index 0000000..c0ee77d
 + out_unlock:
 +	aufs_read_unlock(dentry, AuLock_DW);
 + out:
++	AuTraceErr(err);
 +	return err;
 +}
 diff --git a/fs/aufs/i_op_ren.c b/fs/aufs/i_op_ren.c
 new file mode 100644
-index 0000000..9a81ffb
+index 0000000..b107f93
 --- /dev/null
 +++ b/fs/aufs/i_op_ren.c
-@@ -0,0 +1,957 @@
+@@ -0,0 +1,961 @@
 +/*
 + * Copyright (C) 2005-2009 Junjiro R. Okajima
 + *
@@ -12601,6 +12636,7 @@ index 0000000..9a81ffb
 + out:
 +	if (unlikely(err == -ENOENT || err == -EEXIST))
 +		err = -EIO;
++	AuTraceErr(err);
 +	return err;
 +}
 +
@@ -12849,6 +12885,7 @@ index 0000000..9a81ffb
 +	/* reduce stack space */
 +	struct au_ren_args *a;
 +
++	AuDbg("%.*s, %.*s\n", AuDLNPair(_src_dentry), AuDLNPair(_dst_dentry));
 +	IMustLock(_src_dir);
 +	IMustLock(_dst_dir);
 +
@@ -12933,11 +12970,12 @@ index 0000000..9a81ffb
 +	if (unlikely(err))
 +		goto out_children;
 +
-+	if (!au_opt_test(au_mntflags(a->dst_dir->i_sb), UDBA_NONE)) {
++	if (!au_opt_test(au_mntflags(a->dst_dir->i_sb), UDBA_NONE))
 +		err = au_may_ren(a);
-+		if (unlikely(err))
-+			goto out_hdir;
-+	}
++	else if (unlikely(a->dst_dentry->d_name.len > AUFS_MAX_NAMELEN))
++		err = -ENAMETOOLONG;
++	if (unlikely(err))
++		goto out_hdir;
 +
 +	/* store timestamps to be revertible */
 +	au_ren_dt(a);
@@ -12979,6 +13017,7 @@ index 0000000..9a81ffb
 +		au_whtmp_rmdir_free(a->thargs);
 +	kfree(a);
 + out:
++	AuTraceErr(err);
 +	return err;
 +}
 diff --git a/fs/aufs/iinfo.c b/fs/aufs/iinfo.c
@@ -14366,10 +14405,10 @@ index 0000000..5a0fd87
 +#endif /* __AUFS_LOOP_H__ */
 diff --git a/fs/aufs/magic.mk b/fs/aufs/magic.mk
 new file mode 100644
-index 0000000..83d613c
+index 0000000..1e55221
 --- /dev/null
 +++ b/fs/aufs/magic.mk
-@@ -0,0 +1,52 @@
+@@ -0,0 +1,48 @@
 +
 +# defined in ${srctree}/fs/fuse/inode.c
 +# tristate
@@ -14388,10 +14427,6 @@ index 0000000..83d613c
 +ifdef CONFIG_OCFS2_FS_O2CB
 +ccflags-y += -DDLMFS_MAGIC=0x76a9f425
 +endif
-+
-+# defined in ${srctree}/fs/ramfs/inode.c
-+# always true
-+ccflags-y += -DRAMFS_MAGIC=0x858458f6
 +
 +# defined in ${srctree}/fs/cifs/cifsfs.c
 +# tristate
@@ -14688,10 +14723,10 @@ index 0000000..cea7bc7
 +#endif /* __AUFS_MODULE_H__ */
 diff --git a/fs/aufs/opts.c b/fs/aufs/opts.c
 new file mode 100644
-index 0000000..7e936b8
+index 0000000..4d9b60f
 --- /dev/null
 +++ b/fs/aufs/opts.c
-@@ -0,0 +1,1546 @@
+@@ -0,0 +1,1549 @@
 +/*
 + * Copyright (C) 2005-2009 Junjiro R. Okajima
 + *
@@ -14877,7 +14912,7 @@ index 0000000..7e936b8
 +	{AuBrPerm_RO, NULL}
 +};
 +
-+static int br_perm_val(char *perm)
++static int noinline_for_stack br_perm_val(char *perm)
 +{
 +	int val;
 +	substring_t args[MAX_OPT_ARGS];
@@ -14902,7 +14937,7 @@ index 0000000..7e936b8
 +	{-1, NULL}
 +};
 +
-+static int udba_val(char *str)
++static int noinline_for_stack udba_val(char *str)
 +{
 +	substring_t args[MAX_OPT_ARGS];
 +
@@ -14939,7 +14974,8 @@ index 0000000..7e936b8
 + * gave up calling memparse() since it uses simple_strtoull() instead of
 + * strict_...().
 + */
-+static int au_match_ull(substring_t *s, unsigned long long *result)
++static int noinline_for_stack
++au_match_ull(substring_t *s, unsigned long long *result)
 +{
 +	int err;
 +	unsigned int len;
@@ -14988,7 +15024,8 @@ index 0000000..7e936b8
 +	return err;
 +}
 +
-+static int au_wbr_create_val(char *str, struct au_opt_wbr_create *create)
++static int noinline_for_stack
++au_wbr_create_val(char *str, struct au_opt_wbr_create *create)
 +{
 +	int err, e;
 +	substring_t args[MAX_OPT_ARGS];
@@ -15040,7 +15077,7 @@ index 0000000..7e936b8
 +	{-1, NULL}
 +};
 +
-+static int au_wbr_copyup_val(char *str)
++static int noinline_for_stack au_wbr_copyup_val(char *str)
 +{
 +	substring_t args[MAX_OPT_ARGS];
 +
@@ -15335,7 +15372,8 @@ index 0000000..7e936b8
 +}
 +#endif
 +
-+static int au_opts_parse_mod(struct au_opt_mod *mod, substring_t args[])
++static int noinline_for_stack
++au_opts_parse_mod(struct au_opt_mod *mod, substring_t args[])
 +{
 +	int err;
 +	struct path path;
@@ -15418,10 +15456,10 @@ index 0000000..7e936b8
 +	return err;
 +}
 +
-+static
-+int au_opts_parse_xino_itrunc_path(struct super_block *sb,
-+				   struct au_opt_xino_itrunc *xino_itrunc,
-+				   substring_t args[])
++static int noinline_for_stack
++au_opts_parse_xino_itrunc_path(struct super_block *sb,
++			       struct au_opt_xino_itrunc *xino_itrunc,
++			       substring_t args[])
 +{
 +	int err;
 +	aufs_bindex_t bend, bindex;
@@ -17712,7 +17750,7 @@ index 0000000..bcbbd9a
 +#endif /* __AUFS_SPL_H__ */
 diff --git a/fs/aufs/super.c b/fs/aufs/super.c
 new file mode 100644
-index 0000000..6124d17
+index 0000000..10d30f2
 --- /dev/null
 +++ b/fs/aufs/super.c
 @@ -0,0 +1,876 @@
@@ -18069,7 +18107,7 @@ index 0000000..6124d17
 +
 +	if (!err) {
 +		buf->f_type = AUFS_SUPER_MAGIC;
-+		buf->f_namelen -= AUFS_WH_PFX_LEN;
++		buf->f_namelen = AUFS_MAX_NAMELEN;
 +		memset(&buf->f_fsid, 0, sizeof(buf->f_fsid));
 +	}
 +	/* buf->f_bsize = buf->f_blocks = buf->f_bfree = buf->f_bavail = -1; */
@@ -19596,10 +19634,10 @@ index 0000000..3db9d84
 +}
 diff --git a/fs/aufs/vdir.c b/fs/aufs/vdir.c
 new file mode 100644
-index 0000000..99fd839
+index 0000000..50a3caf
 --- /dev/null
 +++ b/fs/aufs/vdir.c
-@@ -0,0 +1,879 @@
+@@ -0,0 +1,878 @@
 +/*
 + * Copyright (C) 2005-2009 Junjiro R. Okajima
 + *
@@ -19627,7 +19665,6 @@ index 0000000..99fd839
 +
 +static unsigned int calc_size(int nlen)
 +{
-+	BUILD_BUG_ON(sizeof(ino_t) != sizeof(long));
 +	return ALIGN(sizeof(struct au_vdir_de) + nlen, sizeof(ino_t));
 +}
 +
@@ -20481,10 +20518,10 @@ index 0000000..99fd839
 +}
 diff --git a/fs/aufs/vfsub.c b/fs/aufs/vfsub.c
 new file mode 100644
-index 0000000..ab0a419
+index 0000000..34c0d95
 --- /dev/null
 +++ b/fs/aufs/vfsub.c
-@@ -0,0 +1,751 @@
+@@ -0,0 +1,753 @@
 +/*
 + * Copyright (C) 2005-2009 Junjiro R. Okajima
 + *
@@ -20593,6 +20630,7 @@ index 0000000..ab0a419
 +		vfsub_update_h_iattr(&path, /*did*/NULL); /*ignore*/
 +
 + out:
++	AuTraceErrPtr(path.dentry);
 +	return path.dentry;
 +}
 +
@@ -20608,6 +20646,7 @@ index 0000000..ab0a419
 +	if (!IS_ERR(path.dentry) && path.dentry->d_inode)
 +		vfsub_update_h_iattr(&path, /*did*/NULL); /*ignore*/
 +
++	AuTraceErrPtr(path.dentry);
 +	return path.dentry;
 +}
 +
@@ -22063,10 +22102,10 @@ index 0000000..05a8c1e
 +};
 diff --git a/fs/aufs/whout.c b/fs/aufs/whout.c
 new file mode 100644
-index 0000000..177e1dd
+index 0000000..b0ee925
 --- /dev/null
 +++ b/fs/aufs/whout.c
-@@ -0,0 +1,1053 @@
+@@ -0,0 +1,1056 @@
 +/*
 + * Copyright (C) 2005-2009 Junjiro R. Okajima
 + *
@@ -22190,19 +22229,21 @@ index 0000000..177e1dd
 +struct dentry *au_whtmp_lkup(struct dentry *h_parent, struct au_branch *br,
 +			     struct qstr *prefix)
 +{
-+#define HEX_LEN	4
 +	struct dentry *dentry;
 +	int i;
++	/* cf. AUFS_MAX_NAMELEN in include/linux/aufs_type.h */
 +	char defname[AUFS_WH_PFX_LEN * 2 + DNAME_INLINE_LEN_MIN + 1
-+		     + HEX_LEN + 1], *name, *p;
++		     + AUFS_WH_TMP_LEN + 1], *name, *p;
 +	static unsigned short cnt;
 +	struct qstr qs;
++
++	BUILD_BUG_ON(sizeof(cnt) * 2 > AUFS_WH_TMP_LEN);
 +
 +	name = defname;
 +	qs.len = sizeof(defname) - DNAME_INLINE_LEN_MIN + prefix->len - 1;
 +	if (unlikely(prefix->len > DNAME_INLINE_LEN_MIN)) {
 +		dentry = ERR_PTR(-ENAMETOOLONG);
-+		if (unlikely(qs.len >= PATH_MAX))
++		if (unlikely(qs.len > NAME_MAX))
 +			goto out;
 +		dentry = ERR_PTR(-ENOMEM);
 +		name = kmalloc(qs.len + 1, GFP_NOFS);
@@ -22216,11 +22257,11 @@ index 0000000..177e1dd
 +	memcpy(p, prefix->name, prefix->len);
 +	p += prefix->len;
 +	*p++ = '.';
-+	AuDebugOn(name + qs.len + 1 - p <= HEX_LEN);
++	AuDebugOn(name + qs.len + 1 - p <= AUFS_WH_TMP_LEN);
 +
 +	qs.name = name;
 +	for (i = 0; i < 3; i++) {
-+		sprintf(p, "%.*d", HEX_LEN, cnt++);
++		sprintf(p, "%.*d", AUFS_WH_TMP_LEN, cnt++);
 +		dentry = au_sio_lkup_one(&qs, h_parent, br);
 +		if (IS_ERR(dentry) || !dentry->d_inode)
 +			goto out_name;
@@ -22235,8 +22276,8 @@ index 0000000..177e1dd
 +	if (name != defname)
 +		kfree(name);
 + out:
++	AuTraceErrPtr(dentry);
 +	return dentry;
-+#undef HEX_LEN
 +}
 +
 +/*
@@ -22266,6 +22307,7 @@ index 0000000..177e1dd
 +	dput(h_path.dentry);
 +
 + out:
++	AuTraceErr(err);
 +	return err;
 +}
 +
@@ -24778,10 +24820,10 @@ index 0000000..b401aa9
 +}
 diff --git a/include/linux/aufs_type.h b/include/linux/aufs_type.h
 new file mode 100644
-index 0000000..f34d9ed
+index 0000000..b4fee85
 --- /dev/null
 +++ b/include/linux/aufs_type.h
-@@ -0,0 +1,184 @@
+@@ -0,0 +1,191 @@
 +/*
 + * Copyright (C) 2005-2009 Junjiro R. Okajima
 + *
@@ -24804,9 +24846,10 @@ index 0000000..f34d9ed
 +#define __AUFS_TYPE_H__
 +
 +#include <linux/ioctl.h>
++#include <linux/limits.h>
 +#include <linux/types.h>
 +
-+#define AUFS_VERSION	"2-standalone.tree-31-20091012"
++#define AUFS_VERSION	"2-standalone.tree-20091130"
 +
 +/* todo? move this to linux-2.6.19/include/magic.h */
 +#define AUFS_SUPER_MAGIC	('a' << 24 | 'u' << 16 | 'f' << 8 | 's')
@@ -24843,6 +24886,12 @@ index 0000000..f34d9ed
 +
 +#define AUFS_WH_PFX		".wh."
 +#define AUFS_WH_PFX_LEN		((int)sizeof(AUFS_WH_PFX) - 1)
++#define AUFS_WH_TMP_LEN		4
++/* a limit for rmdir/rename a dir */
++#define AUFS_MAX_NAMELEN	(NAME_MAX \
++				- AUFS_WH_PFX_LEN * 2	/* doubly whiteouted */\
++				- 1			/* dot */\
++				- AUFS_WH_TMP_LEN)	/* hex */
 +#define AUFS_XINO_FNAME		"." AUFS_NAME ".xino"
 +#define AUFS_XINO_DEFPATH	"/tmp/" AUFS_XINO_FNAME
 +#define AUFS_XINO_TRUNC_INIT	64 /* blocks */
