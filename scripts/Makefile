@@ -12,7 +12,8 @@ DATA = \
 	Makefile.lib \
 	Makefile.modinst \
 	Makefile.modpost \
-	mkversion
+	mkversion \
+	module-common.lds
 
 SCRIPTS =  \
 	checkincludes.pl \
@@ -27,7 +28,6 @@ SCRIPTS =  \
 	makelst \
 	mksysmap \
 	mkuboot.sh \
-	module-common.lds \
 	namespace.pl \
 	patch-kernel \
 	setlocalversion \
