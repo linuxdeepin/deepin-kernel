@@ -1,0 +1,234 @@
+diff --git a/fs/aufs/f_op.c b/fs/aufs/f_op.c
+index 7601012..65c50bc 100644
+--- a/fs/aufs/f_op.c
++++ b/fs/aufs/f_op.c
+@@ -810,6 +810,7 @@ const struct file_operations aufs_file_fop = {
+ #ifdef CONFIG_AUFS_POLL
+ 	.poll		= aufs_poll,
+ #endif
++	.unlocked_ioctl	= aufs_ioctl_nondir,
+ 	.mmap		= aufs_mmap,
+ 	.open		= aufs_open_nondir,
+ 	.flush		= aufs_flush,
+diff --git a/fs/aufs/file.h b/fs/aufs/file.h
+index 79a63fb..d665cc7 100644
+--- a/fs/aufs/file.h
++++ b/fs/aufs/file.h
+@@ -94,6 +94,9 @@ void au_finfo_fin(struct file *file);
+ int au_finfo_init(struct file *file);
+ int au_fi_realloc(struct au_finfo *finfo, int nbr);
+ 
++/* ioctl.c */
++long aufs_ioctl_nondir(struct file *file, unsigned int cmd, unsigned long arg);
++
+ /* ---------------------------------------------------------------------- */
+ 
+ static inline struct au_finfo *au_fi(struct file *file)
+diff --git a/fs/aufs/i_op.c b/fs/aufs/i_op.c
+index a7f3bc7..8151896 100644
+--- a/fs/aufs/i_op.c
++++ b/fs/aufs/i_op.c
+@@ -159,6 +159,9 @@ static struct dentry *aufs_lookup(struct inode *dir, struct dentry *dentry,
+ 
+ 	sb = dir->i_sb;
+ 	si_read_lock(sb, AuLock_FLUSH);
++	ret = ERR_PTR(-ENAMETOOLONG);
++	if (unlikely(dentry->d_name.len > AUFS_MAX_NAMELEN))
++		goto out;
+ 	err = au_alloc_dinfo(dentry);
+ 	ret = ERR_PTR(err);
+ 	if (unlikely(err))
+diff --git a/fs/aufs/ioctl.c b/fs/aufs/ioctl.c
+index 012361a..6f8bad8 100644
+--- a/fs/aufs/ioctl.c
++++ b/fs/aufs/ioctl.c
+@@ -19,10 +19,67 @@
+ /*
+  * ioctl
+  * plink-management and readdir in userspace.
++ * assist the pathconf(3) wrapper library.
+  */
+ 
++#include <linux/file.h>
+ #include "aufs.h"
+ 
++static int au_wbr_fd(struct path *path)
++{
++	int err, fd, flags;
++	aufs_bindex_t wbi, bindex, bend;
++	struct file *h_file;
++	struct super_block *sb;
++	struct dentry *root;
++	struct au_branch *wbr;
++
++	err = get_unused_fd();
++	if (unlikely(err < 0))
++		goto out;
++	fd = err;
++
++	flags = O_RDONLY | O_DIRECTORY;
++	if (force_o_largefile())
++		flags |= O_LARGEFILE;
++
++	wbi = 0;
++	sb = path->dentry->d_sb;
++	root = sb->s_root;
++	aufs_read_lock(root, AuLock_IR);
++	wbr = au_sbr(sb, wbi);
++	if (!(path->mnt->mnt_flags & MNT_READONLY)
++	    && !au_br_writable(wbr->br_perm)) {
++		bend = au_sbend(sb);
++		for (bindex = 1; bindex <= bend; bindex++) {
++			wbr = au_sbr(sb, bindex);
++			if (au_br_writable(wbr->br_perm)) {
++				wbi = bindex;
++				break;
++			}
++		}
++		wbr = au_sbr(sb, wbi);
++	}
++	AuDbg("wbi %d\n", wbi);
++	h_file = au_h_open(root, wbi, flags, NULL);
++	aufs_read_unlock(root, AuLock_IR);
++	err = PTR_ERR(h_file);
++	if (IS_ERR(h_file))
++		goto out_fd;
++
++	atomic_dec(&wbr->br_count); /* cf. au_h_open() */
++	fd_install(fd, h_file);
++	err = fd;
++	goto out; /* success */
++
++ out_fd:
++	put_unused_fd(fd);
++ out:
++	return err;
++}
++
++/* ---------------------------------------------------------------------- */
++
+ long aufs_ioctl_dir(struct file *file, unsigned int cmd, unsigned long arg)
+ {
+ 	long err;
+@@ -38,6 +95,27 @@ long aufs_ioctl_dir(struct file *file, unsigned int cmd, unsigned long arg)
+ 		err = au_rdu_ioctl(file, cmd, arg);
+ 		break;
+ 
++	case AUFS_CTL_WBR_FD:
++		err = au_wbr_fd(&file->f_path);
++		break;
++
++	default:
++		err = -EINVAL;
++	}
++
++	AuTraceErr(err);
++	return err;
++}
++
++long aufs_ioctl_nondir(struct file *file, unsigned int cmd, unsigned long arg)
++{
++	long err;
++
++	switch (cmd) {
++	case AUFS_CTL_WBR_FD:
++		err = au_wbr_fd(&file->f_path);
++		break;
++
+ 	default:
+ 		err = -EINVAL;
+ 	}
+diff --git a/fs/aufs/rdu.c b/fs/aufs/rdu.c
+index 0a224f4..c38f280 100644
+--- a/fs/aufs/rdu.c
++++ b/fs/aufs/rdu.c
+@@ -59,6 +59,8 @@ static int au_rdu_fill(void *__arg, const char *name, int nlen,
+ 		ent.bindex = rdu->cookie.bindex;
+ 		ent.type = d_type;
+ 		ent.nlen = nlen;
++		if (unlikely(nlen > AUFS_MAX_NAMELEN))
++			ent.type = DT_UNKNOWN;
+ 
+ 		err = -EFAULT;
+ 		if (copy_to_user(arg->ent.e, &ent, sizeof(ent)))
+diff --git a/fs/aufs/vdir.c b/fs/aufs/vdir.c
+index 50a3caf..361de5e 100644
+--- a/fs/aufs/vdir.c
++++ b/fs/aufs/vdir.c
+@@ -474,9 +474,12 @@ static int fillvdir(void *__arg, const char *__name, int nlen,
+ 
+ 		sb = arg->file->f_dentry->d_sb;
+ 		arg->err = au_ino(sb, arg->bindex, h_ino, d_type, &ino);
+-		if (!arg->err)
++		if (!arg->err) {
++			if (unlikely(nlen > AUFS_MAX_NAMELEN))
++				d_type = DT_UNKNOWN;
+ 			arg->err = append_de(arg->vdir, name, nlen, ino,
+ 					     d_type, &arg->delist);
++		}
+ 	} else if (au_ftest_fillvdir(arg->flags, WHABLE)) {
+ 		name += AUFS_WH_PFX_LEN;
+ 		nlen -= AUFS_WH_PFX_LEN;
+@@ -486,10 +489,13 @@ static int fillvdir(void *__arg, const char *__name, int nlen,
+ 		if (shwh)
+ 			arg->err = au_wh_ino(sb, arg->bindex, h_ino, d_type,
+ 					     &ino);
+-		if (!arg->err)
++		if (!arg->err) {
++			if (nlen <= AUFS_MAX_NAMELEN + AUFS_WH_PFX_LEN)
++				d_type = DT_UNKNOWN;
+ 			arg->err = au_nhash_append_wh
+ 				(&arg->whlist, name, nlen, ino, d_type,
+ 				 arg->bindex, shwh);
++		}
+ 	}
+ 
+  out:
+diff --git a/fs/aufs/whout.c b/fs/aufs/whout.c
+index b0ee925..674ab35 100644
+--- a/fs/aufs/whout.c
++++ b/fs/aufs/whout.c
+@@ -123,9 +123,8 @@ struct dentry *au_whtmp_lkup(struct dentry *h_parent, struct au_branch *br,
+ {
+ 	struct dentry *dentry;
+ 	int i;
+-	/* cf. AUFS_MAX_NAMELEN in include/linux/aufs_type.h */
+-	char defname[AUFS_WH_PFX_LEN * 2 + DNAME_INLINE_LEN_MIN + 1
+-		     + AUFS_WH_TMP_LEN + 1], *name, *p;
++	char defname[NAME_MAX - AUFS_MAX_NAMELEN + DNAME_INLINE_LEN_MIN + 1],
++		*name, *p;
+ 	static unsigned short cnt;
+ 	struct qstr qs;
+ 
+diff --git a/include/linux/aufs_type.h b/include/linux/aufs_type.h
+index b4fee85..cc0263d 100644
+--- a/include/linux/aufs_type.h
++++ b/include/linux/aufs_type.h
+@@ -23,7 +23,7 @@
+ #include <linux/limits.h>
+ #include <linux/types.h>
+ 
+-#define AUFS_VERSION	"2-standalone.tree-20091130"
++#define AUFS_VERSION	"2-standalone.tree-20091207"
+ 
+ /* todo? move this to linux-2.6.19/include/magic.h */
+ #define AUFS_SUPER_MAGIC	('a' << 24 | 'u' << 16 | 'f' << 8 | 's')
+@@ -110,7 +110,10 @@ enum {
+ 
+ 	/* readdir in userspace */
+ 	AuCtl_RDU,
+-	AuCtl_RDU_INO
++	AuCtl_RDU_INO,
++
++	/* pathconf wrapper */
++	AuCtl_WBR_FD
+ };
+ 
+ /* borrowed from linux/include/linux/kernel.h */
+@@ -187,5 +190,6 @@ struct aufs_rdu {
+ #define AUFS_CTL_PLINK_CLEAN	_IO(AuCtlType, AuCtl_PLINK_CLEAN)
+ #define AUFS_CTL_RDU		_IOWR(AuCtlType, AuCtl_RDU, struct aufs_rdu)
+ #define AUFS_CTL_RDU_INO	_IOWR(AuCtlType, AuCtl_RDU_INO, struct aufs_rdu)
++#define AUFS_CTL_WBR_FD		_IO(AuCtlType, AuCtl_WBR_FD)
+ 
+ #endif /* __AUFS_TYPE_H__ */
