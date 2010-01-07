@@ -1,0 +1,510 @@
+From ff3b00a0fcaab89ff885e9f0f4ad83c4ced788f4 Mon Sep 17 00:00:00 2001
+From: Steve Hodgson <shodgson@solarflare.com>
+Date: Wed, 23 Dec 2009 13:46:36 +0000
+Subject: [PATCH 1/8] sfc: Move PHY software state initialisation from init() into probe()
+
+This prevents efx->link_advertising from being blatted during
+a reset.
+
+The phy_short_reach sysfs node is now destroyed later in the
+port shutdown process, so check for STATE_RUNNING after
+acquiring the rtnl_lock (just like in set_phy_flash_cfg).
+
+Signed-off-by: Ben Hutchings <bhutchings@solarflare.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/sfc/efx.c        |    6 +-
+ drivers/net/sfc/falcon.c     |    1 +
+ drivers/net/sfc/mcdi_phy.c   |   93 +++++++++++------------------
+ drivers/net/sfc/net_driver.h |    1 +
+ drivers/net/sfc/qt202x_phy.c |   20 +++---
+ drivers/net/sfc/siena.c      |    1 +
+ drivers/net/sfc/tenxpress.c  |  138 +++++++++++++++++++++++------------------
+ 7 files changed, 129 insertions(+), 131 deletions(-)
+
+diff --git a/drivers/net/sfc/efx.c b/drivers/net/sfc/efx.c
+index f983e3b..103e8b0 100644
+--- a/drivers/net/sfc/efx.c
++++ b/drivers/net/sfc/efx.c
+@@ -741,14 +741,14 @@ static int efx_probe_port(struct efx_nic *efx)
+ 
+ 	EFX_LOG(efx, "create port\n");
+ 
++	if (phy_flash_cfg)
++		efx->phy_mode = PHY_MODE_SPECIAL;
++
+ 	/* Connect up MAC/PHY operations table */
+ 	rc = efx->type->probe_port(efx);
+ 	if (rc)
+ 		goto err;
+ 
+-	if (phy_flash_cfg)
+-		efx->phy_mode = PHY_MODE_SPECIAL;
+-
+ 	/* Sanity check MAC address */
+ 	if (is_valid_ether_addr(efx->mac_address)) {
+ 		memcpy(efx->net_dev->dev_addr, efx->mac_address, ETH_ALEN);
+diff --git a/drivers/net/sfc/falcon.c b/drivers/net/sfc/falcon.c
+index 17afcd2..9d009c4 100644
+--- a/drivers/net/sfc/falcon.c
++++ b/drivers/net/sfc/falcon.c
+@@ -925,6 +925,7 @@ static int falcon_probe_port(struct efx_nic *efx)
+ 
+ static void falcon_remove_port(struct efx_nic *efx)
+ {
++	efx->phy_op->remove(efx);
+ 	efx_nic_free_buffer(efx, &efx->stats_buffer);
+ }
+ 
+diff --git a/drivers/net/sfc/mcdi_phy.c b/drivers/net/sfc/mcdi_phy.c
+index 0e1bcc5..eb694af 100644
+--- a/drivers/net/sfc/mcdi_phy.c
++++ b/drivers/net/sfc/mcdi_phy.c
+@@ -304,31 +304,47 @@ static u32 mcdi_to_ethtool_media(u32 media)
+ 
+ static int efx_mcdi_phy_probe(struct efx_nic *efx)
+ {
+-	struct efx_mcdi_phy_cfg *phy_cfg;
++	struct efx_mcdi_phy_cfg *phy_data;
++	u8 outbuf[MC_CMD_GET_LINK_OUT_LEN];
++	u32 caps;
+ 	int rc;
+ 
+-	/* TODO: Move phy_data initialisation to
+-	 * phy_op->probe/remove, rather than init/fini */
+-	phy_cfg = kzalloc(sizeof(*phy_cfg), GFP_KERNEL);
+-	if (phy_cfg == NULL) {
+-		rc = -ENOMEM;
+-		goto fail_alloc;
+-	}
+-	rc = efx_mcdi_get_phy_cfg(efx, phy_cfg);
++	/* Initialise and populate phy_data */
++	phy_data = kzalloc(sizeof(*phy_data), GFP_KERNEL);
++	if (phy_data == NULL)
++		return -ENOMEM;
++
++	rc = efx_mcdi_get_phy_cfg(efx, phy_data);
+ 	if (rc != 0)
+ 		goto fail;
+ 
+-	efx->phy_type = phy_cfg->type;
++	/* Read initial link advertisement */
++	BUILD_BUG_ON(MC_CMD_GET_LINK_IN_LEN != 0);
++	rc = efx_mcdi_rpc(efx, MC_CMD_GET_LINK, NULL, 0,
++			  outbuf, sizeof(outbuf), NULL);
++	if (rc)
++		goto fail;
++
++	/* Fill out nic state */
++	efx->phy_data = phy_data;
++	efx->phy_type = phy_data->type;
+ 
+-	efx->mdio_bus = phy_cfg->channel;
+-	efx->mdio.prtad = phy_cfg->port;
+-	efx->mdio.mmds = phy_cfg->mmd_mask & ~(1 << MC_CMD_MMD_CLAUSE22);
++	efx->mdio_bus = phy_data->channel;
++	efx->mdio.prtad = phy_data->port;
++	efx->mdio.mmds = phy_data->mmd_mask & ~(1 << MC_CMD_MMD_CLAUSE22);
+ 	efx->mdio.mode_support = 0;
+-	if (phy_cfg->mmd_mask & (1 << MC_CMD_MMD_CLAUSE22))
++	if (phy_data->mmd_mask & (1 << MC_CMD_MMD_CLAUSE22))
+ 		efx->mdio.mode_support |= MDIO_SUPPORTS_C22;
+-	if (phy_cfg->mmd_mask & ~(1 << MC_CMD_MMD_CLAUSE22))
++	if (phy_data->mmd_mask & ~(1 << MC_CMD_MMD_CLAUSE22))
+ 		efx->mdio.mode_support |= MDIO_SUPPORTS_C45 | MDIO_EMULATE_C22;
+ 
++	caps = MCDI_DWORD(outbuf, GET_LINK_OUT_CAP);
++	if (caps & (1 << MC_CMD_PHY_CAP_AN_LBN))
++		efx->link_advertising =
++			mcdi_to_ethtool_cap(phy_data->media, caps);
++	else
++		phy_data->forced_cap = caps;
++
+ 	/* Assert that we can map efx -> mcdi loopback modes */
+ 	BUILD_BUG_ON(LOOPBACK_NONE != MC_CMD_LOOPBACK_NONE);
+ 	BUILD_BUG_ON(LOOPBACK_DATA != MC_CMD_LOOPBACK_DATA);
+@@ -365,46 +381,6 @@ static int efx_mcdi_phy_probe(struct efx_nic *efx)
+ 	 * but by convention we don't */
+ 	efx->loopback_modes &= ~(1 << LOOPBACK_NONE);
+ 
+-	kfree(phy_cfg);
+-
+-	return 0;
+-
+-fail:
+-	kfree(phy_cfg);
+-fail_alloc:
+-	return rc;
+-}
+-
+-static int efx_mcdi_phy_init(struct efx_nic *efx)
+-{
+-	struct efx_mcdi_phy_cfg *phy_data;
+-	u8 outbuf[MC_CMD_GET_LINK_OUT_LEN];
+-	u32 caps;
+-	int rc;
+-
+-	phy_data = kzalloc(sizeof(*phy_data), GFP_KERNEL);
+-	if (phy_data == NULL)
+-		return -ENOMEM;
+-
+-	rc = efx_mcdi_get_phy_cfg(efx, phy_data);
+-	if (rc != 0)
+-		goto fail;
+-
+-	efx->phy_data = phy_data;
+-
+-	BUILD_BUG_ON(MC_CMD_GET_LINK_IN_LEN != 0);
+-	rc = efx_mcdi_rpc(efx, MC_CMD_GET_LINK, NULL, 0,
+-			  outbuf, sizeof(outbuf), NULL);
+-	if (rc)
+-		goto fail;
+-
+-	caps = MCDI_DWORD(outbuf, GET_LINK_OUT_CAP);
+-	if (caps & (1 << MC_CMD_PHY_CAP_AN_LBN))
+-		efx->link_advertising =
+-			mcdi_to_ethtool_cap(phy_data->media, caps);
+-	else
+-		phy_data->forced_cap = caps;
+-
+ 	return 0;
+ 
+ fail:
+@@ -504,7 +480,7 @@ static bool efx_mcdi_phy_poll(struct efx_nic *efx)
+ 	return !efx_link_state_equal(&efx->link_state, &old_state);
+ }
+ 
+-static void efx_mcdi_phy_fini(struct efx_nic *efx)
++static void efx_mcdi_phy_remove(struct efx_nic *efx)
+ {
+ 	struct efx_mcdi_phy_data *phy_data = efx->phy_data;
+ 
+@@ -586,10 +562,11 @@ static int efx_mcdi_phy_set_settings(struct efx_nic *efx, struct ethtool_cmd *ec
+ 
+ struct efx_phy_operations efx_mcdi_phy_ops = {
+ 	.probe		= efx_mcdi_phy_probe,
+-	.init 	 	= efx_mcdi_phy_init,
++	.init 	 	= efx_port_dummy_op_int,
+ 	.reconfigure	= efx_mcdi_phy_reconfigure,
+ 	.poll		= efx_mcdi_phy_poll,
+-	.fini		= efx_mcdi_phy_fini,
++	.fini		= efx_port_dummy_op_void,
++	.remove		= efx_mcdi_phy_remove,
+ 	.get_settings	= efx_mcdi_phy_get_settings,
+ 	.set_settings	= efx_mcdi_phy_set_settings,
+ 	.run_tests	= NULL,
+diff --git a/drivers/net/sfc/net_driver.h b/drivers/net/sfc/net_driver.h
+index 34c381f..d5aab5b 100644
+--- a/drivers/net/sfc/net_driver.h
++++ b/drivers/net/sfc/net_driver.h
+@@ -524,6 +524,7 @@ struct efx_phy_operations {
+ 	int (*probe) (struct efx_nic *efx);
+ 	int (*init) (struct efx_nic *efx);
+ 	void (*fini) (struct efx_nic *efx);
++	void (*remove) (struct efx_nic *efx);
+ 	int (*reconfigure) (struct efx_nic *efx);
+ 	bool (*poll) (struct efx_nic *efx);
+ 	void (*get_settings) (struct efx_nic *efx,
+diff --git a/drivers/net/sfc/qt202x_phy.c b/drivers/net/sfc/qt202x_phy.c
+index 3800fc7..7450e3a 100644
+--- a/drivers/net/sfc/qt202x_phy.c
++++ b/drivers/net/sfc/qt202x_phy.c
+@@ -137,6 +137,14 @@ static int qt202x_reset_phy(struct efx_nic *efx)
+ 
+ static int qt202x_phy_probe(struct efx_nic *efx)
+ {
++	struct qt202x_phy_data *phy_data;
++
++	phy_data = kzalloc(sizeof(struct qt202x_phy_data), GFP_KERNEL);
++	if (!phy_data)
++		return -ENOMEM;
++	efx->phy_data = phy_data;
++	phy_data->phy_mode = efx->phy_mode;
++
+ 	efx->mdio.mmds = QT202X_REQUIRED_DEVS;
+ 	efx->mdio.mode_support = MDIO_SUPPORTS_C45 | MDIO_EMULATE_C22;
+ 	efx->loopback_modes = QT202X_LOOPBACKS | FALCON_XMAC_LOOPBACKS;
+@@ -145,7 +153,6 @@ static int qt202x_phy_probe(struct efx_nic *efx)
+ 
+ static int qt202x_phy_init(struct efx_nic *efx)
+ {
+-	struct qt202x_phy_data *phy_data;
+ 	u32 devid;
+ 	int rc;
+ 
+@@ -155,17 +162,11 @@ static int qt202x_phy_init(struct efx_nic *efx)
+ 		return rc;
+ 	}
+ 
+-	phy_data = kzalloc(sizeof(struct qt202x_phy_data), GFP_KERNEL);
+-	if (!phy_data)
+-		return -ENOMEM;
+-	efx->phy_data = phy_data;
+-
+ 	devid = efx_mdio_read_id(efx, MDIO_MMD_PHYXS);
+ 	EFX_INFO(efx, "PHY ID reg %x (OUI %06x model %02x revision %x)\n",
+ 		 devid, efx_mdio_id_oui(devid), efx_mdio_id_model(devid),
+ 		 efx_mdio_id_rev(devid));
+ 
+-	phy_data->phy_mode = efx->phy_mode;
+ 	return 0;
+ }
+ 
+@@ -224,7 +225,7 @@ static void qt202x_phy_get_settings(struct efx_nic *efx, struct ethtool_cmd *ecm
+ 	mdio45_ethtool_gset(&efx->mdio, ecmd);
+ }
+ 
+-static void qt202x_phy_fini(struct efx_nic *efx)
++static void qt202x_phy_remove(struct efx_nic *efx)
+ {
+ 	/* Free the context block */
+ 	kfree(efx->phy_data);
+@@ -236,7 +237,8 @@ struct efx_phy_operations falcon_qt202x_phy_ops = {
+ 	.init		 = qt202x_phy_init,
+ 	.reconfigure	 = qt202x_phy_reconfigure,
+ 	.poll	     	 = qt202x_phy_poll,
+-	.fini	  	 = qt202x_phy_fini,
++	.fini		 = efx_port_dummy_op_void,
++	.remove	  	 = qt202x_phy_remove,
+ 	.get_settings	 = qt202x_phy_get_settings,
+ 	.set_settings	 = efx_mdio_set_settings,
+ };
+diff --git a/drivers/net/sfc/siena.c b/drivers/net/sfc/siena.c
+index de07a4f..f8c6771 100644
+--- a/drivers/net/sfc/siena.c
++++ b/drivers/net/sfc/siena.c
+@@ -133,6 +133,7 @@ static int siena_probe_port(struct efx_nic *efx)
+ 
+ void siena_remove_port(struct efx_nic *efx)
+ {
++	efx->phy_op->remove(efx);
+ 	efx_nic_free_buffer(efx, &efx->stats_buffer);
+ }
+ 
+diff --git a/drivers/net/sfc/tenxpress.c b/drivers/net/sfc/tenxpress.c
+index ca11572..3009c29 100644
+--- a/drivers/net/sfc/tenxpress.c
++++ b/drivers/net/sfc/tenxpress.c
+@@ -202,10 +202,14 @@ static ssize_t set_phy_short_reach(struct device *dev,
+ 	int rc;
+ 
+ 	rtnl_lock();
+-	efx_mdio_set_flag(efx, MDIO_MMD_PMAPMD, MDIO_PMA_10GBT_TXPWR,
+-			  MDIO_PMA_10GBT_TXPWR_SHORT,
+-			  count != 0 && *buf != '0');
+-	rc = efx_reconfigure_port(efx);
++	if (efx->state != STATE_RUNNING) {
++		rc = -EBUSY;
++	} else {
++		efx_mdio_set_flag(efx, MDIO_MMD_PMAPMD, MDIO_PMA_10GBT_TXPWR,
++				  MDIO_PMA_10GBT_TXPWR_SHORT,
++				  count != 0 && *buf != '0');
++		rc = efx_reconfigure_port(efx);
++	}
+ 	rtnl_unlock();
+ 
+ 	return rc < 0 ? rc : (ssize_t)count;
+@@ -298,36 +302,62 @@ static int tenxpress_init(struct efx_nic *efx)
+ 	return 0;
+ }
+ 
+-static int sfx7101_phy_probe(struct efx_nic *efx)
++static int tenxpress_phy_probe(struct efx_nic *efx)
+ {
+-	efx->mdio.mmds = TENXPRESS_REQUIRED_DEVS;
+-	efx->mdio.mode_support = MDIO_SUPPORTS_C45 | MDIO_EMULATE_C22;
+-	efx->loopback_modes = SFX7101_LOOPBACKS | FALCON_XMAC_LOOPBACKS;
+-	return 0;
+-}
++	struct tenxpress_phy_data *phy_data;
++	int rc;
++
++	/* Allocate phy private storage */
++	phy_data = kzalloc(sizeof(*phy_data), GFP_KERNEL);
++	if (!phy_data)
++		return -ENOMEM;
++	efx->phy_data = phy_data;
++	phy_data->phy_mode = efx->phy_mode;
++
++	/* Create any special files */
++	if (efx->phy_type == PHY_TYPE_SFT9001B) {
++		rc = device_create_file(&efx->pci_dev->dev,
++					&dev_attr_phy_short_reach);
++		if (rc)
++			goto fail;
++	}
++
++	if (efx->phy_type == PHY_TYPE_SFX7101) {
++		efx->mdio.mmds = TENXPRESS_REQUIRED_DEVS;
++		efx->mdio.mode_support = MDIO_SUPPORTS_C45;
++
++		efx->loopback_modes = SFX7101_LOOPBACKS | FALCON_XMAC_LOOPBACKS;
++
++		efx->link_advertising = (ADVERTISED_TP | ADVERTISED_Autoneg |
++					 ADVERTISED_10000baseT_Full);
++	} else {
++		efx->mdio.mmds = TENXPRESS_REQUIRED_DEVS;
++		efx->mdio.mode_support = MDIO_SUPPORTS_C45 | MDIO_EMULATE_C22;
++
++		efx->loopback_modes = (SFT9001_LOOPBACKS |
++				       FALCON_XMAC_LOOPBACKS | 
++				       FALCON_GMAC_LOOPBACKS);
++
++		efx->link_advertising = (ADVERTISED_TP | ADVERTISED_Autoneg |
++					 ADVERTISED_10000baseT_Full |
++					 ADVERTISED_1000baseT_Full |
++					 ADVERTISED_100baseT_Full);
++	}
+ 
+-static int sft9001_phy_probe(struct efx_nic *efx)
+-{
+-	efx->mdio.mmds = TENXPRESS_REQUIRED_DEVS;
+-	efx->mdio.mode_support = MDIO_SUPPORTS_C45 | MDIO_EMULATE_C22;
+-	efx->loopback_modes = (SFT9001_LOOPBACKS | FALCON_XMAC_LOOPBACKS |
+-			       FALCON_GMAC_LOOPBACKS);
+ 	return 0;
++
++fail:
++	kfree(efx->phy_data);
++	efx->phy_data = NULL;
++	return rc;
+ }
+ 
+ static int tenxpress_phy_init(struct efx_nic *efx)
+ {
+-	struct tenxpress_phy_data *phy_data;
+-	int rc = 0;
++	int rc;
+ 
+ 	falcon_board(efx)->type->init_phy(efx);
+ 
+-	phy_data = kzalloc(sizeof(*phy_data), GFP_KERNEL);
+-	if (!phy_data)
+-		return -ENOMEM;
+-	efx->phy_data = phy_data;
+-	phy_data->phy_mode = efx->phy_mode;
+-
+ 	if (!(efx->phy_mode & PHY_MODE_SPECIAL)) {
+ 		if (efx->phy_type == PHY_TYPE_SFT9001A) {
+ 			int reg;
+@@ -341,44 +371,27 @@ static int tenxpress_phy_init(struct efx_nic *efx)
+ 
+ 		rc = efx_mdio_wait_reset_mmds(efx, TENXPRESS_REQUIRED_DEVS);
+ 		if (rc < 0)
+-			goto fail;
++			return rc;
+ 
+ 		rc = efx_mdio_check_mmds(efx, TENXPRESS_REQUIRED_DEVS, 0);
+ 		if (rc < 0)
+-			goto fail;
++			return rc;
+ 	}
+ 
+ 	rc = tenxpress_init(efx);
+ 	if (rc < 0)
+-		goto fail;
++		return rc;
+ 
+-	/* Initialise advertising flags */
+-	efx->link_advertising = (ADVERTISED_TP | ADVERTISED_Autoneg |
+-				  ADVERTISED_10000baseT_Full);
+-	if (efx->phy_type != PHY_TYPE_SFX7101)
+-		efx->link_advertising |= (ADVERTISED_1000baseT_Full |
+-					   ADVERTISED_100baseT_Full);
++	/* Reinitialise flow control settings */
+ 	efx_link_set_wanted_fc(efx, efx->wanted_fc);
+ 	efx_mdio_an_reconfigure(efx);
+ 
+-	if (efx->phy_type == PHY_TYPE_SFT9001B) {
+-		rc = device_create_file(&efx->pci_dev->dev,
+-					&dev_attr_phy_short_reach);
+-		if (rc)
+-			goto fail;
+-	}
+-
+ 	schedule_timeout_uninterruptible(HZ / 5); /* 200ms */
+ 
+ 	/* Let XGXS and SerDes out of reset */
+ 	falcon_reset_xaui(efx);
+ 
+ 	return 0;
+-
+- fail:
+-	kfree(efx->phy_data);
+-	efx->phy_data = NULL;
+-	return rc;
+ }
+ 
+ /* Perform a "special software reset" on the PHY. The caller is
+@@ -589,25 +602,26 @@ static bool tenxpress_phy_poll(struct efx_nic *efx)
+ 	return !efx_link_state_equal(&efx->link_state, &old_state);
+ }
+ 
+-static void tenxpress_phy_fini(struct efx_nic *efx)
++static void sfx7101_phy_fini(struct efx_nic *efx)
+ {
+ 	int reg;
+ 
++	/* Power down the LNPGA */
++	reg = (1 << PMA_PMD_LNPGA_POWERDOWN_LBN);
++	efx_mdio_write(efx, MDIO_MMD_PMAPMD, PMA_PMD_XCONTROL_REG, reg);
++
++	/* Waiting here ensures that the board fini, which can turn
++	 * off the power to the PHY, won't get run until the LNPGA
++	 * powerdown has been given long enough to complete. */
++	schedule_timeout_uninterruptible(LNPGA_PDOWN_WAIT); /* 200 ms */
++}
++
++static void tenxpress_phy_remove(struct efx_nic *efx)
++{
+ 	if (efx->phy_type == PHY_TYPE_SFT9001B)
+ 		device_remove_file(&efx->pci_dev->dev,
+ 				   &dev_attr_phy_short_reach);
+ 
+-	if (efx->phy_type == PHY_TYPE_SFX7101) {
+-		/* Power down the LNPGA */
+-		reg = (1 << PMA_PMD_LNPGA_POWERDOWN_LBN);
+-		efx_mdio_write(efx, MDIO_MMD_PMAPMD, PMA_PMD_XCONTROL_REG, reg);
+-
+-		/* Waiting here ensures that the board fini, which can turn
+-		 * off the power to the PHY, won't get run until the LNPGA
+-		 * powerdown has been given long enough to complete. */
+-		schedule_timeout_uninterruptible(LNPGA_PDOWN_WAIT); /* 200 ms */
+-	}
+-
+ 	kfree(efx->phy_data);
+ 	efx->phy_data = NULL;
+ }
+@@ -819,11 +833,12 @@ static void sft9001_set_npage_adv(struct efx_nic *efx, u32 advertising)
+ }
+ 
+ struct efx_phy_operations falcon_sfx7101_phy_ops = {
+-	.probe		  = sfx7101_phy_probe,
++	.probe		  = tenxpress_phy_probe,
+ 	.init             = tenxpress_phy_init,
+ 	.reconfigure      = tenxpress_phy_reconfigure,
+ 	.poll             = tenxpress_phy_poll,
+-	.fini             = tenxpress_phy_fini,
++	.fini             = sfx7101_phy_fini,
++	.remove		  = tenxpress_phy_remove,
+ 	.get_settings	  = tenxpress_get_settings,
+ 	.set_settings	  = tenxpress_set_settings,
+ 	.set_npage_adv    = sfx7101_set_npage_adv,
+@@ -832,11 +847,12 @@ struct efx_phy_operations falcon_sfx7101_phy_ops = {
+ };
+ 
+ struct efx_phy_operations falcon_sft9001_phy_ops = {
+-	.probe		  = sft9001_phy_probe,
++	.probe		  = tenxpress_phy_probe,
+ 	.init             = tenxpress_phy_init,
+ 	.reconfigure      = tenxpress_phy_reconfigure,
+ 	.poll             = tenxpress_phy_poll,
+-	.fini             = tenxpress_phy_fini,
++	.fini             = efx_port_dummy_op_void,
++	.remove		  = tenxpress_phy_remove,
+ 	.get_settings	  = tenxpress_get_settings,
+ 	.set_settings	  = tenxpress_set_settings,
+ 	.set_npage_adv    = sft9001_set_npage_adv,
+-- 
+1.6.5.7
+
