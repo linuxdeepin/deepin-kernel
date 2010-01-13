@@ -1,0 +1,141 @@
+From e6be8d9d17bd44061116f601fe2609b3ace7aa69 Mon Sep 17 00:00:00 2001
+From: Zhenyu Wang <zhenyu.z.wang@intel.com>
+Date: Tue, 5 Jan 2010 11:25:05 +0800
+Subject: [PATCH] drm: remove address mask param for drm_pci_alloc()
+
+drm_pci_alloc() has input of address mask for setting pci dma
+mask on the device, which should be properly setup by drm driver.
+And leave it as a param for drm_pci_alloc() would cause confusion
+or mistake would corrupt the correct dma mask setting, as seen on
+intel hw which set wrong dma mask for hw status page. So remove
+it from drm_pci_alloc() function.
+
+Signed-off-by: Zhenyu Wang <zhenyuw@linux.intel.com>
+Signed-off-by: Dave Airlie <airlied@redhat.com>
+---
+ drivers/gpu/drm/ati_pcigart.c   |   10 ++++++++--
+ drivers/gpu/drm/drm_bufs.c      |    4 ++--
+ drivers/gpu/drm/drm_pci.c       |    8 +-------
+ drivers/gpu/drm/i915/i915_dma.c |    2 +-
+ drivers/gpu/drm/i915/i915_gem.c |    2 +-
+ include/drm/drmP.h              |    2 +-
+ 6 files changed, 14 insertions(+), 14 deletions(-)
+
+diff --git a/drivers/gpu/drm/ati_pcigart.c b/drivers/gpu/drm/ati_pcigart.c
+index 628eae3..a1fce68 100644
+--- a/drivers/gpu/drm/ati_pcigart.c
++++ b/drivers/gpu/drm/ati_pcigart.c
+@@ -39,8 +39,7 @@ static int drm_ati_alloc_pcigart_table(struct drm_device *dev,
+ 				       struct drm_ati_pcigart_info *gart_info)
+ {
+ 	gart_info->table_handle = drm_pci_alloc(dev, gart_info->table_size,
+-						PAGE_SIZE,
+-						gart_info->table_mask);
++						PAGE_SIZE);
+ 	if (gart_info->table_handle == NULL)
+ 		return -ENOMEM;
+ 
+@@ -112,6 +111,13 @@ int drm_ati_pcigart_init(struct drm_device *dev, struct drm_ati_pcigart_info *ga
+ 	if (gart_info->gart_table_location == DRM_ATI_GART_MAIN) {
+ 		DRM_DEBUG("PCI: no table in VRAM: using normal RAM\n");
+ 
++		if (pci_set_dma_mask(dev->pdev, gart_info->table_mask)) {
++			DRM_ERROR("fail to set dma mask to 0x%Lx\n",
++				  gart_info->table_mask);
++			ret = 1;
++			goto done;
++		}
++
+ 		ret = drm_ati_alloc_pcigart_table(dev, gart_info);
+ 		if (ret) {
+ 			DRM_ERROR("cannot allocate PCI GART page!\n");
+diff --git a/drivers/gpu/drm/drm_bufs.c b/drivers/gpu/drm/drm_bufs.c
+index 3d09e30..8417cc4 100644
+--- a/drivers/gpu/drm/drm_bufs.c
++++ b/drivers/gpu/drm/drm_bufs.c
+@@ -326,7 +326,7 @@ static int drm_addmap_core(struct drm_device * dev, resource_size_t offset,
+ 		 * As we're limiting the address to 2^32-1 (or less),
+ 		 * casting it down to 32 bits is no problem, but we
+ 		 * need to point to a 64bit variable first. */
+-		dmah = drm_pci_alloc(dev, map->size, map->size, 0xffffffffUL);
++		dmah = drm_pci_alloc(dev, map->size, map->size);
+ 		if (!dmah) {
+ 			kfree(map);
+ 			return -ENOMEM;
+@@ -885,7 +885,7 @@ int drm_addbufs_pci(struct drm_device * dev, struct drm_buf_desc * request)
+ 
+ 	while (entry->buf_count < count) {
+ 
+-		dmah = drm_pci_alloc(dev, PAGE_SIZE << page_order, 0x1000, 0xfffffffful);
++		dmah = drm_pci_alloc(dev, PAGE_SIZE << page_order, 0x1000);
+ 
+ 		if (!dmah) {
+ 			/* Set count correctly so we free the proper amount. */
+diff --git a/drivers/gpu/drm/drm_pci.c b/drivers/gpu/drm/drm_pci.c
+index 577094f..e68ebf9 100644
+--- a/drivers/gpu/drm/drm_pci.c
++++ b/drivers/gpu/drm/drm_pci.c
+@@ -47,8 +47,7 @@
+ /**
+  * \brief Allocate a PCI consistent memory block, for DMA.
+  */
+-drm_dma_handle_t *drm_pci_alloc(struct drm_device * dev, size_t size, size_t align,
+-				dma_addr_t maxaddr)
++drm_dma_handle_t *drm_pci_alloc(struct drm_device * dev, size_t size, size_t align)
+ {
+ 	drm_dma_handle_t *dmah;
+ #if 1
+@@ -63,11 +62,6 @@ drm_dma_handle_t *drm_pci_alloc(struct drm_device * dev, size_t size, size_t ali
+ 	if (align > size)
+ 		return NULL;
+ 
+-	if (pci_set_dma_mask(dev->pdev, maxaddr) != 0) {
+-		DRM_ERROR("Setting pci dma mask failed\n");
+-		return NULL;
+-	}
+-
+ 	dmah = kmalloc(sizeof(drm_dma_handle_t), GFP_KERNEL);
+ 	if (!dmah)
+ 		return NULL;
+diff --git a/drivers/gpu/drm/i915/i915_dma.c b/drivers/gpu/drm/i915/i915_dma.c
+index 701bfea..02607ed 100644
+--- a/drivers/gpu/drm/i915/i915_dma.c
++++ b/drivers/gpu/drm/i915/i915_dma.c
+@@ -123,7 +123,7 @@ static int i915_init_phys_hws(struct drm_device *dev)
+ 	drm_i915_private_t *dev_priv = dev->dev_private;
+ 	/* Program Hardware Status Page */
+ 	dev_priv->status_page_dmah =
+-		drm_pci_alloc(dev, PAGE_SIZE, PAGE_SIZE, 0xffffffff);
++		drm_pci_alloc(dev, PAGE_SIZE, PAGE_SIZE);
+ 
+ 	if (!dev_priv->status_page_dmah) {
+ 		DRM_ERROR("Can not allocate hardware status page\n");
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index 917b837..c7f0cbe 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -4708,7 +4708,7 @@ int i915_gem_init_phys_object(struct drm_device *dev,
+ 
+ 	phys_obj->id = id;
+ 
+-	phys_obj->handle = drm_pci_alloc(dev, size, 0, 0xffffffff);
++	phys_obj->handle = drm_pci_alloc(dev, size, 0);
+ 	if (!phys_obj->handle) {
+ 		ret = -ENOMEM;
+ 		goto kfree_obj;
+diff --git a/include/drm/drmP.h b/include/drm/drmP.h
+index 71dafb6..ffac157 100644
+--- a/include/drm/drmP.h
++++ b/include/drm/drmP.h
+@@ -1408,7 +1408,7 @@ extern int drm_ati_pcigart_cleanup(struct drm_device *dev,
+ 				   struct drm_ati_pcigart_info * gart_info);
+ 
+ extern drm_dma_handle_t *drm_pci_alloc(struct drm_device *dev, size_t size,
+-				       size_t align, dma_addr_t maxaddr);
++				       size_t align);
+ extern void __drm_pci_free(struct drm_device *dev, drm_dma_handle_t * dmah);
+ extern void drm_pci_free(struct drm_device *dev, drm_dma_handle_t * dmah);
+ 
+-- 
+1.6.5.7
+
