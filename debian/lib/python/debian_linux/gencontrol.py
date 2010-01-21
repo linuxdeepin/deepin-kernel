@@ -167,7 +167,7 @@ class Gencontrol(object):
         pass
 
     def do_arch_recurse(self, packages, makefile, arch, vars, makeflags, extra):
-        for featureset in self.config['base', arch]['featuresets']:
+        for featureset in self.config['base', arch].get('featuresets', ()):
             self.do_featureset(packages, makefile, arch, featureset, vars.copy(), makeflags.copy(), extra)
 
     def do_featureset(self, packages, makefile, arch, featureset, vars, makeflags, extra):
