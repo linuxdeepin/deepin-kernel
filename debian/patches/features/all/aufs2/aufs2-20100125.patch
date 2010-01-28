@@ -1,0 +1,2865 @@
+diff --git a/fs/aufs/Kconfig b/fs/aufs/Kconfig
+index 3258e33..107f4fa 100644
+--- a/fs/aufs/Kconfig
++++ b/fs/aufs/Kconfig
+@@ -80,6 +80,17 @@ config AUFS_RDU
+ 	environment variables for your readdir(3).
+ 	See detail in aufs.5.
+ 
++config AUFS_SP_IATTR
++	bool "Respect the attributes (mtime/ctime mainly) of special files"
++	help
++	When you write something to a special file, some attributes of it
++	(mtime/ctime mainly) may be updated. Generally such updates are
++	less important (actually some device drivers and NFS ignore
++	it). But some applications (such like test program) requires
++	such updates. If you need these updates, then enable this
++	configuration which introduces some overhead.
++	Currently this configuration handles FIFO only.
++
+ config AUFS_SHWH
+ 	bool "Show whiteouts"
+ 	help
+diff --git a/fs/aufs/Makefile b/fs/aufs/Makefile
+index 2b26cd1..9b075f1 100644
+--- a/fs/aufs/Makefile
++++ b/fs/aufs/Makefile
+@@ -29,5 +29,6 @@ aufs-$(CONFIG_AUFS_HINOTIFY) += hinotify.o
+ aufs-$(CONFIG_AUFS_EXPORT) += export.o
+ aufs-$(CONFIG_AUFS_POLL) += poll.o
+ aufs-$(CONFIG_AUFS_RDU) += rdu.o
++aufs-$(CONFIG_AUFS_SP_IATTR) += f_op_sp.o
+ aufs-$(CONFIG_AUFS_DEBUG) += debug.o
+ aufs-$(CONFIG_AUFS_MAGIC_SYSRQ) += sysrq.o
+diff --git a/fs/aufs/aufs.h b/fs/aufs/aufs.h
+index 96307bb..0dfb6fb 100644
+--- a/fs/aufs/aufs.h
++++ b/fs/aufs/aufs.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -25,6 +25,14 @@
+ 
+ #ifdef __KERNEL__
+ 
++#define AuStub(type, name, body, ...) \
++	static inline type name(__VA_ARGS__) { body; }
++
++#define AuStubVoid(name, ...) \
++	AuStub(void, name, , __VA_ARGS__)
++#define AuStubInt0(name, ...) \
++	AuStub(int, name, return 0, __VA_ARGS__)
++
+ #include "debug.h"
+ 
+ #include "branch.h"
+diff --git a/fs/aufs/branch.c b/fs/aufs/branch.c
+index bb7ad86..2ec2a63 100644
+--- a/fs/aufs/branch.c
++++ b/fs/aufs/branch.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -111,7 +111,9 @@ static struct au_branch *au_br_alloc(struct super_block *sb, int new_nbranch,
+ {
+ 	struct au_branch *add_branch;
+ 	struct dentry *root;
++	int err;
+ 
++	err = -ENOMEM;
+ 	root = sb->s_root;
+ 	add_branch = kmalloc(sizeof(*add_branch), GFP_NOFS);
+ 	if (unlikely(!add_branch))
+@@ -126,18 +128,20 @@ static struct au_branch *au_br_alloc(struct super_block *sb, int new_nbranch,
+ 			goto out_br;
+ 	}
+ 
+-	if (unlikely(au_sbr_realloc(au_sbi(sb), new_nbranch)
+-		     || au_di_realloc(au_di(root), new_nbranch)
+-		     || au_ii_realloc(au_ii(root->d_inode), new_nbranch)))
+-		goto out_wbr;
+-	return add_branch; /* success */
++	err = au_sbr_realloc(au_sbi(sb), new_nbranch);
++	if (!err)
++		err = au_di_realloc(au_di(root), new_nbranch);
++	if (!err)
++		err = au_ii_realloc(au_ii(root->d_inode), new_nbranch);
++	if (!err)
++		return add_branch; /* success */
+ 
+- out_wbr:
+ 	kfree(add_branch->br_wbr);
++
+  out_br:
+ 	kfree(add_branch);
+  out:
+-	return ERR_PTR(-ENOMEM);
++	return ERR_PTR(err);
+ }
+ 
+ /*
+@@ -147,13 +151,14 @@ static int test_br(struct inode *inode, int brperm, char *path)
+ {
+ 	int err;
+ 
+-	err = 0;
+-	if (unlikely(au_br_writable(brperm) && IS_RDONLY(inode))) {
+-		pr_err("write permission for readonly mount or inode, %s\n",
+-		       path);
+-		err = -EINVAL;
+-	}
++	err = (au_br_writable(brperm) && IS_RDONLY(inode));
++	if (!err)
++		goto out;
+ 
++	err = -EINVAL;
++	pr_err("write permission for readonly mount or inode, %s\n", path);
++
++ out:
+ 	return err;
+ }
+ 
+@@ -421,7 +426,7 @@ static void au_br_do_add(struct super_block *sb, struct dentry *h_dentry,
+ 
+ 	root = sb->s_root;
+ 	root_inode = root->d_inode;
+-	au_plink_block_maintain(sb);
++	au_plink_maint_block(sb);
+ 	bend = au_sbend(sb);
+ 	amount = bend + 1 - bindex;
+ 	au_br_do_add_brp(au_sbi(sb), bindex, br, bend, amount);
+@@ -647,6 +652,7 @@ static void au_br_do_del_brp(struct au_sbinfo *sbinfo,
+ 	p = krealloc(sbinfo->si_branch, sizeof(*p) * bend, GFP_NOFS);
+ 	if (p)
+ 		sbinfo->si_branch = p;
++	/* harmless error */
+ }
+ 
+ static void au_br_do_del_hdp(struct au_dinfo *dinfo, const aufs_bindex_t bindex,
+@@ -665,6 +671,7 @@ static void au_br_do_del_hdp(struct au_dinfo *dinfo, const aufs_bindex_t bindex,
+ 	p = krealloc(dinfo->di_hdentry, sizeof(*p) * bend, GFP_NOFS);
+ 	if (p)
+ 		dinfo->di_hdentry = p;
++	/* harmless error */
+ }
+ 
+ static void au_br_do_del_hip(struct au_iinfo *iinfo, const aufs_bindex_t bindex,
+@@ -684,6 +691,7 @@ static void au_br_do_del_hip(struct au_iinfo *iinfo, const aufs_bindex_t bindex,
+ 	p = krealloc(iinfo->ii_hinode, sizeof(*p) * bend, GFP_NOFS);
+ 	if (p)
+ 		iinfo->ii_hinode = p;
++	/* harmless error */
+ }
+ 
+ static void au_br_do_del(struct super_block *sb, aufs_bindex_t bindex,
+@@ -698,7 +706,7 @@ static void au_br_do_del(struct super_block *sb, aufs_bindex_t bindex,
+ 
+ 	root = sb->s_root;
+ 	inode = root->d_inode;
+-	au_plink_block_maintain(sb);
++	au_plink_maint_block(sb);
+ 	sbinfo = au_sbi(sb);
+ 	bend = sbinfo->si_bend;
+ 
+@@ -912,7 +920,7 @@ int au_br_mod(struct super_block *sb, struct au_opt_mod *mod, int remount,
+ 	struct au_branch *br;
+ 
+ 	root = sb->s_root;
+-	au_plink_block_maintain(sb);
++	au_plink_maint_block(sb);
+ 	bindex = au_find_dbindex(root, mod->h_root);
+ 	if (bindex < 0) {
+ 		if (remount)
+diff --git a/fs/aufs/branch.h b/fs/aufs/branch.h
+index 1a7219c..5e0e030 100644
+--- a/fs/aufs/branch.h
++++ b/fs/aufs/branch.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+diff --git a/fs/aufs/conf.mk b/fs/aufs/conf.mk
+index 9939c03..02b43a1 100644
+--- a/fs/aufs/conf.mk
++++ b/fs/aufs/conf.mk
+@@ -11,6 +11,7 @@ $(foreach i, BRANCH_MAX_127 BRANCH_MAX_511 BRANCH_MAX_1023 BRANCH_MAX_32767 \
+ 	HINOTIFY \
+ 	EXPORT INO_T_64 \
+ 	RDU \
++	SP_IATTR \
+ 	SHWH \
+ 	BR_RAMFS \
+ 	BR_FUSE POLL \
+diff --git a/fs/aufs/cpup.c b/fs/aufs/cpup.c
+index 1219aad..0408da8 100644
+--- a/fs/aufs/cpup.c
++++ b/fs/aufs/cpup.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+diff --git a/fs/aufs/cpup.h b/fs/aufs/cpup.h
+index 29e2508..506350d 100644
+--- a/fs/aufs/cpup.h
++++ b/fs/aufs/cpup.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+diff --git a/fs/aufs/dbgaufs.c b/fs/aufs/dbgaufs.c
+index 9573b70..e69cbd3 100644
+--- a/fs/aufs/dbgaufs.c
++++ b/fs/aufs/dbgaufs.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+diff --git a/fs/aufs/dbgaufs.h b/fs/aufs/dbgaufs.h
+index 67a7964..ae41480 100644
+--- a/fs/aufs/dbgaufs.h
++++ b/fs/aufs/dbgaufs.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -39,40 +39,13 @@ void dbgaufs_si_fin(struct au_sbinfo *sbinfo);
+ int dbgaufs_si_init(struct au_sbinfo *sbinfo);
+ void dbgaufs_fin(void);
+ int __init dbgaufs_init(void);
+-
+ #else
+-
+-static inline
+-void dbgaufs_brs_del(struct super_block *sb, aufs_bindex_t bindex)
+-{
+-	/* empty */
+-}
+-
+-static inline
+-void dbgaufs_brs_add(struct super_block *sb, aufs_bindex_t bindex)
+-{
+-	/* empty */
+-}
+-
+-static inline
+-void dbgaufs_si_fin(struct au_sbinfo *sbinfo)
+-{
+-	/* empty */
+-}
+-
+-static inline
+-int dbgaufs_si_init(struct au_sbinfo *sbinfo)
+-{
+-	return 0;
+-}
+-
+-#define dbgaufs_fin()	do {} while (0)
+-
+-static inline
+-int __init dbgaufs_init(void)
+-{
+-	return 0;
+-}
++AuStubVoid(dbgaufs_brs_del, struct super_block *sb, aufs_bindex_t bindex)
++AuStubVoid(dbgaufs_brs_add, struct super_block *sb, aufs_bindex_t bindex)
++AuStubVoid(dbgaufs_si_fin, struct au_sbinfo *sbinfo)
++AuStubInt0(dbgaufs_si_init, struct au_sbinfo *sbinfo)
++AuStubVoid(dbgaufs_fin, void)
++AuStubInt0(__init dbgaufs_init, void)
+ #endif /* CONFIG_DEBUG_FS */
+ 
+ #endif /* __KERNEL__ */
+diff --git a/fs/aufs/dcsub.c b/fs/aufs/dcsub.c
+index 43a8cb4..e7ad06c 100644
+--- a/fs/aufs/dcsub.c
++++ b/fs/aufs/dcsub.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+diff --git a/fs/aufs/dcsub.h b/fs/aufs/dcsub.h
+index bb934b4..469d3b4 100644
+--- a/fs/aufs/dcsub.h
++++ b/fs/aufs/dcsub.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+diff --git a/fs/aufs/debug.c b/fs/aufs/debug.c
+index e34d1c2..87935e9 100644
+--- a/fs/aufs/debug.c
++++ b/fs/aufs/debug.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -188,7 +188,8 @@ static int do_pri_file(aufs_bindex_t bindex, struct file *file)
+ 	    && file->f_dentry
+ 	    && au_test_aufs(file->f_dentry->d_sb)
+ 	    && au_fi(file))
+-		snprintf(a, sizeof(a), ", mmapped %d", au_test_mmapped(file));
++		snprintf(a, sizeof(a), ", mmapped %d",
++			 !!au_fi(file)->fi_h_vm_ops);
+ 	dpri("f%d: mode 0x%x, flags 0%o, cnt %ld, pos %llu%s\n",
+ 	     bindex, file->f_mode, file->f_flags, (long)file_count(file),
+ 	     file->f_pos, a);
+diff --git a/fs/aufs/debug.h b/fs/aufs/debug.h
+index 312e1af..dea0ea6 100644
+--- a/fs/aufs/debug.h
++++ b/fs/aufs/debug.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -55,11 +55,8 @@ static inline int au_debug_test(void)
+ }
+ #else
+ #define AuDebugOn(a)		do {} while (0)
+-#define au_debug()		do {} while (0)
+-static inline int au_debug_test(void)
+-{
+-	return 0;
+-}
++AuStubVoid(au_debug, int n)
++AuStubInt0(au_debug_test, void)
+ #endif /* CONFIG_AUFS_DEBUG */
+ 
+ /* ---------------------------------------------------------------------- */
+@@ -187,37 +184,15 @@ void au_debug_sbinfo_init(struct au_sbinfo *sbinfo);
+ 	au_dbg_iattr(ia); \
+ } while (0)
+ #else
+-static inline void au_dbg_verify_dir_parent(struct dentry *dentry,
+-					    unsigned int sigen)
+-{
+-	/* empty */
+-}
+-static inline void au_dbg_verify_nondir_parent(struct dentry *dentry,
+-					       unsigned int sigen)
+-{
+-	/* empty */
+-}
+-static inline void au_dbg_verify_gen(struct dentry *parent, unsigned int sigen)
+-{
+-	/* empty */
+-}
+-static inline void au_dbg_verify_hf(struct au_finfo *finfo)
+-{
+-	/* empty */
+-}
+-static inline void au_dbg_verify_kthread(void)
+-{
+-	/* empty */
+-}
++AuStubVoid(au_dbg_verify_dir_parent, struct dentry *dentry, unsigned int sigen)
++AuStubVoid(au_dbg_verify_nondir_parent, struct dentry *dentry,
++	   unsigned int sigen)
++AuStubVoid(au_dbg_verify_gen, struct dentry *parent, unsigned int sigen)
++AuStubVoid(au_dbg_verify_hf, struct au_finfo *finfo)
++AuStubVoid(au_dbg_verify_kthread, void)
++AuStubInt0(__init au_debug_init, void)
++AuStubVoid(au_debug_sbinfo_init, struct au_sbinfo *sbinfo)
+ 
+-static inline int au_debug_init(void)
+-{
+-	return 0;
+-}
+-static inline void au_debug_sbinfo_init(struct au_sbinfo *sbinfo)
+-{
+-	/* empty */
+-}
+ #define AuDbgWhlist(w)		do {} while (0)
+ #define AuDbgVdir(v)		do {} while (0)
+ #define AuDbgInode(i)		do {} while (0)
+@@ -241,16 +216,13 @@ void au_sysrq_fin(void);
+ 	handle_sysrq('w', vc_cons[fg_console].d->vc_tty); \
+ } while (0)
+ #else
+-#define au_dbg_blocked()	do {} while (0)
++AuStubVoid(au_dbg_blocked, void)
+ #endif
+ 
+ #else
+-static inline int au_sysrq_init(void)
+-{
+-	return 0;
+-}
+-#define au_sysrq_fin()		do {} while (0)
+-#define au_dbg_blocked()	do {} while (0)
++AuStubInt0(__init au_sysrq_init, void)
++AuStubVoid(au_sysrq_fin, void)
++AuStubVoid(au_dbg_blocked, void)
+ #endif /* CONFIG_AUFS_MAGIC_SYSRQ */
+ 
+ #endif /* __KERNEL__ */
+diff --git a/fs/aufs/dentry.c b/fs/aufs/dentry.c
+index 28525d4..718df2e 100644
+--- a/fs/aufs/dentry.c
++++ b/fs/aufs/dentry.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -102,13 +102,11 @@ au_do_lookup(struct dentry *h_parent, struct dentry *dentry,
+ {
+ 	struct dentry *h_dentry;
+ 	struct inode *h_inode, *inode;
+-	struct qstr *name;
+ 	struct au_branch *br;
+ 	int wh_found, opq;
+ 	unsigned char wh_able;
+ 	const unsigned char allow_neg = !!au_ftest_lkup(args->flags, ALLOW_NEG);
+ 
+-	name = &dentry->d_name;
+ 	wh_found = 0;
+ 	br = au_sbr(dentry->d_sb, bindex);
+ 	wh_able = !!au_br_whable(br->br_perm);
+@@ -127,7 +125,7 @@ au_do_lookup(struct dentry *h_parent, struct dentry *dentry,
+ 		return NULL; /* success */
+ 
+  real_lookup:
+-	h_dentry = au_lkup_one(name, h_parent, br, args->nd);
++	h_dentry = au_lkup_one(&dentry->d_name, h_parent, br, args->nd);
+ 	if (IS_ERR(h_dentry))
+ 		goto out;
+ 
+@@ -197,7 +195,6 @@ int au_lkup_dentry(struct dentry *dentry, aufs_bindex_t bstart, mode_t type,
+ 	struct dentry *parent;
+ 	struct inode *inode;
+ 
+-	parent = dget_parent(dentry);
+ 	err = au_test_shwh(dentry->d_sb, name);
+ 	if (unlikely(err))
+ 		goto out;
+@@ -212,6 +209,7 @@ int au_lkup_dentry(struct dentry *dentry, aufs_bindex_t bstart, mode_t type,
+ 		au_fset_lkup(args.flags, ALLOW_NEG);
+ 
+ 	npositive = 0;
++	parent = dget_parent(dentry);
+ 	btail = au_dbtaildir(parent);
+ 	for (bindex = bstart; bindex <= btail; bindex++) {
+ 		struct dentry *h_parent, *h_dentry;
+@@ -238,7 +236,7 @@ int au_lkup_dentry(struct dentry *dentry, aufs_bindex_t bstart, mode_t type,
+ 		mutex_unlock(&h_dir->i_mutex);
+ 		err = PTR_ERR(h_dentry);
+ 		if (IS_ERR(h_dentry))
+-			goto out_wh;
++			goto out_parent;
+ 		au_fclr_lkup(args.flags, ALLOW_NEG);
+ 
+ 		if (au_dbwh(dentry) >= 0)
+@@ -271,10 +269,10 @@ int au_lkup_dentry(struct dentry *dentry, aufs_bindex_t bstart, mode_t type,
+ 		/* both of real entry and whiteout found */
+ 		err = -EIO;
+ 
+- out_wh:
++ out_parent:
++	dput(parent);
+ 	kfree(whname.name);
+  out:
+-	dput(parent);
+ 	return err;
+ }
+ 
+@@ -310,12 +308,10 @@ int au_lkup_neg(struct dentry *dentry, aufs_bindex_t bindex)
+ {
+ 	int err;
+ 	struct dentry *parent, *h_parent, *h_dentry;
+-	struct qstr *name;
+ 
+-	name = &dentry->d_name;
+ 	parent = dget_parent(dentry);
+ 	h_parent = au_h_dptr(parent, bindex);
+-	h_dentry = au_sio_lkup_one(name, h_parent,
++	h_dentry = au_sio_lkup_one(&dentry->d_name, h_parent,
+ 				   au_sbr(dentry->d_sb, bindex));
+ 	err = PTR_ERR(h_dentry);
+ 	if (IS_ERR(h_dentry))
+@@ -328,12 +324,12 @@ int au_lkup_neg(struct dentry *dentry, aufs_bindex_t bindex)
+ 		goto out;
+ 	}
+ 
++	err = 0;
+ 	if (bindex < au_dbstart(dentry))
+ 		au_set_dbstart(dentry, bindex);
+ 	if (au_dbend(dentry) < bindex)
+ 		au_set_dbend(dentry, bindex);
+ 	au_set_h_dptr(dentry, bindex, h_dentry);
+-	err = 0;
+ 
+  out:
+ 	dput(parent);
+diff --git a/fs/aufs/dentry.h b/fs/aufs/dentry.h
+index b1f9a6e..42cd70c 100644
+--- a/fs/aufs/dentry.h
++++ b/fs/aufs/dentry.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -221,10 +221,7 @@ static inline void au_hin_di_reinit(struct dentry *dentry)
+ 	dentry->d_fsdata = NULL;
+ }
+ #else
+-static inline void au_hin_di_reinit(struct dentry *dentry __maybe_unused)
+-{
+-	/* empty */
+-}
++AuStubVoid(au_hin_di_reinit, struct dentry *dentry __maybe_unused)
+ #endif /* CONFIG_AUFS_HINOTIFY */
+ 
+ #endif /* __KERNEL__ */
+diff --git a/fs/aufs/dinfo.c b/fs/aufs/dinfo.c
+index 0010c99..dfe4eb8 100644
+--- a/fs/aufs/dinfo.c
++++ b/fs/aufs/dinfo.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+diff --git a/fs/aufs/dir.c b/fs/aufs/dir.c
+index bb0eb64..aec9452 100644
+--- a/fs/aufs/dir.c
++++ b/fs/aufs/dir.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -112,9 +112,7 @@ static int reopen_dir(struct file *file)
+ 		au_set_h_fptr(file, bindex, NULL);
+ 	au_set_fbend(file, btail);
+ 
+-	spin_lock(&file->f_lock);
+-	flags = file->f_flags;
+-	spin_unlock(&file->f_lock);
++	flags = vfsub_file_flags(file);
+ 	for (bindex = bstart; bindex <= btail; bindex++) {
+ 		h_dentry = au_h_dptr(dentry, bindex);
+ 		if (!h_dentry)
+@@ -150,7 +148,6 @@ static int do_open_dir(struct file *file, int flags)
+ 	err = 0;
+ 	dentry = file->f_dentry;
+ 	au_set_fvdir_cache(file, NULL);
+-	au_fi(file)->fi_maintain_plink = 0;
+ 	file->f_version = dentry->d_inode->i_version;
+ 	bindex = au_dbstart(dentry);
+ 	au_set_fbstart(file, bindex);
+@@ -193,24 +190,13 @@ static int aufs_release_dir(struct inode *inode __maybe_unused,
+ {
+ 	struct au_vdir *vdir_cache;
+ 	struct super_block *sb;
+-	struct au_sbinfo *sbinfo;
+ 
+ 	sb = file->f_dentry->d_sb;
+-	si_noflush_read_lock(sb);
+-	fi_write_lock(file);
+-	vdir_cache = au_fvdir_cache(file);
++	vdir_cache = au_fi(file)->fi_vdir_cache; /* lock-free */
+ 	if (vdir_cache)
+ 		au_vdir_free(vdir_cache);
+-	if (au_fi(file)->fi_maintain_plink) {
+-		sbinfo = au_sbi(sb);
+-		/* clear the flag without write-lock */
+-		sbinfo->au_si_status &= ~AuSi_MAINTAIN_PLINK;
+-		smp_mb();
+-		wake_up_all(&sbinfo->si_plink_wq);
+-	}
+-	fi_write_unlock(file);
++	au_plink_maint_leave(file);
+ 	au_finfo_fin(file);
+-	si_read_unlock(sb);
+ 	return 0;
+ }
+ 
+diff --git a/fs/aufs/dir.h b/fs/aufs/dir.h
+index d90c63f..8ba9c88 100644
+--- a/fs/aufs/dir.h
++++ b/fs/aufs/dir.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+diff --git a/fs/aufs/export.c b/fs/aufs/export.c
+index 5b5c2c4..1b3a9d9 100644
+--- a/fs/aufs/export.c
++++ b/fs/aufs/export.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -347,8 +347,7 @@ static struct dentry *au_lkup_by_ino(struct path *path, ino_t ino,
+ 	parent = path->dentry;
+ 	if (nsi_lock)
+ 		si_read_unlock(parent->d_sb);
+-	path_get(path);
+-	file = vfsub_dentry_open(path, au_dir_roflags, current_cred());
++	file = vfsub_dentry_open(path, au_dir_roflags);
+ 	dentry = (void *)file;
+ 	if (IS_ERR(file))
+ 		goto out;
+diff --git a/fs/aufs/f_op.c b/fs/aufs/f_op.c
+index 65c50bc..529fca6 100644
+--- a/fs/aufs/f_op.c
++++ b/fs/aufs/f_op.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -26,6 +26,7 @@
+ #include <linux/mman.h>
+ #include <linux/mm.h>
+ #include <linux/security.h>
++#include <linux/smp_lock.h>
+ #include "aufs.h"
+ 
+ /* common function to regular file and dir */
+@@ -63,7 +64,7 @@ int aufs_flush(struct file *file, fl_owner_t id)
+ 
+ /* ---------------------------------------------------------------------- */
+ 
+-static int do_open_nondir(struct file *file, int flags)
++int au_do_open_nondir(struct file *file, int flags)
+ {
+ 	int err;
+ 	aufs_bindex_t bindex;
+@@ -100,18 +101,13 @@ static int do_open_nondir(struct file *file, int flags)
+ static int aufs_open_nondir(struct inode *inode __maybe_unused,
+ 			    struct file *file)
+ {
+-	return au_do_open(file, do_open_nondir);
++	return au_do_open(file, au_do_open_nondir);
+ }
+ 
+-static int aufs_release_nondir(struct inode *inode __maybe_unused,
+-			       struct file *file)
++int aufs_release_nondir(struct inode *inode __maybe_unused, struct file *file)
+ {
+-	struct super_block *sb = file->f_dentry->d_sb;
+-
+-	si_noflush_read_lock(sb);
+ 	kfree(au_fi(file)->fi_vm_ops);
+ 	au_finfo_fin(file);
+-	si_read_unlock(sb);
+ 	return 0;
+ }
+ 
+@@ -188,6 +184,34 @@ static ssize_t aufs_write(struct file *file, const char __user *ubuf,
+ 	return err;
+ }
+ 
++static ssize_t au_do_aio(struct file *h_file, int rw, struct kiocb *kio,
++			 const struct iovec *iov, unsigned long nv, loff_t pos)
++{
++	ssize_t err;
++	struct file *file;
++
++	err = security_file_permission(h_file, rw);
++	if (unlikely(err))
++		goto out;
++
++	file = kio->ki_filp;
++	if (!is_sync_kiocb(kio)) {
++		get_file(h_file);
++		fput(file);
++	}
++	kio->ki_filp = h_file;
++	if (rw == MAY_READ)
++		err = h_file->f_op->aio_read(kio, iov, nv, pos);
++	else if (rw == MAY_WRITE)
++		err = h_file->f_op->aio_write(kio, iov, nv, pos);
++	else
++		BUG();
++	/* do not restore kio->ki_filp */
++
++ out:
++	return err;
++}
++
+ static ssize_t aufs_aio_read(struct kiocb *kio, const struct iovec *iov,
+ 			     unsigned long nv, loff_t pos)
+ {
+@@ -207,15 +231,7 @@ static ssize_t aufs_aio_read(struct kiocb *kio, const struct iovec *iov,
+ 	err = -ENOSYS;
+ 	h_file = au_h_fptr(file, au_fbstart(file));
+ 	if (h_file->f_op && h_file->f_op->aio_read) {
+-		err = security_file_permission(h_file, MAY_READ);
+-		if (unlikely(err))
+-			goto out_unlock;
+-		if (!is_sync_kiocb(kio)) {
+-			get_file(h_file);
+-			fput(file);
+-		}
+-		kio->ki_filp = h_file;
+-		err = h_file->f_op->aio_read(kio, iov, nv, pos);
++		err = au_do_aio(h_file, MAY_READ, kio, iov, nv, pos);
+ 		/* todo: necessary? */
+ 		/* file->f_ra = h_file->f_ra; */
+ 		fsstack_copy_attr_atime(dentry->d_inode,
+@@ -224,9 +240,9 @@ static ssize_t aufs_aio_read(struct kiocb *kio, const struct iovec *iov,
+ 		/* currently there is no such fs */
+ 		WARN_ON_ONCE(h_file->f_op && h_file->f_op->read);
+ 
+- out_unlock:
+ 	di_read_unlock(dentry, AuLock_IR);
+ 	fi_read_unlock(file);
++
+  out:
+ 	si_read_unlock(sb);
+ 	return err;
+@@ -236,7 +252,6 @@ static ssize_t aufs_aio_write(struct kiocb *kio, const struct iovec *iov,
+ 			      unsigned long nv, loff_t pos)
+ {
+ 	ssize_t err;
+-	aufs_bindex_t bstart;
+ 	struct au_pin pin;
+ 	struct dentry *dentry;
+ 	struct inode *inode;
+@@ -260,19 +275,10 @@ static ssize_t aufs_aio_write(struct kiocb *kio, const struct iovec *iov,
+ 		goto out_unlock;
+ 
+ 	err = -ENOSYS;
+-	bstart = au_fbstart(file);
+-	h_file = au_h_fptr(file, bstart);
++	h_file = au_h_fptr(file, au_fbstart(file));
+ 	au_unpin(&pin);
+ 	if (h_file->f_op && h_file->f_op->aio_write) {
+-		err = security_file_permission(h_file, MAY_WRITE);
+-		if (unlikely(err))
+-			goto out_unlock;
+-		if (!is_sync_kiocb(kio)) {
+-			get_file(h_file);
+-			fput(file);
+-		}
+-		kio->ki_filp = h_file;
+-		err = h_file->f_op->aio_write(kio, iov, nv, pos);
++		err = au_do_aio(h_file, MAY_WRITE, kio, iov, nv, pos);
+ 		au_cpup_attr_timesizes(inode);
+ 		inode->i_mode = h_file->f_dentry->d_inode->i_mode;
+ 	} else
+@@ -464,33 +470,62 @@ static struct vm_operations_struct aufs_vm_ops = {
+ 
+ /* ---------------------------------------------------------------------- */
+ 
++/* cf. linux/include/linux/mman.h: calc_vm_prot_bits() */
++#define AuConv_VM_PROT(f, b)	_calc_vm_trans(f, VM_##b, PROT_##b)
++
++static unsigned long au_arch_prot_conv(unsigned long flags)
++{
++	/* currently ppc64 only */
++#ifdef CONFIG_PPC64
++	/* cf. linux/arch/powerpc/include/asm/mman.h */
++	AuDebugOn(arch_calc_vm_prot_bits(-1) != VM_SAO);
++	return AuConv_VM_PROT(flags, SAO);
++#else
++	AuDebugOn(arch_calc_vm_prot_bits(-1));
++	return 0;
++#endif
++}
++
+ static unsigned long au_prot_conv(unsigned long flags)
+ {
+-	unsigned long prot;
++	return AuConv_VM_PROT(flags, READ)
++		| AuConv_VM_PROT(flags, WRITE)
++		| AuConv_VM_PROT(flags, EXEC)
++		| au_arch_prot_conv(flags);
++}
++
++/* cf. linux/include/linux/mman.h: calc_vm_flag_bits() */
++#define AuConv_VM_MAP(f, b)	_calc_vm_trans(f, VM_##b, MAP_##b)
+ 
+-	prot = 0;
+-	if (flags & VM_READ)
+-		prot |= PROT_READ;
+-	if (flags & VM_WRITE)
+-		prot |= PROT_WRITE;
+-	if (flags & VM_EXEC)
+-		prot |= PROT_EXEC;
+-	return prot;
++static unsigned long au_flag_conv(unsigned long flags)
++{
++	return AuConv_VM_MAP(flags, GROWSDOWN)
++		| AuConv_VM_MAP(flags, DENYWRITE)
++		| AuConv_VM_MAP(flags, EXECUTABLE)
++		| AuConv_VM_MAP(flags, LOCKED);
+ }
+ 
+ static struct vm_operations_struct *au_vm_ops(struct file *h_file,
+ 					      struct vm_area_struct *vma)
+ {
+ 	struct vm_operations_struct *vm_ops;
++	unsigned long prot;
+ 	int err;
+ 
+ 	vm_ops = ERR_PTR(-ENODEV);
+ 	if (!h_file->f_op || !h_file->f_op->mmap)
+ 		goto out;
+ 
+-	err = ima_file_mmap(h_file, au_prot_conv(vma->vm_flags));
++	prot = au_prot_conv(vma->vm_flags);
++	err = security_file_mmap(h_file, /*reqprot*/prot, prot,
++				 au_flag_conv(vma->vm_flags), vma->vm_start, 0);
+ 	vm_ops = ERR_PTR(err);
+-	if (err)
++	if (unlikely(err))
++		goto out;
++
++	err = ima_file_mmap(h_file, prot);
++	vm_ops = ERR_PTR(err);
++	if (unlikely(err))
+ 		goto out;
+ 
+ 	err = h_file->f_op->mmap(h_file, vma);
+@@ -555,10 +590,25 @@ static int aufs_mmap(struct file *file, struct vm_area_struct *vma)
+ 	dentry = file->f_dentry;
+ 	wlock = !!(file->f_mode & FMODE_WRITE) && (vma->vm_flags & VM_SHARED);
+ 	sb = dentry->d_sb;
++	/*
++	 * Very ugly BKL approach to keep the order of locks.
++	 * Here mm->mmap_sem is acquired by our caller.
++	 *
++	 * native readdir, i_mutex, copy_to_user, mmap_sem
++	 * aufs readdir, i_mutex, rwsem, nested-i_mutex, copy_to_user, mmap_sem
++	 * aufs mmap, mmap_sem, rwsem
++	 *
++	 * Unlock it temporary.
++	 */
++	lock_kernel();
++	up_write(&current->mm->mmap_sem);
+ 	si_read_lock(sb, AuLock_FLUSH);
+ 	err = au_reval_and_lock_fdi(file, au_reopen_nondir, /*wlock*/1);
+-	if (unlikely(err))
++	if (unlikely(err)) {
++		down_write(&current->mm->mmap_sem);
++		unlock_kernel();
+ 		goto out;
++	}
+ 
+ 	mmapped = !!au_test_mmapped(file);
+ 	if (wlock) {
+@@ -566,11 +616,16 @@ static int aufs_mmap(struct file *file, struct vm_area_struct *vma)
+ 
+ 		err = au_ready_to_write(file, -1, &pin);
+ 		di_downgrade_lock(dentry, AuLock_IR);
+-		if (unlikely(err))
++		if (unlikely(err)) {
++			down_write(&current->mm->mmap_sem);
++			unlock_kernel();
+ 			goto out_unlock;
++		}
+ 		au_unpin(&pin);
+ 	} else
+ 		di_downgrade_lock(dentry, AuLock_IR);
++	down_write(&current->mm->mmap_sem);
++	unlock_kernel();
+ 
+ 	h_file = au_h_fptr(file, au_fbstart(file));
+ 	if (!mmapped && au_test_fs_bad_mapping(h_file->f_dentry->d_sb)) {
+diff --git a/fs/aufs/f_op_sp.c b/fs/aufs/f_op_sp.c
+new file mode 100644
+index 0000000..f4a4124
+--- /dev/null
++++ b/fs/aufs/f_op_sp.c
+@@ -0,0 +1,290 @@
++/*
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
++ *
++ * This program, aufs is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
++ */
++
++/*
++ * file operations for special files.
++ * while they exist in aufs virtually,
++ * their file I/O is handled out of aufs.
++ */
++
++#include <linux/fs_stack.h>
++#include "aufs.h"
++
++static ssize_t aufs_aio_read_sp(struct kiocb *kio, const struct iovec *iov,
++				unsigned long nv, loff_t pos)
++{
++	ssize_t err;
++	aufs_bindex_t bstart;
++	unsigned char wbr;
++	struct file *file, *h_file;
++	struct super_block *sb;
++
++	file = kio->ki_filp;
++	sb = file->f_dentry->d_sb;
++	si_read_lock(sb, AuLock_FLUSH);
++	fi_read_lock(file);
++	bstart = au_fbstart(file);
++	h_file = au_h_fptr(file, bstart);
++	fi_read_unlock(file);
++	wbr = !!au_br_writable(au_sbr(sb, bstart)->br_perm);
++	si_read_unlock(sb);
++
++	/* do not change the file in kio */
++	AuDebugOn(!h_file->f_op || !h_file->f_op->aio_read);
++	err = h_file->f_op->aio_read(kio, iov, nv, pos);
++	if (err > 0 && wbr)
++		file_accessed(h_file);
++
++	return err;
++}
++
++static ssize_t aufs_aio_write_sp(struct kiocb *kio, const struct iovec *iov,
++				 unsigned long nv, loff_t pos)
++{
++	ssize_t err;
++	aufs_bindex_t bstart;
++	unsigned char wbr;
++	struct super_block *sb;
++	struct file *file, *h_file;
++
++	file = kio->ki_filp;
++	sb = file->f_dentry->d_sb;
++	si_read_lock(sb, AuLock_FLUSH);
++	fi_read_lock(file);
++	bstart = au_fbstart(file);
++	h_file = au_h_fptr(file, bstart);
++	fi_read_unlock(file);
++	wbr = !!au_br_writable(au_sbr(sb, bstart)->br_perm);
++	si_read_unlock(sb);
++
++	/* do not change the file in kio */
++	AuDebugOn(!h_file->f_op || !h_file->f_op->aio_write);
++	err = h_file->f_op->aio_write(kio, iov, nv, pos);
++	if (err > 0 && wbr)
++		file_update_time(h_file);
++
++	return err;
++}
++
++/* ---------------------------------------------------------------------- */
++
++static int aufs_release_sp(struct inode *inode, struct file *file)
++{
++	int err;
++	struct file *h_file;
++
++	fi_read_lock(file);
++	h_file = au_h_fptr(file, au_fbstart(file));
++	fi_read_unlock(file);
++	/* close this fifo in aufs */
++	err = h_file->f_op->release(inode, file); /* ignore */
++	aufs_release_nondir(inode, file); /* ignore */
++	return err;
++}
++
++/* ---------------------------------------------------------------------- */
++
++/* currently, support only FIFO */
++enum {AuSp_FIFO, AuSp_FIFO_R, AuSp_FIFO_W, AuSp_FIFO_RW,
++      /* AuSp_SOCK, AuSp_CHR, AuSp_BLK, */
++      AuSp_Last};
++static int aufs_open_sp(struct inode *inode, struct file *file);
++static struct au_sp_fop {
++	int			done;
++	struct file_operations	fop;	/* not 'const' */
++	spinlock_t		spin;
++} au_sp_fop[AuSp_Last] = {
++	[AuSp_FIFO] = {
++		.fop	= {
++			.open	= aufs_open_sp
++		}
++	}
++};
++
++static void au_init_fop_sp(struct file *file)
++{
++	struct au_sp_fop *p;
++	int i;
++	struct file *h_file;
++
++	p = au_sp_fop;
++	if (unlikely(!p->done)) {
++		/* initialize first time only */
++		static DEFINE_SPINLOCK(spin);
++
++		spin_lock(&spin);
++		if (!p->done) {
++			BUILD_BUG_ON(sizeof(au_sp_fop)/sizeof(*au_sp_fop)
++				     != AuSp_Last);
++			for (i = 0; i < AuSp_Last; i++)
++				spin_lock_init(&p[i].spin);
++			p->done = 1;
++		}
++		spin_unlock(&spin);
++	}
++
++	switch (file->f_mode & (FMODE_READ | FMODE_WRITE)) {
++	case FMODE_READ:
++		i = AuSp_FIFO_R;
++		break;
++	case FMODE_WRITE:
++		i = AuSp_FIFO_W;
++		break;
++	case FMODE_READ | FMODE_WRITE:
++		i = AuSp_FIFO_RW;
++		break;
++	default:
++		BUG();
++	}
++
++	p += i;
++	if (unlikely(!p->done)) {
++		/* initialize first time only */
++		h_file = au_h_fptr(file, au_fbstart(file));
++		spin_lock(&p->spin);
++		if (!p->done) {
++			p->fop = *h_file->f_op;
++			if (p->fop.aio_read)
++				p->fop.aio_read = aufs_aio_read_sp;
++			if (p->fop.aio_write)
++				p->fop.aio_write = aufs_aio_write_sp;
++			p->fop.release = aufs_release_sp;
++			p->done = 1;
++		}
++		spin_unlock(&p->spin);
++	}
++	file->f_op = &p->fop;
++}
++
++static int au_cpup_sp(struct dentry *dentry)
++{
++	int err;
++	aufs_bindex_t bcpup;
++	struct au_pin pin;
++	struct au_wr_dir_args wr_dir_args = {
++		.force_btgt	= -1,
++		.flags		= 0
++	};
++
++	AuDbg("%.*s\n", AuDLNPair(dentry));
++
++	di_read_unlock(dentry, AuLock_IR);
++	di_write_lock_child(dentry);
++	err = au_wr_dir(dentry, /*src_dentry*/NULL, &wr_dir_args);
++	if (unlikely(err < 0))
++		goto out;
++	bcpup = err;
++	err = 0;
++	if (bcpup == au_dbstart(dentry))
++		goto out; /* success */
++
++	err = au_pin(&pin, dentry, bcpup, au_opt_udba(dentry->d_sb),
++		     AuPin_MNT_WRITE);
++	if (!err) {
++		err = au_sio_cpup_simple(dentry, bcpup, -1, AuCpup_DTIME);
++		au_unpin(&pin);
++	}
++
++ out:
++	di_downgrade_lock(dentry, AuLock_IR);
++	return err;
++}
++
++static int au_do_open_sp(struct file *file, int flags)
++{
++	int err;
++	struct dentry *dentry;
++	struct super_block *sb;
++	struct file *h_file;
++	struct inode *h_inode;
++
++	dentry = file->f_dentry;
++	AuDbg("%.*s\n", AuDLNPair(dentry));
++
++	/*
++	 * try copying-up.
++	 * operate on the ro branch is not an error.
++	 */
++	au_cpup_sp(dentry); /* ignore */
++
++	/* prepare h_file */
++	err = au_do_open_nondir(file, vfsub_file_flags(file));
++	if (unlikely(err))
++		goto out;
++
++	sb = dentry->d_sb;
++	h_file = au_h_fptr(file, au_fbstart(file));
++	h_inode = h_file->f_dentry->d_inode;
++	di_read_unlock(dentry, AuLock_IR);
++	fi_write_unlock(file);
++	si_read_unlock(sb);
++	/* open this fifo in aufs */
++	err = h_inode->i_fop->open(file->f_dentry->d_inode, file);
++	si_noflush_read_lock(sb);
++	fi_write_lock(file);
++	di_read_lock_child(dentry, AuLock_IR);
++	if (!err)
++		au_init_fop_sp(file);
++	else
++		au_finfo_fin(file);
++
++ out:
++	return err;
++}
++
++static int aufs_open_sp(struct inode *inode, struct file *file)
++{
++	return au_do_open(file, au_do_open_sp);
++}
++
++/* ---------------------------------------------------------------------- */
++
++void au_init_special_fop(struct inode *inode, umode_t mode, dev_t rdev)
++{
++	init_special_inode(inode, mode, rdev);
++
++	switch (mode & S_IFMT) {
++	case S_IFIFO:
++		inode->i_fop = &au_sp_fop[AuSp_FIFO].fop;
++		/*FALLTHROUGH*/
++	case S_IFCHR:
++	case S_IFBLK:
++	case S_IFSOCK:
++		break;
++	default:
++		AuDebugOn(1);
++	}
++}
++
++int au_special_file(umode_t mode)
++{
++	int ret;
++
++	ret = 0;
++	switch (mode & S_IFMT) {
++	case S_IFIFO:
++#if 0
++	case S_IFCHR:
++	case S_IFBLK:
++	case S_IFSOCK:
++#endif
++		ret = 1;
++	}
++
++	return ret;
++}
+diff --git a/fs/aufs/file.c b/fs/aufs/file.c
+index a4f33aa..1985b32 100644
+--- a/fs/aufs/file.c
++++ b/fs/aufs/file.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -43,8 +43,8 @@ struct file *au_h_open(struct dentry *dentry, aufs_bindex_t bindex, int flags,
+ 	struct inode *h_inode;
+ 	struct super_block *sb;
+ 	struct au_branch *br;
+-	int err, exec_flag;
+ 	struct path h_path;
++	int err, exec_flag;
+ 
+ 	/* a race condition can happen between open and unlink/rmdir */
+ 	h_file = ERR_PTR(-ENOENT);
+@@ -72,8 +72,18 @@ struct file *au_h_open(struct dentry *dentry, aufs_bindex_t bindex, int flags,
+ 	atomic_inc(&br->br_count);
+ 	h_path.dentry = h_dentry;
+ 	h_path.mnt = br->br_mnt;
+-	path_get(&h_path);
+-	h_file = vfsub_dentry_open(&h_path, flags, current_cred());
++	if (!au_special_file(h_inode->i_mode))
++		h_file = vfsub_dentry_open(&h_path, flags);
++	else {
++		/* this block depends upon the configuration */
++		di_read_unlock(dentry, AuLock_IR);
++		fi_write_unlock(file);
++		si_read_unlock(sb);
++		h_file = vfsub_dentry_open(&h_path, flags);
++		si_noflush_read_lock(sb);
++		fi_write_lock(file);
++		di_read_lock_child(dentry, AuLock_IR);
++	}
+ 	if (IS_ERR(h_file))
+ 		goto out_br;
+ 
+@@ -97,7 +107,6 @@ struct file *au_h_open(struct dentry *dentry, aufs_bindex_t bindex, int flags,
+ int au_do_open(struct file *file, int (*open)(struct file *file, int flags))
+ {
+ 	int err;
+-	unsigned int flags;
+ 	struct dentry *dentry;
+ 	struct super_block *sb;
+ 
+@@ -109,10 +118,7 @@ int au_do_open(struct file *file, int (*open)(struct file *file, int flags))
+ 		goto out;
+ 
+ 	di_read_lock_child(dentry, AuLock_IR);
+-	spin_lock(&file->f_lock);
+-	flags = file->f_flags;
+-	spin_unlock(&file->f_lock);
+-	err = open(file, flags);
++	err = open(file, vfsub_file_flags(file));
+ 	di_read_unlock(dentry, AuLock_IR);
+ 
+ 	fi_write_unlock(file);
+@@ -126,12 +132,12 @@ int au_do_open(struct file *file, int (*open)(struct file *file, int flags))
+ int au_reopen_nondir(struct file *file)
+ {
+ 	int err;
+-	unsigned int flags;
+ 	aufs_bindex_t bstart, bindex, bend;
+ 	struct dentry *dentry;
+ 	struct file *h_file, *h_file_tmp;
+ 
+ 	dentry = file->f_dentry;
++	AuDebugOn(au_special_file(dentry->d_inode->i_mode));
+ 	bstart = au_dbstart(dentry);
+ 	h_file_tmp = NULL;
+ 	if (au_fbstart(file) == bstart) {
+@@ -145,10 +151,8 @@ int au_reopen_nondir(struct file *file)
+ 	AuDebugOn(au_fbstart(file) < bstart
+ 		  || au_fi(file)->fi_hfile[0 + bstart].hf_file);
+ 
+-	spin_lock(&file->f_lock);
+-	flags = file->f_flags & ~O_TRUNC;
+-	spin_unlock(&file->f_lock);
+-	h_file = au_h_open(dentry, bstart, flags, file);
++	h_file = au_h_open(dentry, bstart, vfsub_file_flags(file) & ~O_TRUNC,
++			   file);
+ 	err = PTR_ERR(h_file);
+ 	if (IS_ERR(h_file))
+ 		goto out; /* todo: close all? */
+@@ -202,9 +206,9 @@ static int au_ready_to_write_wh(struct file *file, loff_t len,
+ 	int err;
+ 	struct inode *inode;
+ 	struct dentry *dentry, *hi_wh;
+-	struct super_block *sb;
+ 
+ 	dentry = file->f_dentry;
++	au_update_dbstart(dentry);
+ 	inode = dentry->d_inode;
+ 	hi_wh = au_hi_wh(inode, bcpup);
+ 	if (!hi_wh)
+@@ -213,8 +217,9 @@ static int au_ready_to_write_wh(struct file *file, loff_t len,
+ 		/* already copied-up after unlink */
+ 		err = au_reopen_wh(file, bcpup, hi_wh);
+ 
+-	sb = dentry->d_sb;
+-	if (!err && inode->i_nlink > 1 && au_opt_test(au_mntflags(sb), PLINK))
++	if (!err
++	    && inode->i_nlink > 1
++	    && au_opt_test(au_mntflags(dentry->d_sb), PLINK))
+ 		au_plink_append(inode, bcpup, au_h_dptr(dentry, bcpup));
+ 
+ 	return err;
+@@ -233,8 +238,9 @@ int au_ready_to_write(struct file *file, loff_t len, struct au_pin *pin)
+ 
+ 	dentry = file->f_dentry;
+ 	sb = dentry->d_sb;
+-	bstart = au_fbstart(file);
+ 	inode = dentry->d_inode;
++	AuDebugOn(au_special_file(inode->i_mode));
++	bstart = au_fbstart(file);
+ 	err = au_test_ro(sb, bstart, inode);
+ 	if (!err && (au_h_fptr(file, bstart)->f_mode & FMODE_WRITE)) {
+ 		err = au_pin(pin, dentry, bstart, AuOpt_UDBA_NONE, /*flags*/0);
+@@ -474,15 +480,18 @@ int au_reval_and_lock_fdi(struct file *file, int (*reopen)(struct file *file),
+ 	aufs_bindex_t bstart;
+ 	unsigned char pseudo_link;
+ 	struct dentry *dentry;
++	struct inode *inode;
+ 
+ 	err = 0;
+ 	dentry = file->f_dentry;
++	inode = dentry->d_inode;
++	AuDebugOn(au_special_file(inode->i_mode));
+ 	sigen = au_sigen(dentry->d_sb);
+ 	fi_write_lock(file);
+ 	figen = au_figen(file);
+ 	di_write_lock_child(dentry);
+ 	bstart = au_dbstart(dentry);
+-	pseudo_link = (bstart != au_ibstart(dentry->d_inode));
++	pseudo_link = (bstart != au_ibstart(inode));
+ 	if (sigen == figen && !pseudo_link && au_fbstart(file) == bstart) {
+ 		if (!wlock) {
+ 			di_downgrade_lock(dentry, AuLock_IR);
+@@ -493,12 +502,12 @@ int au_reval_and_lock_fdi(struct file *file, int (*reopen)(struct file *file),
+ 
+ 	AuDbg("sigen %d, figen %d\n", sigen, figen);
+ 	if (sigen != au_digen(dentry)
+-	    || sigen != au_iigen(dentry->d_inode)) {
++	    || sigen != au_iigen(inode)) {
+ 		err = au_reval_dpath(dentry, sigen);
+ 		if (unlikely(err < 0))
+ 			goto out;
+ 		AuDebugOn(au_digen(dentry) != sigen
+-			  || au_iigen(dentry->d_inode) != sigen);
++			  || au_iigen(inode) != sigen);
+ 	}
+ 
+ 	err = refresh_file(file, reopen);
+diff --git a/fs/aufs/file.h b/fs/aufs/file.h
+index d665cc7..14b6655 100644
+--- a/fs/aufs/file.h
++++ b/fs/aufs/file.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -55,7 +55,6 @@ struct au_finfo {
+ 		/* dir only */
+ 		struct {
+ 			struct au_vdir		*fi_vdir_cache;
+-			int			fi_maintain_plink;
+ 		};
+ 	};
+ };
+@@ -82,6 +81,21 @@ unsigned int aufs_poll(struct file *file, poll_table *wait);
+ /* f_op.c */
+ extern const struct file_operations aufs_file_fop;
+ int aufs_flush(struct file *file, fl_owner_t id);
++int au_do_open_nondir(struct file *file, int flags);
++int aufs_release_nondir(struct inode *inode __maybe_unused, struct file *file);
++
++#ifdef CONFIG_AUFS_SP_IATTR
++/* f_op_sp.c */
++int au_special_file(umode_t mode);
++void au_init_special_fop(struct inode *inode, umode_t mode, dev_t rdev);
++#else
++AuStubInt0(au_special_file, umode_t mode)
++static inline void au_init_special_fop(struct inode *inode, umode_t mode,
++				       dev_t rdev)
++{
++	init_special_inode(inode, mode, rdev);
++}
++#endif
+ 
+ /* finfo.c */
+ void au_hfput(struct au_hfile *hf, struct file *file);
+@@ -170,7 +184,7 @@ static inline unsigned int au_figen(struct file *f)
+ 
+ static inline int au_test_mmapped(struct file *f)
+ {
+-	/* FiMustAnyLock(f); */
++	FiMustAnyLock(f);
+ 	return !!(au_fi(f)->fi_h_vm_ops);
+ }
+ 
+diff --git a/fs/aufs/finfo.c b/fs/aufs/finfo.c
+index c52d669..b15b32b 100644
+--- a/fs/aufs/finfo.c
++++ b/fs/aufs/finfo.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -25,7 +25,8 @@
+ 
+ void au_hfput(struct au_hfile *hf, struct file *file)
+ {
+-	if (file->f_flags & vfsub_fmode_to_uint(FMODE_EXEC))
++	/* todo: direct access f_flags */
++	if (vfsub_file_flags(file) & vfsub_fmode_to_uint(FMODE_EXEC))
+ 		allow_write_access(hf->hf_file);
+ 	fput(hf->hf_file);
+ 	hf->hf_file = NULL;
+@@ -42,6 +43,7 @@ void au_set_h_fptr(struct file *file, aufs_bindex_t bindex, struct file *val)
+ 	if (hf->hf_file)
+ 		au_hfput(hf, file);
+ 	if (val) {
++		FiMustWriteLock(file);
+ 		hf->hf_file = val;
+ 		hf->hf_br = au_sbr(file->f_dentry->d_sb, bindex);
+ 	}
+@@ -60,21 +62,20 @@ void au_finfo_fin(struct file *file)
+ 	struct au_finfo *finfo;
+ 	aufs_bindex_t bindex, bend;
+ 
+-	fi_write_lock(file);
+-	bend = au_fbend(file);
+-	bindex = au_fbstart(file);
+-	if (bindex >= 0)
++	finfo = au_fi(file);
++	bindex = finfo->fi_bstart;
++	if (bindex >= 0) {
+ 		/*
+ 		 * calls fput() instead of filp_close(),
+ 		 * since no dnotify or lock for the lower file.
+ 		 */
++		bend = finfo->fi_bend;
+ 		for (; bindex <= bend; bindex++)
+ 			au_set_h_fptr(file, bindex, NULL);
++	}
+ 
+-	finfo = au_fi(file);
+ 	au_dbg_verify_hf(finfo);
+ 	kfree(finfo->fi_hfile);
+-	fi_write_unlock(file);
+ 	AuRwDestroy(&finfo->fi_rwsem);
+ 	au_cache_free_finfo(finfo);
+ }
+diff --git a/fs/aufs/fstype.h b/fs/aufs/fstype.h
+index db859fa..febf77e 100644
+--- a/fs/aufs/fstype.h
++++ b/fs/aufs/fstype.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+diff --git a/fs/aufs/hinotify.c b/fs/aufs/hinotify.c
+index 43890bc..37e92ce 100644
+--- a/fs/aufs/hinotify.c
++++ b/fs/aufs/hinotify.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -750,6 +750,7 @@ int __init au_hinotify_init(void)
+ void au_hinotify_fin(void)
+ {
+ 	inotify_destroy(au_hin_handle);
++	/* cf. au_cache_fin() */
+ 	if (au_cachep[AuCache_HINOTIFY])
+ 		au_hin_destroy_cache();
+ }
+diff --git a/fs/aufs/i_op.c b/fs/aufs/i_op.c
+index 8151896..1b98274 100644
+--- a/fs/aufs/i_op.c
++++ b/fs/aufs/i_op.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -109,7 +109,7 @@ static int aufs_permission(struct inode *inode, int mask)
+ 		bindex = au_ibstart(inode);
+ 		br = au_sbr(sb, bindex);
+ 		err = h_permission(h_inode, mask, br->br_mnt, br->br_perm);
+-		if (write_mask && !err) {
++		if (write_mask && !err && !special_file(h_inode->i_mode)) {
+ 			/* test whether the upper writable branch exists */
+ 			err = -EROFS;
+ 			for (; bindex >= 0; bindex--)
+diff --git a/fs/aufs/i_op_add.c b/fs/aufs/i_op_add.c
+index 813890f..c407b7a 100644
+--- a/fs/aufs/i_op_add.c
++++ b/fs/aufs/i_op_add.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+diff --git a/fs/aufs/i_op_del.c b/fs/aufs/i_op_del.c
+index d47ddfb..c03610b 100644
+--- a/fs/aufs/i_op_del.c
++++ b/fs/aufs/i_op_del.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+diff --git a/fs/aufs/i_op_ren.c b/fs/aufs/i_op_ren.c
+index b107f93..88759b3 100644
+--- a/fs/aufs/i_op_ren.c
++++ b/fs/aufs/i_op_ren.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -238,11 +238,15 @@ static int au_ren_or_cpup(struct au_ren_args *a)
+ 		au_set_h_dptr(d, a->btgt, dget(a->dst_h_dentry));
+ 		err = au_sio_cpup_single(d, a->btgt, a->src_bstart, -1,
+ 					 !AuCpup_DTIME, a->dst_parent);
+-		if (unlikely(err)) {
++		mutex_unlock(h_mtx);
++		if (!err) {
++			d = a->dst_dentry;
++			au_set_h_dptr(d, a->btgt, NULL);
++			au_update_dbstart(d);
++		} else {
+ 			au_set_h_dptr(d, a->btgt, NULL);
+ 			au_set_dbstart(d, a->src_bstart);
+ 		}
+-		mutex_unlock(h_mtx);
+ 	}
+ 
+ 	return err;
+diff --git a/fs/aufs/iinfo.c b/fs/aufs/iinfo.c
+index 072ddfc..5a61d8c 100644
+--- a/fs/aufs/iinfo.c
++++ b/fs/aufs/iinfo.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+diff --git a/fs/aufs/inode.c b/fs/aufs/inode.c
+index 3f146a6..99ba16d 100644
+--- a/fs/aufs/inode.c
++++ b/fs/aufs/inode.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -197,7 +197,7 @@ static int set_inode(struct inode *inode, struct dentry *dentry)
+ 	case S_IFSOCK:
+ 		btail = au_dbtail(dentry);
+ 		inode->i_op = &aufs_iop;
+-		init_special_inode(inode, mode, h_inode->i_rdev);
++		au_init_special_fop(inode, mode, h_inode->i_rdev);
+ 		break;
+ 	default:
+ 		AuIOErr("Unknown file type 0%o\n", mode);
+@@ -337,13 +337,14 @@ struct inode *au_new_inode(struct dentry *dentry, int must_new)
+ 	if (inode->i_state & I_NEW) {
+ 		ii_write_lock_new_child(inode);
+ 		err = set_inode(inode, dentry);
+-		unlock_new_inode(inode);
+-		if (!err)
++		if (!err) {
++			unlock_new_inode(inode);
+ 			goto out; /* success */
++		}
+ 
+-		iget_failed(inode);
+ 		ii_write_unlock(inode);
+-		goto out_iput;
++		iget_failed(inode);
++		goto out_err;
+ 	} else if (!must_new) {
+ 		err = reval_inode(inode, dentry, &match);
+ 		if (!err)
+@@ -366,6 +367,7 @@ struct inode *au_new_inode(struct dentry *dentry, int must_new)
+ 
+  out_iput:
+ 	iput(inode);
++ out_err:
+ 	inode = ERR_PTR(err);
+  out:
+ 	return inode;
+diff --git a/fs/aufs/inode.h b/fs/aufs/inode.h
+index 1c5559b..086791c 100644
+--- a/fs/aufs/inode.h
++++ b/fs/aufs/inode.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -203,14 +203,12 @@ void au_iinfo_fin(struct inode *inode);
+ int au_ii_realloc(struct au_iinfo *iinfo, int nbr);
+ 
+ /* plink.c */
+-void au_plink_block_maintain(struct super_block *sb);
++void au_plink_maint_block(struct super_block *sb);
++void au_plink_maint_leave(struct file *file);
+ #ifdef CONFIG_AUFS_DEBUG
+ void au_plink_list(struct super_block *sb);
+ #else
+-static inline void au_plink_list(struct super_block *sb)
+-{
+-	/* nothing */
+-}
++AuStubVoid(au_plink_list, struct super_block *sb)
+ #endif
+ int au_plink_test(struct inode *inode);
+ struct dentry *au_plink_lkup(struct inode *inode, aufs_bindex_t bindex);
+@@ -432,36 +430,15 @@ int au_hin_alloc(struct au_hinode *hinode __maybe_unused,
+ 	return -EOPNOTSUPP;
+ }
+ 
+-static inline void au_hin_free(struct au_hinode *hinode __maybe_unused)
+-{
+-	/* nothing */
+-}
+-
+-static inline void au_hin_ctl(struct au_hinode *hinode __maybe_unused,
+-			      int do_set __maybe_unused)
+-{
+-	/* nothing */
+-}
+-
+-static inline void au_reset_hinotify(struct inode *inode __maybe_unused,
+-				     unsigned int flags __maybe_unused)
+-{
+-	/* nothing */
+-}
+-
+-static inline int au_hinotify_init(void)
+-{
+-	return 0;
+-}
+-
+-#define au_hinotify_fin()	do {} while (0)
+-
+-static inline
+-void au_hin_init(struct au_hinode *hinode __maybe_unused,
+-		 struct au_hinotify *val __maybe_unused)
+-{
+-	/* empty */
+-}
++AuStubVoid(au_hin_free, struct au_hinode *hinode __maybe_unused)
++AuStubVoid(au_hin_ctl, struct au_hinode *hinode __maybe_unused,
++	   int do_set __maybe_unused)
++AuStubVoid(au_reset_hinotify, struct inode *inode __maybe_unused,
++	   unsigned int flags __maybe_unused)
++AuStubInt0(__init au_hinotify_init, void)
++AuStubVoid(au_hinotify_fin, void)
++AuStubVoid(au_hin_init, struct au_hinode *hinode __maybe_unused,
++	   struct au_hinotify *val __maybe_unused)
+ #endif /* CONFIG_AUFS_HINOTIFY */
+ 
+ static inline void au_hin_suspend(struct au_hinode *hdir)
+diff --git a/fs/aufs/ioctl.c b/fs/aufs/ioctl.c
+index 6f8bad8..bfff168 100644
+--- a/fs/aufs/ioctl.c
++++ b/fs/aufs/ioctl.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -100,6 +100,7 @@ long aufs_ioctl_dir(struct file *file, unsigned int cmd, unsigned long arg)
+ 		break;
+ 
+ 	default:
++		AuDbg("0x%x\n", cmd);
+ 		err = -EINVAL;
+ 	}
+ 
+@@ -117,6 +118,7 @@ long aufs_ioctl_nondir(struct file *file, unsigned int cmd, unsigned long arg)
+ 		break;
+ 
+ 	default:
++		AuDbg("0x%x\n", cmd);
+ 		err = -EINVAL;
+ 	}
+ 
+diff --git a/fs/aufs/loop.c b/fs/aufs/loop.c
+index 277011f..5fceec7 100644
+--- a/fs/aufs/loop.c
++++ b/fs/aufs/loop.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+diff --git a/fs/aufs/loop.h b/fs/aufs/loop.h
+index 5a0fd87..e655b4f 100644
+--- a/fs/aufs/loop.h
++++ b/fs/aufs/loop.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -34,17 +34,9 @@ int au_test_loopback_overlap(struct super_block *sb, struct dentry *h_d1,
+ 			     struct dentry *h_d2);
+ int au_test_loopback_kthread(void);
+ #else
+-static inline
+-int au_test_loopback_overlap(struct super_block *sb, struct dentry *h_d1,
+-			     struct dentry *h_d2)
+-{
+-	return 0;
+-}
+-
+-static inline int au_test_loopback_kthread(void)
+-{
+-	return 0;
+-}
++AuStubInt0(au_test_loopback_overlap, struct super_block *sb,
++	   struct dentry *h_d1, struct dentry *h_d2)
++AuStubInt0(au_test_loopback_kthread, void)
+ #endif /* BLK_DEV_LOOP */
+ 
+ #endif /* __KERNEL__ */
+diff --git a/fs/aufs/module.c b/fs/aufs/module.c
+index 5b3531f..bfaa7e6 100644
+--- a/fs/aufs/module.c
++++ b/fs/aufs/module.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -61,6 +61,8 @@ static int __init au_cache_init(void)
+ static void au_cache_fin(void)
+ {
+ 	int i;
++
++	/* including AuCache_HINOTIFY */
+ 	for (i = 0; i < AuCache_Last; i++)
+ 		if (au_cachep[i]) {
+ 			kmem_cache_destroy(au_cachep[i]);
+@@ -82,11 +84,6 @@ MODULE_DESCRIPTION(AUFS_NAME
+ MODULE_VERSION(AUFS_VERSION);
+ MODULE_INFO(staging, "Y");
+ 
+-/* it should be 'byte', but param_set_byte() prints it by "%c" */
+-short aufs_nwkq = AUFS_NWKQ_DEF;
+-MODULE_PARM_DESC(nwkq, "the number of workqueue thread, " AUFS_WKQ_NAME);
+-module_param_named(nwkq, aufs_nwkq, short, S_IRUGO);
+-
+ /* this module parameter has no meaning when SYSFS is disabled */
+ int sysaufs_brs = 1;
+ MODULE_PARM_DESC(brs, "use <sysfs>/fs/aufs/si_*/brN");
+@@ -119,11 +116,6 @@ static int __init aufs_init(void)
+ 
+ 	sysaufs_brs_init();
+ 	au_debug_init();
+-
+-	err = -EINVAL;
+-	if (unlikely(aufs_nwkq <= 0))
+-		goto out;
+-
+ 	err = sysaufs_init();
+ 	if (unlikely(err))
+ 		goto out;
+diff --git a/fs/aufs/module.h b/fs/aufs/module.h
+index cea7bc7..267ab16 100644
+--- a/fs/aufs/module.h
++++ b/fs/aufs/module.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -31,7 +31,6 @@ struct path;
+ struct seq_file;
+ 
+ /* module parameters */
+-extern short aufs_nwkq;
+ extern int sysaufs_brs;
+ 
+ /* ---------------------------------------------------------------------- */
+@@ -56,21 +55,21 @@ enum {
+ 	AuCache_Last
+ };
+ 
+-#define AuCache(type)	KMEM_CACHE(type, SLAB_RECLAIM_ACCOUNT)
++#define AuCache(type)	KMEM_CACHE(type, SLAB_RECLAIM_ACCOUNT | SLAB_MEM_SPREAD)
+ 
+ extern struct kmem_cache *au_cachep[];
+ 
+ #define AuCacheFuncs(name, index) \
+-static inline void *au_cache_alloc_##name(void) \
++static inline struct au_##name *au_cache_alloc_##name(void) \
+ { return kmem_cache_alloc(au_cachep[AuCache_##index], GFP_NOFS); } \
+-static inline void au_cache_free_##name(void *p) \
++static inline void au_cache_free_##name(struct au_##name *p) \
+ { kmem_cache_free(au_cachep[AuCache_##index], p); }
+ 
+ AuCacheFuncs(dinfo, DINFO);
+ AuCacheFuncs(icntnr, ICNTNR);
+ AuCacheFuncs(finfo, FINFO);
+ AuCacheFuncs(vdir, VDIR);
+-AuCacheFuncs(dehstr, DEHSTR);
++AuCacheFuncs(vdir_dehstr, DEHSTR);
+ 
+ /*  ---------------------------------------------------------------------- */
+ 
+diff --git a/fs/aufs/opts.c b/fs/aufs/opts.c
+index 4d9b60f..a4b330d 100644
+--- a/fs/aufs/opts.c
++++ b/fs/aufs/opts.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+diff --git a/fs/aufs/opts.h b/fs/aufs/opts.h
+index 27439b1..83a00ef 100644
+--- a/fs/aufs/opts.h
++++ b/fs/aufs/opts.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+diff --git a/fs/aufs/plink.c b/fs/aufs/plink.c
+index 074f143..cd5b258 100644
+--- a/fs/aufs/plink.c
++++ b/fs/aufs/plink.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -26,14 +26,53 @@
+  * during a user process maintains the pseudo-links,
+  * prohibit adding a new plink and branch manipulation.
+  */
+-void au_plink_block_maintain(struct super_block *sb)
++void au_plink_maint_block(struct super_block *sb)
+ {
+ 	struct au_sbinfo *sbi = au_sbi(sb);
+ 
+ 	SiMustAnyLock(sb);
+ 
+ 	/* gave up wake_up_bit() */
+-	wait_event(sbi->si_plink_wq, !au_ftest_si(sbi, MAINTAIN_PLINK));
++	wait_event(sbi->si_plink_wq, !sbi->si_plink_maint);
++}
++
++void au_plink_maint_leave(struct file *file)
++{
++	struct au_sbinfo *sbinfo;
++	int iam;
++
++	AuDebugOn(atomic_long_read(&file->f_count));
++
++	sbinfo = au_sbi(file->f_dentry->d_sb);
++	spin_lock(&sbinfo->si_plink_maint_lock);
++	iam = (sbinfo->si_plink_maint == file);
++	if (iam)
++		sbinfo->si_plink_maint = NULL;
++	spin_unlock(&sbinfo->si_plink_maint_lock);
++	if (iam)
++		wake_up_all(&sbinfo->si_plink_wq);
++}
++
++static int au_plink_maint_enter(struct file *file)
++{
++	int err;
++	struct super_block *sb;
++	struct au_sbinfo *sbinfo;
++
++	err = 0;
++	sb = file->f_dentry->d_sb;
++	sbinfo = au_sbi(sb);
++	/* make sure i am the only one in this fs */
++	si_write_lock(sb);
++	/* spin_lock(&sbinfo->si_plink_maint_lock); */
++	if (!sbinfo->si_plink_maint)
++		sbinfo->si_plink_maint = file;
++	else
++		err = -EBUSY;
++	/* spin_unlock(&sbinfo->si_plink_maint_lock); */
++	si_write_unlock(sb);
++
++	return err;
+ }
+ 
+ /* ---------------------------------------------------------------------- */
+@@ -272,7 +311,7 @@ void au_plink_append(struct inode *inode, aufs_bindex_t bindex,
+ 	spin_unlock(&sbinfo->si_plink.spin);
+ 
+ 	if (!err) {
+-		au_plink_block_maintain(sb);
++		au_plink_maint_block(sb);
+ 		err = whplink(h_dentry, inode, bindex, au_sbr(sb, bindex));
+ 	}
+ 
+@@ -374,13 +413,7 @@ long au_plink_ioctl(struct file *file, unsigned int cmd)
+ 		 * pseudo-link maintenance mode,
+ 		 * cleared by aufs_release_dir()
+ 		 */
+-		si_write_lock(sb);
+-		if (!au_ftest_si(sbinfo, MAINTAIN_PLINK)) {
+-			au_fset_si(sbinfo, MAINTAIN_PLINK);
+-			au_fi(file)->fi_maintain_plink = 1;
+-		} else
+-			err = -EBUSY;
+-		si_write_unlock(sb);
++		err = au_plink_maint_enter(file);
+ 		break;
+ 	case AUFS_CTL_PLINK_CLEAN:
+ 		aufs_write_lock(sb->s_root);
+diff --git a/fs/aufs/poll.c b/fs/aufs/poll.c
+index 1a1ddae..49dc0aa 100644
+--- a/fs/aufs/poll.c
++++ b/fs/aufs/poll.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+diff --git a/fs/aufs/rdu.c b/fs/aufs/rdu.c
+index c38f280..4b8a11b 100644
+--- a/fs/aufs/rdu.c
++++ b/fs/aufs/rdu.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+diff --git a/fs/aufs/rwsem.h b/fs/aufs/rwsem.h
+index dfd2c68..d608e24 100644
+--- a/fs/aufs/rwsem.h
++++ b/fs/aufs/rwsem.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+diff --git a/fs/aufs/sbinfo.c b/fs/aufs/sbinfo.c
+index f0650e5..89b2b6a 100644
+--- a/fs/aufs/sbinfo.c
++++ b/fs/aufs/sbinfo.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -32,6 +32,7 @@ void au_si_free(struct kobject *kobj)
+ 
+ 	sbinfo = container_of(kobj, struct au_sbinfo, si_kobj);
+ 	AuDebugOn(!list_empty(&sbinfo->si_plink.head));
++	AuDebugOn(sbinfo->si_plink_maint);
+ 
+ 	sb = sbinfo->si_sb;
+ 	si_write_lock(sb);
+@@ -51,7 +52,7 @@ int au_si_alloc(struct super_block *sb)
+ 	struct au_sbinfo *sbinfo;
+ 
+ 	err = -ENOMEM;
+-	sbinfo = kmalloc(sizeof(*sbinfo), GFP_NOFS);
++	sbinfo = kzalloc(sizeof(*sbinfo), GFP_NOFS);
+ 	if (unlikely(!sbinfo))
+ 		goto out;
+ 
+@@ -60,30 +61,22 @@ int au_si_alloc(struct super_block *sb)
+ 	if (unlikely(!sbinfo->si_branch))
+ 		goto out_sbinfo;
+ 
+-	memset(&sbinfo->si_kobj, 0, sizeof(sbinfo->si_kobj));
+ 	err = sysaufs_si_init(sbinfo);
+ 	if (unlikely(err))
+ 		goto out_br;
+ 
+ 	au_nwt_init(&sbinfo->si_nowait);
+ 	au_rw_init_wlock(&sbinfo->si_rwsem);
+-	sbinfo->si_generation = 0;
+-	sbinfo->au_si_status = 0;
+ 	sbinfo->si_bend = -1;
+-	sbinfo->si_last_br_id = 0;
+ 
+ 	sbinfo->si_wbr_copyup = AuWbrCopyup_Def;
+ 	sbinfo->si_wbr_create = AuWbrCreate_Def;
+-	sbinfo->si_wbr_copyup_ops = au_wbr_copyup_ops + AuWbrCopyup_Def;
+-	sbinfo->si_wbr_create_ops = au_wbr_create_ops + AuWbrCreate_Def;
++	sbinfo->si_wbr_copyup_ops = au_wbr_copyup_ops + sbinfo->si_wbr_copyup;
++	sbinfo->si_wbr_create_ops = au_wbr_create_ops + sbinfo->si_wbr_create;
+ 
+ 	sbinfo->si_mntflags = AuOpt_Def;
+ 
+-	sbinfo->si_xread = NULL;
+-	sbinfo->si_xwrite = NULL;
+-	sbinfo->si_xib = NULL;
+ 	mutex_init(&sbinfo->si_xib_mtx);
+-	sbinfo->si_xib_buf = NULL;
+ 	sbinfo->si_xino_brid = -1;
+ 	/* leave si_xib_last_pindex and si_xib_next_bit */
+ 
+@@ -94,6 +87,7 @@ int au_si_alloc(struct super_block *sb)
+ 
+ 	au_spl_init(&sbinfo->si_plink);
+ 	init_waitqueue_head(&sbinfo->si_plink_wq);
++	spin_lock_init(&sbinfo->si_plink_maint_lock);
+ 
+ 	/* leave other members for sysaufs and si_mnt. */
+ 	sbinfo->si_sb = sb;
+diff --git a/fs/aufs/spl.h b/fs/aufs/spl.h
+index bcbbd9a..261edc4 100644
+--- a/fs/aufs/spl.h
++++ b/fs/aufs/spl.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+diff --git a/fs/aufs/super.c b/fs/aufs/super.c
+index 10d30f2..f2d1ead 100644
+--- a/fs/aufs/super.c
++++ b/fs/aufs/super.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -266,9 +266,9 @@ static int aufs_show_options(struct seq_file *m, struct vfsmount *mnt)
+ 	si_read_unlock(sb);
+ 	return 0;
+ 
+-#undef Deleted
+ #undef AuBool
+ #undef AuStr
++#undef AuUInt
+ }
+ 
+ /* ---------------------------------------------------------------------- */
+@@ -814,20 +814,14 @@ static int aufs_fill_super(struct super_block *sb, void *raw_data,
+ 
+ 	/* lock vfs_inode first, then aufs. */
+ 	mutex_lock(&inode->i_mutex);
+-	inode->i_op = &aufs_dir_iop;
+-	inode->i_fop = &aufs_dir_fop;
+ 	aufs_write_lock(root);
+ 	err = au_opts_mount(sb, &opts);
+ 	au_opts_free(&opts);
+-	if (unlikely(err))
+-		goto out_unlock;
+ 	aufs_write_unlock(root);
+ 	mutex_unlock(&inode->i_mutex);
+-	goto out_opts; /* success */
++	if (!err)
++		goto out_opts; /* success */
+ 
+- out_unlock:
+-	aufs_write_unlock(root);
+-	mutex_unlock(&inode->i_mutex);
+  out_root:
+ 	dput(root);
+ 	sb->s_root = NULL;
+diff --git a/fs/aufs/super.h b/fs/aufs/super.h
+index 63d3ad1..cd6fdc4 100644
+--- a/fs/aufs/super.h
++++ b/fs/aufs/super.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -129,6 +129,8 @@ struct au_sbinfo {
+ 	/* pseudo_link list */
+ 	struct au_splhead	si_plink;
+ 	wait_queue_head_t	si_plink_wq;
++	spinlock_t		si_plink_maint_lock;
++	struct file		*si_plink_maint;
+ 
+ 	/*
+ 	 * sysfs and lifetime management.
+@@ -155,7 +157,6 @@ struct au_sbinfo {
+  * if it is false, refreshing dirs at access time is unnecesary
+  */
+ #define AuSi_FAILED_REFRESH_DIRS	1
+-#define AuSi_MAINTAIN_PLINK		(1 << 1)	/* ioctl */
+ static inline unsigned char au_do_ftest_si(struct au_sbinfo *sbi,
+ 					   unsigned int flag)
+ {
+@@ -245,36 +246,12 @@ static inline int au_busy_or_stale(void)
+ 	return -ESTALE;
+ }
+ #else
+-static inline void au_export_init(struct super_block *sb)
+-{
+-	/* nothing */
+-}
+-
+-static inline int au_test_nfsd(struct task_struct *tsk)
+-{
+-	return 0;
+-}
+-
+-static inline int au_xigen_inc(struct inode *inode)
+-{
+-	return 0;
+-}
+-
+-static inline int au_xigen_new(struct inode *inode)
+-{
+-	return 0;
+-}
+-
+-static inline int au_xigen_set(struct super_block *sb, struct file *base)
+-{
+-	return 0;
+-}
+-
+-static inline void au_xigen_clr(struct super_block *sb)
+-{
+-	/* empty */
+-}
+-
++AuStubVoid(au_export_init, struct super_block *sb)
++AuStubInt0(au_test_nfsd, struct task_struct *tsk)
++AuStubInt0(au_xigen_inc, struct inode *inode)
++AuStubInt0(au_xigen_new, struct inode *inode)
++AuStubInt0(au_xigen_set, struct super_block *sb, struct file *base)
++AuStubVoid(au_xigen_clr, struct super_block *sb)
+ static inline int au_busy_or_stale(void)
+ {
+ 	return -EBUSY;
+diff --git a/fs/aufs/sysaufs.c b/fs/aufs/sysaufs.c
+index b796330..919e1b0 100644
+--- a/fs/aufs/sysaufs.c
++++ b/fs/aufs/sysaufs.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+diff --git a/fs/aufs/sysaufs.h b/fs/aufs/sysaufs.h
+index 379033a..6796934 100644
+--- a/fs/aufs/sysaufs.h
++++ b/fs/aufs/sysaufs.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -81,11 +81,7 @@ void sysaufs_brs_del(struct super_block *sb, aufs_bindex_t bindex);
+ #else
+ #define sysaufs_attr_group	NULL
+ 
+-static inline
+-int sysaufs_si_xi_path(struct seq_file *seq, struct super_block *sb)
+-{
+-	return 0;
+-}
++AuStubInt0(sysaufs_si_xi_path, struct seq_file *seq, struct super_block *sb)
+ 
+ static inline
+ ssize_t sysaufs_si_show(struct kobject *kobj, struct attribute *attr,
+@@ -94,20 +90,9 @@ ssize_t sysaufs_si_show(struct kobject *kobj, struct attribute *attr,
+ 	return 0;
+ }
+ 
+-static inline void sysaufs_br_init(struct au_branch *br)
+-{
+-	/* empty */
+-}
+-
+-static inline void sysaufs_brs_add(struct super_block *sb, aufs_bindex_t bindex)
+-{
+-	/* nothing */
+-}
+-
+-static inline void sysaufs_brs_del(struct super_block *sb, aufs_bindex_t bindex)
+-{
+-	/* nothing */
+-}
++AuStubVoid(sysaufs_br_init, struct au_branch *br)
++AuStubVoid(sysaufs_brs_add, struct super_block *sb, aufs_bindex_t bindex)
++AuStubVoid(sysaufs_brs_del, struct super_block *sb, aufs_bindex_t bindex)
+ 
+ static inline void sysaufs_brs_init(void)
+ {
+diff --git a/fs/aufs/sysfs.c b/fs/aufs/sysfs.c
+index 956bbb9..6340cf9 100644
+--- a/fs/aufs/sysfs.c
++++ b/fs/aufs/sysfs.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+diff --git a/fs/aufs/sysrq.c b/fs/aufs/sysrq.c
+index 3db9d84..b2f09f7 100644
+--- a/fs/aufs/sysrq.c
++++ b/fs/aufs/sysrq.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -55,9 +55,12 @@ static void sysrq_sb(struct super_block *sb)
+ 			au_dpri_inode(i);
+ #endif
+ 	printk(KERN_WARNING AUFS_NAME ": files\n");
+-	list_for_each_entry(file, &sb->s_files, f_u.fu_list)
+-		if (!special_file(file->f_dentry->d_inode->i_mode))
++	list_for_each_entry(file, &sb->s_files, f_u.fu_list) {
++		umode_t mode;
++		mode = file->f_dentry->d_inode->i_mode;
++		if (!special_file(mode) || au_special_file(mode))
+ 			au_dpri_file(file);
++	}
+ 
+ 	au_plevel = plevel;
+ 	au_debug(0);
+diff --git a/fs/aufs/vdir.c b/fs/aufs/vdir.c
+index 361de5e..36435c9 100644
+--- a/fs/aufs/vdir.c
++++ b/fs/aufs/vdir.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -122,7 +122,7 @@ static void au_nhash_de_do_free(struct hlist_head *head)
+ 
+ 	hlist_for_each_entry_safe(tpos, pos, node, head, hash) {
+ 		/* hlist_del(pos); */
+-		au_cache_free_dehstr(tpos);
++		au_cache_free_vdir_dehstr(tpos);
+ 	}
+ }
+ 
+@@ -332,7 +332,7 @@ static int append_de(struct au_vdir *vdir, char *name, int nlen, ino_t ino,
+ 	}
+ 
+ 	err = -ENOMEM;
+-	dehstr = au_cache_alloc_dehstr();
++	dehstr = au_cache_alloc_vdir_dehstr();
+ 	if (unlikely(!dehstr))
+ 		goto out;
+ 
+diff --git a/fs/aufs/vfsub.c b/fs/aufs/vfsub.c
+index 34c0d95..921e855 100644
+--- a/fs/aufs/vfsub.c
++++ b/fs/aufs/vfsub.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -49,12 +49,12 @@ int vfsub_update_h_iattr(struct path *h_path, int *did)
+ 
+ /* ---------------------------------------------------------------------- */
+ 
+-struct file *vfsub_dentry_open(struct path *path, int flags,
+-			       const struct cred *cred)
++struct file *vfsub_dentry_open(struct path *path, int flags)
+ {
+ 	struct file *file;
+ 
+-	file = dentry_open(path->dentry, path->mnt, flags, cred);
++	path_get(path);
++	file = dentry_open(path->dentry, path->mnt, flags, current_cred());
+ 	if (IS_ERR(file))
+ 		return file;
+ 	/* as NFSD does, just call ima_..._get() simply after dentry_open */
+@@ -119,9 +119,12 @@ struct dentry *vfsub_lookup_hash(struct nameidata *nd)
+ 	IMustLock(nd->path.dentry->d_inode);
+ 
+ 	path.dentry = lookup_hash(nd);
+-	if (!IS_ERR(path.dentry) && path.dentry->d_inode)
++	if (IS_ERR(path.dentry))
++		goto out;
++	if (path.dentry->d_inode)
+ 		vfsub_update_h_iattr(&path, /*did*/NULL); /*ignore*/
+ 
++ out:
+ 	AuTraceErrPtr(path.dentry);
+ 	return path.dentry;
+ }
+diff --git a/fs/aufs/vfsub.h b/fs/aufs/vfsub.h
+index 63d21d3..ddd62fc 100644
+--- a/fs/aufs/vfsub.h
++++ b/fs/aufs/vfsub.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -59,8 +59,7 @@ static inline void vfsub_copy_inode_size(struct inode *inode,
+ 
+ int vfsub_update_h_iattr(struct path *h_path, int *did);
+ struct file *vfsub_filp_open(const char *path, int oflags, int mode);
+-struct file *vfsub_dentry_open(struct path *path, int flags,
+-			       const struct cred *cred);
++struct file *vfsub_dentry_open(struct path *path, int flags);
+ int vfsub_kern_path(const char *name, unsigned int flags, struct path *path);
+ struct dentry *vfsub_lookup_one_len(const char *name, struct dentry *parent,
+ 				    int len);
+@@ -85,12 +84,6 @@ int vfsub_rename(struct inode *src_hdir, struct dentry *src_dentry,
+ int vfsub_mkdir(struct inode *dir, struct path *path, int mode);
+ int vfsub_rmdir(struct inode *dir, struct path *path);
+ 
+-int vfsub_sio_mkdir(struct inode *dir, struct path *path, int mode);
+-int vfsub_sio_rmdir(struct inode *dir, struct path *path);
+-int vfsub_sio_notify_change(struct path *path, struct iattr *ia);
+-int vfsub_notify_change(struct path *path, struct iattr *ia);
+-int vfsub_unlink(struct inode *dir, struct path *path, int force);
+-
+ /* ---------------------------------------------------------------------- */
+ 
+ ssize_t vfsub_read_u(struct file *file, char __user *ubuf, size_t count,
+@@ -103,13 +96,16 @@ ssize_t vfsub_write_k(struct file *file, void *kbuf, size_t count,
+ 		      loff_t *ppos);
+ int vfsub_readdir(struct file *file, filldir_t filldir, void *arg);
+ 
+-long vfsub_splice_to(struct file *in, loff_t *ppos,
+-		     struct pipe_inode_info *pipe, size_t len,
+-		     unsigned int flags);
+-long vfsub_splice_from(struct pipe_inode_info *pipe, struct file *out,
+-		       loff_t *ppos, size_t len, unsigned int flags);
+-int vfsub_trunc(struct path *h_path, loff_t length, unsigned int attr,
+-		struct file *h_file);
++static inline unsigned int vfsub_file_flags(struct file *file)
++{
++	unsigned int flags;
++
++	spin_lock(&file->f_lock);
++	flags = file->f_flags;
++	spin_unlock(&file->f_lock);
++
++	return flags;
++}
+ 
+ static inline void vfsub_file_accessed(struct file *h_file)
+ {
+@@ -128,6 +124,14 @@ static inline void vfsub_touch_atime(struct vfsmount *h_mnt,
+ 	vfsub_update_h_iattr(&h_path, /*did*/NULL); /*ignore*/
+ }
+ 
++long vfsub_splice_to(struct file *in, loff_t *ppos,
++		     struct pipe_inode_info *pipe, size_t len,
++		     unsigned int flags);
++long vfsub_splice_from(struct pipe_inode_info *pipe, struct file *out,
++		       loff_t *ppos, size_t len, unsigned int flags);
++int vfsub_trunc(struct path *h_path, loff_t length, unsigned int attr,
++		struct file *h_file);
++
+ /* ---------------------------------------------------------------------- */
+ 
+ static inline loff_t vfsub_llseek(struct file *file, loff_t offset, int origin)
+@@ -168,5 +172,13 @@ static inline fmode_t vfsub_uint_to_fmode(unsigned int ui)
+ 	return u.fm;
+ }
+ 
++/* ---------------------------------------------------------------------- */
++
++int vfsub_sio_mkdir(struct inode *dir, struct path *path, int mode);
++int vfsub_sio_rmdir(struct inode *dir, struct path *path);
++int vfsub_sio_notify_change(struct path *path, struct iattr *ia);
++int vfsub_notify_change(struct path *path, struct iattr *ia);
++int vfsub_unlink(struct inode *dir, struct path *path, int force);
++
+ #endif /* __KERNEL__ */
+ #endif /* __AUFS_VFSUB_H__ */
+diff --git a/fs/aufs/wbr_policy.c b/fs/aufs/wbr_policy.c
+index 05a8c1e..1e888d3 100644
+--- a/fs/aufs/wbr_policy.c
++++ b/fs/aufs/wbr_policy.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -109,8 +109,7 @@ static int au_cpdown_dir(struct dentry *dentry, aufs_bindex_t bdst,
+ 			 struct dentry *h_parent, void *arg)
+ {
+ 	int err, rerr;
+-	aufs_bindex_t bend, bopq, bstart;
+-	unsigned char parent_opq;
++	aufs_bindex_t bopq, bstart;
+ 	struct path h_path;
+ 	struct dentry *parent;
+ 	struct inode *h_dir, *h_inode, *inode, *dir;
+@@ -135,7 +134,6 @@ static int au_cpdown_dir(struct dentry *dentry, aufs_bindex_t bdst,
+ 		goto out_put;
+ 	au_fset_cpdown(args->flags, MADE_DIR);
+ 
+-	bend = au_dbend(dentry);
+ 	bopq = au_dbdiropq(dentry);
+ 	au_fclr_cpdown(args->flags, WHED);
+ 	au_fclr_cpdown(args->flags, DIROPQ);
+@@ -143,8 +141,6 @@ static int au_cpdown_dir(struct dentry *dentry, aufs_bindex_t bdst,
+ 		au_fset_cpdown(args->flags, WHED);
+ 	if (!au_ftest_cpdown(args->flags, PARENT_OPQ) && bopq <= bdst)
+ 		au_fset_cpdown(args->flags, PARENT_OPQ);
+-	parent_opq = (au_ftest_cpdown(args->flags, PARENT_OPQ)
+-		      && args->parent == dentry);
+ 	h_inode = h_path.dentry->d_inode;
+ 	mutex_lock_nested(&h_inode->i_mutex, AuLsc_I_CHILD);
+ 	if (au_ftest_cpdown(args->flags, WHED)) {
+diff --git a/fs/aufs/whout.c b/fs/aufs/whout.c
+index 674ab35..eedec93 100644
+--- a/fs/aufs/whout.c
++++ b/fs/aufs/whout.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -72,9 +72,7 @@ int au_wh_test(struct dentry *h_parent, struct qstr *wh_name,
+ {
+ 	int err;
+ 	struct dentry *wh_dentry;
+-	struct inode *h_dir;
+ 
+-	h_dir = h_parent->d_inode;
+ 	if (!try_sio)
+ 		wh_dentry = au_lkup_one(wh_name, h_parent, br, /*nd*/NULL);
+ 	else
+@@ -481,7 +479,6 @@ int au_wh_init(struct dentry *h_root, struct au_branch *br,
+ 	if (wbr)
+ 		WbrWhMustWriteLock(wbr);
+ 
+-	h_dir = h_root->d_inode;
+ 	for (i = 0; i < AuBrWh_Last; i++) {
+ 		/* doubly whiteouted */
+ 		struct dentry *d;
+@@ -504,12 +501,12 @@ int au_wh_init(struct dentry *h_root, struct au_branch *br,
+ 		}
+ 
+ 	err = 0;
+-
+ 	switch (br->br_perm) {
+ 	case AuBrPerm_RO:
+ 	case AuBrPerm_ROWH:
+ 	case AuBrPerm_RR:
+ 	case AuBrPerm_RRWH:
++		h_dir = h_root->d_inode;
+ 		au_wh_init_ro(h_dir, base, &path);
+ 		break;
+ 
+diff --git a/fs/aufs/whout.h b/fs/aufs/whout.h
+index 40c6926..a59158b 100644
+--- a/fs/aufs/whout.h
++++ b/fs/aufs/whout.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+diff --git a/fs/aufs/wkq.c b/fs/aufs/wkq.c
+index 89656e9..307b1c4 100644
+--- a/fs/aufs/wkq.c
++++ b/fs/aufs/wkq.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -25,12 +25,7 @@
+ #include "aufs.h"
+ 
+ /* internal workqueue named AUFS_WKQ_NAME */
+-static struct au_wkq {
+-	struct workqueue_struct	*q;
+-
+-	/* balancing */
+-	atomic_t		busy;
+-} *au_wkq;
++static struct workqueue_struct *au_wkq;
+ 
+ struct au_wkinfo {
+ 	struct work_struct wk;
+@@ -41,60 +36,16 @@ struct au_wkinfo {
+ 	au_wkq_func_t func;
+ 	void *args;
+ 
+-	atomic_t *busyp;
+ 	struct completion *comp;
+ };
+ 
+ /* ---------------------------------------------------------------------- */
+ 
+-static int enqueue(struct au_wkq *wkq, struct au_wkinfo *wkinfo)
+-{
+-	wkinfo->busyp = &wkq->busy;
+-	if (au_ftest_wkq(wkinfo->flags, WAIT))
+-		return !queue_work(wkq->q, &wkinfo->wk);
+-	else
+-		return !schedule_work(&wkinfo->wk);
+-}
+-
+-static void do_wkq(struct au_wkinfo *wkinfo)
+-{
+-	unsigned int idle, n;
+-	int i, idle_idx;
+-
+-	while (1) {
+-		if (au_ftest_wkq(wkinfo->flags, WAIT)) {
+-			idle_idx = 0;
+-			idle = UINT_MAX;
+-			for (i = 0; i < aufs_nwkq; i++) {
+-				n = atomic_inc_return(&au_wkq[i].busy);
+-				if (n == 1 && !enqueue(au_wkq + i, wkinfo))
+-					return; /* success */
+-
+-				if (n < idle) {
+-					idle_idx = i;
+-					idle = n;
+-				}
+-				atomic_dec(&au_wkq[i].busy);
+-			}
+-		} else
+-			idle_idx = aufs_nwkq;
+-
+-		atomic_inc(&au_wkq[idle_idx].busy);
+-		if (!enqueue(au_wkq + idle_idx, wkinfo))
+-			return; /* success */
+-
+-		/* impossible? */
+-		AuWarn1("failed to queue_work()\n");
+-		yield();
+-	}
+-}
+-
+ static void wkq_func(struct work_struct *wk)
+ {
+ 	struct au_wkinfo *wkinfo = container_of(wk, struct au_wkinfo, wk);
+ 
+ 	wkinfo->func(wkinfo->args);
+-	atomic_dec_return(wkinfo->busyp);
+ 	if (au_ftest_wkq(wkinfo->flags, WAIT))
+ 		complete(wkinfo->comp);
+ 	else {
+@@ -145,11 +96,14 @@ static void au_wkq_comp_free(struct completion *comp __maybe_unused)
+ }
+ #endif /* 4KSTACKS */
+ 
+-static void au_wkq_run(struct au_wkinfo *wkinfo)
++static void au_wkq_run(struct au_wkinfo *wkinfo, int do_wait)
+ {
+ 	au_dbg_verify_kthread();
+ 	INIT_WORK(&wkinfo->wk, wkq_func);
+-	do_wkq(wkinfo);
++	if (do_wait)
++		queue_work(au_wkq, &wkinfo->wk);
++	else
++		schedule_work(&wkinfo->wk);
+ }
+ 
+ int au_wkq_wait(au_wkq_func_t func, void *args)
+@@ -164,7 +118,7 @@ int au_wkq_wait(au_wkq_func_t func, void *args)
+ 
+ 	err = au_wkq_comp_alloc(&wkinfo, &comp);
+ 	if (!err) {
+-		au_wkq_run(&wkinfo);
++		au_wkq_run(&wkinfo, AuWkq_WAIT);
+ 		/* no timeout, no interrupt */
+ 		wait_for_completion(wkinfo.comp);
+ 		au_wkq_comp_free(comp);
+@@ -196,7 +150,7 @@ int au_wkq_nowait(au_wkq_func_t func, void *args, struct super_block *sb)
+ 		kobject_get(&au_sbi(sb)->si_kobj);
+ 		__module_get(THIS_MODULE);
+ 
+-		au_wkq_run(wkinfo);
++		au_wkq_run(wkinfo, !AuWkq_WAIT);
+ 	} else {
+ 		err = -ENOMEM;
+ 		atomic_dec(&au_sbi(sb)->si_nowait.nw_len);
+@@ -210,50 +164,17 @@ int au_wkq_nowait(au_wkq_func_t func, void *args, struct super_block *sb)
+ void au_nwt_init(struct au_nowait_tasks *nwt)
+ {
+ 	atomic_set(&nwt->nw_len, 0);
+-	/* smp_mb();*/ /* atomic_set */
++	/* smp_mb(); */ /* atomic_set */
+ 	init_waitqueue_head(&nwt->nw_wq);
+ }
+ 
+ void au_wkq_fin(void)
+ {
+-	int i;
+-
+-	for (i = 0; i < aufs_nwkq; i++)
+-		if (au_wkq[i].q && !IS_ERR(au_wkq[i].q))
+-			destroy_workqueue(au_wkq[i].q);
+-	kfree(au_wkq);
++	destroy_workqueue(au_wkq);
+ }
+ 
+ int __init au_wkq_init(void)
+ {
+-	int err, i;
+-	struct au_wkq *nowaitq;
+-
+-	/* '+1' is for accounting of nowait queue */
+-	err = -ENOMEM;
+-	au_wkq = kcalloc(aufs_nwkq + 1, sizeof(*au_wkq), GFP_NOFS);
+-	if (unlikely(!au_wkq))
+-		goto out;
+-
+-	err = 0;
+-	for (i = 0; i < aufs_nwkq; i++) {
+-		au_wkq[i].q = create_singlethread_workqueue(AUFS_WKQ_NAME);
+-		if (au_wkq[i].q && !IS_ERR(au_wkq[i].q)) {
+-			atomic_set(&au_wkq[i].busy, 0);
+-			continue;
+-		}
+-
+-		err = PTR_ERR(au_wkq[i].q);
+-		au_wkq_fin();
+-		goto out;
+-	}
+-
+-	/* nowait accounting */
+-	nowaitq = au_wkq + aufs_nwkq;
+-	atomic_set(&nowaitq->busy, 0);
+-	nowaitq->q = NULL;
+-	/* smp_mb(); */ /* atomic_set */
+-
+- out:
+-	return err;
++	au_wkq = create_workqueue(AUFS_WKQ_NAME);
++	return 0;
+ }
+diff --git a/fs/aufs/wkq.h b/fs/aufs/wkq.h
+index b5b6a61..3fe36b3 100644
+--- a/fs/aufs/wkq.h
++++ b/fs/aufs/wkq.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -63,7 +63,9 @@ void au_wkq_fin(void);
+ 
+ static inline int au_test_wkq(struct task_struct *tsk)
+ {
+-	return !tsk->mm && !strcmp(tsk->comm, AUFS_WKQ_NAME);
++	return !tsk->mm
++		&& !strncmp(tsk->comm, AUFS_WKQ_NAME "/",
++			    sizeof(AUFS_WKQ_NAME));
+ }
+ 
+ static inline void au_nwt_done(struct au_nowait_tasks *nwt)
+diff --git a/fs/aufs/xino.c b/fs/aufs/xino.c
+index b401aa9..a5362dc 100644
+--- a/fs/aufs/xino.c
++++ b/fs/aufs/xino.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -127,11 +127,11 @@ ssize_t xino_fwrite(au_writef_t func, struct file *file, void *buf, size_t size,
+ struct file *au_xino_create2(struct file *base_file, struct file *copy_src)
+ {
+ 	struct file *file;
+-	struct dentry *base, *dentry, *parent;
++	struct dentry *base, *parent;
+ 	struct inode *dir;
+ 	struct qstr *name;
+-	int err;
+ 	struct path path;
++	int err;
+ 
+ 	base = base_file->f_dentry;
+ 	parent = base->d_parent; /* dir inode is locked */
+@@ -140,27 +140,25 @@ struct file *au_xino_create2(struct file *base_file, struct file *copy_src)
+ 
+ 	file = ERR_PTR(-EINVAL);
+ 	name = &base->d_name;
+-	dentry = vfsub_lookup_one_len(name->name, parent, name->len);
+-	if (IS_ERR(dentry)) {
+-		file = (void *)dentry;
++	path.dentry = vfsub_lookup_one_len(name->name, parent, name->len);
++	if (IS_ERR(path.dentry)) {
++		file = (void *)path.dentry;
+ 		pr_err("%.*s lookup err %ld\n",
+-		       AuLNPair(name), PTR_ERR(dentry));
++		       AuLNPair(name), PTR_ERR(path.dentry));
+ 		goto out;
+ 	}
+ 
+ 	/* no need to mnt_want_write() since we call dentry_open() later */
+-	err = vfs_create(dir, dentry, S_IRUGO | S_IWUGO, NULL);
++	err = vfs_create(dir, path.dentry, S_IRUGO | S_IWUGO, NULL);
+ 	if (unlikely(err)) {
+ 		file = ERR_PTR(err);
+ 		pr_err("%.*s create err %d\n", AuLNPair(name), err);
+ 		goto out_dput;
+ 	}
+ 
+-	path.dentry = dentry;
+ 	path.mnt = base_file->f_vfsmnt;
+-	path_get(&path);
+-	file = vfsub_dentry_open(&path, O_RDWR | O_CREAT | O_EXCL | O_LARGEFILE,
+-				 current_cred());
++	file = vfsub_dentry_open(&path,
++				 O_RDWR | O_CREAT | O_EXCL | O_LARGEFILE);
+ 	if (IS_ERR(file)) {
+ 		pr_err("%.*s open err %ld\n", AuLNPair(name), PTR_ERR(file));
+ 		goto out_dput;
+@@ -187,7 +185,7 @@ struct file *au_xino_create2(struct file *base_file, struct file *copy_src)
+ 	fput(file);
+ 	file = ERR_PTR(err);
+  out_dput:
+-	dput(dentry);
++	dput(path.dentry);
+  out:
+ 	return file;
+ }
+diff --git a/include/linux/aufs_type.h b/include/linux/aufs_type.h
+index cc0263d..3ca3948 100644
+--- a/include/linux/aufs_type.h
++++ b/include/linux/aufs_type.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2005-2009 Junjiro R. Okajima
++ * Copyright (C) 2005-2010 Junjiro R. Okajima
+  *
+  * This program, aufs is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -23,7 +23,7 @@
+ #include <linux/limits.h>
+ #include <linux/types.h>
+ 
+-#define AUFS_VERSION	"2-standalone.tree-20091207"
++#define AUFS_VERSION	"2-standalone.tree-32-20100125"
+ 
+ /* todo? move this to linux-2.6.19/include/magic.h */
+ #define AUFS_SUPER_MAGIC	('a' << 24 | 'u' << 16 | 'f' << 8 | 's')
+@@ -75,7 +75,6 @@ typedef __s16 aufs_bindex_t;
+ #define AUFS_RDBLK_DEF		512 /* bytes */
+ #define AUFS_RDHASH_DEF		32
+ #define AUFS_WKQ_NAME		AUFS_NAME "d"
+-#define AUFS_NWKQ_DEF		4
+ #define AUFS_MFS_SECOND_DEF	30 /* seconds */
+ #define AUFS_PLINK_WARN		100 /* number of plinks */
+ 
+--- a/security/security.c
++++ b/security/security.c
+@@ -651,6 +651,7 @@
+ {
+ 	return security_ops->file_mmap(file, reqprot, prot, flags, addr, addr_only);
+ }
++EXPORT_SYMBOL(security_file_mmap);
+ 
+ int security_file_mprotect(struct vm_area_struct *vma, unsigned long reqprot,
+ 			    unsigned long prot)
+--- a/security/commoncap.c
++++ b/security/commoncap.c
+@@ -1014,3 +1014,4 @@ int cap_file_mmap(struct file *file, unsigned long reqprot,
+ 	}
+ 	return ret;
+ }
++EXPORT_SYMBOL(cap_file_mmap);
