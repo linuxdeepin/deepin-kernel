@@ -30,6 +30,7 @@ SCRIPTS =  \
 	mkuboot.sh \
 	namespace.pl \
 	patch-kernel \
+	recordmcount.pl \
 	setlocalversion \
 	ver_linux
 
