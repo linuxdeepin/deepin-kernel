@@ -94,7 +94,7 @@ class Gencontrol(Base):
         ):
             makeflags[i[1]] = data[i[0]]
         for i in (
-            ('cflags', 'CFLAGS'),
+            ('cflags', 'CFLAGS_KERNEL'),
             ('initramfs', 'INITRAMFS'),
             ('kpkg-arch', 'KPKG_ARCH'),
             ('kpkg-subarch', 'KPKG_SUBARCH'),
