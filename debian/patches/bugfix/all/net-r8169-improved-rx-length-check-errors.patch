@@ -1,0 +1,113 @@
+From: Neil Horman <nhorman@redhat.com>
+Date: Tue, 5 Jan 2010 09:43:37 -0500
+Subject: [net] r8169: imporved rx length check errors
+Message-id: 20100105144337.GB24293@hmsreliant.think-freely.org
+O-Subject: [kernel team] [RHEL 5.5 PATCH] imporved r8169 patch for rx length check errors (bz 522438)
+Bugzilla: 552438
+RH-Acked-by: No One <noone@redhat.com>
+
+[ cebbert : ported to 2.6.32 ]
+
+Hey-
+	So we've been going back and forth about these r8169 changes( bz 550915).
+We have a hardware ideosyncracy that seems to dictate that we disable frame
+filtering, and as a result we are forced to allocate very large buffers, which
+Dave correctly points out are a major performance impact.  This is further
+compllicated by the fact that we don't know which subset of hardware is affected
+by this bug.  As such I've come up with this fix that I _think_ makes everyone
+as happy as possible given what we know (or more specifically, what we don't
+know).  Anywho, I've posted this upstream and am waiting for comments.
+Basically, it does the following things
+
+1) Modifies the setrxbuf routine to accept an mtu paramter
+
+2) Changes the drivers open routine to force the mtu pased to the function in
+(1) a size of 16383-VLAN_ETH_HLEN-ETH_FCS_LEN
+
+3) raises the copybreak value so that we always allocate frames on rx to pass to
+the network stack.
+
+4) Adds a warning about changing the mtu to a size that is not 16383
+
+The effective result of these changes are that by default, we allocate at device
+open a ring of 16k buffers which disables filtering, and set the copybreak value
+to that size, so that instead of constantly allocating 16k buffers, we just
+allocate frame size appropriate buffers.  This is still a big performance hit,
+but better than constant 16k allocations, which would quickly fail.
+
+We also (and this is the improved part), allow for user space to set mtu's
+smaller than 16383, which results in the driver reverting back to the
+pre-patched behavior.  A loud warning is issued to this effect, so that people
+will realize what their doing, but if a user is in a situation where the can
+guarantee frame sizes with other equipment (switch filtering, etc), then this
+allows them the old performance levels
+
+Satisfies bz 522438
+
+Neil
+
+diff --git a/drivers/net/r8169.c b/drivers/net/r8169.c
+index 063d949..c241338 100644
+--- a/drivers/net/r8169.c
++++ b/drivers/net/r8169.c
+@@ -181,7 +181,12 @@ static struct pci_device_id rtl8169_pci_tbl[] = {
+ 
+ MODULE_DEVICE_TABLE(pci, rtl8169_pci_tbl);
+ 
+-static int rx_copybreak = 200;
++/*
++ * we set our copybreak very high so that we don't have
++ * to allocate 16k frames all the time (see note in
++ * rtl8169_open()
++ */ 
++static int rx_copybreak = 16383;
+ static int use_dac;
+ static struct {
+ 	u32 msg_enable;
+@@ -2209,11 +2214,15 @@ static void __devexit rtl8169_remove_one(struct pci_dev *pdev)
+ }
+ 
+ static void rtl8169_set_rxbufsize(struct rtl8169_private *tp,
+-				  struct net_device *dev)
++				  unsigned int mtu)
+ {
+-	unsigned int max_frame = dev->mtu + VLAN_ETH_HLEN + ETH_FCS_LEN;
++	unsigned int max_frame = mtu + VLAN_ETH_HLEN + ETH_FCS_LEN;
++
++	if (max_frame != 16383)
++		printk(KERN_WARNING "WARNING! Changing of MTU on this NIC "
++			"May lead to frame reception errors!\n");
+ 
+-	tp->rx_buf_sz = (max_frame > RX_BUF_SIZE) ? max_frame : RX_BUF_SIZE;
++	tp->rx_buf_sz = (max_frame > RX_BUF_SIZE) ? max_frame : RX_BUF_SIZE;
+ }
+ 
+ static int rtl8169_open(struct net_device *dev)
+@@ -2223,7 +2232,17 @@ static int rtl8169_open(struct net_device *dev)
+ 	int retval = -ENOMEM;
+ 
+ 
+-	rtl8169_set_rxbufsize(tp, dev);
++	/*
++	 * Note that we use a magic value here, its wierd I know
++	 * its done because, some subset of rtl8169 hardware suffers from
++	 * a problem in which frames received that are longer than 
++	 * the size set in RxMaxSize register return garbage sizes
++	 * when received.  To avoid this we need to turn off filtering, 
++	 * which is done by setting a value of 16383 in the RxMaxSize register
++	 * and allocating 16k frames to handle the largest possible rx value
++	 * thats what the magic math below does.
++	 */
++	rtl8169_set_rxbufsize(tp, 16383 - VLAN_ETH_HLEN - ETH_FCS_LEN);
+ 
+ 	/*
+ 	 * Rx and Tx desscriptors needs 256 bytes alignment.
+@@ -2874,7 +2893,7 @@ static int rtl8169_change_mtu(struct net_device *dev, int new_mtu)
+ 
+ 	rtl8169_down(dev);
+ 
+-	rtl8169_set_rxbufsize(tp, dev);
++	rtl8169_set_rxbufsize(tp, dev->mtu);
+ 
+ 	ret = rtl8169_init_ring(dev);
+ 	if (ret < 0)
