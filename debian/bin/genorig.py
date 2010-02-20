@@ -102,6 +102,11 @@ class Main(object):
         for i in 'input.h', 'license.h', 'mod_devicetable.h':
             shutil.copyfile(os.path.join(temp, 'include', 'linux', i), os.path.join(orig, 'include', 'linux', i))
         shutil.copytree(os.path.join(temp, 'scripts'), os.path.join(orig, 'scripts'))
+        for arch in os.listdir(os.path.join(temp, 'arch')):
+            if os.path.exists(os.path.join(temp, 'arch', arch, 'scripts')):
+                os.makedirs(os.path.join(orig, 'arch', arch))
+                shutil.copytree(os.path.join(temp, 'arch', arch, 'scripts'),
+                                os.path.join(orig, 'arch', arch, 'scripts'))
 
     def tar(self):
         out = os.path.join("../orig", self.orig_tar)
