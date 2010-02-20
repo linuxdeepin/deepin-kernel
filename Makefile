@@ -3,8 +3,7 @@ DATA = \
 	Makefile \
 
 SUBDIRS = \
-	scripts \
-	$(wildcard arch/$(SRCARCH)/scripts)
+	scripts
 
 OUTDIR = .
 
