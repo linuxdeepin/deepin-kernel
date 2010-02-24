@@ -1,0 +1,73 @@
+From 2812f9c43c50cbf0e17118e7ae7d82e44d74a1dd Mon Sep 17 00:00:00 2001
+From: Dave Airlie <airlied@redhat.com>
+Date: Wed, 24 Feb 2010 17:17:13 +1000
+Subject: [PATCH] drm/radeon: block ability for userspace app to trash 0 page and beyond
+
+radeon's have a special ability to passthrough writes in their internal
+memory space directly to PCI, this ability means that if some of the internal
+surfaces like the depth buffer point at 0x0, any writes to these will
+go directly to RAM at 0x0 via PCI busmastering.
+
+Now mesa used to always emit clears after emitting state, since the
+radeon mesa driver was refactored a year or more ago, it was found it
+could generate a clear request without ever sending any setup state to the
+card. So the clear would attempt to clear the depth buffer at 0x0, which
+would overwrite main memory at this point. fs corruption ensues.
+
+Also once one app did this correctly, it would never get set back to 0
+making this messy to reproduce.
+
+The kernel should block this from happening as mesa runs without privs,
+though it does require the user be connected to the current running X session.
+
+This patch implements a check to make sure the depth offset has been set
+before a depth clear occurs and if it finds one it prints a warning and
+ignores the depth clear request. There is also a mesa fix to avoid sending
+the badness going into mesa.
+
+Signed-off-by: Dave Airlie <airlied@redhat.com>
+---
+ drivers/gpu/drm/radeon/radeon_drv.h   |    2 ++
+ drivers/gpu/drm/radeon/radeon_state.c |    6 ++++++
+ 2 files changed, 8 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/gpu/drm/radeon/radeon_drv.h b/drivers/gpu/drm/radeon/radeon_drv.h
+index b058316..0c08953 100644
+--- a/drivers/gpu/drm/radeon/radeon_drv.h
++++ b/drivers/gpu/drm/radeon/radeon_drv.h
+@@ -267,6 +267,8 @@ typedef struct drm_radeon_private {
+ 
+ 	u32 scratch_ages[5];
+ 
++	int have_z_offset;
++
+ 	/* starting from here on, data is preserved accross an open */
+ 	uint32_t flags;		/* see radeon_chip_flags */
+ 	resource_size_t fb_aper_offset;
+diff --git a/drivers/gpu/drm/radeon/radeon_state.c b/drivers/gpu/drm/radeon/radeon_state.c
+index 38537d9..f089493 100644
+--- a/drivers/gpu/drm/radeon/radeon_state.c
++++ b/drivers/gpu/drm/radeon/radeon_state.c
+@@ -101,6 +101,7 @@ static __inline__ int radeon_check_and_fixup_packets(drm_radeon_private_t *
+ 			DRM_ERROR("Invalid depth buffer offset\n");
+ 			return -EINVAL;
+ 		}
++		dev_priv->have_z_offset = 1;
+ 		break;
+ 
+ 	case RADEON_EMIT_PP_CNTL:
+@@ -876,6 +877,11 @@ static void radeon_cp_dispatch_clear(struct drm_device * dev,
+ 		if (tmp & RADEON_BACK)
+ 			flags |= RADEON_FRONT;
+ 	}
++	if (flags & (RADEON_DEPTH|RADEON_STENCIL)) {
++		if (!dev_priv->have_z_offset)
++			printk_once(KERN_ERR "radeon: illegal depth clear request. Buggy mesa detected - please update.\n");
++		flags &= ~(RADEON_DEPTH | RADEON_STENCIL);
++	}
+ 
+ 	if (flags & (RADEON_FRONT | RADEON_BACK)) {
+ 
+-- 
+1.6.5.2
+
