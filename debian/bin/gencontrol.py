@@ -141,8 +141,11 @@ class Gencontrol(Base):
 
         desc_parts = self.config.get_merge('description', arch, featureset, flavour, 'parts')
         if desc_parts:
+            # XXX: Workaround, we need to support multiple entries of the same name
+            parts = list(set(desc_parts))
+            parts.sort()
             desc = image_fields['Description']
-            for part in desc_parts[::-1]:
+            for part in parts:
                 desc.append(config_entry_description['part-long-' + part])
                 desc.append_short(config_entry_description.get('part-short-' + part, ''))
 
