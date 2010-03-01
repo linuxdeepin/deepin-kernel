@@ -156,6 +156,7 @@ class Gencontrol(Base):
             image = self.templates["control.image.type-standalone"]
             build_modules = False
         elif config_entry_image['type'] == 'plain-xen':
+            raise RuntimeError
             image = self.templates["control.image.type-modulesextra"]
             build_modules = True
             config_entry_xen = self.config.merge('xen', arch, featureset, flavour)
@@ -174,6 +175,15 @@ class Gencontrol(Base):
             build_modules = True
             image = self.templates["control.image.type-%s" % config_entry_image['type']]
             #image = self.templates["control.image.type-modulesinline"]
+
+        config_entry_xen = self.config.merge('xen', arch, featureset, flavour)
+        if config_entry_xen.get('dom0-support', False):
+            p = self.process_packages(self.templates['control.xen-linux-system'], vars)
+            l = PackageRelationGroup()
+            for xen_flavour in config_entry_xen['flavours']:
+                l.append("xen-hypervisor-%s" % xen_flavour)
+            p[0]['Depends'].append(l)
+            packages_dummy.extend(p)
 
         vars.setdefault('desc', None)
 
