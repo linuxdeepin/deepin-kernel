@@ -876,21 +876,27 @@ sub udev_next {
     return @results;
 }
 
-sub udev_cd_list {
-    # doesn't use block device names
-    return ();
+# Convert an IDE device path to the corresponding SCSI device path if it's
+# handled by a libata driver.
+sub udev_ide_to_scsi_path {
+    # libata uses the PATA controller and device numbers
+    # as SCSI host number and bus id.  Channel number and
+    # LUN are always 0.  The parent device path should
+    # stay the same.
+    $_[0] =~ s/-ide-(\d+):(\d+)$/-scsi-$1:0:$2:0/;
+    return $_[0];
 }
 
-sub udev_cd_update {
-    my ($old, $new) = @_; # ignore map
-    my @ide_rules;
-    my %scsi_rules;
-    my $i;
+# Find symlink rules using IDE device paths that aren't matched by rules
+# using the SCSI corresponding device path.
+sub udev_cd_find_unmatched_ide_rules {
+    my ($file) = @_;
+    my %wanted_rule;
+    my @unmatched;
+    my $i = 0;
 
-    # First pass: list the current symlink rules for IDE and SCSI devices
-    $i = 0;
     while (1) {
-	my @keys = udev_next($old);
+	my @keys = udev_next($file);
 	last if $#keys < 0;
 
 	my ($path, $symlink);
@@ -906,50 +912,65 @@ sub udev_cd_update {
 
 	if (defined($path) && defined($symlink)) {
 	    if ($path =~ /-ide-\d+:\d+$/) {
-		$ide_rules[$i] = $symlink;
+		my $path = udev_ide_to_scsi_path($path);
+		my $rule_key =  $path . ' ' . $symlink;
+		if (!exists($wanted_rule{$rule_key})) {
+		    $wanted_rule{$rule_key} = $i;
+		    $unmatched[$i] = 1;
+		}
 	    } elsif ($path =~ /-scsi-\d+:\d+:\d+:\d+$/) {
-		$scsi_rules{"$path $symlink"} = 1;
+		my $rule_key =  $path . ' ' . $symlink;
+		if (defined(my $j = $wanted_rule{$rule_key})) {
+		    $unmatched[$j] = 0;
+		}
+		$wanted_rule{$rule_key} = -1;
 	    }
 	}
 
 	++$i;
     }
 
-    # Second pass: fill in the missing rules for SCSI devices
+    return @unmatched;
+}
+
+sub udev_cd_needs_update {
+    my ($file) = @_;
+    for (udev_cd_find_unmatched_ide_rules($file)) {
+	return 1 if $_;
+    }
+    return 0;
+}
+
+sub udev_cd_update {
+    my ($old, $new) = @_; # ignore map
+
+    # Find which rules we will need to copy and edit, then rewind
+    my @unmatched = udev_cd_find_unmatched_ide_rules($old);
     $old->seek(0, 0);
-    $i = 0;
+
+    my $i = 0;
     while (1) {
 	my @keys = udev_next($old);
 	last if $#keys < 0;
 
 	my $old_text = '';
 	my $new_text = '';
-	my $need_new;
 
 	for (@keys) {
 	    my ($text, $key, $op, $value) = @$_;
 	    $old_text .= $text;
-	    next unless defined($ide_rules[$i]) && defined($key);
+	    next unless defined($unmatched[$i]) && defined($key);
 
 	    if ($key eq 'ENV{ID_PATH}' && $op eq '==') {
-		# libata uses the PATA controller and device numbers
-		# as SCSI host number and bus id.  Channel number and
-		# LUN are always 0.  The parent device path should
-		# stay the same.
-		$value =~ s/-ide-(\d+):(\d+)$/-scsi-$1:0:$2:0/;
-
-		my $rule_key = $value . ' ' . $ide_rules[$i];
-		if (!exists($scsi_rules{$rule_key})) {
-		    $need_new = 1;
-		    $new_text .= ", $key$op\"$value\"";
-		}
+		my $value = udev_ide_to_scsi_path($value);
+		$new_text .= ", $key$op\"$value\"";
 	    } else {
 		$new_text .= $text;
 	    }
 	}
 
 	$new->print($old_text);
-	if ($need_new) {
+	if ($unmatched[$i]) {
 	    $new->print($new_text . "\n");
 	}
 
@@ -1057,9 +1078,8 @@ my @config_files = ({packages => 'mount',
 		     update => \&aboot_update},
 		    {packages => 'udev',
 		     path => '/etc/udev/rules.d/70-persistent-cd.rules',
-		     list => \&udev_cd_list,
-		     update => \&udev_cd_update,
-		     always_update => 1},
+		     needs_update => \&udev_cd_needs_update,
+		     update => \&udev_cd_update},
 		    {packages => 'initramfs-tools',
 		     path => '/etc/initramfs-tools/conf.d/resume',
 		     list => \&initramfs_resume_list,
@@ -1198,15 +1218,21 @@ sub scan_config_files {
 	}
 
 	my @matched_bdevs = ();
+	my $needs_update;
 
-	for my $bdev (&{$config->{list}}($file)) {
-	    if ($bdev =~ m{^/dev/(?:[hs]d[a-z]\d*|s(?:cd|r)\d+)$}) {
-		$bdev_map{$bdev} = {};
-		push @matched_bdevs, $bdev;
+	if (exists($config->{needs_update})) {
+	    $needs_update = &{$config->{needs_update}}($file);
+	} else {
+	    for my $bdev (&{$config->{list}}($file)) {
+		if ($bdev =~ m{^/dev/(?:[hs]d[a-z]\d*|s(?:cd|r)\d+)$}) {
+		    $bdev_map{$bdev} = {};
+		    push @matched_bdevs, $bdev;
+		    $needs_update = 1;
+		}
 	    }
 	}
 
-	if (@matched_bdevs || $config->{always_update}) {
+	if ($needs_update) {
 	    push @matched_configs, {config => $config,
 				    devices => \@matched_bdevs,
 				    installed => $installed};
