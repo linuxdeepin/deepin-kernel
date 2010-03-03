@@ -876,19 +876,10 @@ sub udev_next {
     return @results;
 }
 
-# Convert an IDE device path to the corresponding SCSI device path if it's
-# handled by a libata driver.
-sub udev_ide_to_scsi_path {
-    # libata uses the PATA controller and device numbers
-    # as SCSI host number and bus id.  Channel number and
-    # LUN are always 0.  The parent device path should
-    # stay the same.
-    $_[0] =~ s/-ide-(\d+):(\d+)$/-scsi-$1:0:$2:0/;
-    return $_[0];
-}
-
 # Find symlink rules using IDE device paths that aren't matched by rules
-# using the SCSI corresponding device path.
+# using the corresponding SCSI device path.  Return an array containing
+# the corresponding path for each rule where this is the case and undef
+# for all other rules.
 sub udev_cd_find_unmatched_ide_rules {
     my ($file) = @_;
     my %wanted_rule;
@@ -912,16 +903,20 @@ sub udev_cd_find_unmatched_ide_rules {
 
 	if (defined($path) && defined($symlink)) {
 	    if ($path =~ /-ide-\d+:\d+$/) {
-		my $path = udev_ide_to_scsi_path($path);
+		# libata uses the PATA controller and device numbers
+		# as SCSI host number and bus id.  Channel number and
+		# LUN are always 0.  The parent device path should
+		# stay the same.
+		$path =~ s/-ide-(\d+):(\d+)$/-scsi-$1:0:$2:0/;
 		my $rule_key =  $path . ' ' . $symlink;
 		if (!exists($wanted_rule{$rule_key})) {
 		    $wanted_rule{$rule_key} = $i;
-		    $unmatched[$i] = 1;
+		    $unmatched[$i] = $path;
 		}
 	    } elsif ($path =~ /-scsi-\d+:\d+:\d+:\d+$/) {
 		my $rule_key =  $path . ' ' . $symlink;
 		if (defined(my $j = $wanted_rule{$rule_key})) {
-		    $unmatched[$j] = 0;
+		    $unmatched[$j] = undef;
 		}
 		$wanted_rule{$rule_key} = -1;
 	    }
@@ -935,10 +930,13 @@ sub udev_cd_find_unmatched_ide_rules {
 
 sub udev_cd_needs_update {
     my ($file) = @_;
+    my %paths;
     for (udev_cd_find_unmatched_ide_rules($file)) {
-	return 1 if $_;
+	if (defined($_)) {
+	    $paths{$_} = 1;
+	}
     }
-    return 0;
+    return join('\n', map({"+ PATH=$_"} keys(%paths)));
 }
 
 sub udev_cd_update {
@@ -962,7 +960,7 @@ sub udev_cd_update {
 	    next unless defined($unmatched[$i]) && defined($key);
 
 	    if ($key eq 'ENV{ID_PATH}' && $op eq '==') {
-		my $value = udev_ide_to_scsi_path($value);
+		my $value = $unmatched[$i];
 		$new_text .= ", $key$op\"$value\"";
 	    } else {
 		$new_text .= $text;
@@ -1218,23 +1216,23 @@ sub scan_config_files {
 	}
 
 	my @matched_bdevs = ();
-	my $needs_update;
+	my $id_map_text;
 
 	if (exists($config->{needs_update})) {
-	    $needs_update = &{$config->{needs_update}}($file);
+	    $id_map_text = &{$config->{needs_update}}($file);
 	} else {
 	    for my $bdev (&{$config->{list}}($file)) {
 		if ($bdev =~ m{^/dev/(?:[hs]d[a-z]\d*|s(?:cd|r)\d+)$}) {
 		    $bdev_map{$bdev} = {};
 		    push @matched_bdevs, $bdev;
-		    $needs_update = 1;
 		}
 	    }
 	}
 
-	if ($needs_update) {
+	if (@matched_bdevs || $id_map_text) {
 	    push @matched_configs, {config => $config,
 				    devices => \@matched_bdevs,
+				    id_map_text => $id_map_text,
 				    installed => $installed};
 	}
     }
@@ -1433,7 +1431,8 @@ sub transition {
 			      join("\\n",
 				   map({sprintf("%s: %s", $_, $bdev_map{$_}->{ids}->[0])}
 				       grep({@{$bdev_map{$_}->{ids}}}
-					    keys(%bdev_map)))));
+					    keys(%bdev_map))),
+				   map({$_->{id_map_text}} @matched_configs)));
 	die "Error setting debconf substitutions in $question: $seen" if $ret;
 	($ret, $seen) = subst($question, 'files',
 			      join(', ',
