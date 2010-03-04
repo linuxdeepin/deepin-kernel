@@ -1,0 +1,100 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Subject: [PATCH] qla2xxx: Disable MSI/MSI-X on some chips or as selected by module parameter
+
+Based on these patches applied to RHEL 5:
+
+linux-2.6-scsi-qla2xxx-disable-msi-x-by-default.patch
+linux-2.6-scsi-qla2xxx-msi-x-hardware-issues-on-platforms.patch
+linux-2.6-scsi-qla2xxx-allow-use-of-msi-when-msi-x-disabled.patch
+linux-2.6-scsi-qla2xxx-enable-msi-x-correctly-on-qlogic-2xxx-series.patch
+
+The combined effect is:
+- MSI is disabled on QLA24xx chips other than QLA2432 (MSI-X already was)
+- MSI-X is disabled if qlx2enablemsix=2
+- MSI and MSI-X are disabled if qlx2enablemsix=0
+
+--- a/drivers/scsi/qla2xxx/qla_gbl.h
++++ b/drivers/scsi/qla2xxx/qla_gbl.h
+@@ -78,6 +78,7 @@
+ extern int ql2xmaxqueues;
+ extern int ql2xmultique_tag;
+ extern int ql2xfwloadbin;
++extern int ql2xenablemsix;
+ 
+ extern int qla2x00_loop_reset(scsi_qla_host_t *);
+ extern void qla2x00_abort_all_cmds(scsi_qla_host_t *, int);
+--- a/drivers/scsi/qla2xxx/qla_isr.c
++++ b/drivers/scsi/qla2xxx/qla_isr.c
+@@ -2244,19 +2244,13 @@ qla2x00_request_irqs(scsi_qla_host_t *ha)
+ 	int ret;
+ 	device_reg_t __iomem *reg = ha->iobase;
+ 
+-	/* If possible, enable MSI-X. */
+-	if (!IS_QLA2432(ha) && !IS_QLA2532(ha) &&
+-	    !IS_QLA8432(ha) && !IS_QLA8001(ha))
+-		goto skip_msix;
+-
+-	if (IS_QLA2432(ha) && (ha->pdev->revision < QLA_MSIX_CHIP_REV_24XX ||
+-		!QLA_MSIX_FW_MODE_1(ha->fw_attributes))) {
+-		DEBUG2(qla_printk(KERN_WARNING, ha,
+-		"MSI-X: Unsupported ISP2432 (0x%X, 0x%X).\n",
+-			ha->pdev->revision, ha->fw_attributes));
++	/* If possible, enable MSI-X, MSI. */
++	if (ql2xenablemsix == 0)
++		goto skip_msi;
+ 
+-		goto skip_msix;
+-	}
++	if (!IS_QLA2432(ha) && !IS_QLA2532(ha) &&
++	    !IS_QLA8432(ha) && !IS_QLA8001(ha))
++		goto skip_msi;
+ 
+ 	if (ha->pdev->subsystem_vendor == PCI_VENDOR_ID_HP &&
+ 	    (ha->pdev->subsystem_device == 0x7040 ||
+@@ -2270,6 +2264,17 @@ qla2x00_request_irqs(scsi_qla_host_t *ha)
+ 		goto skip_msi;
+ 	}
+ 
++	if (ql2xenablemsix == 2)
++		goto skip_msix;
++
++	if (IS_QLA2432(ha) && (ha->pdev->revision < QLA_MSIX_CHIP_REV_24XX ||
++	    !QLA_MSIX_FW_MODE_1(ha->fw_attributes))) {
++		DEBUG2(qla_printk(KERN_WARNING, ha,
++		    "MSI-X: Unsupported ISP2432 (0x%X, 0x%X).\n",
++		    ha->pdev->revision, ha->fw_attributes));
++		goto skip_msix;
++	}
++
+ 	ret = qla24xx_enable_msix(ha, rsp);
+ 	if (!ret) {
+ 		DEBUG2(qla_printk(KERN_INFO, ha,
+@@ -2281,10 +2286,6 @@ qla2x00_request_irqs(scsi_qla_host_t *ha)
+ 	    "MSI-X: Falling back-to INTa mode -- %d.\n", ret);
+ skip_msix:
+ 
+-	if (!IS_QLA24XX(ha) && !IS_QLA2532(ha) && !IS_QLA8432(ha) &&
+-	    !IS_QLA8001(ha))
+-		goto skip_msi;
+-
+ 	ret = pci_enable_msi(ha->pdev);
+ 	if (!ret) {
+ 		DEBUG2(qla_printk(KERN_INFO, ha, "MSI: Enabled.\n"));
+--- a/drivers/scsi/qla2xxx/qla_os.c
++++ b/drivers/scsi/qla2xxx/qla_os.c
+@@ -121,6 +121,15 @@ MODULE_PARM_DESC(ql2xqfullrampup,
+ 		" 1 -- load firmware from flash.\n"
+ 		" 0 -- use default semantics.\n");
+ 
++int ql2xenablemsix = 1;
++module_param(ql2xenablemsix, int, S_IRUGO|S_IRUSR);
++MODULE_PARM_DESC(ql2xenablemsix,
++                "Set to enable MSI or MSI-X interrupt mechanism."
++                " Default is 1, enable MSI-X interrupt mechanism."
++                " 0 = enable traditional pin-based mechanism."
++                " 1 = enable MSI-X interrupt mechanism."
++                " 2 = enable MSI interrupt mechanism.");
++
+ /*
+  * SCSI host template entry points
+  */
