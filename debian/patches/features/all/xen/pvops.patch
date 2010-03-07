@@ -454,10 +454,20 @@ index 0e8c2a0..271de94 100644
   */
  extern pgd_t *pgd_alloc(struct mm_struct *);
 diff --git a/arch/x86/include/asm/pgtable.h b/arch/x86/include/asm/pgtable.h
-index af6fd36..4953f9b 100644
+index af6fd36..863e1c2 100644
 --- a/arch/x86/include/asm/pgtable.h
 +++ b/arch/x86/include/asm/pgtable.h
-@@ -616,6 +616,9 @@ static inline void clone_pgd_range(pgd_t *dst, pgd_t *src, int count)
+@@ -397,6 +397,9 @@ static inline unsigned long pages_to_mb(unsigned long npg)
+ #define io_remap_pfn_range(vma, vaddr, pfn, size, prot)	\
+ 	remap_pfn_range(vma, vaddr, pfn, size, prot)
+ 
++#define arch_vm_get_page_prot arch_vm_get_page_prot
++extern pgprot_t arch_vm_get_page_prot(unsigned vm_flags);
++
+ #if PAGETABLE_LEVELS > 2
+ static inline int pud_none(pud_t pud)
+ {
+@@ -616,6 +619,9 @@ static inline void clone_pgd_range(pgd_t *dst, pgd_t *src, int count)
         memcpy(dst, src, count * sizeof(pgd_t));
  }
  
@@ -467,6 +477,19 @@ index af6fd36..4953f9b 100644
  
  #include <asm-generic/pgtable.h>
  #endif	/* __ASSEMBLY__ */
+diff --git a/arch/x86/include/asm/pgtable_64.h b/arch/x86/include/asm/pgtable_64.h
+index c57a301..4e46931 100644
+--- a/arch/x86/include/asm/pgtable_64.h
++++ b/arch/x86/include/asm/pgtable_64.h
+@@ -160,7 +160,7 @@ extern void cleanup_highmap(void);
+ #define pgtable_cache_init()   do { } while (0)
+ #define check_pgt_cache()      do { } while (0)
+ 
+-#define PAGE_AGP    PAGE_KERNEL_NOCACHE
++#define PAGE_AGP    PAGE_KERNEL_IO_NOCACHE
+ #define HAVE_PAGE_AGP 1
+ 
+ /* fs/proc/kcore.c */
 diff --git a/arch/x86/include/asm/processor.h b/arch/x86/include/asm/processor.h
 index 13b1885..0aac25a 100644
 --- a/arch/x86/include/asm/processor.h
@@ -2600,10 +2623,10 @@ index e78cd0e..fb91994 100644
  
  #ifdef CONFIG_STRICT_DEVMEM
 diff --git a/arch/x86/mm/pgtable.c b/arch/x86/mm/pgtable.c
-index ed34f5e..25fc1df 100644
+index ed34f5e..103e324 100644
 --- a/arch/x86/mm/pgtable.c
 +++ b/arch/x86/mm/pgtable.c
-@@ -4,8 +4,19 @@
+@@ -4,8 +4,29 @@
  #include <asm/tlb.h>
  #include <asm/fixmap.h>
  
@@ -2620,10 +2643,20 @@ index ed34f5e..25fc1df 100644
 +
 +gfp_t __userpte_alloc_gfp = PGALLOC_GFP | PGALLOC_USER_GFP;
 +
++pgprot_t arch_vm_get_page_prot(unsigned vm_flags)
++{
++	pgprot_t ret = __pgprot(0);
++
++	if (vm_flags & VM_IO)
++		ret = __pgprot(_PAGE_IOMAP);
++
++	return ret;
++}
++
  pte_t *pte_alloc_one_kernel(struct mm_struct *mm, unsigned long address)
  {
  	return (pte_t *)__get_free_page(PGALLOC_GFP);
-@@ -15,16 +26,29 @@ pgtable_t pte_alloc_one(struct mm_struct *mm, unsigned long address)
+@@ -15,16 +36,29 @@ pgtable_t pte_alloc_one(struct mm_struct *mm, unsigned long address)
  {
  	struct page *pte;
  
@@ -2658,7 +2691,7 @@ index ed34f5e..25fc1df 100644
  void ___pte_free_tlb(struct mmu_gather *tlb, struct page *pte)
  {
  	pgtable_page_dtor(pte);
-@@ -267,6 +291,12 @@ out:
+@@ -267,6 +301,12 @@ out:
  
  void pgd_free(struct mm_struct *mm, pgd_t *pgd)
  {
@@ -4371,7 +4404,7 @@ index 1d886e0..f4a2b10 100644
  	  This driver implements the front-end of the Xen virtual
  	  block device driver.  It communicates with a back-end driver
 diff --git a/drivers/block/xen-blkfront.c b/drivers/block/xen-blkfront.c
-index b8578bb..feec425 100644
+index b8578bb..45ff762 100644
 --- a/drivers/block/xen-blkfront.c
 +++ b/drivers/block/xen-blkfront.c
 @@ -42,6 +42,7 @@
@@ -4510,15 +4543,22 @@ index b8578bb..feec425 100644
  	if (info->connected == BLKIF_STATE_SUSPENDED && !err)
  		err = blkif_recover(info);
  
-@@ -923,6 +984,7 @@ static void blkfront_connect(struct blkfront_info *info)
- static void blkfront_closing(struct xenbus_device *dev)
+@@ -920,12 +981,11 @@ static void blkfront_connect(struct blkfront_info *info)
+  * the backend.  Once is this done, we can switch to Closed in
+  * acknowledgement.
+  */
+-static void blkfront_closing(struct xenbus_device *dev)
++static void blkfront_closing(struct blkfront_info *info)
  {
- 	struct blkfront_info *info = dev_get_drvdata(&dev->dev);
+-	struct blkfront_info *info = dev_get_drvdata(&dev->dev);
 +	unsigned int minor, nr_minors;
  	unsigned long flags;
  
- 	dev_dbg(&dev->dev, "blkfront_closing: %s removed\n", dev->nodename);
-@@ -945,7 +1007,10 @@ static void blkfront_closing(struct xenbus_device *dev)
+-	dev_dbg(&dev->dev, "blkfront_closing: %s removed\n", dev->nodename);
+ 
+ 	if (info->rq == NULL)
+ 		goto out;
+@@ -945,22 +1005,26 @@ static void blkfront_closing(struct xenbus_device *dev)
  	blk_cleanup_queue(info->rq);
  	info->rq = NULL;
  
@@ -4528,8 +4568,11 @@ index b8578bb..feec425 100644
 +	xlbd_release_minors(minor, nr_minors);
  
   out:
- 	xenbus_frontend_closed(dev);
-@@ -954,13 +1019,13 @@ static void blkfront_closing(struct xenbus_device *dev)
+-	xenbus_frontend_closed(dev);
++	if (info->xbdev)
++		xenbus_frontend_closed(info->xbdev);
+ }
+ 
  /**
   * Callback received when the backend's state changes.
   */
@@ -4545,7 +4588,16 @@ index b8578bb..feec425 100644
  
  	switch (backend_state) {
  	case XenbusStateInitialising:
-@@ -1003,7 +1068,10 @@ static int blkfront_remove(struct xenbus_device *dev)
+@@ -988,7 +1052,7 @@ static void backend_changed(struct xenbus_device *dev,
+ 			xenbus_dev_error(dev, -EBUSY,
+ 					 "Device in use; refusing to close");
+ 		else
+-			blkfront_closing(dev);
++			blkfront_closing(info);
+ 		mutex_unlock(&bd->bd_mutex);
+ 		bdput(bd);
+ 		break;
+@@ -1003,7 +1067,10 @@ static int blkfront_remove(struct xenbus_device *dev)
  
  	blkif_free(info, 0);
  
@@ -4553,40 +4605,45 @@ index b8578bb..feec425 100644
 +	if(info->users == 0)
 +		kfree(info);
 +	else
-+		info->is_ready = -1;
++		info->xbdev = NULL;
  
  	return 0;
  }
-@@ -1012,12 +1080,15 @@ static int blkfront_is_ready(struct xenbus_device *dev)
+@@ -1012,12 +1079,15 @@ static int blkfront_is_ready(struct xenbus_device *dev)
  {
  	struct blkfront_info *info = dev_get_drvdata(&dev->dev);
  
 -	return info->is_ready;
-+	return info->is_ready > 0;
++	return info->is_ready && info->xbdev;
  }
  
  static int blkif_open(struct block_device *bdev, fmode_t mode)
  {
  	struct blkfront_info *info = bdev->bd_disk->private_data;
 +
-+	if(info->is_ready < 0)
++	if (!info->xbdev)
 +		return -ENODEV;
  	info->users++;
  	return 0;
  }
-@@ -1033,7 +1104,10 @@ static int blkif_release(struct gendisk *disk, fmode_t mode)
+@@ -1031,10 +1101,13 @@ static int blkif_release(struct gendisk *disk, fmode_t mode)
+ 		   have ignored this request initially, as the device was
+ 		   still mounted. */
  		struct xenbus_device *dev = info->xbdev;
- 		enum xenbus_state state = xenbus_read_driver_state(dev->otherend);
+-		enum xenbus_state state = xenbus_read_driver_state(dev->otherend);
  
 -		if (state == XenbusStateClosing && info->is_ready)
-+		if(info->is_ready < 0) {
-+			blkfront_closing(dev);
+-			blkfront_closing(dev);
++		if (!dev) {
++			blkfront_closing(info);
 +			kfree(info);
-+		} else if (state == XenbusStateClosing && info->is_ready)
- 			blkfront_closing(dev);
++		} else if (xenbus_read_driver_state(dev->otherend)
++			   == XenbusStateClosing && info->is_ready)
++			blkfront_closing(info);
  	}
  	return 0;
-@@ -1061,7 +1135,7 @@ static struct xenbus_driver blkfront = {
+ }
+@@ -1061,7 +1134,7 @@ static struct xenbus_driver blkfront = {
  	.probe = blkfront_probe,
  	.remove = blkfront_remove,
  	.resume = blkfront_resume,
@@ -4596,7 +4653,7 @@ index b8578bb..feec425 100644
  };
  
 diff --git a/drivers/char/agp/intel-agp.c b/drivers/char/agp/intel-agp.c
-index 4dcfef0..9bca04e 100644
+index 4dcfef0..399a017 100644
 --- a/drivers/char/agp/intel-agp.c
 +++ b/drivers/char/agp/intel-agp.c
 @@ -15,8 +15,12 @@
@@ -4612,6 +4669,48 @@ index 4dcfef0..9bca04e 100644
 +#if defined(CONFIG_DMAR) || defined(CONFIG_XEN)
  #define USE_PCI_DMA_API 1
  #endif
+ 
+@@ -394,15 +398,19 @@ static void intel_i810_agp_enable(struct agp_bridge_data *bridge, u32 mode)
+ /* Exists to support ARGB cursors */
+ static struct page *i8xx_alloc_pages(void)
+ {
++	void *addr;
++	dma_addr_t _d;
+ 	struct page *page;
+ 
+-	page = alloc_pages(GFP_KERNEL | GFP_DMA32, 2);
+-	if (page == NULL)
++	addr = dma_alloc_coherent(NULL, 4 * PAGE_SIZE, &_d, GFP_KERNEL);
++	if (addr == NULL)
+ 		return NULL;
+ 
++	page = virt_to_page(addr);
++
+ 	if (set_pages_uc(page, 4) < 0) {
+ 		set_pages_wb(page, 4);
+-		__free_pages(page, 2);
++		dma_free_coherent(NULL, 4 * PAGE_SIZE, addr, _d);
+ 		return NULL;
+ 	}
+ 	get_page(page);
+@@ -412,12 +420,17 @@ static struct page *i8xx_alloc_pages(void)
+ 
+ static void i8xx_destroy_pages(struct page *page)
+ {
++	void *addr;
++
+ 	if (page == NULL)
+ 		return;
+ 
+ 	set_pages_wb(page, 4);
+ 	put_page(page);
+-	__free_pages(page, 2);
++
++	addr = page_address(page);
++
++	dma_free_coherent(NULL, 4 * PAGE_SIZE, addr, virt_to_bus(addr));
+ 	atomic_dec(&agp_bridge->current_memory_agp);
+ }
  
 diff --git a/drivers/char/hvc_xen.c b/drivers/char/hvc_xen.c
 index a6ee32b..5be0dd3 100644
@@ -4803,6 +4902,169 @@ index a6ee32b..5be0dd3 100644
  }
  
  void xen_raw_printk(const char *fmt, ...)
+diff --git a/drivers/gpu/drm/drm_drv.c b/drivers/gpu/drm/drm_drv.c
+index a75ca63..bdc26b9 100644
+--- a/drivers/gpu/drm/drm_drv.c
++++ b/drivers/gpu/drm/drm_drv.c
+@@ -201,7 +201,7 @@ int drm_lastclose(struct drm_device * dev)
+ 	}
+ 	if (drm_core_check_feature(dev, DRIVER_SG) && dev->sg &&
+ 	    !drm_core_check_feature(dev, DRIVER_MODESET)) {
+-		drm_sg_cleanup(dev->sg);
++		drm_sg_cleanup(dev, dev->sg);
+ 		dev->sg = NULL;
+ 	}
+ 
+diff --git a/drivers/gpu/drm/drm_gem.c b/drivers/gpu/drm/drm_gem.c
+index 8bf3770..dde5f66 100644
+--- a/drivers/gpu/drm/drm_gem.c
++++ b/drivers/gpu/drm/drm_gem.c
+@@ -539,7 +539,7 @@ int drm_gem_mmap(struct file *filp, struct vm_area_struct *vma)
+ 	vma->vm_flags |= VM_RESERVED | VM_IO | VM_PFNMAP | VM_DONTEXPAND;
+ 	vma->vm_ops = obj->dev->driver->gem_vm_ops;
+ 	vma->vm_private_data = map->handle;
+-	vma->vm_page_prot =  pgprot_writecombine(vm_get_page_prot(vma->vm_flags));
++	vma->vm_page_prot = pgprot_writecombine(vm_get_page_prot(vma->vm_flags));
+ 
+ 	/* Take a ref for this mapping of the object, so that the fault
+ 	 * handler can dereference the mmap offset's pointer to the object.
+diff --git a/drivers/gpu/drm/drm_scatter.c b/drivers/gpu/drm/drm_scatter.c
+index c7823c8..95ffb8a 100644
+--- a/drivers/gpu/drm/drm_scatter.c
++++ b/drivers/gpu/drm/drm_scatter.c
+@@ -32,20 +32,73 @@
+  */
+ 
+ #include <linux/vmalloc.h>
++#include <linux/mm.h>
+ #include "drmP.h"
+ 
+ #define DEBUG_SCATTER 0
+ 
+-static inline void *drm_vmalloc_dma(unsigned long size)
++static void *drm_vmalloc_dma(struct drm_device *drmdev, unsigned long size)
+ {
+ #if defined(__powerpc__) && defined(CONFIG_NOT_COHERENT_CACHE)
+ 	return __vmalloc(size, GFP_KERNEL, PAGE_KERNEL | _PAGE_NO_CACHE);
+ #else
+-	return vmalloc_32(size);
++	struct device *dev = &drmdev->pdev->dev;
++	struct page **pages;
++	void *addr;
++	const int npages = PFN_UP(size);
++	int i;
++
++	pages = kmalloc(npages * sizeof(*pages), GFP_KERNEL);
++	if (!pages)
++		goto fail;
++
++	for (i = 0; i < npages; i++) {
++		dma_addr_t phys;
++		void *addr;
++		addr = dma_alloc_coherent(dev, PAGE_SIZE, &phys, GFP_KERNEL);
++		if (addr == NULL)
++			goto out_free_pages;
++
++		pages[i] = virt_to_page(addr);
++	}
++
++	addr = vmap(pages, npages, VM_MAP | VM_IOREMAP, PAGE_KERNEL);
++
++	kfree(pages);
++
++	return addr;
++
++out_free_pages:
++	while (i > 0) {
++		void *addr = page_address(pages[--i]);
++		dma_free_coherent(dev, PAGE_SIZE, addr, virt_to_bus(addr));
++	}
++
++	kfree(pages);
++
++fail:
++	return NULL;
++#endif
++}
++
++static void drm_vfree_dma(struct drm_device *drmdev, void *addr, int npages,
++			  struct page **pages)
++{
++#if defined(__powerpc__) && defined(CONFIG_NOT_COHERENT_CACHE)
++	vfree(addr);
++#else
++	struct device *dev = &drmdev->pdev->dev;
++	int i;
++
++	for (i = 0; i < npages; i++) {
++		void *addr = page_address(pages[i]);
++		dma_free_coherent(dev, PAGE_SIZE, addr, virt_to_bus(addr));
++	}
++	vunmap(addr);
+ #endif
+ }
+ 
+-void drm_sg_cleanup(struct drm_sg_mem * entry)
++void drm_sg_cleanup(struct drm_device *drmdev, struct drm_sg_mem * entry)
+ {
+ 	struct page *page;
+ 	int i;
+@@ -56,7 +109,7 @@ void drm_sg_cleanup(struct drm_sg_mem * entry)
+ 			ClearPageReserved(page);
+ 	}
+ 
+-	vfree(entry->virtual);
++	drm_vfree_dma(drmdev, entry->virtual, entry->pages, entry->pagelist);
+ 
+ 	kfree(entry->busaddr);
+ 	kfree(entry->pagelist);
+@@ -107,7 +160,7 @@ int drm_sg_alloc(struct drm_device *dev, struct drm_scatter_gather * request)
+ 	}
+ 	memset((void *)entry->busaddr, 0, pages * sizeof(*entry->busaddr));
+ 
+-	entry->virtual = drm_vmalloc_dma(pages << PAGE_SHIFT);
++	entry->virtual = drm_vmalloc_dma(dev, pages << PAGE_SHIFT);
+ 	if (!entry->virtual) {
+ 		kfree(entry->busaddr);
+ 		kfree(entry->pagelist);
+@@ -180,7 +233,7 @@ int drm_sg_alloc(struct drm_device *dev, struct drm_scatter_gather * request)
+ 	return 0;
+ 
+       failed:
+-	drm_sg_cleanup(entry);
++	drm_sg_cleanup(dev, entry);
+ 	return -ENOMEM;
+ }
+ EXPORT_SYMBOL(drm_sg_alloc);
+@@ -212,7 +265,7 @@ int drm_sg_free(struct drm_device *dev, void *data,
+ 
+ 	DRM_DEBUG("virtual  = %p\n", entry->virtual);
+ 
+-	drm_sg_cleanup(entry);
++	drm_sg_cleanup(dev, entry);
+ 
+ 	return 0;
+ }
+diff --git a/drivers/gpu/drm/ttm/ttm_bo_vm.c b/drivers/gpu/drm/ttm/ttm_bo_vm.c
+index 1c040d0..3dc8d6b 100644
+--- a/drivers/gpu/drm/ttm/ttm_bo_vm.c
++++ b/drivers/gpu/drm/ttm/ttm_bo_vm.c
+@@ -272,6 +272,7 @@ int ttm_bo_mmap(struct file *filp, struct vm_area_struct *vma,
+ 
+ 	vma->vm_private_data = bo;
+ 	vma->vm_flags |= VM_RESERVED | VM_IO | VM_MIXEDMAP | VM_DONTEXPAND;
++	vma->vm_page_prot = vm_get_page_prot(vma->vm_flags);
+ 	return 0;
+ out_unref:
+ 	ttm_bo_unref(&bo);
+@@ -287,6 +288,7 @@ int ttm_fbdev_mmap(struct vm_area_struct *vma, struct ttm_buffer_object *bo)
+ 	vma->vm_ops = &ttm_bo_vm_ops;
+ 	vma->vm_private_data = ttm_bo_reference(bo);
+ 	vma->vm_flags |= VM_RESERVED | VM_IO | VM_MIXEDMAP | VM_DONTEXPAND;
++	vma->vm_page_prot = vm_get_page_prot(vma->vm_flags);
+ 	return 0;
+ }
+ EXPORT_SYMBOL(ttm_fbdev_mmap);
 diff --git a/drivers/input/xen-kbdfront.c b/drivers/input/xen-kbdfront.c
 index b115726..c721c0a 100644
 --- a/drivers/input/xen-kbdfront.c
@@ -17194,6 +17456,19 @@ index 26373cf..9fb4270 100644
  #ifndef HAVE_ARCH_PCI_GET_LEGACY_IDE_IRQ
  static inline int pci_get_legacy_ide_irq(struct pci_dev *dev, int channel)
  {
+diff --git a/include/drm/drmP.h b/include/drm/drmP.h
+index 7ad3faa..cf9ddce 100644
+--- a/include/drm/drmP.h
++++ b/include/drm/drmP.h
+@@ -1388,7 +1388,7 @@ extern int drm_vma_info(struct seq_file *m, void *data);
+ #endif
+ 
+ 				/* Scatter Gather Support (drm_scatter.h) */
+-extern void drm_sg_cleanup(struct drm_sg_mem * entry);
++extern void drm_sg_cleanup(struct drm_device *dev, struct drm_sg_mem * entry);
+ extern int drm_sg_alloc_ioctl(struct drm_device *dev, void *data,
+ 			struct drm_file *file_priv);
+ extern int drm_sg_alloc(struct drm_device *dev, struct drm_scatter_gather * request);
 diff --git a/include/linux/bootmem.h b/include/linux/bootmem.h
 index dd97fb8..b10ec49 100644
 --- a/include/linux/bootmem.h
