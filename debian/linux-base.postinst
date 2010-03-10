@@ -22,6 +22,7 @@ use AptPkg::Config;
 use Debconf::Client::ConfModule ':all';
 use FileHandle;
 use POSIX ();
+use UUID;
 
 package DebianKernel::DiskId;
 
@@ -1086,31 +1087,44 @@ my @config_files = ({packages => 'mount',
 		     # with few exceptions.  Such as including a '^'.
 		     suffix => '^old'});
 
-### Filesystem relabelling
+### Filesystem labels and UUIDs
 
-sub ext2_label {
+sub ext2_set_label {
     my ($bdev, $label) = @_;
-    system('e2label', $bdev, $label) == 0 or die "e2label failed: $?";
+    system('tune2fs', '-L', $label, $bdev) == 0 or die "tune2fs failed: $?";
+}
+sub ext2_set_uuid {
+    my ($bdev, $uuid) = @_;
+    system('tune2fs', '-U', $uuid, $bdev) == 0 or die "tune2fs failed: $?";
 }
 
-sub jfs_label {
+sub jfs_set_label {
     my ($bdev, $label) = @_;
     system('jfs_tune', '-L', $label, $bdev) == 0 or die "jfs_tune failed: $?";
 }
-
-sub fat_label {
-    my ($bdev, $label) = @_;
-    system('dosfslabel', $bdev, $label) == 0 or die "dosfslabel failed: $?";;
+sub jfs_set_uuid {
+    my ($bdev, $uuid) = @_;
+    system('jfs_tune', '-U', $uuid, $bdev) == 0 or die "jfs_tune failed: $?";
 }
 
-sub ntfs_label {
+sub fat_set_label {
+    my ($bdev, $label) = @_;
+    system('dosfslabel', $bdev, $label) == 0 or die "dosfslabel failed: $?";
+}
+
+sub ntfs_set_label {
     my ($bdev, $label) = @_;
     system('ntfslabel', $bdev, $label) == 0 or die "ntfslabel failed: $?";
 }
 
-sub reiserfs_label {
+sub reiserfs_set_label {
     my ($bdev, $label) = @_;
     system('reiserfstune', '--label', $label, $bdev)
+	or die "reiserfstune failed: $?";
+}
+sub reiserfs_set_uuid {
+    my ($bdev, $uuid) = @_;
+    system('reiserfstune', '--uuid', $uuid, $bdev)
 	or die "reiserfstune failed: $?";
 }
 
@@ -1129,9 +1143,10 @@ sub reiserfs_label {
 # };
 # and has the signature 'SWAPSPACE2' at the end of the first page.
 use constant { SWAP_SIGNATURE => 'SWAPSPACE2',
+	       SWAP_UUID_OFFSET => 1036, SWAP_UUID_LEN => 16,
 	       SWAP_LABEL_OFFSET => 1052, SWAP_LABEL_LEN => 16 };
-sub swap_label {
-    my ($bdev, $label) = @_;
+sub _swap_set_field {
+    my ($bdev, $offset, $value) = @_;
     my $pagesize = POSIX::sysconf(POSIX::_SC_PAGESIZE) or die "$!";
     my ($length, $signature);
 
@@ -1146,11 +1161,10 @@ sub swap_label {
 	die "swap signature not found on $bdev";
     }
 
-    # Set the label
-    $label = pack('Z' . SWAP_LABEL_LEN, $label);
-    POSIX::lseek($fd, SWAP_LABEL_OFFSET, POSIX::SEEK_SET);
-    $length = POSIX::write($fd, $label, SWAP_LABEL_LEN);
-    if (!defined($length) || $length != SWAP_LABEL_LEN) {
+    # Set the field
+    POSIX::lseek($fd, $offset, POSIX::SEEK_SET);
+    $length = POSIX::write($fd, $value, length($value));
+    if (!defined($length) || $length != length($value)) {
 	my $error = "$!";
 	POSIX::close($fd);
 	die $error;
@@ -1158,29 +1172,54 @@ sub swap_label {
 
     POSIX::close($fd);
 }
+sub swap_set_label {
+    my ($bdev, $label) = @_;
+    _swap_set_field($bdev, SWAP_LABEL_OFFSET, pack('Z' . SWAP_LABEL_LEN, $label));
+}
+sub swap_set_uuid {
+    my ($bdev, $uuid) = @_;
+    my $uuid_bin;
+    if (UUID::parse($uuid, $uuid_bin) != 0 ||
+	length($uuid_bin) != SWAP_UUID_LEN) {
+	die "internal error: invalid UUID string";
+    }
+    _swap_set_field($bdev, SWAP_UUID_OFFSET, $uuid_bin);
+}
 
-sub ufs_label {
+sub ufs_set_label {
     my ($bdev, $label) = @_;
     system('tunefs.ufs', '-L', $label, $bdev) or die "tunefs.ufs failed: $?";
 }
 
-sub xfs_label {
+sub xfs_set_label {
     my ($bdev, $label) = @_;
     system('xfs_admin', '-L', $label, $bdev) or die "xfs_admin failed: $?";
 }
+sub xfs_set_uuid {
+    my ($bdev, $uuid) = @_;
+    system('xfs_admin', '-U', $uuid, $bdev) or die "xfs_admin failed: $?";
+}
 
-my %label_types = (ext2     => { len => 16,  relabel => \&ext2_label },
-		   ext3     => { len => 16,  relabel => \&ext2_label },
-		   ext4     => { len => 16,  relabel => \&ext2_label },
-		   jfs      => { len => 16,  relabel => \&jfs_label },
-		   msdos    => { len => 11,  relabel => \&fat_label },
-		   ntfs     => { len => 128, relabel => \&ntfs_label },
-		   reiserfs => { len => 16,  relabel => \&reiserfs_label },
-		   swap     => { len => SWAP_LABEL_LEN,
-				 relabel => \&swap_label },
-		   ufs      => { len => 32,  relabel => \&ufs_label },
-		   vfat     => { len => 11,  relabel => \&fat_label },
-		   xfs      => { len => 12,  relabel => \&xfs_label });
+my %filesystem_types = (
+    ext2     => { label_len => 16,             set_label => \&ext2_set_label,
+		  set_uuid  => \&ext2_set_uuid },
+    ext3     => { label_len => 16,             set_label => \&ext2_set_label,
+		  set_uuid  => \&ext2_set_uuid },
+    ext4     => { label_len => 16,             set_label => \&ext2_set_label,
+		  set_uuid  => \&ext2_set_uuid },
+    jfs      => { label_len => 16,             set_label => \&jfs_set_label,
+		  set_uuid  => \&jfs_set_uuid },
+    msdos    => { label_len => 11,             set_label => \&fat_set_label },
+    ntfs     => { label_len => 128,            set_label => \&ntfs_set_label },
+    reiserfs => { label_len => 16,             set_label => \&reiserfs_set_label,
+		  set_uuid  => \&reiserfs_set_uuid },
+    swap     => { label_len => SWAP_LABEL_LEN, set_label => \&swap_set_label,
+		  set_uuid  => \&swap_set_uuid },
+    ufs      => { label_len => 32,             set_label => \&ufs_set_label },
+    vfat     => { label_len => 11,             set_label => \&fat_set_label },
+    xfs      => { label_len => 12,             set_label => \&xfs_set_label,
+		  set_uuid  => \&xfs_set_uuid }
+    );
 
 my %bdev_map;
 my @matched_configs;
@@ -1253,12 +1292,15 @@ sub scan_config_files {
 sub add_tag {
     # Map disks to labels/UUIDs and vice versa.  Include all disks in
     # the reverse mapping so we can detect ambiguity.
-    my ($bdev, $name, $value) = @_;
+    my ($bdev, $name, $value, $new) = @_;
     my $id = "$name=$value";
     push @{$id_map{$id}}, $bdev;
     if (exists($bdev_map{$bdev})) {
 	$bdev_map{$bdev}->{$name} = $value;
 	push @{$bdev_map{$bdev}->{ids}}, $id;
+    }
+    if ($new) {
+	$bdev_map{$bdev}->{new_id} = $id;
     }
 }
 
@@ -1280,18 +1322,26 @@ sub scan_devices {
     }
 }
 
-sub assign_labels {
+sub assign_new_ids {
     my $hostname = (POSIX::uname())[1];
 
-    # For all devices that have no alternate device ids, suggest labelling
-    # them based on fstab or just using a generic label.
+    # For all devices that have no alternate device ids, suggest setting
+    # UUIDs, labelling them based on fstab or just using a generic label.
     for my $bdev (keys(%bdev_map)) {
 	next if $#{$bdev_map{$bdev}->{ids}} >= 0;
 
 	my $type = $bdev_map{$bdev}->{type};
-	next unless defined($type) && exists($label_types{$type});
+	next unless defined($type) && exists($filesystem_types{$type});
 
-	my $label_len = $label_types{$type}->{len};
+	if (defined($filesystem_types{$type}->{set_uuid})) {
+	    my ($uuid_bin, $uuid);
+	    UUID::generate($uuid_bin);
+	    UUID::unparse($uuid_bin, $uuid);
+	    add_tag($bdev, 'UUID', $uuid, 1);
+	    next;
+	}
+
+	my $label_len = $filesystem_types{$type}->{len};
 	my $label;
 	use bytes; # string lengths are in bytes
 
@@ -1331,17 +1381,23 @@ sub assign_labels {
 	    } while (exists($id_map{"LABEL=$label"}));
 	}
 
-	add_tag($bdev, 'LABEL', $label);
-	$bdev_map{$bdev}->{relabel} = 1;
+	add_tag($bdev, 'LABEL', $label, 1);
     }
 }
 
-sub relabel {
+sub set_new_ids {
     for my $bdev (keys(%bdev_map)) {
 	my $bdev_info = $bdev_map{$bdev};
-	if ($bdev_info->{relabel}) {
-	    my $relabel = $label_types{$bdev_info->{type}}->{relabel};
-	    &{$relabel}($bdev, $bdev_info->{LABEL});
+	if ($bdev_info->{new_id}) {
+	    my ($name, $value) = split(/=/, $bdev_info->{new_id}, 2);
+	    my $setter;
+	    if ($name eq 'UUID') {
+		$setter = $filesystem_types{$bdev_info->{type}}->{set_uuid};
+	    } elsif ($name eq 'LABEL') {
+		$setter = $filesystem_types{$bdev_info->{type}}->{set_label};
+	    }
+	    defined($setter) or die "internal error: invalid new_id type";
+	    &{$setter}($bdev, $value);
 	}
     }
 }
@@ -1410,14 +1466,15 @@ sub transition {
 
     if ($answer eq 'true') {
 	scan_devices();
-	assign_labels();
+	assign_new_ids();
 
-	if (grep({$bdev_map{$_}->{relabel}} keys(%bdev_map))) {
+	if (grep({$bdev_map{$_}->{new_id}} keys(%bdev_map))) {
 	    $question = 'linux-base/disk-id-convert-plan';
 	    ($ret, $seen) = subst($question, 'relabel',
 				  join("\\n",
-				       map({sprintf("%s: %s", $_, $bdev_map{$_}->{LABEL})}
-					   grep({$bdev_map{$_}->{relabel}}
+				       map({sprintf("%s: %s",
+						    $_, $bdev_map{$_}->{new_id})}
+					   grep({$bdev_map{$_}->{new_id}}
 						keys(%bdev_map)))));
 	    die "Error setting debconf substitutions in $question: $seen" if $ret;
 	} else {
@@ -1448,7 +1505,7 @@ sub transition {
 	if ($answer ne 'true') {
 	    # TODO: go back to the auto/manual question or allow editing the plan
 	} else {
-	    relabel();
+	    set_new_ids();
 	    update_config();
 	}
     }
