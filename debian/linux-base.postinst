@@ -877,6 +877,20 @@ sub udev_next {
     return @results;
 }
 
+sub udev_parse_symlink_rule {
+    my ($path, $symlink);
+    for (@_) {
+	my ($text, $key, $op, $value) = @$_;
+	next if !defined($key);
+	if ($key eq 'ENV{ID_PATH}' && $op eq '==') {
+	    $path = $value;
+	} elsif ($key eq 'SYMLINK' && $op eq '+=') {
+	    $symlink = $value;
+	}
+    }
+    return ($path, $symlink);
+}
+
 # Find symlink rules using IDE device paths that aren't matched by rules
 # using the corresponding SCSI device path.  Return an array containing
 # the corresponding path for each rule where this is the case and undef
@@ -891,17 +905,7 @@ sub udev_cd_find_unmatched_ide_rules {
 	my @keys = udev_next($file);
 	last if $#keys < 0;
 
-	my ($path, $symlink);
-	for (@keys) {
-	    my ($text, $key, $op, $value) = @$_;
-	    next if !defined($key);
-	    if ($key eq 'ENV{ID_PATH}' && $op eq '==') {
-		$path = $value;
-	    } elsif ($key eq 'SYMLINK' && $op eq '+=') {
-		$symlink = $value;
-	    }
-	}
-
+	my ($path, $symlink) = udev_parse_symlink_rule(@keys);
 	if (defined($path) && defined($symlink)) {
 	    if ($path =~ /-ide-\d+:\d+$/) {
 		# libata uses the PATA controller and device numbers
@@ -1315,10 +1319,28 @@ sub scan_devices {
 	}
     }
 
-    # Discard all device ids that are ambiguous.
+    # Discard all labels and UUIDs(!) that are ambiguous.
     for my $bdev (keys(%bdev_map)) {
 	@{$bdev_map{$bdev}->{ids}} = grep({ $#{$id_map{$_}} == 0 }
 					  @{$bdev_map{$bdev}->{ids}});
+    }
+
+    # Add persistent aliases for CD/DVD/BD drives
+    my $cd_rules =
+	new FileHandle('/etc/udev/rules.d/70-persistent-cd.rules', 'r');
+    while (defined($cd_rules)) {
+	my @keys = udev_next($cd_rules);
+	last if $#keys < 0;
+
+	my ($path, $symlink) = udev_parse_symlink_rule(@keys);
+	if (defined($path) && defined($symlink)) {
+	    $symlink =~ s{^(?!/)}{/dev/};
+	    my $bdev = readlink($symlink) or next;
+	    $bdev =~ s{^(?!/)}{/dev/};
+	    if (exists($bdev_map{$bdev})) {
+		push @{$bdev_map{$bdev}->{ids}}, $symlink;
+	    }
+	}
     }
 }
 
