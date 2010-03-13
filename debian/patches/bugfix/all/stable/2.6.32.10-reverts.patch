@@ -1,0 +1,348 @@
+reverted:
+--- b/drivers/gpu/drm/radeon/r600_cs.c
++++ a/drivers/gpu/drm/radeon/r600_cs.c
+@@ -36,10 +36,6 @@
+ typedef int (*next_reloc_t)(struct radeon_cs_parser*, struct radeon_cs_reloc**);
+ static next_reloc_t r600_cs_packet_next_reloc = &r600_cs_packet_next_reloc_mm;
+ 
+-struct r600_cs_track {
+-	u32	cb_color0_base_last;
+-};
+-
+ /**
+  * r600_cs_packet_parse() - parse cp packet and point ib index to next packet
+  * @parser:	parser structure holding parsing context.
+@@ -181,28 +177,6 @@
+ }
+ 
+ /**
+- * r600_cs_packet_next_is_pkt3_nop() - test if next packet is packet3 nop for reloc
+- * @parser:		parser structure holding parsing context.
+- *
+- * Check next packet is relocation packet3, do bo validation and compute
+- * GPU offset using the provided start.
+- **/
+-static inline int r600_cs_packet_next_is_pkt3_nop(struct radeon_cs_parser *p)
+-{
+-	struct radeon_cs_packet p3reloc;
+-	int r;
+-
+-	r = r600_cs_packet_parse(p, &p3reloc, p->idx);
+-	if (r) {
+-		return 0;
+-	}
+-	if (p3reloc.type != PACKET_TYPE3 || p3reloc.opcode != PACKET3_NOP) {
+-		return 0;
+-	}
+-	return 1;
+-}
+-
+-/**
+  * r600_cs_packet_next_vline() - parse userspace VLINE packet
+  * @parser:		parser structure holding parsing context.
+  *
+@@ -363,7 +337,6 @@
+ 				struct radeon_cs_packet *pkt)
+ {
+ 	struct radeon_cs_reloc *reloc;
+-	struct r600_cs_track *track;
+ 	volatile u32 *ib;
+ 	unsigned idx;
+ 	unsigned i;
+@@ -371,7 +344,6 @@
+ 	int r;
+ 	u32 idx_value;
+ 
+-	track = (struct r600_cs_track *)p->track;
+ 	ib = p->ib->ptr;
+ 	idx = pkt->idx + 1;
+ 	idx_value = radeon_get_ib_value(p, idx);
+@@ -531,60 +503,9 @@
+ 		for (i = 0; i < pkt->count; i++) {
+ 			reg = start_reg + (4 * i);
+ 			switch (reg) {
+-			/* This register were added late, there is userspace
+-			 * which does provide relocation for those but set
+-			 * 0 offset. In order to avoid breaking old userspace
+-			 * we detect this and set address to point to last
+-			 * CB_COLOR0_BASE, note that if userspace doesn't set
+-			 * CB_COLOR0_BASE before this register we will report
+-			 * error. Old userspace always set CB_COLOR0_BASE
+-			 * before any of this.
+-			 */
+-			case R_0280E0_CB_COLOR0_FRAG:
+-			case R_0280E4_CB_COLOR1_FRAG:
+-			case R_0280E8_CB_COLOR2_FRAG:
+-			case R_0280EC_CB_COLOR3_FRAG:
+-			case R_0280F0_CB_COLOR4_FRAG:
+-			case R_0280F4_CB_COLOR5_FRAG:
+-			case R_0280F8_CB_COLOR6_FRAG:
+-			case R_0280FC_CB_COLOR7_FRAG:
+-			case R_0280C0_CB_COLOR0_TILE:
+-			case R_0280C4_CB_COLOR1_TILE:
+-			case R_0280C8_CB_COLOR2_TILE:
+-			case R_0280CC_CB_COLOR3_TILE:
+-			case R_0280D0_CB_COLOR4_TILE:
+-			case R_0280D4_CB_COLOR5_TILE:
+-			case R_0280D8_CB_COLOR6_TILE:
+-			case R_0280DC_CB_COLOR7_TILE:
+-				if (!r600_cs_packet_next_is_pkt3_nop(p)) {
+-					if (!track->cb_color0_base_last) {
+-						dev_err(p->dev, "Broken old userspace ? no cb_color0_base supplied before trying to write 0x%08X\n", reg);
+-						return -EINVAL;
+-					}
+-					ib[idx+1+i] = track->cb_color0_base_last;
+-					printk_once(KERN_WARNING "You have old & broken userspace "
+-						"please consider updating mesa & xf86-video-ati\n");
+-				} else {
+-					r = r600_cs_packet_next_reloc(p, &reloc);
+-					if (r) {
+-						dev_err(p->dev, "bad SET_CONTEXT_REG 0x%04X\n", reg);
+-						return -EINVAL;
+-					}
+-					ib[idx+1+i] += (u32)((reloc->lobj.gpu_offset >> 8) & 0xffffffff);
+-				}
+-				break;
+ 			case DB_DEPTH_BASE:
+ 			case DB_HTILE_DATA_BASE:
+ 			case CB_COLOR0_BASE:
+-				r = r600_cs_packet_next_reloc(p, &reloc);
+-				if (r) {
+-					DRM_ERROR("bad SET_CONTEXT_REG "
+-							"0x%04X\n", reg);
+-					return -EINVAL;
+-				}
+-				ib[idx+1+i] += (u32)((reloc->lobj.gpu_offset >> 8) & 0xffffffff);
+-				track->cb_color0_base_last = ib[idx+1+i];
+-				break;
+ 			case CB_COLOR1_BASE:
+ 			case CB_COLOR2_BASE:
+ 			case CB_COLOR3_BASE:
+@@ -757,11 +678,8 @@
+ int r600_cs_parse(struct radeon_cs_parser *p)
+ {
+ 	struct radeon_cs_packet pkt;
+-	struct r600_cs_track *track;
+ 	int r;
+ 
+-	track = kzalloc(sizeof(*track), GFP_KERNEL);
+-	p->track = track;
+ 	do {
+ 		r = r600_cs_packet_parse(p, &pkt, p->idx);
+ 		if (r) {
+@@ -839,7 +757,6 @@
+ 	/* initialize parser */
+ 	memset(&parser, 0, sizeof(struct radeon_cs_parser));
+ 	parser.filp = filp;
+-	parser.dev = &dev->pdev->dev;
+ 	parser.rdev = NULL;
+ 	parser.family = family;
+ 	parser.ib = &fake_ib;
+reverted:
+--- b/drivers/gpu/drm/radeon/r600d.h
++++ a/drivers/gpu/drm/radeon/r600d.h
+@@ -674,30 +674,4 @@
+ #define		S_000E60_SOFT_RESET_TSC(x)		(((x) & 1) << 16)
+ #define		S_000E60_SOFT_RESET_VMC(x)		(((x) & 1) << 17)
+ 
+-#define R_005480_HDP_MEM_COHERENCY_FLUSH_CNTL		0x5480
+-
+-#define R_0280E0_CB_COLOR0_FRAG                      0x0280E0
+-#define   S_0280E0_BASE_256B(x)                        (((x) & 0xFFFFFFFF) << 0)
+-#define   G_0280E0_BASE_256B(x)                        (((x) >> 0) & 0xFFFFFFFF)
+-#define   C_0280E0_BASE_256B                           0x00000000
+-#define R_0280E4_CB_COLOR1_FRAG                      0x0280E4
+-#define R_0280E8_CB_COLOR2_FRAG                      0x0280E8
+-#define R_0280EC_CB_COLOR3_FRAG                      0x0280EC
+-#define R_0280F0_CB_COLOR4_FRAG                      0x0280F0
+-#define R_0280F4_CB_COLOR5_FRAG                      0x0280F4
+-#define R_0280F8_CB_COLOR6_FRAG                      0x0280F8
+-#define R_0280FC_CB_COLOR7_FRAG                      0x0280FC
+-#define R_0280C0_CB_COLOR0_TILE                      0x0280C0
+-#define   S_0280C0_BASE_256B(x)                        (((x) & 0xFFFFFFFF) << 0)
+-#define   G_0280C0_BASE_256B(x)                        (((x) >> 0) & 0xFFFFFFFF)
+-#define   C_0280C0_BASE_256B                           0x00000000
+-#define R_0280C4_CB_COLOR1_TILE                      0x0280C4
+-#define R_0280C8_CB_COLOR2_TILE                      0x0280C8
+-#define R_0280CC_CB_COLOR3_TILE                      0x0280CC
+-#define R_0280D0_CB_COLOR4_TILE                      0x0280D0
+-#define R_0280D4_CB_COLOR5_TILE                      0x0280D4
+-#define R_0280D8_CB_COLOR6_TILE                      0x0280D8
+-#define R_0280DC_CB_COLOR7_TILE                      0x0280DC
+-
+-
+ #endif
+reverted:
+--- b/drivers/gpu/drm/radeon/radeon.h
++++ a/drivers/gpu/drm/radeon/radeon.h
+@@ -448,7 +448,6 @@
+ };
+ 
+ struct radeon_cs_parser {
+-	struct device		*dev;
+ 	struct radeon_device	*rdev;
+ 	struct drm_file		*filp;
+ 	/* chunks */
+reverted:
+--- b/drivers/gpu/drm/radeon/radeon_cs.c
++++ a/drivers/gpu/drm/radeon/radeon_cs.c
+@@ -230,7 +230,6 @@
+ 	memset(&parser, 0, sizeof(struct radeon_cs_parser));
+ 	parser.filp = filp;
+ 	parser.rdev = rdev;
+-	parser.dev = rdev->dev;
+ 	r = radeon_cs_parser_init(&parser, data);
+ 	if (r) {
+ 		DRM_ERROR("Failed to initialize parser !\n");
+reverted:
+--- b/drivers/gpu/drm/radeon/r600.c
++++ a/drivers/gpu/drm/radeon/r600.c
+@@ -1686,14 +1686,13 @@
+ 	if (rdev->accel_working) {
+ 		r = radeon_ib_pool_init(rdev);
+ 		if (r) {
++			DRM_ERROR("radeon: failled initializing IB pool (%d).\n", r);
++			rdev->accel_working = false;
++		}
++		r = r600_ib_test(rdev);
++		if (r) {
++			DRM_ERROR("radeon: failled testing IB (%d).\n", r);
+-			dev_err(rdev->dev, "IB initialization failed (%d).\n", r);
+ 			rdev->accel_working = false;
+-		} else {
+-			r = r600_ib_test(rdev);
+-			if (r) {
+-				dev_err(rdev->dev, "IB test failed (%d).\n", r);
+-				rdev->accel_working = false;
+-			}
+ 		}
+ 	}
+ 	return 0;
+reverted:
+--- b/drivers/gpu/drm/radeon/rv770.c
++++ a/drivers/gpu/drm/radeon/rv770.c
+@@ -1034,14 +1034,13 @@
+ 	if (rdev->accel_working) {
+ 		r = radeon_ib_pool_init(rdev);
+ 		if (r) {
++			DRM_ERROR("radeon: failled initializing IB pool (%d).\n", r);
++			rdev->accel_working = false;
++		}
++		r = r600_ib_test(rdev);
++		if (r) {
++			DRM_ERROR("radeon: failled testing IB (%d).\n", r);
+-			dev_err(rdev->dev, "IB initialization failed (%d).\n", r);
+ 			rdev->accel_working = false;
+-		} else {
+-			r = r600_ib_test(rdev);
+-			if (r) {
+-				dev_err(rdev->dev, "IB test failed (%d).\n", r);
+-				rdev->accel_working = false;
+-			}
+ 		}
+ 	}
+ 	return 0;
+reverted:
+--- b/drivers/gpu/drm/radeon/radeon_display.c
++++ a/drivers/gpu/drm/radeon/radeon_display.c
+@@ -599,11 +599,7 @@
+ 	struct drm_gem_object *obj;
+ 
+ 	obj = drm_gem_object_lookup(dev, file_priv, mode_cmd->handle);
++
+-	if (obj ==  NULL) {
+-		dev_err(&dev->pdev->dev, "No GEM object associated to handle 0x%08X, "
+-			"can't create framebuffer\n", mode_cmd->handle);
+-		return NULL;
+-	}
+ 	return radeon_framebuffer_create(dev, mode_cmd, obj);
+ }
+ 
+reverted:
+--- b/drivers/gpu/drm/i915/intel_tv.c
++++ a/drivers/gpu/drm/i915/intel_tv.c
+@@ -1801,6 +1801,8 @@
+ 	drm_connector_attach_property(connector,
+ 				   dev->mode_config.tv_bottom_margin_property,
+ 				   tv_priv->margin[TV_MARGIN_BOTTOM]);
++
++	dev_priv->hotplug_supported_mask |= TV_HOTPLUG_INT_STATUS;
+ out:
+ 	drm_sysfs_connector_add(connector);
+ }
+reverted:
+--- b/drivers/gpu/drm/i915/intel_sdvo.c
++++ a/drivers/gpu/drm/i915/intel_sdvo.c
+@@ -35,7 +35,6 @@
+ #include "i915_drm.h"
+ #include "i915_drv.h"
+ #include "intel_sdvo_regs.h"
+-#include <linux/dmi.h>
+ 
+ #undef SDVO_DEBUG
+ 
+@@ -2290,25 +2289,6 @@
+ 		return 0x72;
+ }
+ 
+-static int intel_sdvo_bad_tv_callback(const struct dmi_system_id *id)
+-{
+-	DRM_DEBUG_KMS("Ignoring bad SDVO TV connector for %s\n", id->ident);
+-	return 1;
+-}
+-
+-static struct dmi_system_id intel_sdvo_bad_tv[] = {
+-	{
+-		.callback = intel_sdvo_bad_tv_callback,
+-		.ident = "IntelG45/ICH10R/DME1737",
+-		.matches = {
+-			DMI_MATCH(DMI_SYS_VENDOR, "IBM CORPORATION"),
+-			DMI_MATCH(DMI_PRODUCT_NAME, "4800784"),
+-		},
+-	},
+-
+-	{ }	/* terminating entry */
+-};
+-
+ static bool
+ intel_sdvo_output_setup(struct intel_output *intel_output, uint16_t flags)
+ {
+@@ -2349,8 +2329,7 @@
+ 					(1 << INTEL_SDVO_NON_TV_CLONE_BIT) |
+ 					(1 << INTEL_ANALOG_CLONE_BIT);
+ 		}
++	} else if (flags & SDVO_OUTPUT_SVID0) {
+-	} else if ((flags & SDVO_OUTPUT_SVID0) &&
+-		   !dmi_check_system(intel_sdvo_bad_tv)) {
+ 
+ 		sdvo_priv->controlled_output = SDVO_OUTPUT_SVID0;
+ 		encoder->encoder_type = DRM_MODE_ENCODER_TVDAC;
+reverted:
+--- b/drivers/gpu/drm/i915/intel_lvds.c
++++ a/drivers/gpu/drm/i915/intel_lvds.c
+@@ -629,13 +629,6 @@
+ 			DMI_MATCH(DMI_PRODUCT_NAME, "PC-81005"),
+ 		},
+ 	},
+-	{
+-		.ident = "Clevo M5x0N",
+-		.matches = {
+-			DMI_MATCH(DMI_SYS_VENDOR, "CLEVO Co."),
+-			DMI_MATCH(DMI_BOARD_NAME, "M5x0N"),
+-		},
+-	},
+ 	{ }
+ };
+ 
+reverted:
+--- b/drivers/gpu/drm/i915/intel_display.c
++++ a/drivers/gpu/drm/i915/intel_display.c
+@@ -4322,7 +4322,7 @@
+ 	}
+ 
+ 	/* Returns the core display clock speed */
++	if (IS_I945G(dev))
+-	if (IS_I945G(dev) || (IS_G33(dev) && ! IS_IGDGM(dev)))
+ 		dev_priv->display.get_display_clock_speed =
+ 			i945_get_display_clock_speed;
+ 	else if (IS_I915G(dev))
