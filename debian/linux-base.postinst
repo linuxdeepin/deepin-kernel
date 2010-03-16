@@ -1,0 +1,1632 @@
+#!/usr/bin/perl
+
+# Copyright 2009-2010 Ben Hutchings
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+
+use strict;
+use warnings;
+use AptPkg::Config;
+use Debconf::Client::ConfModule ':all';
+use FileHandle;
+use POSIX ();
+use UUID;
+
+package DebianKernel::DiskId;
+
+### utility
+
+sub id_to_path {
+    my ($id) = @_;
+    $id =~ m|^/|
+	or $id =~ s{^(LABEL|UUID)=}{'/dev/disk/by-' . lc($1) . '/'}e
+	or die "Could not map id $id to path";
+    return $id;
+}
+
+### /etc/fstab
+
+sub fstab_next {
+    # Based on my_getmntent() in mount_mntent.c
+
+    my ($file) = @_;
+    my $text = <$file>;
+    unless (defined($text)) {
+	return ();
+    }
+
+    my $line = $text;
+    $line =~ s/\r?\n$//;
+    $line =~ s/^[ \t]*//;
+    if ($line =~ /^(#|$)/) {
+	return ($text);
+    } else {
+	return ($text,
+		map({ s/\\([0-7][0-7][0-7])/chr(oct($1) & 0xff)/eg; $_; }
+		    split(/[ \t]+/, $line)));
+    }
+}
+
+sub fstab_list {
+    my ($file) = @_;
+    my @bdevs;
+    while (1) {
+	my ($text, $bdev) = fstab_next($file);
+	last unless defined($text);
+	if (defined($bdev)) {
+	    push @bdevs, $bdev;
+	}
+    }
+    return @bdevs;
+}
+
+sub fstab_update {
+    my ($old, $new, $map) = @_;
+    while (1) {
+	my ($text, $bdev) = fstab_next($old);
+	last unless defined($text);
+	if (defined($bdev) && defined(my $id = $map->{$bdev})) {
+	    $text =~ s/^(\s*\S+)(.*)/# $1$2\n$id$2/;
+	}
+	$new->print("$text");
+    }
+}
+
+### Kernel parameters
+
+sub kernel_list {
+    my ($cmd_line) = @_;
+    return ($cmd_line =~ /\broot=(\S+)/) ? ($1) : ();
+}
+
+sub kernel_update {
+    my ($cmd_line, $map) = @_;
+    if ($cmd_line =~ /\broot=(\S+)/ && defined(my $id = $map->{$1})) {
+	$cmd_line =~ s/\broot=(\S+)/root=$id/;
+	return $cmd_line;
+    } else {
+	return undef;
+    }
+}
+
+### shell script variable assignment
+
+# Maintains enough context to find statement boundaries, and can parse
+# variable definitions that do not include substitutions.  I think.
+
+sub shellvars_next {
+    my ($file) = @_;
+    my $text = '';
+    my @context = ('');
+    my $first = 1;
+    my $in_value = 0;
+    my ($name, $value);
+    my $unhandled = 0;
+
+  LINE:
+    while (<$file>) {
+	$text .= $_;
+
+	# variable assignment
+	if ($first && m/^\s*([A-Za-z_][A-Za-z0-9_]*)=/g) {
+	    $name = $1;
+	    $value = '';
+	    $in_value = 1;
+	}
+
+	while (/\G(.*?)([#`'"(){}\s]|\\.|\$[({]?)/gs) {
+	    my $end_pos = pos;
+	    my $special = $2;
+
+	    if ($in_value) {
+		# add non-special characters to the value verbatim
+		$value .= $1;
+	    }
+
+	    if ($context[$#context] eq '') {
+		# space outside quotes or brackets ends the value
+		if ($special =~ /^\s/) {
+		    $in_value = 0;
+		    if ($special eq "\n") {
+			last LINE;
+		    }
+		}
+		# something else after the value means this is a command
+		# with an environment override, not a variable definition
+		elsif (defined($name) && !$in_value) {
+		    $unhandled = 1;
+		}
+	    }
+
+	    # in single-quoted string
+	    if ($context[$#context] eq "'") {
+		# only the terminating single-quote is special
+		if ($special eq "'") {
+		    pop @context;
+		} else {
+		    $value .= $special;
+		}
+	    }
+	    # backslash escape
+	    elsif ($special =~ /^\\/) {
+		if ($in_value && $special ne "\\\n") {
+		    $value .= substr($special, 1, 1);
+		}
+	    }
+	    # in backtick substitution
+	    elsif ($context[$#context] eq '`') {
+		# backtick does not participate in nesting, so only the
+		# terminating backtick should be considered special
+		if ($special eq '`') {
+		    pop @context;
+		}
+	    }
+	    # comment
+	    elsif ($context[$#context] !~ /^['"]/ && $special eq '#') {
+		# ignore rest of the physical line, except the new-line
+		pos = $end_pos;
+		/\G.*/g;
+		next;
+	    }
+	    # start of backtick substitution
+	    elsif ($special eq '`') {
+		push @context, '`';
+		$unhandled = 1;
+	    }
+	    # start of single/double-quoted string
+	    elsif ($special =~ /^['"]/ && $context[$#context] !~ /^['"]/) {
+		push @context, $special;
+	    }
+	    # end of double-quoted string
+	    elsif ($special eq '"' && $context[$#context] eq '"') {
+		pop @context;
+	    }
+	    # open bracket
+	    elsif ($special =~ /^\$?\(/) {
+		push @context, ')';
+		$unhandled = 1;
+	    } elsif ($special =~ /^\$\{/) {
+		push @context, '}';
+		$unhandled = 1;
+	    }
+	    # close bracket
+	    elsif ($special =~ /^[)}]/ && $special eq $context[$#context]) {
+		pop @context;
+	    }
+	    # variable substitution
+	    elsif ($special eq '$') {
+		$unhandled = 1;
+	    }
+	    # not a special character in this context (or a syntax error)
+	    else {
+		if ($in_value) {
+		    $value .= $special;
+		}
+	    }
+
+	    pos = $end_pos;
+	}
+
+	$first = 0;
+    }
+
+    if ($text eq '') {
+	return ();
+    } elsif ($unhandled) {
+	return ($text);
+    } else {
+	return ($text, $name, $value);
+    }
+}
+
+sub shellvars_quote {
+    my ($value) = @_;
+    $value =~ s/'/'\''/g;
+    return "'$value'";
+}
+
+### GRUB 1 (grub-legacy) config
+
+sub grub1_parse {
+    my ($file) = @_;
+    my @results = ();
+    my $text = '';
+    my $in_auto = 0;
+    my $in_opts = 0;
+
+    while (<$file>) {
+	if ($in_opts && /^\# (\w+)=(.*)/) {
+	    push @results, [$text];
+	    $text = '';
+	    push @results, [$_, $1, $2];
+	} else {
+	    $text .= $_;
+	    if ($_ eq "### BEGIN AUTOMAGIC KERNELS LIST\n") {
+		$in_auto = 1;
+	    } elsif ($_ eq "### END DEBIAN AUTOMAGIC KERNELS LIST\n") {
+		$in_auto = 0;
+	    } elsif ($_ eq "## ## Start Default Options ##\n") {
+		$in_opts = $in_auto;
+	    } elsif ($_ eq "## ## End Default Options ##\n") {
+		$in_opts = 0;
+	    }
+	}
+    }
+
+    if ($text ne '') {
+	push @results, [$text];
+    }
+
+    return @results;
+}
+
+sub grub1_list {
+    my ($file) = @_;
+    my %options;
+    for (grub1_parse($file)) {
+	my ($text, $name, $value) = @$_;
+	next unless defined($name);
+	$options{$name} = $value;
+    }
+
+    my @bdevs;
+    if (exists($options{kopt_2_6})) {
+	push @bdevs, kernel_list($options{kopt_2_6});
+    } elsif (exists($options{kopt})) {
+	push @bdevs, kernel_list($options{kopt});
+    }
+    if (exists($options{xenkopt})) {
+	push @bdevs, kernel_list($options{xenkopt});
+    }
+    return @bdevs;
+}
+
+sub grub1_update {
+    my ($old, $new, $map) = @_;
+
+    my %options;
+    for (grub1_parse($old)) {
+	my ($text, $name, $value) = @$_;
+	next unless defined($name);
+	$options{$name} = $value;
+    }
+
+    $old->seek(0, 0);
+    for (grub1_parse($old)) {
+	my ($text, $name, $value) = @$_;
+	if (defined($name) && 
+	    ($name eq 'kopt_2_6' ||
+	     ($name eq 'kopt' && !exists($options{kopt_2_6})) ||
+	     $name eq 'xenkopt')) {
+	    if (defined(my $new_value = kernel_update($value, $map))) {
+		$text = "## $name=$value\n# $name=$new_value\n";
+	    }
+	}
+	$new->print($text);
+    }
+}
+
+sub grub1_post {
+    system('update-grub');
+}
+
+### GRUB 2 config
+
+sub grub2_list {
+    my ($file) = @_;
+    my @bdevs;
+
+    while (1) {
+	my ($text, $name, $value) = shellvars_next($file);
+	last unless defined($text);
+	if (defined($name) && $name =~ /^GRUB_CMDLINE_LINUX(?:_DEFAULT)?$/) {
+	    push @bdevs, kernel_list($value);
+	}
+    }
+
+    return @bdevs;
+}
+
+sub grub2_update {
+    my ($old, $new, $map) = @_;
+    my @bdevs;
+
+    while (1) {
+	my ($text, $name, $value) = shellvars_next($old);
+	last unless defined($text);
+	if (defined($name) && $name =~ /^GRUB_CMDLINE_LINUX(?:_DEFAULT)?$/ &&
+	    defined(my $new_value = kernel_update($value, $map))) {
+	    $text =~ s/^/# /gm;
+	    $text .= sprintf("%s=%s\n", $name, shellvars_quote($new_value));
+	}
+	$new->print($text);
+    }
+}
+
+sub grub2_post {
+    system('grub-mkconfig', '-o', '/boot/grub/grub.cfg');
+}
+
+### LILO
+
+sub lilo_tokenize {
+    # Based on cfg_get_token() and next() in cfg.c.
+    # Line boundaries are *not* significant (except as white space) so
+    # we tokenize the whole file at once.
+
+    my ($file) = @_;
+    my @tokens = ();
+    my $text = '';
+    my $token;
+    my $in_quote = 0;
+
+    while (<$file>) {
+	# If this is the continuation of a multi-line quote, skip
+	# leading space and push back the necessary context.
+	if ($in_quote) {
+	    s/^[ \t]*/"/;
+	    $text .= $&;
+	}
+
+	pos = 0;
+	while (/\G \s* (?:\#.*)?
+                (?: (=) |
+                    " ((?:[^"] | \\[\\"n])*) (" | \\\r?\n) |
+                    ((?:[^\s\#="\\] | \\[^\r\n])+) (\\\r?\n)?)?
+               /gsx) {
+	    my $cont;
+	    my $new_text = $&;
+
+	    if (defined($1)) {
+		# equals sign
+		$text = $new_text;
+		$token = $1;
+		$cont = 0;
+	    } elsif (defined($2)) {
+		# quoted text
+		if (!$in_quote) {
+		    $text = $new_text;
+		    $token = $2;
+		} else {
+		    $text .= substr($new_text, 1); # remove the quote again; ick
+		    $token .= ' ' . $2;
+		}
+		$cont = $3 ne '"';
+	    } elsif (defined($4)) {
+		# unquoted word
+		if (!defined($token)) {
+		    $token = '';
+		}
+		$text .= $new_text;
+		$token .= $4;
+		$cont = defined($5);
+	    } else {
+		$text .= $new_text;
+		$cont = $new_text eq '';
+	    }
+
+	    if (!$cont) {
+		if ($text =~ /(?:^|[^\\])\$/) {
+		    # unhandled expansion
+		    $token = undef;
+		} elsif (defined($token)) {
+		    if ($in_quote) {
+			$token =~ s/\\(.)/$1 eq 'n' ? "\n" : $1/eg;
+		    } else {
+			$token =~ s/\\(.)/$1/g;
+		    }
+		}
+		push @tokens, [$text, $token];
+		$text = '';
+		$token = undef;
+		$in_quote = 0;
+	    }
+	}
+    }
+
+    return @tokens;
+}
+
+sub lilo_list {
+    my ($file) = @_;
+    my @bdevs = ();
+    my @tokens = lilo_tokenize($file);
+    my $i = 0;
+    my $in_generic = 1; # global or image=/vmlinuz or image=/vmlinuz.old
+
+    while ($i <= $#tokens) {
+	# Configuration items are either <name> "=" <value> or <name> alone.
+	if ($#tokens - $i >= 2 &&
+	    defined($tokens[$i + 1][1]) && $tokens[$i + 1][1] eq '=') {
+	    my ($name, $value) = ($tokens[$i][1], $tokens[$i + 2][1]);
+	    if (defined($name) && defined($value)) {
+		if ($name eq 'image') {
+		    $in_generic = ($value =~ m|^/vmlinuz(?:\.old)?$|);
+		} elsif ($in_generic) {
+		    if ($name =~ /^(?:boot|root)$/) {
+			push @bdevs, $value;
+		    } elsif ($name =~ /^(?:addappend|append|literal)$/) {
+			push @bdevs, kernel_list($value);
+		    }
+		}
+	    }
+	    $i += 3;
+	} else {
+	    $i += 1;
+	}
+    }
+
+    return @bdevs;
+}
+
+sub lilo_update {
+    my ($old, $new, $map) = @_;
+    my @tokens = lilo_tokenize($old);
+    my $i = 0;
+    my $in_generic = 1; # global or image=/vmlinuz or image=/vmlinuz.old
+
+    while ($i <= $#tokens) {
+	my $text = $tokens[$i][0];
+
+	if ($#tokens - $i >= 2 &&
+	    defined($tokens[$i + 1][1]) && $tokens[$i + 1][1] eq '=') {
+	    my ($name, $value) = ($tokens[$i][1], $tokens[$i + 2][1]);
+	    my $new_value;
+	    if (defined($name) && defined($value)) {
+		if ($name eq 'image') {
+		    $in_generic = ($value =~ m|^/vmlinuz(?:\.old)?$|);
+		} elsif ($in_generic) {
+		    if ($name eq 'boot') {
+			# 'boot' is used directly by the lilo command, which
+			# doesn't use libblkid
+			$new_value = $map->{$value} && id_to_path($map->{$value});
+		    } elsif ($name eq 'root') {
+			# 'root' adds a root parameter to the kernel command
+			# line
+			$new_value = $map->{$value};
+		    } elsif ($name =~ /^(?:addappend|append|literal)$/) {
+			# These are all destined for the kernel command line
+			# in some way
+			$new_value = kernel_update($value, $map);
+		    }
+		}
+	    }
+	    if (defined($new_value)) {
+		$new_value =~ s/\\/\\\\/g;
+		$text = "\n# $name = $value\n$name = \"$new_value\"\n";
+	    } else {
+		$text .= $tokens[$i + 1][0] . $tokens[$i + 2][0];
+	    }
+	    $i += 3;
+	} else {
+	    $i += 1;
+	}
+
+	$new->print($text);
+    }
+}
+
+sub lilo_post {
+    system('lilo');
+}
+
+### SILO
+
+sub silo_post {
+    system('silo');
+}
+
+### ELILO
+
+sub elilo_post {
+    system('elilo');
+}
+
+### PALO
+
+sub palo_next {
+    my ($file, $expect_opt) = @_;
+    my $text = <$file>;
+
+    if (!defined($text) || $text eq '') {
+	return ();
+    }
+
+    my $arg = $text;
+    $arg =~ s/^\s*(?:#.*)?//s;
+    $arg =~ s/\s*$//;
+
+    # I would like to use Getopt::Long but it would make it
+    # impossible to determine which source text to replace.
+    if ($expect_opt && $arg =~ /^-(?!-)[?v]*(.)(.+)?$/) {
+	return ($text, "-$1", $2,    defined($2));
+    } elsif ($expect_opt && $arg =~ /^(--[^=]+)(?:=(.*))?$/) {
+	return ($text, $1,    $2,    defined($2));
+    } elsif ($arg ne '') {
+	return ($text, undef, $arg,  1);
+    } else {
+	return ($text, undef, undef, $expect_opt);
+    }
+}
+
+sub palo_list {
+    my ($file) = @_;
+    my $optopt;
+    my @bdevs;
+
+    while (1) {
+	my ($text, $optarg, $complete);
+	if (defined($optopt)) {
+	    ($text, undef,   $optarg, $complete) = palo_next($file, 0);
+	} else {
+	    ($text, $optopt, $optarg, $complete) = palo_next($file, 1);
+	}
+	last unless defined($text);
+
+	if ($complete && defined($optopt)) {
+	    if ($optopt eq '-c' || $optopt eq '--commandline') {
+		# If PALO is not configured to use the generic sym-link,
+		# ignore it
+		if ($optarg !~ m|^\d+/vmlinux\b|) {
+		    return ();
+		}
+		push @bdevs, kernel_list($optarg);
+	    } elsif ($optopt eq '-I' || $optopt eq '--init-partitioned') {
+		push @bdevs, $optarg;
+	    }
+	    $optopt = undef;
+	}
+
+	if (!defined($optopt) && defined($optarg) && $optarg eq '--') {
+	    last;
+	}
+    }
+
+    return @bdevs;
+}
+
+sub palo_update {
+    my ($old, $new, $map) = @_;
+    my $optopt;
+    my $allow_opts = 1;
+
+    while (1) {
+	my ($text, $optarg, $complete);
+	if (defined($optopt)) {
+	    ($text, undef,   $optarg, $complete) = palo_next($old, 0);
+	} else {
+	    ($text, $optopt, $optarg, $complete) = palo_next($old, $allow_opts);
+	}
+	last unless defined($text);
+
+	if (defined($optopt)) {
+	    if ($optopt eq '-c' || $optopt eq '--commandline') {
+		$text = "# $text";
+		if ($complete) {
+		    my $new_cmdline = kernel_update($optarg, $map);
+		    if (!defined($new_cmdline)) {
+			$new_cmdline = $optarg;
+		    }
+		    $text .= "--commandline=$new_cmdline\n";
+		}
+	    }
+	    $optopt = undef;
+	}
+
+	$new->print($text);
+
+	if (!defined($optopt) && defined($optarg) && $optarg eq '--') {
+	    $allow_opts = 0;
+	}
+    }
+}
+
+sub palo_post {
+    system('palo');
+}
+
+### delo
+
+sub delo_next {
+    # Based on getconfig() in config.c
+
+    my ($file) = @_;
+    my $text = <$file>;
+
+    if (!defined($text) || $text eq '') {
+	return ();
+    }
+
+    local $_ = $text;
+    s/[ \t]*(?:#.*)?\n//;
+    s/^[ \t]*//;
+
+    if (/^([a-z]+)=(.*)$/) {
+	return ($text, $1, $2);
+    } else {
+	return ($text);
+    }
+}
+
+sub delo_sections {
+    my ($file) = @_;
+    my @sections;
+    my $section = {};
+
+    while (1) {
+	my ($text, $name, $value) = delo_next($file);
+
+	# If this is EOF or a new section, finish the current section
+	if (!defined($text) || (defined($name) && $name eq 'label')) {
+	    $section->{is_generic} =
+		(exists($section->{image}) &&
+		 exists($section->{append}) &&
+		 $section->{image} =~ m|^/vmlinux(?:\.old)?$|);
+	    push @sections, $section;
+	    $section = {};
+	}
+
+	last unless defined($text);
+
+	if (defined($name)) {
+	    if ($name eq 'append') {
+		$value =~ s/^"([^"]*).*/$1/;
+	    }
+	    $section->{$name} = $value;
+	}
+    }
+
+    return @sections;
+}
+
+sub delo_list {
+    my ($file) = @_;
+    my ($globals, @entries) = delo_sections($file);
+    my @bdevs;
+
+    if (exists($globals->{boot})) {
+	push @bdevs, $globals->{boot};
+    }
+
+    for my $entry (@entries) {
+	if ($entry->{is_generic}) {
+	    push @bdevs, kernel_list($entry->{append});
+	}
+    }
+
+    return @bdevs;
+}
+
+sub delo_update {
+    my ($old, $new, $map) = @_;
+    my ($globals, @entries) = delo_sections($old);
+    my $i = -1;
+
+    $old->seek(0, 0);
+
+    while (1) {
+	my ($text, $name, $value) = delo_next($old);
+	last unless defined($text);
+
+	if (defined($name)) {
+	    if ($name eq 'label') {
+		++$i; # next entry
+	    } elsif ($name eq 'boot' && $i < 0) {
+		my $new_value = $map->{$value} && id_to_path($map->{$value});
+		if (defined($new_value)) {
+		    $text = "# $text" . "boot=$new_value\n";
+		}
+	    } elsif ($name eq 'append' &&
+		     $i >= 0 && $entries[$i]->{is_generic}) {
+		my $new_cmdline = kernel_update($value, $map);
+		if (defined($new_cmdline)) {
+		    $text = "# $text" . "append=\"$new_cmdline\"\n";
+		}
+	    }
+	}
+
+	$new->print($text);
+    }
+}
+
+### extlinux
+
+sub extlinux_old_path {
+    for ('/boot/extlinux', '/boot/boot/exlinux', '/extlinux') {
+	if (-e) {
+	    return "$_/options.cfg";
+	}
+    }
+    return undef;
+}
+
+sub extlinux_old_list {
+    my ($file) = @_;
+    while (<$file>) {
+	if (/^## ROOT=(.*)/) {
+	    return kernel_list($1);
+	}
+    }
+    return ();
+}
+
+sub extlinux_old_update {
+    my ($old, $new, $map) = @_;
+    while (<$old>) {
+	my $text = $_;
+	if (/^## ROOT=(.*)/) {
+	    my $new_params = kernel_update($1, $map);
+	    if (defined($new_params)) {
+		$text = "## $text" . "## ROOT=$new_params\n";
+	    }
+	}
+	$new->print($text);
+    }
+}
+
+sub extlinux_new_list {
+    my ($file) = @_;
+    while (<$file>) {
+	if (/^# ROOT=(.*)/) {
+	    return kernel_list($1);
+	}
+    }
+    return ();
+}
+
+sub extlinux_new_update {
+    my ($old, $new, $map) = @_;
+    while (<$old>) {
+	my $text = $_;
+	if (/^# ROOT=(.*)/) {
+	    my $new_params = kernel_update($1, $map);
+	    if (defined($new_params)) {
+		$text = "## $text" . "# ROOT=$new_params\n";
+	    }
+	}
+	$new->print($text);
+    }
+}
+
+sub extlinux_post {
+    system('update-extlinux');
+}
+
+### aboot
+
+sub aboot_next {
+    my ($file) = @_;
+    my $text = <$file>;
+
+    if (!defined($text) || $text eq '') {
+	return ();
+    }
+
+    if ($text =~ /^([0-9]):([^ ]*) (.*)/) {
+	return ($text, $1, $2, $3);
+    } else {
+	return ($text);
+    }
+}
+
+sub aboot_list {
+    my ($file) = @_;
+    my @bdevs;
+    while (1) {
+	my ($text, $preset, $kernel, $params) = aboot_next($file);
+	last unless defined($text);
+	if (defined($params) && $kernel =~ m|^\d+/vmlinux(?:\.old)?$|) {
+	    push @bdevs, kernel_list($params);
+	}
+    }
+    return @bdevs;
+}
+
+sub aboot_update {
+    my ($old, $new, $map) = @_;
+    while (1) {
+	my ($text, $preset, $kernel, $params) = aboot_next($old);
+	last unless defined($text);
+	if (defined($params) && $kernel =~ m|^\d+/vmlinux(?:\.old)?$|) {
+	    my $new_params = kernel_update($params, $map);
+	    if (defined($new_params)) {
+		$text = "# $text" . "$preset:$kernel $new_params\n";
+	    }
+	}
+	$new->print($text);
+    }
+}
+
+# udev persistent-cd
+
+sub udev_next {
+    my ($file) = @_;
+    my @results = ();
+
+    # Based on parse_file() and get_key() in udev-rules.c
+    while (1) {
+	my $text = <$file>;
+	last if !defined($text) || $text eq '';
+
+	if ($text =~ /^\s*(?:#|$)/) {
+	    push @results, [$text];
+	} else {
+	    my $end_pos = 0;
+	    while ($text =~ /\G [\s,]* ((?:[^\s=+!:]|[+!:](?!=))+)
+                         \s* ([=+!:]?=) "([^"]*)"/gx) {
+		push @results, [$&, $1, $2, $3];
+		$end_pos = pos($text);
+	    }
+	    push @results, [substr($text, $end_pos)];
+	    last if $text !~ /\\\n$/;
+	}
+    }
+
+    return @results;
+}
+
+sub udev_parse_symlink_rule {
+    my ($path, $symlink);
+    for (@_) {
+	my ($text, $key, $op, $value) = @$_;
+	next if !defined($key);
+	if ($key eq 'ENV{ID_PATH}' && $op eq '==') {
+	    $path = $value;
+	} elsif ($key eq 'SYMLINK' && $op eq '+=') {
+	    $symlink = $value;
+	}
+    }
+    return ($path, $symlink);
+}
+
+# Find symlink rules using IDE device paths that aren't matched by rules
+# using the corresponding SCSI device path.  Return an array containing
+# the corresponding path for each rule where this is the case and undef
+# for all other rules.
+sub udev_cd_find_unmatched_ide_rules {
+    my ($file) = @_;
+    my %wanted_rule;
+    my @unmatched;
+    my $i = 0;
+
+    while (1) {
+	my @keys = udev_next($file);
+	last if $#keys < 0;
+
+	my ($path, $symlink) = udev_parse_symlink_rule(@keys);
+	if (defined($path) && defined($symlink)) {
+	    if ($path =~ /-ide-\d+:\d+$/) {
+		# libata uses the PATA controller and device numbers
+		# as SCSI host number and bus id.  Channel number and
+		# LUN are always 0.  The parent device path should
+		# stay the same.
+		$path =~ s/-ide-(\d+):(\d+)$/-scsi-$1:0:$2:0/;
+		my $rule_key =  $path . ' ' . $symlink;
+		if (!exists($wanted_rule{$rule_key})) {
+		    $wanted_rule{$rule_key} = $i;
+		    $unmatched[$i] = $path;
+		}
+	    } elsif ($path =~ /-scsi-\d+:\d+:\d+:\d+$/) {
+		my $rule_key =  $path . ' ' . $symlink;
+		if (defined(my $j = $wanted_rule{$rule_key})) {
+		    $unmatched[$j] = undef;
+		}
+		$wanted_rule{$rule_key} = -1;
+	    }
+	}
+
+	++$i;
+    }
+
+    return @unmatched;
+}
+
+sub udev_cd_needs_update {
+    my ($file) = @_;
+    my %paths;
+    for (udev_cd_find_unmatched_ide_rules($file)) {
+	if (defined($_)) {
+	    $paths{$_} = 1;
+	}
+    }
+    return join('\n', map({"+ PATH=$_"} keys(%paths)));
+}
+
+sub udev_cd_update {
+    my ($old, $new) = @_; # ignore map
+
+    # Find which rules we will need to copy and edit, then rewind
+    my @unmatched = udev_cd_find_unmatched_ide_rules($old);
+    $old->seek(0, 0);
+
+    my $i = 0;
+    while (1) {
+	my @keys = udev_next($old);
+	last if $#keys < 0;
+
+	my $old_text = '';
+	my $new_text = '';
+
+	for (@keys) {
+	    my ($text, $key, $op, $value) = @$_;
+	    $old_text .= $text;
+	    next unless defined($unmatched[$i]) && defined($key);
+
+	    if ($key eq 'ENV{ID_PATH}' && $op eq '==') {
+		my $value = $unmatched[$i];
+		$new_text .= ", $key$op\"$value\"";
+	    } else {
+		$new_text .= $text;
+	    }
+	}
+
+	$new->print($old_text);
+	if ($unmatched[$i]) {
+	    $new->print($new_text . "\n");
+	}
+
+	++$i;
+    }
+}
+
+# initramfs-tools resume
+
+sub initramfs_resume_list {
+    my ($file) = @_;
+    my @results = ();
+
+    while (1) {
+	my ($text, $name, $value) = shellvars_next($file);
+	last unless defined($text);
+	if (defined($name) && $name eq 'RESUME') {
+	    $results[0] = $value;
+	}
+    }
+
+    return @results;
+}
+
+sub initramfs_resume_update {
+    my ($old, $new, $map) = @_;
+
+    while (1) {
+	my ($text, $name, $value) = shellvars_next($old);
+	last unless defined($text);
+	if (defined($name) && $name eq 'RESUME' &&
+	    defined(my $new_value = $map->{$value})) {
+	    $text =~ s/^/# /gm;
+	    $text .= sprintf("%s=%s\n", $name, shellvars_quote($new_value));
+	}
+	$new->print($text);
+    }
+}
+
+# uswsusp resume
+
+sub uswsusp_next {
+    # Based on parse_line() in config_parser.c
+
+    my ($file) = @_;
+    my $text = <$file>;
+
+    if (!defined($text) || $text eq '') {
+	return ();
+    }
+
+    local $_ = $text;
+    s/^\s*(?:#.*)?//;
+    s/\s*$//;
+
+    if ($text =~ /^([\w ]*\w)[ \t]*[:=][ \t]*(.+)$/) {
+	return ($text, $1, $2);
+    } else {
+	return ($text);
+    }
+}
+
+sub uswsusp_resume_list {
+    my ($file) = @_;
+    my @results = ();
+
+    while (1) {
+	my ($text, $name, $value) = uswsusp_next($file);
+	last unless defined($text);
+	if (defined($name) && $name eq 'resume device') {
+	    $results[0] = $value;
+	}
+    }
+
+    return @results;
+}
+
+sub uswsusp_resume_update {
+    my ($old, $new, $map) = @_;
+
+    while (1) {
+	my ($text, $name, $value) = uswsusp_next($old);
+	last unless defined($text);
+	if (defined($name) && $name eq 'resume device' &&
+	    defined(my $new_value = $map->{$value})) {
+	    $text =~ s/^/# /gm;
+	    $text .= sprintf("%s = %s\n", $name, id_to_path($new_value));
+	}
+	$new->print($text);
+    }
+}
+
+### list of all configuration files and functions
+
+my @config_files = ({packages => 'mount',
+		     path => '/etc/fstab',
+		     list => \&fstab_list,
+		     update => \&fstab_update},
+		    {packages => 'grub grub-legacy',
+		     path => '/boot/grub/menu.lst',
+		     list => \&grub1_list,
+		     update => \&grub1_update,
+		     post_update => \&grub1_post},
+		    {packages => 'grub-common',
+		     path => '/etc/default/grub',
+		     list => \&grub2_list,
+		     update => \&grub2_update,
+		     post_update => \&grub2_post},
+		    {packages => 'lilo',
+		     path => '/etc/lilo.conf',
+		     list => \&lilo_list,
+		     update => \&lilo_update,
+		     post_update => \&lilo_post},
+		    {packages => 'silo',
+		     path => '/etc/silo.conf',
+		     list => \&lilo_list,
+		     update => \&lilo_update,
+		     post_update => \&silo_post},
+		    {packages => 'quik',
+		     path => '/etc/quik.conf',
+		     list => \&lilo_list,
+		     update => \&lilo_update},
+		    {packages => 'yaboot',
+		     path => '/etc/yaboot.conf',
+		     list => \&lilo_list,
+		     update => \&lilo_update},
+		    {packages => 'elilo',
+		     path => '/etc/elilo.conf',
+		     list => \&lilo_list,
+		     update => \&lilo_update,
+		     post_update => \&elilo_post},
+		    {packages => 'palo',
+		     path => '/etc/palo.conf',
+		     list => \&palo_list,
+		     update => \&palo_update,
+		     post_update => \&palo_post},
+		    {packages => 'delo',
+		     path => '/etc/delo.conf',
+		     list => \&delo_list,
+		     update => \&delo_update},
+		    {packages => 'arcboot',
+		     path => '/etc/arcboot.conf',
+		     list => \&delo_list,
+		     update => \&delo_update},
+		    {packages => 'extlinux',
+		     path => extlinux_old_path(),
+		     list => \&extlinux_old_list,
+		     update => \&extlinux_old_update,
+		     post_update => \&extlinux_post},
+		    {packages => 'extlinux',
+		     path => '/etc/default/extlinux',
+		     list => \&extlinux_new_list,
+		     update => \&extlinux_new_update,
+		     post_update => \&extlinux_post},
+		    {packages => 'aboot',
+		     path => '/etc/aboot.conf',
+		     list => \&aboot_list,
+		     update => \&aboot_update},
+		    {packages => 'udev',
+		     path => '/etc/udev/rules.d/70-persistent-cd.rules',
+		     needs_update => \&udev_cd_needs_update,
+		     update => \&udev_cd_update},
+		    {packages => 'initramfs-tools',
+		     path => '/etc/initramfs-tools/conf.d/resume',
+		     list => \&initramfs_resume_list,
+		     update => \&initramfs_resume_update,
+		     # udev will source all files in this directory,
+		     # with few exceptions.  Such as including a '^'.
+		     suffix => '^old'},
+		    {packages => 'uswsusp',
+		     path => '/etc/uswsusp.conf',
+		     list => \&uswsusp_resume_list,
+		     update => \&uswsusp_resume_update});
+
+### Filesystem labels and UUIDs
+
+sub ext2_set_label {
+    my ($bdev, $label) = @_;
+    system('tune2fs', '-L', $label, $bdev) == 0 or die "tune2fs failed: $?";
+}
+sub ext2_set_uuid {
+    my ($bdev, $uuid) = @_;
+    system('tune2fs', '-U', $uuid, $bdev) == 0 or die "tune2fs failed: $?";
+}
+
+sub jfs_set_label {
+    my ($bdev, $label) = @_;
+    system('jfs_tune', '-L', $label, $bdev) == 0 or die "jfs_tune failed: $?";
+}
+sub jfs_set_uuid {
+    my ($bdev, $uuid) = @_;
+    system('jfs_tune', '-U', $uuid, $bdev) == 0 or die "jfs_tune failed: $?";
+}
+
+sub fat_set_label {
+    my ($bdev, $label) = @_;
+    system('dosfslabel', $bdev, $label) == 0 or die "dosfslabel failed: $?";
+}
+
+sub ntfs_set_label {
+    my ($bdev, $label) = @_;
+    system('ntfslabel', $bdev, $label) == 0 or die "ntfslabel failed: $?";
+}
+
+sub reiserfs_set_label {
+    my ($bdev, $label) = @_;
+    system('reiserfstune', '--label', $label, $bdev)
+	or die "reiserfstune failed: $?";
+}
+sub reiserfs_set_uuid {
+    my ($bdev, $uuid) = @_;
+    system('reiserfstune', '--uuid', $uuid, $bdev)
+	or die "reiserfstune failed: $?";
+}
+
+# There is no command to relabel swap, and we mustn't run mkswap if
+# the partition is already in use.  Thankfully the header format is
+# pretty simple; it starts with this structure:
+# struct swap_header_v1_2 {
+# 	char	      bootbits[1024];    /* Space for disklabel etc. */
+# 	unsigned int  version;
+# 	unsigned int  last_page;
+# 	unsigned int  nr_badpages;
+# 	unsigned char uuid[16];
+# 	char	      volume_name[16];
+# 	unsigned int  padding[117];
+# 	unsigned int  badpages[1];
+# };
+# and has the signature 'SWAPSPACE2' at the end of the first page.
+use constant { SWAP_SIGNATURE => 'SWAPSPACE2',
+	       SWAP_UUID_OFFSET => 1036, SWAP_UUID_LEN => 16,
+	       SWAP_LABEL_OFFSET => 1052, SWAP_LABEL_LEN => 16 };
+sub _swap_set_field {
+    my ($bdev, $offset, $value) = @_;
+    my $pagesize = POSIX::sysconf(POSIX::_SC_PAGESIZE) or die "$!";
+    my ($length, $signature);
+
+    my $fd = POSIX::open($bdev, POSIX::O_RDWR);
+    defined($fd) or die "$!";
+
+    # Check the signature
+    POSIX::lseek($fd, $pagesize - length(SWAP_SIGNATURE), POSIX::SEEK_SET);
+    $length = POSIX::read($fd, $signature, length(SWAP_SIGNATURE));
+    if (!defined($length) || $signature ne SWAP_SIGNATURE) {
+	POSIX::close($fd);
+	die "swap signature not found on $bdev";
+    }
+
+    # Set the field
+    POSIX::lseek($fd, $offset, POSIX::SEEK_SET);
+    $length = POSIX::write($fd, $value, length($value));
+    if (!defined($length) || $length != length($value)) {
+	my $error = "$!";
+	POSIX::close($fd);
+	die $error;
+    }
+
+    POSIX::close($fd);
+}
+sub swap_set_label {
+    my ($bdev, $label) = @_;
+    _swap_set_field($bdev, SWAP_LABEL_OFFSET, pack('Z' . SWAP_LABEL_LEN, $label));
+}
+sub swap_set_uuid {
+    my ($bdev, $uuid) = @_;
+    my $uuid_bin;
+    if (UUID::parse($uuid, $uuid_bin) != 0 ||
+	length($uuid_bin) != SWAP_UUID_LEN) {
+	die "internal error: invalid UUID string";
+    }
+    _swap_set_field($bdev, SWAP_UUID_OFFSET, $uuid_bin);
+}
+
+sub ufs_set_label {
+    my ($bdev, $label) = @_;
+    system('tunefs.ufs', '-L', $label, $bdev) or die "tunefs.ufs failed: $?";
+}
+
+sub xfs_set_label {
+    my ($bdev, $label) = @_;
+    system('xfs_admin', '-L', $label, $bdev) or die "xfs_admin failed: $?";
+}
+sub xfs_set_uuid {
+    my ($bdev, $uuid) = @_;
+    system('xfs_admin', '-U', $uuid, $bdev) or die "xfs_admin failed: $?";
+}
+
+my %filesystem_types = (
+    ext2     => { label_len => 16,             set_label => \&ext2_set_label,
+		  set_uuid  => \&ext2_set_uuid },
+    ext3     => { label_len => 16,             set_label => \&ext2_set_label,
+		  set_uuid  => \&ext2_set_uuid },
+    ext4     => { label_len => 16,             set_label => \&ext2_set_label,
+		  set_uuid  => \&ext2_set_uuid },
+    jfs      => { label_len => 16,             set_label => \&jfs_set_label,
+		  set_uuid  => \&jfs_set_uuid },
+    msdos    => { label_len => 11,             set_label => \&fat_set_label },
+    ntfs     => { label_len => 128,            set_label => \&ntfs_set_label },
+    reiserfs => { label_len => 16,             set_label => \&reiserfs_set_label,
+		  set_uuid  => \&reiserfs_set_uuid },
+    swap     => { label_len => SWAP_LABEL_LEN, set_label => \&swap_set_label,
+		  set_uuid  => \&swap_set_uuid },
+    ufs      => { label_len => 32,             set_label => \&ufs_set_label },
+    vfat     => { label_len => 11,             set_label => \&fat_set_label },
+    xfs      => { label_len => 12,             set_label => \&xfs_set_label,
+		  set_uuid  => \&xfs_set_uuid }
+    );
+
+my %bdev_map;
+my @matched_configs;
+my %id_map;
+
+sub scan_config_files {
+    # Find all IDE/SCSI disks mentioned in configurations
+    for my $config (@config_files) {
+	# Is the file present?
+	my $path = $config->{path};
+	if (!defined($path)) {
+	    next;
+	}
+	my $file = new FileHandle($path, 'r');
+	if (!defined($file)) {
+	    if ($! == POSIX::ENOENT) {
+		next;
+	    }
+	    die $!;
+	}
+
+	# Are any of the related packages wanted or installed?
+	my $wanted = 0;
+	my $installed = 0;
+	my $packages = $config->{packages};
+	for (`dpkg-query 2>/dev/null --showformat '\${status}\\n' -W $packages`)
+	{
+	    $wanted = 1 if /^install /;
+	    $installed = 1 if / installed\n$/;
+	}
+	if (!$wanted && !$installed) {
+	    next;
+	}
+
+	my @matched_bdevs = ();
+	my $id_map_text;
+
+	if (exists($config->{needs_update})) {
+	    $id_map_text = &{$config->{needs_update}}($file);
+	} else {
+	    for my $bdev (&{$config->{list}}($file)) {
+		if ($bdev =~ m{^/dev/(?:[hs]d[a-z]\d*|s(?:cd|r)\d+)$} &&
+		    -b $bdev) {
+		    $bdev_map{$bdev} = {};
+		    push @matched_bdevs, $bdev;
+		}
+	    }
+	}
+
+	if (@matched_bdevs || $id_map_text) {
+	    push @matched_configs, {config => $config,
+				    devices => \@matched_bdevs,
+				    id_map_text => $id_map_text,
+				    installed => $installed};
+	}
+    }
+
+    my $fstab = new FileHandle('/etc/fstab', 'r');
+    while (1) {
+	my ($text, $bdev, $path, $type) = fstab_next($fstab);
+	last unless defined($text);
+	if (defined($type) && exists($bdev_map{$bdev})) {
+	    $bdev_map{$bdev}->{path} = $path;
+	    $bdev_map{$bdev}->{type} = $type;
+	}
+    }
+    $fstab->close();
+}
+
+sub add_tag {
+    # Map disks to labels/UUIDs and vice versa.  Include all disks in
+    # the reverse mapping so we can detect ambiguity.
+    my ($bdev, $name, $value, $new) = @_;
+    my $id = "$name=$value";
+    push @{$id_map{$id}}, $bdev;
+    if (exists($bdev_map{$bdev})) {
+	$bdev_map{$bdev}->{$name} = $value;
+	push @{$bdev_map{$bdev}->{ids}}, $id;
+    }
+    if ($new) {
+	$bdev_map{$bdev}->{new_id} = $id;
+    }
+}
+
+sub scan_devices {
+    for (`blkid -o device`) {
+	chomp;
+	my $bdev = $_;
+	for (`blkid -o udev -s LABEL -s UUID '$bdev'`) {
+	    if (/^ID_FS_(LABEL|UUID)_ENC=(.+)\n$/) {
+		add_tag($bdev, $1, $2);
+	    }
+	}
+    }
+
+    # Discard all labels and UUIDs(!) that are ambiguous.
+    for my $bdev (keys(%bdev_map)) {
+	@{$bdev_map{$bdev}->{ids}} = grep({ $#{$id_map{$_}} == 0 }
+					  @{$bdev_map{$bdev}->{ids}});
+    }
+
+    # Add persistent aliases for CD/DVD/BD drives
+    my $cd_rules =
+	new FileHandle('/etc/udev/rules.d/70-persistent-cd.rules', 'r');
+    while (defined($cd_rules)) {
+	my @keys = udev_next($cd_rules);
+	last if $#keys < 0;
+
+	my ($path, $symlink) = udev_parse_symlink_rule(@keys);
+	if (defined($path) && defined($symlink)) {
+	    $symlink =~ s{^(?!/)}{/dev/};
+	    my $bdev = readlink($symlink) or next;
+	    $bdev =~ s{^(?!/)}{/dev/};
+	    if (exists($bdev_map{$bdev})) {
+		push @{$bdev_map{$bdev}->{ids}}, $symlink;
+	    }
+	}
+    }
+}
+
+sub assign_new_ids {
+    my $hostname = (POSIX::uname())[1];
+
+    # For all devices that have no alternate device ids, suggest setting
+    # UUIDs, labelling them based on fstab or just using a generic label.
+    for my $bdev (keys(%bdev_map)) {
+	next if $#{$bdev_map{$bdev}->{ids}} >= 0;
+
+	my $type = $bdev_map{$bdev}->{type};
+	next unless defined($type) && exists($filesystem_types{$type});
+
+	if (defined($filesystem_types{$type}->{set_uuid})) {
+	    my ($uuid_bin, $uuid);
+	    UUID::generate($uuid_bin);
+	    UUID::unparse($uuid_bin, $uuid);
+	    add_tag($bdev, 'UUID', $uuid, 1);
+	    next;
+	}
+
+	my $label_len = $filesystem_types{$type}->{len};
+	my $label;
+	use bytes; # string lengths are in bytes
+
+	if (defined($bdev_map{$bdev}->{path})) {
+	    # Convert path/type to label; prepend hostname if possible;
+	    # append numeric suffix if necessary.
+
+	    my $base;
+	    if ($bdev_map{$bdev}->{path} =~ m|^/|) {
+		$base = $bdev_map{$bdev}->{path};
+	    } else {
+		$base = $bdev_map{$bdev}->{type};
+	    }
+	    $base =~ s/[^\w]+/-/g;
+	    $base =~ s/^-//g;
+	    $base =~ s/-$//g;
+
+	    my $n = 0;
+	    my $suffix = '';
+	    do {
+		$label = "$hostname-$base$suffix";
+		if (length($label) > $label_len) {
+		    $label = substr($base, 0, $label_len - length($suffix))
+			. $suffix;
+		}
+		$n++;
+		$suffix = "-$n";
+	    } while (exists($id_map{"LABEL=$label"}));
+	} else {
+	    my $n = 0;
+	    my $suffix;
+	    do {
+		$n++;
+		$suffix = "-$n";
+		$label = substr($hostname, 0, $label_len - length($suffix))
+		    . $suffix;
+	    } while (exists($id_map{"LABEL=$label"}));
+	}
+
+	add_tag($bdev, 'LABEL', $label, 1);
+    }
+}
+
+sub set_new_ids {
+    for my $bdev (keys(%bdev_map)) {
+	my $bdev_info = $bdev_map{$bdev};
+	if ($bdev_info->{new_id}) {
+	    my ($name, $value) = split(/=/, $bdev_info->{new_id}, 2);
+	    my $setter;
+	    if ($name eq 'UUID') {
+		$setter = $filesystem_types{$bdev_info->{type}}->{set_uuid};
+	    } elsif ($name eq 'LABEL') {
+		$setter = $filesystem_types{$bdev_info->{type}}->{set_label};
+	    }
+	    defined($setter) or die "internal error: invalid new_id type";
+	    &{$setter}($bdev, $value);
+	}
+    }
+}
+
+sub update_config {
+    my %map;
+    for my $bdev (keys(%bdev_map)) {
+	$map{$bdev} = $bdev_map{$bdev}->{ids}->[0];
+    }
+
+    for my $match (@matched_configs) {
+	# Generate a new config
+	my $path = $match->{config}->{path};
+	my $old = new FileHandle($path, 'r') or die "$!";
+	my $new = new FileHandle("$path.new", POSIX::O_WRONLY | POSIX::O_CREAT,
+				 0600)
+	    or die "$!";
+	&{$match->{config}->{update}}($old, $new, \%map);
+	$old->close();
+	$new->close();
+
+	# New config should have same permissions as the old
+	my (undef, undef, $mode, undef, $uid, $gid) = stat($path) or die "$!";
+	chown($uid, $gid, "$path.new") or die "$!";
+	chmod($mode & 07777, "$path.new") or die "$!";
+
+	# Back up the old config and replace with the new
+	my $old_path = $path . ($match->{config}->{suffix} || '.old');
+	unlink($old_path);
+	link($path, $old_path) or die "$!";
+	rename("$path.new", $path) or die "$!";
+
+	# If the package is installed, run the post-update function
+	if ($match->{installed} && $match->{config}->{post_update}) {
+	    &{$match->{config}->{post_update}}();
+	}
+    }
+}
+
+sub transition {
+    use Debconf::Client::ConfModule ':all';
+
+    %bdev_map = ();
+    @matched_configs = ();
+    %id_map = ();
+
+    scan_config_files();
+
+    if ($#matched_configs < 0) {
+	return;
+    }
+
+    my ($question, $answer, $ret, $seen);
+
+    $question = 'linux-base/disk-id-convert-auto';
+    ($ret, $seen) = input('high', $question);
+    if ($ret && $ret != 30) {
+	die "Error setting debconf question $question: $seen";
+    }
+    ($ret, $seen) = go();
+    if ($ret && $ret != 30) {
+	die "Error asking debconf question $question: $seen";
+    }
+    ($ret, $answer) = get($question);
+    die "Error retrieving answer for $question: $answer" if $ret;
+
+    if ($answer eq 'true') {
+	scan_devices();
+	assign_new_ids();
+
+	if (grep({$bdev_map{$_}->{new_id}} keys(%bdev_map))) {
+	    $question = 'linux-base/disk-id-convert-plan';
+	    ($ret, $seen) = subst($question, 'relabel',
+				  join("\\n",
+				       map({sprintf("%s: %s",
+						    $_, $bdev_map{$_}->{new_id})}
+					   grep({$bdev_map{$_}->{new_id}}
+						keys(%bdev_map)))));
+	    die "Error setting debconf substitutions in $question: $seen" if $ret;
+	} else {
+	    $question = 'linux-base/disk-id-convert-plan-no-relabel';
+	}
+	($ret, $seen) = subst($question, 'id_map',
+			      join("\\n",
+				   map({sprintf("%s: %s", $_, $bdev_map{$_}->{ids}->[0])}
+				       grep({@{$bdev_map{$_}->{ids}}}
+					    keys(%bdev_map))),
+				   grep({defined}
+					map({$_->{id_map_text}} @matched_configs))));
+	die "Error setting debconf substitutions in $question: $seen" if $ret;
+	($ret, $seen) = subst($question, 'files',
+			      join(', ',
+				   map({$_->{config}->{path}} @matched_configs)));
+	die "Error setting debconf substitutions in $question: $seen" if $ret;
+	($ret, $seen) = input('high', $question);
+	if ($ret && $ret != 30) {
+	    die "Error setting debconf question $question: $seen";
+	}
+	($ret, $seen) = go();
+	if ($ret && $ret != 30) {
+	    die "Error asking debconf question $question: $seen";
+	}
+	($ret, $answer) = get($question);
+	die "Error retrieving answer for $question: $answer" if $ret;
+    
+	if ($answer eq 'true') {
+	    set_new_ids();
+	    update_config();
+	}
+    }
+
+    my @unconv_files = ();
+    for my $match (@matched_configs) {
+	my @unconv_bdevs = grep({!exists($bdev_map{$_}->{ids}) ||
+				     @{$bdev_map{$_}->{ids}} == 0}
+				@{$match->{devices}});
+	if (@unconv_bdevs) {
+	    push @unconv_files, sprintf('%s: %s', $match->{config}->{path},
+					join(', ',@unconv_bdevs));
+	}
+    }
+    if (@unconv_files) {
+	$question = 'linux-base/disk-id-manual';
+	($ret, $seen) = subst($question, 'unconverted',
+			      join("\\n", @unconv_files));
+	die "Error setting debconf substitutions in $question: $seen" if $ret;
+	($ret, $seen) = input('high', $question);
+	if ($ret && $ret != 30) {
+	    die "Error setting debconf note $question: $seen";
+	}
+	($ret, $seen) = go();
+	if ($ret && $ret != 30) {
+	    die "Error showing debconf note $question: $seen";
+	}
+    }
+}
+
+package main;
+
+capb('escape');
+
+sub compare_versions {
+    return $AptPkg::Config::_config->system->versioning->compare(@_);
+}
+
+if ($ARGV[0] eq 'reconfigure' ||
+    compare_versions($ARGV[1], '2.6.32-10') < 0) {
+    DebianKernel::DiskId::transition();
+}
+
+exec("set -e\nset -- @ARGV\n" . << 'EOF');
+#DEBHELPER#
+EOF
