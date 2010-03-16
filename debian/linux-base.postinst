@@ -522,223 +522,10 @@ sub lilo_post {
     system('lilo');
 }
 
-### SILO
-
-sub silo_post {
-    system('silo');
-}
-
 ### ELILO
 
 sub elilo_post {
     system('elilo');
-}
-
-### PALO
-
-sub palo_next {
-    my ($file, $expect_opt) = @_;
-    my $text = <$file>;
-
-    if (!defined($text) || $text eq '') {
-	return ();
-    }
-
-    my $arg = $text;
-    $arg =~ s/^\s*(?:#.*)?//s;
-    $arg =~ s/\s*$//;
-
-    # I would like to use Getopt::Long but it would make it
-    # impossible to determine which source text to replace.
-    if ($expect_opt && $arg =~ /^-(?!-)[?v]*(.)(.+)?$/) {
-	return ($text, "-$1", $2,    defined($2));
-    } elsif ($expect_opt && $arg =~ /^(--[^=]+)(?:=(.*))?$/) {
-	return ($text, $1,    $2,    defined($2));
-    } elsif ($arg ne '') {
-	return ($text, undef, $arg,  1);
-    } else {
-	return ($text, undef, undef, $expect_opt);
-    }
-}
-
-sub palo_list {
-    my ($file) = @_;
-    my $optopt;
-    my @bdevs;
-
-    while (1) {
-	my ($text, $optarg, $complete);
-	if (defined($optopt)) {
-	    ($text, undef,   $optarg, $complete) = palo_next($file, 0);
-	} else {
-	    ($text, $optopt, $optarg, $complete) = palo_next($file, 1);
-	}
-	last unless defined($text);
-
-	if ($complete && defined($optopt)) {
-	    if ($optopt eq '-c' || $optopt eq '--commandline') {
-		# If PALO is not configured to use the generic sym-link,
-		# ignore it
-		if ($optarg !~ m|^\d+/vmlinux\b|) {
-		    return ();
-		}
-		push @bdevs, kernel_list($optarg);
-	    } elsif ($optopt eq '-I' || $optopt eq '--init-partitioned') {
-		push @bdevs, $optarg;
-	    }
-	    $optopt = undef;
-	}
-
-	if (!defined($optopt) && defined($optarg) && $optarg eq '--') {
-	    last;
-	}
-    }
-
-    return @bdevs;
-}
-
-sub palo_update {
-    my ($old, $new, $map) = @_;
-    my $optopt;
-    my $allow_opts = 1;
-
-    while (1) {
-	my ($text, $optarg, $complete);
-	if (defined($optopt)) {
-	    ($text, undef,   $optarg, $complete) = palo_next($old, 0);
-	} else {
-	    ($text, $optopt, $optarg, $complete) = palo_next($old, $allow_opts);
-	}
-	last unless defined($text);
-
-	if (defined($optopt)) {
-	    if ($optopt eq '-c' || $optopt eq '--commandline') {
-		$text = "# $text";
-		if ($complete) {
-		    my $new_cmdline = kernel_update($optarg, $map);
-		    if (!defined($new_cmdline)) {
-			$new_cmdline = $optarg;
-		    }
-		    $text .= "--commandline=$new_cmdline\n";
-		}
-	    }
-	    $optopt = undef;
-	}
-
-	$new->print($text);
-
-	if (!defined($optopt) && defined($optarg) && $optarg eq '--') {
-	    $allow_opts = 0;
-	}
-    }
-}
-
-sub palo_post {
-    system('palo');
-}
-
-### delo
-
-sub delo_next {
-    # Based on getconfig() in config.c
-
-    my ($file) = @_;
-    my $text = <$file>;
-
-    if (!defined($text) || $text eq '') {
-	return ();
-    }
-
-    local $_ = $text;
-    s/[ \t]*(?:#.*)?\n//;
-    s/^[ \t]*//;
-
-    if (/^([a-z]+)=(.*)$/) {
-	return ($text, $1, $2);
-    } else {
-	return ($text);
-    }
-}
-
-sub delo_sections {
-    my ($file) = @_;
-    my @sections;
-    my $section = {};
-
-    while (1) {
-	my ($text, $name, $value) = delo_next($file);
-
-	# If this is EOF or a new section, finish the current section
-	if (!defined($text) || (defined($name) && $name eq 'label')) {
-	    $section->{is_generic} =
-		(exists($section->{image}) &&
-		 exists($section->{append}) &&
-		 $section->{image} =~ m|^/vmlinux(?:\.old)?$|);
-	    push @sections, $section;
-	    $section = {};
-	}
-
-	last unless defined($text);
-
-	if (defined($name)) {
-	    if ($name eq 'append') {
-		$value =~ s/^"([^"]*).*/$1/;
-	    }
-	    $section->{$name} = $value;
-	}
-    }
-
-    return @sections;
-}
-
-sub delo_list {
-    my ($file) = @_;
-    my ($globals, @entries) = delo_sections($file);
-    my @bdevs;
-
-    if (exists($globals->{boot})) {
-	push @bdevs, $globals->{boot};
-    }
-
-    for my $entry (@entries) {
-	if ($entry->{is_generic}) {
-	    push @bdevs, kernel_list($entry->{append});
-	}
-    }
-
-    return @bdevs;
-}
-
-sub delo_update {
-    my ($old, $new, $map) = @_;
-    my ($globals, @entries) = delo_sections($old);
-    my $i = -1;
-
-    $old->seek(0, 0);
-
-    while (1) {
-	my ($text, $name, $value) = delo_next($old);
-	last unless defined($text);
-
-	if (defined($name)) {
-	    if ($name eq 'label') {
-		++$i; # next entry
-	    } elsif ($name eq 'boot' && $i < 0) {
-		my $new_value = $map->{$value} && id_to_path($map->{$value});
-		if (defined($new_value)) {
-		    $text = "# $text" . "boot=$new_value\n";
-		}
-	    } elsif ($name eq 'append' &&
-		     $i >= 0 && $entries[$i]->{is_generic}) {
-		my $new_cmdline = kernel_update($value, $map);
-		if (defined($new_cmdline)) {
-		    $text = "# $text" . "append=\"$new_cmdline\"\n";
-		}
-	    }
-	}
-
-	$new->print($text);
-    }
 }
 
 ### extlinux
@@ -802,51 +589,6 @@ sub extlinux_new_update {
 
 sub extlinux_post {
     system('update-extlinux');
-}
-
-### aboot
-
-sub aboot_next {
-    my ($file) = @_;
-    my $text = <$file>;
-
-    if (!defined($text) || $text eq '') {
-	return ();
-    }
-
-    if ($text =~ /^([0-9]):([^ ]*) (.*)/) {
-	return ($text, $1, $2, $3);
-    } else {
-	return ($text);
-    }
-}
-
-sub aboot_list {
-    my ($file) = @_;
-    my @bdevs;
-    while (1) {
-	my ($text, $preset, $kernel, $params) = aboot_next($file);
-	last unless defined($text);
-	if (defined($params) && $kernel =~ m|^\d+/vmlinux(?:\.old)?$|) {
-	    push @bdevs, kernel_list($params);
-	}
-    }
-    return @bdevs;
-}
-
-sub aboot_update {
-    my ($old, $new, $map) = @_;
-    while (1) {
-	my ($text, $preset, $kernel, $params) = aboot_next($old);
-	last unless defined($text);
-	if (defined($params) && $kernel =~ m|^\d+/vmlinux(?:\.old)?$|) {
-	    my $new_params = kernel_update($params, $map);
-	    if (defined($new_params)) {
-		$text = "# $text" . "$preset:$kernel $new_params\n";
-	    }
-	}
-	$new->print($text);
-    }
 }
 
 # udev persistent-cd
@@ -1087,37 +829,11 @@ my @config_files = ({packages => 'mount',
 		     list => \&lilo_list,
 		     update => \&lilo_update,
 		     post_update => \&lilo_post},
-		    {packages => 'silo',
-		     path => '/etc/silo.conf',
-		     list => \&lilo_list,
-		     update => \&lilo_update,
-		     post_update => \&silo_post},
-		    {packages => 'quik',
-		     path => '/etc/quik.conf',
-		     list => \&lilo_list,
-		     update => \&lilo_update},
-		    {packages => 'yaboot',
-		     path => '/etc/yaboot.conf',
-		     list => \&lilo_list,
-		     update => \&lilo_update},
 		    {packages => 'elilo',
 		     path => '/etc/elilo.conf',
 		     list => \&lilo_list,
 		     update => \&lilo_update,
 		     post_update => \&elilo_post},
-		    {packages => 'palo',
-		     path => '/etc/palo.conf',
-		     list => \&palo_list,
-		     update => \&palo_update,
-		     post_update => \&palo_post},
-		    {packages => 'delo',
-		     path => '/etc/delo.conf',
-		     list => \&delo_list,
-		     update => \&delo_update},
-		    {packages => 'arcboot',
-		     path => '/etc/arcboot.conf',
-		     list => \&delo_list,
-		     update => \&delo_update},
 		    {packages => 'extlinux',
 		     path => extlinux_old_path(),
 		     list => \&extlinux_old_list,
@@ -1128,10 +844,6 @@ my @config_files = ({packages => 'mount',
 		     list => \&extlinux_new_list,
 		     update => \&extlinux_new_update,
 		     post_update => \&extlinux_post},
-		    {packages => 'aboot',
-		     path => '/etc/aboot.conf',
-		     list => \&aboot_list,
-		     update => \&aboot_update},
 		    {packages => 'udev',
 		     path => '/etc/udev/rules.d/70-persistent-cd.rules',
 		     needs_update => \&udev_cd_needs_update,
@@ -1622,8 +1334,11 @@ sub compare_versions {
     return $AptPkg::Config::_config->system->versioning->compare(@_);
 }
 
-if ($ARGV[0] eq 'reconfigure' ||
-    compare_versions($ARGV[1], '2.6.32-10') < 0) {
+my $deb_arch = `dpkg --print-architecture`;
+chomp $deb_arch;
+
+if (($deb_arch eq 'i386' || $deb_arch eq 'amd64') &&
+    ($ARGV[0] eq 'reconfigure' || compare_versions($ARGV[1], '2.6.32-10') < 0)) {
     DebianKernel::DiskId::transition();
 }
 
