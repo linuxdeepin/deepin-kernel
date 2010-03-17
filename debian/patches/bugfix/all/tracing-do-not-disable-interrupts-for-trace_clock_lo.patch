@@ -1,0 +1,110 @@
+From 8b2a5dac7859dd1954095fce8b6445c3ceb36ef6 Mon Sep 17 00:00:00 2001
+From: Steven Rostedt <srostedt@redhat.com>
+Date: Wed, 11 Nov 2009 19:36:03 -0500
+Subject: [PATCH] tracing: do not disable interrupts for trace_clock_local
+
+Disabling interrupts in trace_clock_local takes quite a performance
+hit to the recording of traces. Using perf top we see:
+
+------------------------------------------------------------------------------
+   PerfTop:     244 irqs/sec  kernel:100.0% [1000Hz cpu-clock-msecs],  (all, 4 CPUs)
+------------------------------------------------------------------------------
+
+             samples    pcnt   kernel function
+             _______   _____   _______________
+
+             2842.00 - 40.4% : trace_clock_local
+             1043.00 - 14.8% : rb_reserve_next_event
+              784.00 - 11.1% : ring_buffer_lock_reserve
+              600.00 -  8.5% : __rb_reserve_next
+              579.00 -  8.2% : rb_end_commit
+              440.00 -  6.3% : ring_buffer_unlock_commit
+              290.00 -  4.1% : ring_buffer_producer_thread 	[ring_buffer_benchmark]
+              155.00 -  2.2% : debug_smp_processor_id
+              117.00 -  1.7% : trace_recursive_unlock
+              103.00 -  1.5% : ring_buffer_event_data
+               28.00 -  0.4% : do_gettimeofday
+               22.00 -  0.3% : _spin_unlock_irq
+               14.00 -  0.2% : native_read_tsc
+               11.00 -  0.2% : getnstimeofday
+
+Where trace_clock_local is 40% of the tracing, and the time for recording
+a trace according to ring_buffer_benchmark is 210ns. After converting
+the interrupts to preemption disabling we have from perf top:
+
+------------------------------------------------------------------------------
+   PerfTop:    1084 irqs/sec  kernel:99.9% [1000Hz cpu-clock-msecs],  (all, 4 CPUs)
+------------------------------------------------------------------------------
+
+             samples    pcnt   kernel function
+             _______   _____   _______________
+
+             1277.00 - 16.8% : native_read_tsc
+             1148.00 - 15.1% : rb_reserve_next_event
+              896.00 - 11.8% : ring_buffer_lock_reserve
+              688.00 -  9.1% : __rb_reserve_next
+              664.00 -  8.8% : rb_end_commit
+              563.00 -  7.4% : ring_buffer_unlock_commit
+              508.00 -  6.7% : _spin_unlock_irq
+              365.00 -  4.8% : debug_smp_processor_id
+              321.00 -  4.2% : trace_clock_local
+              303.00 -  4.0% : ring_buffer_producer_thread 	[ring_buffer_benchmark]
+              273.00 -  3.6% : native_sched_clock
+              122.00 -  1.6% : trace_recursive_unlock
+              113.00 -  1.5% : sched_clock
+              101.00 -  1.3% : ring_buffer_event_data
+               53.00 -  0.7% : tick_nohz_stop_sched_tick
+
+Where trace_clock_local drops from 40% to only taking 4% of the total time.
+The trace time also goes from 210ns down to 179ns (31ns).
+
+I talked with Peter Zijlstra about the impact that sched_clock may have
+without having interrupts disabled, and he told me that if a timer interrupt
+comes in, sched_clock may report a wrong time.
+
+Balancing a seldom incorrect timestamp with a 15% performance boost, I'll
+take the performance boost.
+
+Acked-by: Peter Zijlstra <peterz@infradead.org>
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ kernel/trace/trace_clock.c |    8 +++++---
+ 1 files changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/kernel/trace/trace_clock.c b/kernel/trace/trace_clock.c
+index 20c5f92..878c03f 100644
+--- a/kernel/trace/trace_clock.c
++++ b/kernel/trace/trace_clock.c
+@@ -20,6 +20,8 @@
+ #include <linux/ktime.h>
+ #include <linux/trace_clock.h>
+ 
++#include "trace.h"
++
+ /*
+  * trace_clock_local(): the simplest and least coherent tracing clock.
+  *
+@@ -28,17 +30,17 @@
+  */
+ u64 notrace trace_clock_local(void)
+ {
+-	unsigned long flags;
+ 	u64 clock;
++	int resched;
+ 
+ 	/*
+ 	 * sched_clock() is an architecture implemented, fast, scalable,
+ 	 * lockless clock. It is not guaranteed to be coherent across
+ 	 * CPUs, nor across CPU idle events.
+ 	 */
+-	raw_local_irq_save(flags);
++	resched = ftrace_preempt_disable();
+ 	clock = sched_clock();
+-	raw_local_irq_restore(flags);
++	ftrace_preempt_enable(resched);
+ 
+ 	return clock;
+ }
+-- 
+1.7.0
+
