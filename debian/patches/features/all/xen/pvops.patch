@@ -1,4 +1,4 @@
-Patch based on commit 84b76672405787415df3df568206845292c030c0 of
+Patch based on commit f1125493ed735ca66725904cc3ef06e907bd480f of
 git://git.kernel.org/pub/scm/linux/kernel/git/jeremy/xen.git.
 
 diff --git a/Documentation/x86/x86_64/boot-options.txt b/Documentation/x86/x86_64/boot-options.txt
@@ -322,6 +322,42 @@ index fd6d21b..345c99c 100644
  extern struct dma_map_ops nommu_dma_ops;
  extern int force_iommu, no_iommu;
  extern int iommu_detected;
+diff --git a/arch/x86/include/asm/irq_vectors.h b/arch/x86/include/asm/irq_vectors.h
+index 6e90a04..451a45b 100644
+--- a/arch/x86/include/asm/irq_vectors.h
++++ b/arch/x86/include/asm/irq_vectors.h
+@@ -157,6 +157,14 @@ static inline int invalid_vm86_irq(int irq)
+ #define CPU_VECTOR_LIMIT		(  8 * NR_CPUS      )
+ #define IO_APIC_VECTOR_LIMIT		( 32 * MAX_IO_APICS )
+ 
++#ifndef __ASSEMBLY__
++# if defined(CONFIG_X86_IO_APIC) && defined(CONFIG_SPARSE_IRQ)
++extern int nr_dynamic_irqs;
++# else
++#  define NR_DYNAMIC_IRQS			 256
++# endif
++#endif
++
+ #ifdef CONFIG_X86_IO_APIC
+ # ifdef CONFIG_SPARSE_IRQ
+ #  define NR_IRQS					\
+@@ -165,13 +173,13 @@ static inline int invalid_vm86_irq(int irq)
+ 		(NR_VECTORS + IO_APIC_VECTOR_LIMIT))
+ # else
+ #  if NR_CPUS < MAX_IO_APICS
+-#   define NR_IRQS 			(NR_VECTORS + 4*CPU_VECTOR_LIMIT)
++#   define NR_IRQS 			(NR_VECTORS + 4*CPU_VECTOR_LIMIT) + NR_DYNAMIC_IRQS
+ #  else
+-#   define NR_IRQS			(NR_VECTORS + IO_APIC_VECTOR_LIMIT)
++#   define NR_IRQS			(NR_VECTORS + IO_APIC_VECTOR_LIMIT) + NR_DYNAMIC_IRQS
+ #  endif
+ # endif
+ #else /* !CONFIG_X86_IO_APIC: */
+-# define NR_IRQS			NR_IRQS_LEGACY
++# define NR_IRQS			NR_IRQS_LEGACY + NR_DYNAMIC_IRQS
+ #endif
+ 
+ #endif /* _ASM_X86_IRQ_VECTORS_H */
 diff --git a/arch/x86/include/asm/microcode.h b/arch/x86/include/asm/microcode.h
 index ef51b50..e15fca1 100644
 --- a/arch/x86/include/asm/microcode.h
@@ -1283,7 +1319,7 @@ index 128111d..e0dfb68 100644
  	} else if ((!no_iommu && max_pfn > MAX_DMA32_PFN) ||
  		   force_iommu ||
 diff --git a/arch/x86/kernel/apic/io_apic.c b/arch/x86/kernel/apic/io_apic.c
-index dc4f486..d766a61 100644
+index dc4f486..dfb14f9 100644
 --- a/arch/x86/kernel/apic/io_apic.c
 +++ b/arch/x86/kernel/apic/io_apic.c
 @@ -63,7 +63,12 @@
@@ -1372,7 +1408,7 @@ index dc4f486..d766a61 100644
  }
  
  #if defined (CONFIG_DMAR) || defined (CONFIG_INTR_REMAP)
-@@ -3854,6 +3890,11 @@ void __init probe_nr_irqs_gsi(void)
+@@ -3854,7 +3890,14 @@ void __init probe_nr_irqs_gsi(void)
  	printk(KERN_DEBUG "nr_irqs_gsi: %d\n", nr_irqs_gsi);
  }
  
@@ -1382,8 +1418,20 @@ index dc4f486..d766a61 100644
 +}
 +
  #ifdef CONFIG_SPARSE_IRQ
++int nr_dynamic_irqs;
++
  int __init arch_probe_nr_irqs(void)
  {
+ 	int nr;
+@@ -3872,6 +3915,8 @@ int __init arch_probe_nr_irqs(void)
+ 	if (nr < nr_irqs)
+ 		nr_irqs = nr;
+ 
++	nr_irqs += nr_dynamic_irqs;
++
+ 	return 0;
+ }
+ #endif
 diff --git a/arch/x86/kernel/cpu/mtrr/Makefile b/arch/x86/kernel/cpu/mtrr/Makefile
 index f4361b5..404e458 100644
 --- a/arch/x86/kernel/cpu/mtrr/Makefile
@@ -3180,7 +3228,7 @@ index 0000000..21a3089
 +#endif
 +}
 diff --git a/arch/x86/xen/enlighten.c b/arch/x86/xen/enlighten.c
-index 3578688..bc03e10 100644
+index 3578688..565ab25 100644
 --- a/arch/x86/xen/enlighten.c
 +++ b/arch/x86/xen/enlighten.c
 @@ -28,6 +28,7 @@
@@ -3307,7 +3355,15 @@ index 3578688..bc03e10 100644
  {
  	apic->read = xen_apic_read;
  	apic->write = xen_apic_write;
-@@ -978,6 +1005,7 @@ static const struct pv_cpu_ops xen_cpu_ops __initdata = {
+@@ -728,7 +755,6 @@ static void set_xen_basic_apic_ops(void)
+ 
+ #endif
+ 
+-
+ static void xen_clts(void)
+ {
+ 	struct multicall_space mcs;
+@@ -978,6 +1004,7 @@ static const struct pv_cpu_ops xen_cpu_ops __initdata = {
  	.load_sp0 = xen_load_sp0,
  
  	.set_iopl_mask = xen_set_iopl_mask,
@@ -3315,7 +3371,7 @@ index 3578688..bc03e10 100644
  	.io_delay = xen_io_delay,
  
  	/* Xen takes care of %gs when switching to usermode for us */
-@@ -1020,6 +1048,14 @@ static void xen_machine_halt(void)
+@@ -1020,6 +1047,14 @@ static void xen_machine_halt(void)
  	xen_reboot(SHUTDOWN_poweroff);
  }
  
@@ -3330,7 +3386,7 @@ index 3578688..bc03e10 100644
  static void xen_crash_shutdown(struct pt_regs *regs)
  {
  	xen_reboot(SHUTDOWN_crash);
-@@ -1028,7 +1064,7 @@ static void xen_crash_shutdown(struct pt_regs *regs)
+@@ -1028,7 +1063,7 @@ static void xen_crash_shutdown(struct pt_regs *regs)
  static const struct machine_ops __initdata xen_machine_ops = {
  	.restart = xen_restart,
  	.halt = xen_machine_halt,
@@ -3339,7 +3395,7 @@ index 3578688..bc03e10 100644
  	.shutdown = xen_machine_halt,
  	.crash_shutdown = xen_crash_shutdown,
  	.emergency_restart = xen_emergency_restart,
-@@ -1061,6 +1097,8 @@ asmlinkage void __init xen_start_kernel(void)
+@@ -1061,6 +1096,8 @@ asmlinkage void __init xen_start_kernel(void)
  
  	xen_domain_type = XEN_PV_DOMAIN;
  
@@ -3348,7 +3404,7 @@ index 3578688..bc03e10 100644
  	/* Install Xen paravirt ops */
  	pv_info = xen_info;
  	pv_init_ops = xen_init_ops;
-@@ -1086,6 +1124,12 @@ asmlinkage void __init xen_start_kernel(void)
+@@ -1086,6 +1123,12 @@ asmlinkage void __init xen_start_kernel(void)
  
  	xen_init_mmu_ops();
  
@@ -3361,7 +3417,18 @@ index 3578688..bc03e10 100644
  	/* Prevent unwanted bits from being set in PTEs. */
  	__supported_pte_mask &= ~_PAGE_GLOBAL;
  	if (!xen_initial_domain())
-@@ -1144,6 +1188,8 @@ asmlinkage void __init xen_start_kernel(void)
+@@ -1116,6 +1159,10 @@ asmlinkage void __init xen_start_kernel(void)
+ 	 */
+ 	xen_setup_stackprotector();
+ 
++#ifdef CONFIG_SPARSE_IRQ
++	nr_dynamic_irqs += 256;
++#endif
++
+ 	xen_init_irq_ops();
+ 	xen_init_cpuid_mask();
+ 
+@@ -1144,6 +1191,8 @@ asmlinkage void __init xen_start_kernel(void)
  
  	pgd = (pgd_t *)xen_start_info->pt_base;
  
@@ -3370,7 +3437,7 @@ index 3578688..bc03e10 100644
  	/* Don't do the full vcpu_info placement stuff until we have a
  	   possible map and a non-dummy shared_info. */
  	per_cpu(xen_vcpu, 0) = &HYPERVISOR_shared_info->vcpu_info[0];
-@@ -1153,6 +1199,7 @@ asmlinkage void __init xen_start_kernel(void)
+@@ -1153,6 +1202,7 @@ asmlinkage void __init xen_start_kernel(void)
  
  	xen_raw_console_write("mapping kernel into physical memory\n");
  	pgd = xen_setup_kernel_pagetable(pgd, xen_start_info->nr_pages);
@@ -3378,7 +3445,7 @@ index 3578688..bc03e10 100644
  
  	init_mm.pgd = pgd;
  
-@@ -1162,6 +1209,14 @@ asmlinkage void __init xen_start_kernel(void)
+@@ -1162,6 +1212,14 @@ asmlinkage void __init xen_start_kernel(void)
  	if (xen_feature(XENFEAT_supervisor_mode_kernel))
  		pv_info.kernel_rpl = 0;
  
@@ -3393,7 +3460,7 @@ index 3578688..bc03e10 100644
  	/* set the limit of our address space */
  	xen_reserve_top();
  
-@@ -1184,6 +1239,16 @@ asmlinkage void __init xen_start_kernel(void)
+@@ -1184,6 +1242,16 @@ asmlinkage void __init xen_start_kernel(void)
  		add_preferred_console("xenboot", 0, NULL);
  		add_preferred_console("tty", 0, NULL);
  		add_preferred_console("hvc", 0, NULL);
@@ -4412,7 +4479,7 @@ index 0000000..61e1ade
 +}
 +EXPORT_SYMBOL(xen_unregister_device_domain_owner);
 diff --git a/arch/x86/xen/setup.c b/arch/x86/xen/setup.c
-index ad0047f..266c86a 100644
+index ad0047f..b8b0199 100644
 --- a/arch/x86/xen/setup.c
 +++ b/arch/x86/xen/setup.c
 @@ -10,6 +10,7 @@
@@ -4423,15 +4490,82 @@ index ad0047f..266c86a 100644
  #include <asm/vdso.h>
  #include <asm/e820.h>
  #include <asm/setup.h>
-@@ -19,6 +20,7 @@
+@@ -19,7 +20,9 @@
  
  #include <xen/page.h>
  #include <xen/interface/callback.h>
 +#include <xen/interface/memory.h>
  #include <xen/interface/physdev.h>
++#include <xen/interface/memory.h>
  #include <xen/features.h>
  
-@@ -36,21 +38,60 @@ extern void xen_syscall32_target(void);
+ #include "xen-ops.h"
+@@ -32,25 +35,125 @@ extern void xen_sysenter_target(void);
+ extern void xen_syscall_target(void);
+ extern void xen_syscall32_target(void);
+ 
++static unsigned long __init xen_release_chunk(phys_addr_t start_addr,
++					      phys_addr_t end_addr)
++{
++	struct xen_memory_reservation reservation = {
++		.address_bits = 0,
++		.extent_order = 0,
++		.domid        = DOMID_SELF
++	};
++	unsigned long start, end;
++	unsigned long len = 0;
++	unsigned long pfn;
++	int ret;
++
++	start = PFN_UP(start_addr);
++	end = PFN_DOWN(end_addr);
++
++	if (end <= start)
++		return 0;
++
++	printk(KERN_INFO "xen_release_chunk: looking at area pfn %lx-%lx: ",
++	       start, end);
++	for(pfn = start; pfn < end; pfn++) {
++		unsigned long mfn = pfn_to_mfn(pfn);
++
++		/* Make sure pfn exists to start with */
++		if (mfn == INVALID_P2M_ENTRY || mfn_to_pfn(mfn) != pfn)
++			continue;
++
++		set_xen_guest_handle(reservation.extent_start, &mfn);
++		reservation.nr_extents = 1;
++
++		ret = HYPERVISOR_memory_op(XENMEM_decrease_reservation,
++					   &reservation);
++		WARN(ret != 1, "Failed to release memory %lx-%lx err=%d\n",
++		     start, end, ret);
++		if (ret == 1) {
++			set_phys_to_machine(pfn, INVALID_P2M_ENTRY);
++			len++;
++		}
++	}
++	printk(KERN_CONT "%ld pages freed\n", len);
++
++	return len;
++}
++
++static unsigned long __init xen_return_unused_memory(const struct e820map *e820)
++{
++	unsigned long last_end = 0;
++	unsigned long released = 0;
++	int i;
++
++	for (i = 0; i < e820->nr_map; i++) {
++		released += xen_release_chunk(last_end, e820->map[i].addr);
++		last_end = e820->map[i].addr + e820->map[i].size;
++	}
++
++	released += xen_release_chunk(last_end, PFN_PHYS(xen_start_info->nr_pages));
++
++	printk(KERN_INFO "released %ld pages of unused memory\n", released);
++	return released;
++}
+ 
  /**
   * machine_specific_memory_setup - Hook for machine specific memory setup.
   **/
@@ -4495,7 +4629,16 @@ index ad0047f..266c86a 100644
  	 */
  	e820_add_region(ISA_START_ADDRESS, ISA_END_ADDRESS - ISA_START_ADDRESS,
  			E820_RESERVED);
-@@ -182,13 +223,17 @@ void __init xen_arch_setup(void)
+@@ -67,6 +170,8 @@ char * __init xen_memory_setup(void)
+ 
+ 	sanitize_e820_map(e820.map, ARRAY_SIZE(e820.map), &e820.nr_map);
+ 
++	xen_return_unused_memory(&e820);
++
+ 	return "Xen";
+ }
+ 
+@@ -182,13 +287,17 @@ void __init xen_arch_setup(void)
  	}
  #endif
  
@@ -4689,7 +4832,7 @@ index 1d886e0..f4a2b10 100644
  	  This driver implements the front-end of the Xen virtual
  	  block device driver.  It communicates with a back-end driver
 diff --git a/drivers/block/xen-blkfront.c b/drivers/block/xen-blkfront.c
-index b8578bb..a6d8046 100644
+index b8578bb..a8d30d7 100644
 --- a/drivers/block/xen-blkfront.c
 +++ b/drivers/block/xen-blkfront.c
 @@ -42,6 +42,7 @@
@@ -4828,7 +4971,39 @@ index b8578bb..a6d8046 100644
  	if (info->connected == BLKIF_STATE_SUSPENDED && !err)
  		err = blkif_recover(info);
  
-@@ -920,12 +981,11 @@ static void blkfront_connect(struct blkfront_info *info)
+@@ -869,10 +930,29 @@ static void blkfront_connect(struct blkfront_info *info)
+ 	unsigned int binfo;
+ 	int err;
+ 
+-	if ((info->connected == BLKIF_STATE_CONNECTED) ||
+-	    (info->connected == BLKIF_STATE_SUSPENDED) )
++	switch (info->connected) {
++	case BLKIF_STATE_CONNECTED:
++		/*
++		 * Potentially, the back-end may be signalling
++		 * a capacity change; update the capacity.
++		 */
++		err = xenbus_scanf(XBT_NIL, info->xbdev->otherend,
++				   "sectors", "%Lu", &sectors);
++		if (XENBUS_EXIST_ERR(err))
++			return;
++		printk(KERN_INFO "Setting capacity to %Lu\n",
++		       sectors);
++		set_capacity(info->gd, sectors);
++		revalidate_disk(info->gd);
++
++		/* fall through */
++	case BLKIF_STATE_SUSPENDED:
+ 		return;
+ 
++	default:
++		break;
++	}
++
+ 	dev_dbg(&info->xbdev->dev, "%s:%s.\n",
+ 		__func__, info->xbdev->otherend);
+ 
+@@ -920,12 +1000,11 @@ static void blkfront_connect(struct blkfront_info *info)
   * the backend.  Once is this done, we can switch to Closed in
   * acknowledgement.
   */
@@ -4843,7 +5018,7 @@ index b8578bb..a6d8046 100644
  
  	if (info->rq == NULL)
  		goto out;
-@@ -945,27 +1005,33 @@ static void blkfront_closing(struct xenbus_device *dev)
+@@ -945,27 +1024,33 @@ static void blkfront_closing(struct xenbus_device *dev)
  	blk_cleanup_queue(info->rq);
  	info->rq = NULL;
  
@@ -4880,7 +5055,7 @@ index b8578bb..a6d8046 100644
  	case XenbusStateUnknown:
  	case XenbusStateClosed:
  		break;
-@@ -988,7 +1054,7 @@ static void backend_changed(struct xenbus_device *dev,
+@@ -988,7 +1073,7 @@ static void backend_changed(struct xenbus_device *dev,
  			xenbus_dev_error(dev, -EBUSY,
  					 "Device in use; refusing to close");
  		else
@@ -4889,7 +5064,7 @@ index b8578bb..a6d8046 100644
  		mutex_unlock(&bd->bd_mutex);
  		bdput(bd);
  		break;
-@@ -1003,7 +1069,10 @@ static int blkfront_remove(struct xenbus_device *dev)
+@@ -1003,7 +1088,10 @@ static int blkfront_remove(struct xenbus_device *dev)
  
  	blkif_free(info, 0);
  
@@ -4901,7 +5076,7 @@ index b8578bb..a6d8046 100644
  
  	return 0;
  }
-@@ -1012,12 +1081,15 @@ static int blkfront_is_ready(struct xenbus_device *dev)
+@@ -1012,12 +1100,15 @@ static int blkfront_is_ready(struct xenbus_device *dev)
  {
  	struct blkfront_info *info = dev_get_drvdata(&dev->dev);
  
@@ -4918,7 +5093,7 @@ index b8578bb..a6d8046 100644
  	info->users++;
  	return 0;
  }
-@@ -1031,10 +1103,13 @@ static int blkif_release(struct gendisk *disk, fmode_t mode)
+@@ -1031,10 +1122,13 @@ static int blkif_release(struct gendisk *disk, fmode_t mode)
  		   have ignored this request initially, as the device was
  		   still mounted. */
  		struct xenbus_device *dev = info->xbdev;
@@ -4935,7 +5110,7 @@ index b8578bb..a6d8046 100644
  	}
  	return 0;
  }
-@@ -1061,7 +1136,7 @@ static struct xenbus_driver blkfront = {
+@@ -1061,7 +1155,7 @@ static struct xenbus_driver blkfront = {
  	.probe = blkfront_probe,
  	.remove = blkfront_remove,
  	.resume = blkfront_resume,
@@ -5550,28 +5725,40 @@ index 2498602..fd89530 100644
  
  	init_iommu_sysfs();
 diff --git a/drivers/pci/msi.c b/drivers/pci/msi.c
-index f9cf317..80b9756 100644
+index f9cf317..a77a46f 100644
 --- a/drivers/pci/msi.c
 +++ b/drivers/pci/msi.c
-@@ -19,6 +19,8 @@
+@@ -19,6 +19,9 @@
  #include <linux/errno.h>
  #include <linux/io.h>
  
++#include <asm/xen/hypercall.h>
 +#include <asm/xen/hypervisor.h>
 +
  #include "pci.h"
  #include "msi.h"
  
-@@ -268,7 +270,8 @@ void write_msi_msg(unsigned int irq, struct msi_msg *msg)
+@@ -366,6 +369,20 @@ static void __pci_restore_msix_state(struct pci_dev *dev)
+ 
+ void pci_restore_msi_state(struct pci_dev *dev)
  {
- 	struct irq_desc *desc = irq_to_desc(irq);
- 
--	write_msi_msg_desc(desc, msg);
-+	if (!xen_initial_domain())
-+		write_msi_msg_desc(desc, msg);
++	if (xen_initial_domain()) {
++		struct physdev_restore_msi physdev;
++
++		if (!dev->msi_enabled && !dev->msix_enabled)
++			return;
++
++		pci_intx_for_msi(dev, 0);
++
++		physdev.bus = dev->bus->number;
++		physdev.devfn = dev->devfn;
++		HYPERVISOR_physdev_op(PHYSDEVOP_restore_msi, &physdev);
++
++		return;
++	}
+ 	__pci_restore_msi_state(dev);
+ 	__pci_restore_msix_state(dev);
  }
- 
- static void free_msi_irqs(struct pci_dev *dev)
 diff --git a/drivers/pci/xen-iommu.c b/drivers/pci/xen-iommu.c
 new file mode 100644
 index 0000000..ac6bcdb
@@ -7904,10 +8091,10 @@ index 0000000..7f97d15
 +#endif
 diff --git a/drivers/xen/blkback/blkback.c b/drivers/xen/blkback/blkback.c
 new file mode 100644
-index 0000000..e644dd5
+index 0000000..0bef445
 --- /dev/null
 +++ b/drivers/xen/blkback/blkback.c
-@@ -0,0 +1,672 @@
+@@ -0,0 +1,675 @@
 +/******************************************************************************
 + * arch/xen/drivers/blkif/backend/main.c
 + *
@@ -8120,6 +8307,7 @@ index 0000000..e644dd5
 +int blkif_schedule(void *arg)
 +{
 +	blkif_t *blkif = arg;
++	struct vbd *vbd = &blkif->vbd;
 +
 +	blkif_get(blkif);
 +
@@ -8129,6 +8317,8 @@ index 0000000..e644dd5
 +	while (!kthread_should_stop()) {
 +		if (try_to_freeze())
 +			continue;
++		if (unlikely(vbd->size != vbd_size(vbd)))
++			vbd_resize(blkif);
 +
 +		wait_event_interruptible(
 +			blkif->wq,
@@ -8582,10 +8772,10 @@ index 0000000..e644dd5
 +MODULE_LICENSE("Dual BSD/GPL");
 diff --git a/drivers/xen/blkback/common.h b/drivers/xen/blkback/common.h
 new file mode 100644
-index 0000000..af43d63
+index 0000000..531ba81
 --- /dev/null
 +++ b/drivers/xen/blkback/common.h
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,143 @@
 +/*
 + * This program is free software; you can redistribute it and/or
 + * modify it under the terms of the GNU General Public License version 2
@@ -8642,6 +8832,7 @@ index 0000000..af43d63
 +	unsigned char  type;        /* VDISK_xxx */
 +	u32            pdevice;     /* phys device that this vbd maps to */
 +	struct block_device *bdev;
++	sector_t       size;        /* Cached size parameter */
 +};
 +
 +struct backend_info;
@@ -8688,6 +8879,7 @@ index 0000000..af43d63
 +void blkif_disconnect(blkif_t *blkif);
 +void blkif_free(blkif_t *blkif);
 +int blkif_map(blkif_t *blkif, unsigned long shared_page, unsigned int evtchn);
++void vbd_resize(blkif_t *blkif);
 +
 +#define blkif_get(_b) (atomic_inc(&(_b)->refcnt))
 +#define blkif_put(_b)					\
@@ -8723,6 +8915,8 @@ index 0000000..af43d63
 +
 +int blkback_barrier(struct xenbus_transaction xbt,
 +		    struct backend_info *be, int state);
++
++struct xenbus_device *blkback_xenbus(struct backend_info *be);
 +
 +#endif /* __BLKIF__BACKEND__COMMON_H__ */
 diff --git a/drivers/xen/blkback/interface.c b/drivers/xen/blkback/interface.c
@@ -8919,10 +9113,10 @@ index 0000000..e397a41
 +}
 diff --git a/drivers/xen/blkback/vbd.c b/drivers/xen/blkback/vbd.c
 new file mode 100644
-index 0000000..410c2ea
+index 0000000..943ec23
 --- /dev/null
 +++ b/drivers/xen/blkback/vbd.c
-@@ -0,0 +1,118 @@
+@@ -0,0 +1,161 @@
 +/******************************************************************************
 + * blkback/vbd.c
 + *
@@ -8998,6 +9192,7 @@ index 0000000..410c2ea
 +	}
 +
 +	vbd->bdev = bdev;
++	vbd->size = vbd_size(vbd);
 +
 +	if (vbd->bdev->bd_disk == NULL) {
 +		DPRINTK("vbd_creat: device %08x doesn't exist.\n",
@@ -9041,12 +9236,54 @@ index 0000000..410c2ea
 + out:
 +	return rc;
 +}
++
++void vbd_resize(blkif_t *blkif)
++{
++	struct vbd *vbd = &blkif->vbd;
++	struct xenbus_transaction xbt;
++	int err;
++	struct xenbus_device *dev = blkback_xenbus(blkif->be);
++	unsigned long long new_size = vbd_size(vbd);
++
++	printk(KERN_INFO "VBD Resize: new size %Lu\n", new_size);
++	vbd->size = new_size;
++again:
++	err = xenbus_transaction_start(&xbt);
++	if (err) {
++		printk(KERN_WARNING "Error starting transaction");
++		return;
++	}
++	err = xenbus_printf(xbt, dev->nodename, "sectors", "%Lu",
++			    vbd_size(vbd));
++	if (err) {
++		printk(KERN_WARNING "Error writing new size");
++		goto abort;
++	}
++	/*
++	 * Write the current state; we will use this to synchronize
++	 * the front-end. If the current state is "connected" the
++	 * front-end will get the new size information online.
++	 */
++	err = xenbus_printf(xbt, dev->nodename, "state", "%d", dev->state);
++	if (err) {
++		printk(KERN_WARNING "Error writing the state");
++		goto abort;
++	}
++
++	err = xenbus_transaction_end(xbt, 0);
++	if (err == -EAGAIN)
++		goto again;
++	if (err)
++		printk(KERN_WARNING "Error ending transaction");
++abort:
++	xenbus_transaction_end(xbt, 1);
++}
 diff --git a/drivers/xen/blkback/xenbus.c b/drivers/xen/blkback/xenbus.c
 new file mode 100644
-index 0000000..34f8e40
+index 0000000..c31e5c4
 --- /dev/null
 +++ b/drivers/xen/blkback/xenbus.c
-@@ -0,0 +1,541 @@
+@@ -0,0 +1,546 @@
 +/*  Xenbus code for blkif backend
 +    Copyright (C) 2005 Rusty Russell <rusty@rustcorp.com.au>
 +    Copyright (C) 2005 XenSource Ltd
@@ -9090,6 +9327,11 @@ index 0000000..34f8e40
 +static int connect_ring(struct backend_info *);
 +static void backend_changed(struct xenbus_watch *, const char **,
 +			    unsigned int);
++
++struct xenbus_device *blkback_xenbus(struct backend_info *be)
++{
++	return be->dev;
++}
 +
 +static int blkback_name(blkif_t *blkif, char *buf)
 +{
@@ -14561,10 +14803,10 @@ index 0000000..51f97c0
 +#endif /* __NETIF__BACKEND__COMMON_H__ */
 diff --git a/drivers/xen/netback/interface.c b/drivers/xen/netback/interface.c
 new file mode 100644
-index 0000000..b23b14d
+index 0000000..086d939
 --- /dev/null
 +++ b/drivers/xen/netback/interface.c
-@@ -0,0 +1,405 @@
+@@ -0,0 +1,410 @@
 +/******************************************************************************
 + * arch/xen/drivers/netif/backend/interface.c
 + *
@@ -14703,9 +14945,14 @@ index 0000000..b23b14d
 +	{ "copied_skbs", offsetof(struct xen_netif, nr_copied_skbs) },
 +};
 +
-+static int netbk_get_stats_count(struct net_device *dev)
++static int netbk_get_sset_count(struct net_device *dev, int string_set)
 +{
-+	return ARRAY_SIZE(netbk_stats);
++	switch (string_set) {
++	case ETH_SS_STATS:
++		return ARRAY_SIZE(netbk_stats);
++	default:
++		return -EINVAL;
++	}
 +}
 +
 +static void netbk_get_ethtool_stats(struct net_device *dev,
@@ -14743,7 +14990,7 @@ index 0000000..b23b14d
 +	.set_tso = netbk_set_tso,
 +	.get_link = ethtool_op_get_link,
 +
-+	.get_stats_count = netbk_get_stats_count,
++	.get_sset_count = netbk_get_sset_count,
 +	.get_ethtool_stats = netbk_get_ethtool_stats,
 +	.get_strings = netbk_get_strings,
 +};
@@ -25303,10 +25550,10 @@ index af36ead..eac3ce1 100644
 +extern spinlock_t xen_reservation_lock;
  #endif /* __XEN_PUBLIC_MEMORY_H__ */
 diff --git a/include/xen/interface/physdev.h b/include/xen/interface/physdev.h
-index cd69391..39c2b51 100644
+index cd69391..66122aa 100644
 --- a/include/xen/interface/physdev.h
 +++ b/include/xen/interface/physdev.h
-@@ -106,6 +106,57 @@ struct physdev_irq {
+@@ -106,6 +106,64 @@ struct physdev_irq {
  	uint32_t vector;
  };
  
@@ -25348,6 +25595,13 @@ index cd69391..39c2b51 100644
 +	uint8_t devfn;
 +};
 +
++#define PHYSDEVOP_restore_msi		19
++struct physdev_restore_msi {
++	/* IN */
++	uint8_t bus;
++	uint8_t devfn;
++};
++
 +#define PHYSDEVOP_manage_pci_add_ext	20
 +struct physdev_manage_pci_ext {
 +	/* IN */
@@ -25364,7 +25618,7 @@ index cd69391..39c2b51 100644
  /*
   * Argument to physdev_op_compat() hypercall. Superceded by new physdev_op()
   * hypercall since 0x00030202.
-@@ -121,6 +172,16 @@ struct physdev_op {
+@@ -121,6 +179,16 @@ struct physdev_op {
  	} u;
  };
  
