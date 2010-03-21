@@ -123,6 +123,7 @@ class CheckAbi(object):
         configs.append(self.config.get(('abi', self.arch, None, self.flavour), {}))
         configs.append(self.config.get(('abi', self.arch, self.featureset), {}))
         configs.append(self.config.get(('abi', self.arch), {}))
+        configs.append(self.config.get(('abi', None, self.featureset), {}))
         configs.append(self.config.get(('abi',), {}))
 
         ignores = set()
