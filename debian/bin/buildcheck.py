@@ -53,7 +53,7 @@ class CheckAbi(object):
 
         symbols, add, change, remove = self._cmp(ref, new)
 
-        ignore = self._ignore(symbols.keys())
+        ignore = self._ignore(symbols)
 
         add_effective = add - ignore
         change_effective = change - ignore
@@ -116,7 +116,7 @@ class CheckAbi(object):
 
         return symbols, add, change, remove
 
-    def _ignore(self, all):
+    def _ignore(self, symbols):
         # TODO: let config merge this lists
         configs = []
         configs.append(self.config.get(('abi', self.arch, self.featureset, self.flavour), {}))
@@ -124,12 +124,20 @@ class CheckAbi(object):
         configs.append(self.config.get(('abi', self.arch, self.featureset), {}))
         configs.append(self.config.get(('abi', self.arch), {}))
         configs.append(self.config.get(('abi',), {}))
+
         ignores = set()
         for config in configs:
             ignores.update(config.get('ignore-changes', []))
+
         filtered = set()
-        for m in ignores:
-            filtered.update(fnmatch.filter(all, m))
+        for ignore in ignores:
+            type = 'symbolmatch'
+            if ':' in ignore:
+                type, ignore = ignore.split(':')
+            if type == 'symbolmatch':
+                filtered.update(fnmatch.filter(symbols.iterkeys(), ignore))
+            else:
+                raise NotImplementedError
         return filtered
  
 
