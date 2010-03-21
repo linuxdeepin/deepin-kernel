@@ -73,23 +73,17 @@ class CheckAbi(object):
 
         if add:
             out.write("\nAdded symbols:\n")
-            t = list(add)
-            t.sort()
-            for name in t:
+            for name in sorted(add):
                 symbols[name].write(out, name in ignore)
 
         if change:
             out.write("\nChanged symbols:\n")
-            t = list(change)
-            t.sort()
-            for name in t:
+            for name in sorted(change):
                 symbols[name].write(out, name in ignore)
 
         if remove:
             out.write("\nRemoved symbols:\n")
-            t = list(remove)
-            t.sort()
-            for name in t:
+            for name in sorted(remove):
                 symbols[name].write(out, name in ignore)
 
         return ret
