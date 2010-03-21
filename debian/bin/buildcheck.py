@@ -13,33 +13,22 @@ from debian_linux.debian import *
 
 class CheckAbi(object):
     class SymbolInfo(object):
-        def __init__(self, symbol):
+        def __init__(self, symbol, symbol_ref=None):
             self.symbol = symbol
+            self.symbol_ref = symbol_ref or symbol
 
         def write(self, out, ignored):
             info = []
             if ignored:
                 info.append("ignored")
-            for i in ('module', 'version', 'export'):
-                info.append("%s: %s" % (i, getattr(self.symbol, i)))
-            out.write("%-48s %s\n" % (self.symbol.name, ", ".join(info)))
-
-    class SymbolChangeInfo(object):
-        def __init__(self, symbol_ref, symbol_new):
-            self.symbol_ref, self.symbol_new = symbol_ref, symbol_new
-
-        def write(self, out, ignored):
-            info = []
-            if ignored:
-                info.append("ignored")
-            for i in ('module', 'version', 'export'):
-                d_ref = getattr(self.symbol_ref, i)
-                d_new = getattr(self.symbol_new, i)
-                if d_ref != d_new:
-                    info.append("%s: %s -> %s" % (i, d_ref, d_new))
+            for name in ('module', 'version', 'export'):
+                data = getattr(self.symbol, name)
+                data_ref = getattr(self.symbol_ref, name)
+                if data != data_ref:
+                    info.append("%s: %s -> %s" % (name, data_ref, data))
                 else:
-                    info.append("%s: %s" % (i, d_new))
-            out.write("%-48s %s\n" % (self.symbol_new.name, ", ".join(info)))
+                    info.append("%s: %s" % (name, data))
+            out.write("%-48s %s\n" % (self.symbol.name, ", ".join(info)))
 
     def __init__(self, config, dir, arch, featureset, flavour):
         self.config = config
@@ -125,7 +114,7 @@ class CheckAbi(object):
 
             if s_ref != s_new:
                 change.add(name)
-                symbols[name] = self.SymbolChangeInfo(s_ref, s_new)
+                symbols[name] = self.SymbolInfo(s_new, s_ref)
 
         for name in ref_names - new_names:
             remove.add(name)
