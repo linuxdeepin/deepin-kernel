@@ -136,6 +136,11 @@ class CheckAbi(object):
                 type, ignore = ignore.split(':')
             if type == 'symbolmatch':
                 filtered.update(fnmatch.filter(symbols.iterkeys(), ignore))
+            elif type == 'module':
+                for symbol in symbols.itervalues():
+                    symbol = symbol.symbol
+                    if symbol.module == ignore:
+                        filtered.add(symbol.name)
             else:
                 raise NotImplementedError
         return filtered
