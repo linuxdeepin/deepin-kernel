@@ -1,9 +1,49 @@
-openvz patch from git://git.openvz.org/pub/linux-2.6.32-openvz
+commit 796e80e5b2edff524f40a608be511143b4c8c828
+Author: Pavel Emelyanov <xemul@openvz.org>
+Date:   Fri Mar 19 11:17:45 2010 +0300
 
-generated with
-git log 2.6.32.10...HEAD > openvz.patch
-git diff 2.6.32.10...HEAD >> openvz.patch
--maks
+    OpenVZ kernel 2.6.32-afanasyev released
+    
+    Named after Viktor Mikhailovich Afanasyev - a Russian cosmonaut.
+
+commit 97ae2f923c11e4cc83436878cdf5262781ae17d1
+Author: Pavel Emelyanov <xemul@openvz.org>
+Date:   Mon Mar 22 17:14:57 2010 +0300
+
+    net: Virtualize tcp orphan count back
+    
+    This oopsed before the previous fix.
+    
+    Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+
+commit 5ae2ad90d7bbe29ea299955fad28491fedf10468
+Author: Pavel Emelyanov <xemul@openvz.org>
+Date:   Mon Mar 22 17:14:23 2010 +0300
+
+    bc: Don't re-initialize BC after orphan count allocaiton
+    
+    And do a small code rework.
+    http://bugzilla.openvz.org/show_bug.cgi?id=1471
+    
+    Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+
+commit 1a8072e88d55070bd78fe960c6db36e5af61ea85
+Author: Pavel Emelyanov <xemul@openvz.org>
+Date:   Mon Mar 22 17:13:48 2010 +0300
+
+    mm: Don't charge failed allocaiton
+    
+    I.e. don't oops :\
+    
+    Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+
+commit f27cf7344f66277fc44462d2880d8a43c17f59ac
+Author: Pavel Emelyanov <xemul@openvz.org>
+Date:   Fri Mar 19 12:06:09 2010 +0300
+
+    Compilation fix for ftrace
+    
+    Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
 
 commit 026c0e96af23e154b741645fe2d61a0278451268
 Author: Pavel Emelyanov <xemul@openvz.org>
@@ -2526,14 +2566,14 @@ index 0000000..9856a2b
 +library.  If this is what you want to do, use the GNU Library General
 +Public License instead of this License.
 diff --git a/Makefile b/Makefile
-index 2becebb..68e36f0 100644
+index 2becebb..0af517e 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -2,6 +2,7 @@ VERSION = 2
  PATCHLEVEL = 6
  SUBLEVEL = 32
  EXTRAVERSION =
-+VZVERSION = 042test001
++VZVERSION = afanasyev
  NAME = Man-Eating Seals of Antiquity
  
  # *DOCUMENTATION*
@@ -22082,10 +22122,10 @@ index 0000000..b314c9b
 +#endif
 diff --git a/include/bc/sock_orphan.h b/include/bc/sock_orphan.h
 new file mode 100644
-index 0000000..d5b6f74
+index 0000000..b19a316
 --- /dev/null
 +++ b/include/bc/sock_orphan.h
-@@ -0,0 +1,107 @@
+@@ -0,0 +1,104 @@
 +/*
 + *  include/bc/sock_orphan.h
 + *
@@ -22107,11 +22147,8 @@ index 0000000..d5b6f74
 +
 +static inline struct percpu_counter *__ub_get_orphan_count_ptr(struct sock *sk)
 +{
-+#if 0
-+	FIXME this oopses in tcp_close
 +	if (sock_has_ubc(sk))
 +		return &sock_bc(sk)->ub->ub_orphan_count;
-+#endif
 +	return sk->sk_prot->orphan_count;
 +}
 +
@@ -31610,10 +31647,10 @@ index 0000000..95ee497
 +obj-$(CONFIG_BC_IO_ACCOUNTING) += io_acct.o
 diff --git a/kernel/bc/beancounter.c b/kernel/bc/beancounter.c
 new file mode 100644
-index 0000000..3158b0a
+index 0000000..6513257
 --- /dev/null
 +++ b/kernel/bc/beancounter.c
-@@ -0,0 +1,680 @@
+@@ -0,0 +1,688 @@
 +/*
 + *  linux/kernel/bc/beancounter.c
 + *
@@ -31724,11 +31761,55 @@ index 0000000..3158b0a
 + *	will mean the old entry is still around with resource tied to it.
 + */
 +
-+static inline void free_ub(struct user_beancounter *ub)
++static struct user_beancounter *alloc_ub(uid_t uid, struct user_beancounter *p)
++{
++	struct user_beancounter *new_ub;
++
++	ub_debug(UBD_ALLOC, "Creating ub %p\n", new_ub);
++
++	new_ub = (struct user_beancounter *)kmem_cache_alloc(ub_cachep, 
++			GFP_KERNEL);
++	if (new_ub == NULL)
++		return NULL;
++
++	if (p == NULL) {
++		memcpy(new_ub, &default_beancounter, sizeof(*new_ub));
++		init_beancounter_struct(new_ub);
++	} else {
++		memset(new_ub, 0, sizeof(*new_ub));
++		init_beancounter_struct(new_ub);
++		init_beancounter_nolimits(new_ub);
++		init_beancounter_store(new_ub);
++	}
++
++	if (percpu_counter_init(&new_ub->ub_orphan_count, 0))
++		goto fail_pcpu;
++
++	new_ub->ub_percpu = alloc_percpu(struct ub_percpu_struct);
++	if (new_ub->ub_percpu == NULL)
++		goto fail_free;
++
++	new_ub->ub_uid = uid;
++	new_ub->parent = get_beancounter(p);
++	return new_ub;
++
++fail_free:
++	percpu_counter_destroy(&new_ub->ub_orphan_count);
++fail_pcpu:
++	kmem_cache_free(ub_cachep, new_ub);
++	return NULL;
++}
++
++static inline void __free_ub(struct user_beancounter *ub)
 +{
 +	free_percpu(ub->ub_percpu);
-+	percpu_counter_destroy(&ub->ub_orphan_count);
 +	kmem_cache_free(ub_cachep, ub);
++}
++
++static inline void free_ub(struct user_beancounter *ub)
++{
++	percpu_counter_destroy(&ub->ub_orphan_count);
++	__free_ub(ub);
 +}
 +
 +static inline struct user_beancounter *bc_lookup_hash(struct hlist_head *hash,
@@ -31777,29 +31858,12 @@ index 0000000..3158b0a
 +	}
 +	spin_unlock_irqrestore(&ub_hash_lock, flags);
 +
-+	/* alloc new ub */
-+	new_ub = (struct user_beancounter *)kmem_cache_alloc(ub_cachep, 
-+			GFP_KERNEL);
++	new_ub = alloc_ub(uid, NULL);
 +	if (new_ub == NULL)
 +		return NULL;
 +
-+	if (percpu_counter_init(&new_ub->ub_orphan_count, 0))
-+		goto fail_pcpu;
-+
-+	ub_debug(UBD_ALLOC, "Creating ub %p\n", new_ub);
-+	memcpy(new_ub, &default_beancounter, sizeof(*new_ub));
-+	init_beancounter_struct(new_ub);
-+	new_ub->ub_percpu = alloc_percpu(struct ub_percpu_struct);
-+	if (new_ub->ub_percpu == NULL)
-+		goto fail_free;
-+	new_ub->ub_uid = uid;
 +	goto retry;
 +
-+fail_free:
-+	percpu_counter_destroy(&new_ub->ub_orphan_count);
-+fail_pcpu:
-+	kmem_cache_free(ub_cachep, new_ub);
-+	return NULL;
 +}
 +EXPORT_SYMBOL(get_beancounter_byuid);
 +
@@ -31839,32 +31903,11 @@ index 0000000..3158b0a
 +	}
 +	spin_unlock_irqrestore(&ub_hash_lock, flags);
 +
-+	/* alloc new ub */
-+	new_ub = (struct user_beancounter *)kmem_cache_alloc(ub_cachep, 
-+			GFP_KERNEL);
++	new_ub = alloc_ub(id, p);
 +	if (new_ub == NULL)
 +		return NULL;
 +
-+	if (percpu_counter_init(&new_ub->ub_orphan_count, 0))
-+		goto fail_pcpu;
-+
-+	ub_debug(UBD_ALLOC, "Creating sub %p\n", new_ub);
-+	memset(new_ub, 0, sizeof(*new_ub));
-+	init_beancounter_nolimits(new_ub);
-+	init_beancounter_store(new_ub);
-+	init_beancounter_struct(new_ub);
-+	new_ub->ub_percpu = alloc_percpu(struct ub_percpu_struct);
-+	if (new_ub->ub_percpu == NULL)
-+		goto fail_free;
-+	new_ub->ub_uid = id;
-+	new_ub->parent = get_beancounter(p);
 +	goto retry;
-+
-+fail_free:
-+	percpu_counter_destroy(&new_ub->ub_orphan_count);
-+fail_pcpu:
-+	kmem_cache_free(ub_cachep, new_ub);
-+	return NULL;
 +}
 +EXPORT_SYMBOL(get_subbeancounter_byid);
 +
@@ -31915,7 +31958,7 @@ index 0000000..3158b0a
 +	struct user_beancounter *ub;
 +
 +	ub = container_of(rcu, struct user_beancounter, rcu);
-+	free_ub(ub);
++	__free_ub(ub);
 +}
 +
 +static void delayed_release_beancounter(struct work_struct *w)
@@ -31938,6 +31981,8 @@ index 0000000..3158b0a
 +
 +	bc_verify_held(ub);
 +	ub_free_counters(ub);
++	percpu_counter_destroy(&ub->ub_orphan_count);
++
 +	parent = ub->parent;
 +
 +	call_rcu(&ub->rcu, bc_free_rcu);
@@ -63336,6 +63381,28 @@ index 5db5a8d..0ba4a86 100644
  	/*
  	 * If the sum of all the available memory (i.e. ram + swap)
  	 * is less than can be stored in a 32 bit unsigned long then
+diff --git a/kernel/trace/ftrace.c b/kernel/trace/ftrace.c
+index 6dc4e5e..f8d1912 100644
+--- a/kernel/trace/ftrace.c
++++ b/kernel/trace/ftrace.c
+@@ -3091,7 +3091,7 @@ static int alloc_retstack_tasklist(struct ftrace_ret_stack **ret_stack_list)
+ 	}
+ 
+ 	read_lock_irqsave(&tasklist_lock, flags);
+-	do_each_thread(g, t) {
++	do_each_thread_all(g, t) {
+ 		if (start == end) {
+ 			ret = -EAGAIN;
+ 			goto unlock;
+@@ -3105,7 +3105,7 @@ static int alloc_retstack_tasklist(struct ftrace_ret_stack **ret_stack_list)
+ 			smp_wmb();
+ 			t->ret_stack = ret_stack_list[start++];
+ 		}
+-	} while_each_thread(g, t);
++	} while_each_thread_all(g, t);
+ 
+ unlock:
+ 	read_unlock_irqrestore(&tasklist_lock, flags);
 diff --git a/kernel/tracepoint.c b/kernel/tracepoint.c
 index cc89be5..b328e97 100644
 --- a/kernel/tracepoint.c
@@ -68410,7 +68477,7 @@ index 2c5d792..45641b9 100644
  		}
  		return 0;
 diff --git a/mm/page_alloc.c b/mm/page_alloc.c
-index 36992b6..85e288f 100644
+index 36992b6..cd0501c 100644
 --- a/mm/page_alloc.c
 +++ b/mm/page_alloc.c
 @@ -54,6 +54,9 @@
@@ -68524,7 +68591,7 @@ index 36992b6..85e288f 100644
  				preferred_zone, migratetype);
  
 +	__alloc_collect_stats(gfp_mask, order, page, start);
-+	if (ub_page_charge(page, order, gfp_mask)) {
++	if (page && ub_page_charge(page, order, gfp_mask)) {
 +		__free_pages(page, order);
 +		page = NULL;
 +	}
@@ -74521,19 +74588,18 @@ index 9e81e0d..883cd2e 100644
  }
  
 diff --git a/net/ipv4/proc.c b/net/ipv4/proc.c
-index f25542c..777a7b5 100644
+index f25542c..879462c 100644
 --- a/net/ipv4/proc.c
 +++ b/net/ipv4/proc.c
-@@ -53,6 +53,9 @@ static int sockstat_seq_show(struct seq_file *seq, void *v)
- 	struct net *net = seq->private;
+@@ -54,7 +54,7 @@ static int sockstat_seq_show(struct seq_file *seq, void *v)
  	int orphans, sockets;
  
-+	if (!ve_is_super(get_exec_env()))
-+		return 0;
-+
  	local_bh_disable();
- 	orphans = percpu_counter_sum_positive(&tcp_orphan_count);
+-	orphans = percpu_counter_sum_positive(&tcp_orphan_count);
++	orphans = percpu_counter_sum_positive(&get_exec_ub()->ub_orphan_count);
  	sockets = percpu_counter_sum_positive(&tcp_sockets_allocated);
+ 	local_bh_enable();
+ 
 diff --git a/net/ipv4/route.c b/net/ipv4/route.c
 index 5b1050a..db496b6 100644
 --- a/net/ipv4/route.c
