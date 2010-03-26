@@ -1,4 +1,4 @@
-Patch based on commit d945b014ac5df9592c478bf9486d97e8914aab59 of
+Patch based on commit f64df18aae5ab07b44bdcc2334cf0044ef46320c of
 git://git.kernel.org/pub/scm/linux/kernel/git/jeremy/xen.git.
 
 diff --git a/Documentation/x86/x86_64/boot-options.txt b/Documentation/x86/x86_64/boot-options.txt
@@ -916,15 +916,17 @@ index 018a0a4..f334014 100644
  unsigned long arbitrary_virt_to_mfn(void *vaddr);
 diff --git a/arch/x86/include/asm/xen/pci.h b/arch/x86/include/asm/xen/pci.h
 new file mode 100644
-index 0000000..d68637f
+index 0000000..6683196
 --- /dev/null
 +++ b/arch/x86/include/asm/xen/pci.h
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,104 @@
 +#ifndef _ASM_X86_XEN_PCI_H
 +#define _ASM_X86_XEN_PCI_H
 +
 +#if defined(CONFIG_PCI_MSI)
 +#if defined(CONFIG_PCI_XEN)
++int xen_register_pirq(u32 gsi, int triggering);
++int xen_register_gsi(u32 gsi, int triggering, int polarity);
 +int xen_create_msi_irq(struct pci_dev *dev,
 +			struct msi_desc *msidesc,
 +			int type);
@@ -4190,10 +4192,10 @@ index 0000000..4d55524
 +}
 diff --git a/arch/x86/xen/pci.c b/arch/x86/xen/pci.c
 new file mode 100644
-index 0000000..61e1ade
+index 0000000..956e0d0
 --- /dev/null
 +++ b/arch/x86/xen/pci.c
-@@ -0,0 +1,284 @@
+@@ -0,0 +1,299 @@
 +#include <linux/kernel.h>
 +#include <linux/acpi.h>
 +#include <linux/pci.h>
@@ -4212,6 +4214,46 @@ index 0000000..61e1ade
 +
 +#include "xen-ops.h"
 +
++int xen_register_pirq(u32 gsi, int triggering)
++{
++	int rc, irq;
++	struct physdev_map_pirq map_irq;
++	int shareable = 0;
++	char *name;
++
++	if (!xen_domain())
++		return -1;
++
++	if (triggering == ACPI_EDGE_SENSITIVE) {
++		shareable = 0;
++		name = "ioapic-edge";
++	} else {
++		shareable = 1;
++		name = "ioapic-level";
++	}
++
++	irq = xen_allocate_pirq(gsi, shareable, name);
++
++	printk(KERN_DEBUG "xen: --> irq=%d\n", irq);
++
++	if (irq < 0)
++		goto out;
++
++	map_irq.domid = DOMID_SELF;
++	map_irq.type = MAP_PIRQ_TYPE_GSI;
++	map_irq.index = gsi;
++	map_irq.pirq = irq;
++
++	rc = HYPERVISOR_physdev_op(PHYSDEVOP_map_pirq, &map_irq);
++	if (rc) {
++		printk(KERN_WARNING "xen map irq failed %d\n", rc);
++		return -1;
++	}
++
++out:
++	return irq;
++}
++
 +int xen_register_gsi(u32 gsi, int triggering, int polarity)
 +{
 +	int rc, irq;
@@ -4226,44 +4268,20 @@ index 0000000..61e1ade
 +	printk(KERN_DEBUG "xen: registering gsi %u triggering %d polarity %d\n",
 +			gsi, triggering, polarity);
 +
-+	if (triggering == ACPI_EDGE_SENSITIVE) {
-+		shareable = 0;
-+		name = "ioapic-edge";
-+	} else {
-+		shareable = 1;
-+		name = "ioapic-level";
++	irq = xen_register_pirq(gsi, triggering);
++
++	setup_gsi.gsi = gsi;
++	setup_gsi.triggering = (triggering == ACPI_EDGE_SENSITIVE ? 0 : 1);
++	setup_gsi.polarity = (polarity == ACPI_ACTIVE_HIGH ? 0 : 1);
++
++	rc = HYPERVISOR_physdev_op(PHYSDEVOP_setup_gsi, &setup_gsi);
++	if (rc == -EEXIST)
++		printk(KERN_INFO "Already setup the GSI :%d\n", gsi);
++	else if (rc) {
++		printk(KERN_ERR "Failed to setup GSI :%d, err_code:%d\n",
++				gsi, rc);
 +	}
 +
-+	irq = xen_allocate_pirq(gsi, shareable, name);
-+
-+	printk(KERN_DEBUG "xen: --> irq=%d\n", irq);
-+
-+	if (irq >= 0) {
-+		setup_gsi.gsi = gsi;
-+		setup_gsi.triggering = (triggering == ACPI_EDGE_SENSITIVE ?
-+				0 : 1);
-+		setup_gsi.polarity = (polarity == ACPI_ACTIVE_HIGH ? 0 : 1);
-+
-+		rc = HYPERVISOR_physdev_op(PHYSDEVOP_setup_gsi, &setup_gsi);
-+		if (rc == -EEXIST)
-+			printk(KERN_INFO "Already setup the GSI :%d\n", gsi);
-+		else if (rc) {
-+			printk(KERN_ERR "Failed to setup GSI :%d, err_code:%d\n",
-+					gsi, rc);
-+			BUG();
-+		}
-+
-+		map_irq.domid = DOMID_SELF;
-+		map_irq.type = MAP_PIRQ_TYPE_GSI;
-+		map_irq.index = gsi;
-+		map_irq.pirq = irq;
-+
-+		rc = HYPERVISOR_physdev_op(PHYSDEVOP_map_pirq, &map_irq);
-+		if (rc) {
-+			printk(KERN_WARNING "xen map irq failed %d\n", rc);
-+			irq = -1;
-+		}
-+	}
 +	return irq;
 +}
 +
@@ -4375,9 +4393,8 @@ index 0000000..61e1ade
 +		if (acpi_get_override_irq(irq, &trigger, &polarity) == -1)
 +			continue;
 +
-+		xen_register_gsi(irq,
-+			trigger ? ACPI_LEVEL_SENSITIVE : ACPI_EDGE_SENSITIVE,
-+			polarity ? ACPI_ACTIVE_LOW : ACPI_ACTIVE_HIGH);
++		xen_register_pirq(irq,
++			trigger ? ACPI_LEVEL_SENSITIVE : ACPI_EDGE_SENSITIVE);
 +	}
 +
 +	xen_setup_acpi_sci();
