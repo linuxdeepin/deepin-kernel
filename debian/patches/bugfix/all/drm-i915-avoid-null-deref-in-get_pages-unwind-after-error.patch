@@ -1,0 +1,85 @@
+From 1f2b10131f83f7caa67bf1273cec126b4283015d Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Fri, 12 Mar 2010 19:52:55 +0000
+Subject: drm/i915: Avoid NULL deref in get_pages() unwind after error.
+
+From: Chris Wilson <chris@chris-wilson.co.uk>
+
+commit 1f2b10131f83f7caa67bf1273cec126b4283015d upstream.
+
+Fixes:
+  http://bugzilla.kernel.org/show_bug.cgi?id=15527
+  NULL pointer dereference in i915_gem_object_save_bit_17_swizzle
+
+BUG: unable to handle kernel NULL pointer dereference at (null)
+IP: [<f82b5d2b>] i915_gem_object_save_bit_17_swizzle+0x5b/0xc0 [i915]
+Call Trace:
+[<f82aea55>] ? i915_gem_object_put_pages+0x125/0x150 [i915]
+[<f82aeb71>] ? i915_gem_object_get_pages+0xf1/0x110 [i915]
+[<f82b0de8>] ? i915_gem_object_bind_to_gtt+0xb8/0x2a0 [i915]
+[<c02db74d>] ? drm_mm_get_block_generic+0x4d/0x180
+[<f82b11cd>] ? i915_gem_mmap_gtt_ioctl+0x16d/0x240 [i915]
+[<f82ae786>] ? i915_gem_madvise_ioctl+0x86/0x120 [i915]
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reported-by: maciej.rutecki@gmail.com
+Cc: stable@kernel.org
+Reviewed-by: Eric Anholt <eric@anholt.net>
+Signed-off-by: Eric Anholt <eric@anholt.net>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+
+---
+ drivers/gpu/drm/i915/i915_gem.c |   21 ++++++++++++---------
+ 1 file changed, 12 insertions(+), 9 deletions(-)
+
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -1470,9 +1470,6 @@ i915_gem_object_put_pages(struct drm_gem
+ 		obj_priv->dirty = 0;
+ 
+ 	for (i = 0; i < page_count; i++) {
+-		if (obj_priv->pages[i] == NULL)
+-			break;
+-
+ 		if (obj_priv->dirty)
+ 			set_page_dirty(obj_priv->pages[i]);
+ 
+@@ -2228,7 +2225,6 @@ i915_gem_object_get_pages(struct drm_gem
+ 	struct address_space *mapping;
+ 	struct inode *inode;
+ 	struct page *page;
+-	int ret;
+ 
+ 	if (obj_priv->pages_refcount++ != 0)
+ 		return 0;
+@@ -2251,11 +2247,9 @@ i915_gem_object_get_pages(struct drm_gem
+ 					   mapping_gfp_mask (mapping) |
+ 					   __GFP_COLD |
+ 					   gfpmask);
+-		if (IS_ERR(page)) {
+-			ret = PTR_ERR(page);
+-			i915_gem_object_put_pages(obj);
+-			return ret;
+-		}
++		if (IS_ERR(page))
++			goto err_pages;
++
+ 		obj_priv->pages[i] = page;
+ 	}
+ 
+@@ -2263,6 +2257,15 @@ i915_gem_object_get_pages(struct drm_gem
+ 		i915_gem_object_do_bit_17_swizzle(obj);
+ 
+ 	return 0;
++
++err_pages:
++	while (i--)
++		page_cache_release(obj_priv->pages[i]);
++
++	drm_free_large(obj_priv->pages);
++	obj_priv->pages = NULL;
++	obj_priv->pages_refcount--;
++	return PTR_ERR(page);
+ }
+ 
+ static void i965_write_fence_reg(struct drm_i915_fence_reg *reg)
