@@ -1,0 +1,239 @@
+From 41d2e494937715d3150e5c75d01f0e75ae899337 Mon Sep 17 00:00:00 2001
+From: Thomas Gleixner <tglx@linutronix.de>
+Date: Fri, 13 Nov 2009 17:05:44 +0100
+Subject: hrtimer: Tune hrtimer_interrupt hang logic
+
+From: Thomas Gleixner <tglx@linutronix.de>
+
+commit 41d2e494937715d3150e5c75d01f0e75ae899337 upstream.
+
+The hrtimer_interrupt hang logic adjusts min_delta_ns based on the
+execution time of the hrtimer callbacks.
+
+This is error-prone for virtual machines, where a guest vcpu can be
+scheduled out during the execution of the callbacks (and the callbacks
+themselves can do operations that translate to blocking operations in
+the hypervisor), which in can lead to large min_delta_ns rendering the
+system unusable.
+
+Replace the current heuristics with something more reliable. Allow the
+interrupt code to try 3 times to catch up with the lost time. If that
+fails use the total time spent in the interrupt handler to defer the
+next timer interrupt so the system can catch up with other things
+which got delayed. Limit that deferment to 100ms.
+
+The retry events and the maximum time spent in the interrupt handler
+are recorded and exposed via /proc/timer_list
+
+Inspired by a patch from Marcelo.
+
+Reported-by: Michael Tokarev <mjt@tls.msk.ru>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Tested-by: Marcelo Tosatti <mtosatti@redhat.com>
+Cc: kvm@vger.kernel.org
+Cc: Jeremy Fitzhardinge <jeremy@goop.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+
+---
+ include/linux/hrtimer.h  |   13 ++++--
+ kernel/hrtimer.c         |   96 +++++++++++++++++++++++++++--------------------
+ kernel/time/timer_list.c |    5 +-
+ 3 files changed, 70 insertions(+), 44 deletions(-)
+
+--- a/include/linux/hrtimer.h
++++ b/include/linux/hrtimer.h
+@@ -162,10 +162,11 @@ struct hrtimer_clock_base {
+  * @expires_next:	absolute time of the next event which was scheduled
+  *			via clock_set_next_event()
+  * @hres_active:	State of high resolution mode
+- * @check_clocks:	Indictator, when set evaluate time source and clock
+- *			event devices whether high resolution mode can be
+- *			activated.
+- * @nr_events:		Total number of timer interrupt events
++ * @hang_detected:	The last hrtimer interrupt detected a hang
++ * @nr_events:		Total number of hrtimer interrupt events
++ * @nr_retries:		Total number of hrtimer interrupt retries
++ * @nr_hangs:		Total number of hrtimer interrupt hangs
++ * @max_hang_time:	Maximum time spent in hrtimer_interrupt
+  */
+ struct hrtimer_cpu_base {
+ 	spinlock_t			lock;
+@@ -173,7 +174,11 @@ struct hrtimer_cpu_base {
+ #ifdef CONFIG_HIGH_RES_TIMERS
+ 	ktime_t				expires_next;
+ 	int				hres_active;
++	int				hang_detected;
+ 	unsigned long			nr_events;
++	unsigned long			nr_retries;
++	unsigned long			nr_hangs;
++	ktime_t				max_hang_time;
+ #endif
+ };
+ 
+--- a/kernel/hrtimer.c
++++ b/kernel/hrtimer.c
+@@ -557,7 +557,7 @@ hrtimer_force_reprogram(struct hrtimer_c
+ static int hrtimer_reprogram(struct hrtimer *timer,
+ 			     struct hrtimer_clock_base *base)
+ {
+-	ktime_t *expires_next = &__get_cpu_var(hrtimer_bases).expires_next;
++	struct hrtimer_cpu_base *cpu_base = &__get_cpu_var(hrtimer_bases);
+ 	ktime_t expires = ktime_sub(hrtimer_get_expires(timer), base->offset);
+ 	int res;
+ 
+@@ -582,7 +582,16 @@ static int hrtimer_reprogram(struct hrti
+ 	if (expires.tv64 < 0)
+ 		return -ETIME;
+ 
+-	if (expires.tv64 >= expires_next->tv64)
++	if (expires.tv64 >= cpu_base->expires_next.tv64)
++		return 0;
++
++	/*
++	 * If a hang was detected in the last timer interrupt then we
++	 * do not schedule a timer which is earlier than the expiry
++	 * which we enforced in the hang detection. We want the system
++	 * to make progress.
++	 */
++	if (cpu_base->hang_detected)
+ 		return 0;
+ 
+ 	/*
+@@ -590,7 +599,7 @@ static int hrtimer_reprogram(struct hrti
+ 	 */
+ 	res = tick_program_event(expires, 0);
+ 	if (!IS_ERR_VALUE(res))
+-		*expires_next = expires;
++		cpu_base->expires_next = expires;
+ 	return res;
+ }
+ 
+@@ -1217,29 +1226,6 @@ static void __run_hrtimer(struct hrtimer
+ 
+ #ifdef CONFIG_HIGH_RES_TIMERS
+ 
+-static int force_clock_reprogram;
+-
+-/*
+- * After 5 iteration's attempts, we consider that hrtimer_interrupt()
+- * is hanging, which could happen with something that slows the interrupt
+- * such as the tracing. Then we force the clock reprogramming for each future
+- * hrtimer interrupts to avoid infinite loops and use the min_delta_ns
+- * threshold that we will overwrite.
+- * The next tick event will be scheduled to 3 times we currently spend on
+- * hrtimer_interrupt(). This gives a good compromise, the cpus will spend
+- * 1/4 of their time to process the hrtimer interrupts. This is enough to
+- * let it running without serious starvation.
+- */
+-
+-static inline void
+-hrtimer_interrupt_hanging(struct clock_event_device *dev,
+-			ktime_t try_time)
+-{
+-	force_clock_reprogram = 1;
+-	dev->min_delta_ns = (unsigned long)try_time.tv64 * 3;
+-	printk(KERN_WARNING "hrtimer: interrupt too slow, "
+-		"forcing clock min delta to %lu ns\n", dev->min_delta_ns);
+-}
+ /*
+  * High resolution timer interrupt
+  * Called with interrupts disabled
+@@ -1248,21 +1234,15 @@ void hrtimer_interrupt(struct clock_even
+ {
+ 	struct hrtimer_cpu_base *cpu_base = &__get_cpu_var(hrtimer_bases);
+ 	struct hrtimer_clock_base *base;
+-	ktime_t expires_next, now;
+-	int nr_retries = 0;
+-	int i;
++	ktime_t expires_next, now, entry_time, delta;
++	int i, retries = 0;
+ 
+ 	BUG_ON(!cpu_base->hres_active);
+ 	cpu_base->nr_events++;
+ 	dev->next_event.tv64 = KTIME_MAX;
+ 
+- retry:
+-	/* 5 retries is enough to notice a hang */
+-	if (!(++nr_retries % 5))
+-		hrtimer_interrupt_hanging(dev, ktime_sub(ktime_get(), now));
+-
+-	now = ktime_get();
+-
++	entry_time = now = ktime_get();
++retry:
+ 	expires_next.tv64 = KTIME_MAX;
+ 
+ 	spin_lock(&cpu_base->lock);
+@@ -1324,10 +1304,48 @@ void hrtimer_interrupt(struct clock_even
+ 	spin_unlock(&cpu_base->lock);
+ 
+ 	/* Reprogramming necessary ? */
+-	if (expires_next.tv64 != KTIME_MAX) {
+-		if (tick_program_event(expires_next, force_clock_reprogram))
+-			goto retry;
++	if (expires_next.tv64 == KTIME_MAX ||
++	    !tick_program_event(expires_next, 0)) {
++		cpu_base->hang_detected = 0;
++		return;
+ 	}
++
++	/*
++	 * The next timer was already expired due to:
++	 * - tracing
++	 * - long lasting callbacks
++	 * - being scheduled away when running in a VM
++	 *
++	 * We need to prevent that we loop forever in the hrtimer
++	 * interrupt routine. We give it 3 attempts to avoid
++	 * overreacting on some spurious event.
++	 */
++	now = ktime_get();
++	cpu_base->nr_retries++;
++	if (++retries < 3)
++		goto retry;
++	/*
++	 * Give the system a chance to do something else than looping
++	 * here. We stored the entry time, so we know exactly how long
++	 * we spent here. We schedule the next event this amount of
++	 * time away.
++	 */
++	cpu_base->nr_hangs++;
++	cpu_base->hang_detected = 1;
++	delta = ktime_sub(now, entry_time);
++	if (delta.tv64 > cpu_base->max_hang_time.tv64)
++		cpu_base->max_hang_time = delta;
++	/*
++	 * Limit it to a sensible value as we enforce a longer
++	 * delay. Give the CPU at least 100ms to catch up.
++	 */
++	if (delta.tv64 > 100 * NSEC_PER_MSEC)
++		expires_next = ktime_add_ns(now, 100 * NSEC_PER_MSEC);
++	else
++		expires_next = ktime_add(now, delta);
++	tick_program_event(expires_next, 1);
++	printk_once(KERN_WARNING "hrtimer: interrupt took %llu ns\n",
++		    ktime_to_ns(delta));
+ }
+ 
+ /*
+--- a/kernel/time/timer_list.c
++++ b/kernel/time/timer_list.c
+@@ -150,6 +150,9 @@ static void print_cpu(struct seq_file *m
+ 	P_ns(expires_next);
+ 	P(hres_active);
+ 	P(nr_events);
++	P(nr_retries);
++	P(nr_hangs);
++	P_ns(max_hang_time);
+ #endif
+ #undef P
+ #undef P_ns
+@@ -252,7 +255,7 @@ static int timer_list_show(struct seq_fi
+ 	u64 now = ktime_to_ns(ktime_get());
+ 	int cpu;
+ 
+-	SEQ_printf(m, "Timer List Version: v0.4\n");
++	SEQ_printf(m, "Timer List Version: v0.5\n");
+ 	SEQ_printf(m, "HRTIMER_MAX_CLOCK_BASES: %d\n", HRTIMER_MAX_CLOCK_BASES);
+ 	SEQ_printf(m, "now at %Ld nsecs\n", (unsigned long long)now);
+ 
