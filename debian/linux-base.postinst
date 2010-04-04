@@ -1135,10 +1135,12 @@ sub scan_config_files {
 
 	my @matched_bdevs = ();
 	my $id_map_text;
+	my $needs_update;
 
 	if (exists($config->{needs_update})) {
 	    $id_map_text = &{$config->{needs_update}}($file);
-	} else {
+	    $needs_update = defined($id_map_text) && $id_map_text ne '';
+	} elsif (exists($config->{list})) {
 	    for my $bdev (&{$config->{list}}($file)) {
 		if ($bdev =~ m{^/dev/(?:[hs]d[a-z]\d*|s(?:cd|r)\d+)$} &&
 		    -b $bdev) {
@@ -1146,12 +1148,17 @@ sub scan_config_files {
 		    push @matched_bdevs, $bdev;
 		}
 	    }
+	    $needs_update = @matched_bdevs > 0;
+	} else {
+	    # Needs manual update
+	    $needs_update = 1;
 	}
 
 	push @configs, {config => $config,
 			devices => \@matched_bdevs,
 			id_map_text => $id_map_text,
-			installed => $installed};
+			installed => $installed,
+			needs_update => $needs_update};
     }
 
     my $fstab = new FileHandle('/etc/fstab', 'r') or die "$!";
@@ -1341,8 +1348,8 @@ sub transition {
     %id_map = ();
 
     my @found_configs = scan_config_files();
-    my @matched_configs =
-	grep({@{$_->{devices}} || $_->{id_map_text}} @found_configs);
+    my @matched_configs = grep({$_->{needs_update}} @found_configs);
+    my @auto_configs = grep({defined($_->{config}->{update})} @matched_configs);
     my $found_boot_loader =
 	grep({$_->{config}->{is_boot_loader} && $_->{installed}} @found_configs);
 
@@ -1367,7 +1374,7 @@ sub transition {
     ($ret, $answer) = get($question);
     die "Error retrieving answer for $question: $answer" if $ret;
 
-    if (@matched_configs && $answer eq 'true') {
+    if (@auto_configs && $answer eq 'true') {
 	scan_devices();
 	assign_new_ids();
 
@@ -1389,11 +1396,11 @@ sub transition {
 				       grep({@{$bdev_map{$_}->{ids}}}
 					    keys(%bdev_map))),
 				   grep({defined}
-					map({$_->{id_map_text}} @matched_configs))));
+					map({$_->{id_map_text}} @auto_configs))));
 	die "Error setting debconf substitutions in $question: $seen" if $ret;
 	($ret, $seen) = subst($question, 'files',
 			      join(', ',
-				   map({$_->{config}->{path}} @matched_configs)));
+				   map({$_->{config}->{path}} @auto_configs)));
 	die "Error setting debconf substitutions in $question: $seen" if $ret;
 	($ret, $seen) = input('high', $question);
 	if ($ret && $ret != 30) {
@@ -1408,18 +1415,22 @@ sub transition {
     
 	if ($answer eq 'true') {
 	    set_new_ids();
-	    update_config(@matched_configs);
+	    update_config(@auto_configs);
 	}
     }
 
     my @unconv_files = ();
     for my $match (@matched_configs) {
-	my @unconv_bdevs = grep({!exists($bdev_map{$_}->{ids}) ||
-				     @{$bdev_map{$_}->{ids}} == 0}
-				@{$match->{devices}});
-	if (@unconv_bdevs) {
-	    push @unconv_files, sprintf('%s: %s', $match->{config}->{path},
-					join(', ',@unconv_bdevs));
+	if (!defined($match->{config}->{update})) {
+	    push @unconv_files, $match->{config}->{path};
+	} else {
+	    my @unconv_bdevs = grep({!exists($bdev_map{$_}->{ids}) ||
+					 @{$bdev_map{$_}->{ids}} == 0}
+				    @{$match->{devices}});
+	    if (@unconv_bdevs) {
+		push @unconv_files, sprintf('%s: %s', $match->{config}->{path},
+					    join(', ',@unconv_bdevs));
+	    }
 	}
     }
     if (@unconv_files) {
