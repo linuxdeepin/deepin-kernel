@@ -1344,10 +1344,7 @@ sub set_new_ids {
 }
 
 sub update_config {
-    my %map;
-    for my $bdev (keys(%bdev_map)) {
-	$map{$bdev} = $bdev_map{$bdev}->{ids}->[0];
-    }
+    my $map = shift;
 
     for my $match (@_) {
 	# Generate a new config
@@ -1356,7 +1353,7 @@ sub update_config {
 	my $new = new FileHandle("$path.new", POSIX::O_WRONLY | POSIX::O_CREAT,
 				 0600)
 	    or die "$!";
-	&{$match->{config}->{update}}($old, $new, \%map);
+	&{$match->{config}->{update}}($old, $new, $map);
 	$old->close();
 	$new->close();
 
@@ -1389,6 +1386,7 @@ sub transition {
     my @auto_configs = grep({defined($_->{config}->{update})} @matched_configs);
     my $found_boot_loader =
 	grep({$_->{config}->{is_boot_loader} && $_->{installed}} @found_configs);
+    my %update_map = ();
 
     # We can skip all of this if we didn't find any configuration
     # files that need conversion and we found the configuration file
@@ -1415,6 +1413,22 @@ sub transition {
 	scan_devices();
 	assign_new_ids();
 
+	# Construct the device ID update map
+	for my $bdev (keys(%bdev_map)) {
+	    if (@{$bdev_map{$bdev}->{ids}}) {
+		$update_map{$bdev} = $bdev_map{$bdev}->{ids}->[0];
+	    }
+	}
+
+	# Weed out configurations which will be unaffected by this
+	# mapping or by a custom mapping described in id_map_text.
+	@auto_configs = grep({ defined($_->{id_map_text}) ||
+				   grep({exists($update_map{$_})}
+					@{$_->{devices}}) }
+			     @auto_configs);
+    }
+
+    if (@auto_configs && $answer eq 'true') {
 	if (grep({$bdev_map{$_}->{new_id}} keys(%bdev_map))) {
 	    $question = 'linux-base/disk-id-convert-plan';
 	    ($ret, $seen) = subst($question, 'relabel',
@@ -1429,9 +1443,8 @@ sub transition {
 	}
 	($ret, $seen) = subst($question, 'id_map',
 			      join("\\n",
-				   map({sprintf("%s: %s", $_, $bdev_map{$_}->{ids}->[0])}
-				       grep({@{$bdev_map{$_}->{ids}}}
-					    keys(%bdev_map))),
+				   map({sprintf("%s: %s", $_, $update_map{$_})}
+				       keys(%update_map)),
 				   grep({defined}
 					map({$_->{id_map_text}} @auto_configs))));
 	die "Error setting debconf substitutions in $question: $seen" if $ret;
@@ -1452,7 +1465,7 @@ sub transition {
     
 	if ($answer eq 'true') {
 	    set_new_ids();
-	    update_config(@auto_configs);
+	    update_config(\%update_map, @auto_configs);
 	}
     }
 
@@ -1461,8 +1474,7 @@ sub transition {
 	if (!defined($match->{config}->{update})) {
 	    push @unconv_files, $match->{config}->{path};
 	} else {
-	    my @unconv_bdevs = grep({!exists($bdev_map{$_}->{ids}) ||
-					 @{$bdev_map{$_}->{ids}} == 0}
+	    my @unconv_bdevs = grep({!exists($update_map{$_})}
 				    @{$match->{devices}});
 	    if (@unconv_bdevs) {
 		push @unconv_files, sprintf('%s: %s', $match->{config}->{path},
