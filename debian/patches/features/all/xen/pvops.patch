@@ -1,4 +1,4 @@
-Patch based on commit f64df18aae5ab07b44bdcc2334cf0044ef46320c of
+Patch based on commit 27f948a3bf365a5bc3d56119637a177d41147815 of
 git://git.kernel.org/pub/scm/linux/kernel/git/jeremy/xen.git.
 
 diff --git a/Documentation/x86/x86_64/boot-options.txt b/Documentation/x86/x86_64/boot-options.txt
@@ -1057,7 +1057,7 @@ index d8e5d0c..6e80af9 100644
  
  obj-$(CONFIG_X86_CHECK_BIOS_CORRUPTION) += check.o
 diff --git a/arch/x86/kernel/acpi/boot.c b/arch/x86/kernel/acpi/boot.c
-index 195e4b7..6458fe8 100644
+index 23c2da8..a2a5125 100644
 --- a/arch/x86/kernel/acpi/boot.c
 +++ b/arch/x86/kernel/acpi/boot.c
 @@ -42,6 +42,10 @@
@@ -1117,6 +1117,51 @@ index 195e4b7..6458fe8 100644
 +
  	return max_gsi + 1;
  }
+ 
+diff --git a/arch/x86/kernel/acpi/processor.c b/arch/x86/kernel/acpi/processor.c
+index d85d1b2..8c9526d 100644
+--- a/arch/x86/kernel/acpi/processor.c
++++ b/arch/x86/kernel/acpi/processor.c
+@@ -11,6 +11,7 @@
+ 
+ #include <acpi/processor.h>
+ #include <asm/acpi.h>
++#include <asm/xen/hypervisor.h>
+ 
+ static void init_intel_pdc(struct acpi_processor *pr, struct cpuinfo_x86 *c)
+ {
+@@ -88,6 +89,19 @@ void arch_acpi_processor_init_pdc(struct acpi_processor *pr)
+ 
+ EXPORT_SYMBOL(arch_acpi_processor_init_pdc);
+ 
++/* Initialize _PDC data based on the CPU vendor */
++void xen_arch_acpi_processor_init_pdc(struct acpi_processor *pr)
++{
++	struct cpuinfo_x86 *c = &cpu_data(0);
++
++	pr->pdc = NULL;
++	if (c->x86_vendor == X86_VENDOR_INTEL)
++		init_intel_pdc(pr, c);
++
++	return;
++}
++EXPORT_SYMBOL(xen_arch_acpi_processor_init_pdc);
++
+ void arch_acpi_processor_cleanup_pdc(struct acpi_processor *pr)
+ {
+ 	if (pr->pdc) {
+diff --git a/arch/x86/kernel/acpi/sleep.c b/arch/x86/kernel/acpi/sleep.c
+index ca93638..9eff23c 100644
+--- a/arch/x86/kernel/acpi/sleep.c
++++ b/arch/x86/kernel/acpi/sleep.c
+@@ -12,6 +12,8 @@
+ #include <asm/segment.h>
+ #include <asm/desc.h>
+ 
++#include <xen/acpi.h>
++
+ #include "realmode/wakeup.h"
+ #include "sleep.h"
  
 diff --git a/arch/x86/kernel/amd_iommu.c b/arch/x86/kernel/amd_iommu.c
 index 23fc9fe..40497d3 100644
@@ -1621,13 +1666,15 @@ index a501dee..98569c3 100644
  extern int mtrr_cleanup(unsigned address_bits);
 diff --git a/arch/x86/kernel/cpu/mtrr/xen.c b/arch/x86/kernel/cpu/mtrr/xen.c
 new file mode 100644
-index 0000000..54ced4b
+index 0000000..852018b
 --- /dev/null
 +++ b/arch/x86/kernel/cpu/mtrr/xen.c
-@@ -0,0 +1,105 @@
+@@ -0,0 +1,109 @@
 +#include <linux/init.h>
 +#include <linux/mm.h>
-+#
++
++#include <asm/pat.h>
++
 +#include "mtrr.h"
 +
 +#include <xen/xen.h>
@@ -1727,8 +1774,10 @@ index 0000000..54ced4b
 +	if (cpu_has_mtrr ||
 +	    cpu_has_k6_mtrr ||
 +	    cpu_has_cyrix_arr ||
-+	    cpu_has_centaur_mcr)
++	    cpu_has_centaur_mcr) {
 +		mtrr_if = &xen_mtrr_ops;
++		pat_init();
++	}
 +}
 diff --git a/arch/x86/kernel/crash.c b/arch/x86/kernel/crash.c
 index 5e409dc..a4849c1 100644
@@ -2583,7 +2632,7 @@ index aaa6b78..7d2829d 100644
  	}
  }
 diff --git a/arch/x86/kernel/process.c b/arch/x86/kernel/process.c
-index f010ab4..6b39f09 100644
+index d0ba107..0b4f9d1 100644
 --- a/arch/x86/kernel/process.c
 +++ b/arch/x86/kernel/process.c
 @@ -73,16 +73,12 @@ void exit_thread(void)
@@ -3230,7 +3279,7 @@ index 0000000..21a3089
 +#endif
 +}
 diff --git a/arch/x86/xen/enlighten.c b/arch/x86/xen/enlighten.c
-index 3578688..565ab25 100644
+index 3578688..cc0c7ed 100644
 --- a/arch/x86/xen/enlighten.c
 +++ b/arch/x86/xen/enlighten.c
 @@ -28,6 +28,7 @@
@@ -3292,11 +3341,8 @@ index 3578688..565ab25 100644
  	}
  
  	asm(XEN_EMULATE_PREFIX "cpuid"
-@@ -217,8 +230,11 @@ static __init void xen_init_cpuid_mask(void)
- 	cpuid_leaf1_edx_mask =
- 		~((1 << X86_FEATURE_MCE)  |  /* disable MCE */
+@@ -219,6 +232,8 @@ static __init void xen_init_cpuid_mask(void)
  		  (1 << X86_FEATURE_MCA)  |  /* disable MCA */
-+		  (1 << X86_FEATURE_PAT)  |  /* disable PAT */
  		  (1 << X86_FEATURE_ACC));   /* thermal monitoring */
  
 +	cpuid_leaf81_edx_mask = ~(1 << (X86_FEATURE_GBPAGES % 32));
@@ -3304,7 +3350,7 @@ index 3578688..565ab25 100644
  	if (!xen_initial_domain())
  		cpuid_leaf1_edx_mask &=
  			~((1 << X86_FEATURE_APIC) |  /* disable local APIC */
-@@ -406,7 +422,7 @@ static __init void xen_load_gdt_boot(const struct desc_ptr *dtr)
+@@ -406,7 +421,7 @@ static __init void xen_load_gdt_boot(const struct desc_ptr *dtr)
  
  		pte = pfn_pte(pfn, PAGE_KERNEL_RO);
  
@@ -3313,7 +3359,7 @@ index 3578688..565ab25 100644
  			BUG();
  
  		frames[f] = mfn;
-@@ -519,11 +535,10 @@ static int cvt_gate_to_trap(int vector, const gate_desc *val,
+@@ -519,11 +534,10 @@ static int cvt_gate_to_trap(int vector, const gate_desc *val,
  	} else if (addr == (unsigned long)machine_check) {
  		return 0;
  #endif
@@ -3329,7 +3375,7 @@ index 3578688..565ab25 100644
  #endif	/* CONFIG_X86_64 */
  	info->address = addr;
  
-@@ -679,6 +694,18 @@ static void xen_set_iopl_mask(unsigned mask)
+@@ -679,6 +693,18 @@ static void xen_set_iopl_mask(unsigned mask)
  	HYPERVISOR_physdev_op(PHYSDEVOP_set_iopl, &set_iopl);
  }
  
@@ -3348,7 +3394,7 @@ index 3578688..565ab25 100644
  static void xen_io_delay(void)
  {
  }
-@@ -716,7 +743,7 @@ static u32 xen_safe_apic_wait_icr_idle(void)
+@@ -716,7 +742,7 @@ static u32 xen_safe_apic_wait_icr_idle(void)
          return 0;
  }
  
@@ -3357,7 +3403,7 @@ index 3578688..565ab25 100644
  {
  	apic->read = xen_apic_read;
  	apic->write = xen_apic_write;
-@@ -728,7 +755,6 @@ static void set_xen_basic_apic_ops(void)
+@@ -728,7 +754,6 @@ static void set_xen_basic_apic_ops(void)
  
  #endif
  
@@ -3365,7 +3411,19 @@ index 3578688..565ab25 100644
  static void xen_clts(void)
  {
  	struct multicall_space mcs;
-@@ -978,6 +1004,7 @@ static const struct pv_cpu_ops xen_cpu_ops __initdata = {
+@@ -811,6 +836,11 @@ static int xen_write_msr_safe(unsigned int msr, unsigned low, unsigned high)
+ 		   Xen console noise. */
+ 		break;
+ 
++	case MSR_IA32_CR_PAT:
++		if (smp_processor_id() == 0)
++			xen_set_pat(((u64)high << 32) | low);
++		break;
++
+ 	default:
+ 		ret = native_write_msr_safe(msr, low, high);
+ 	}
+@@ -978,6 +1008,7 @@ static const struct pv_cpu_ops xen_cpu_ops __initdata = {
  	.load_sp0 = xen_load_sp0,
  
  	.set_iopl_mask = xen_set_iopl_mask,
@@ -3373,7 +3431,7 @@ index 3578688..565ab25 100644
  	.io_delay = xen_io_delay,
  
  	/* Xen takes care of %gs when switching to usermode for us */
-@@ -1020,6 +1047,14 @@ static void xen_machine_halt(void)
+@@ -1020,6 +1051,14 @@ static void xen_machine_halt(void)
  	xen_reboot(SHUTDOWN_poweroff);
  }
  
@@ -3388,7 +3446,7 @@ index 3578688..565ab25 100644
  static void xen_crash_shutdown(struct pt_regs *regs)
  {
  	xen_reboot(SHUTDOWN_crash);
-@@ -1028,7 +1063,7 @@ static void xen_crash_shutdown(struct pt_regs *regs)
+@@ -1028,7 +1067,7 @@ static void xen_crash_shutdown(struct pt_regs *regs)
  static const struct machine_ops __initdata xen_machine_ops = {
  	.restart = xen_restart,
  	.halt = xen_machine_halt,
@@ -3397,7 +3455,7 @@ index 3578688..565ab25 100644
  	.shutdown = xen_machine_halt,
  	.crash_shutdown = xen_crash_shutdown,
  	.emergency_restart = xen_emergency_restart,
-@@ -1061,6 +1096,8 @@ asmlinkage void __init xen_start_kernel(void)
+@@ -1061,6 +1100,8 @@ asmlinkage void __init xen_start_kernel(void)
  
  	xen_domain_type = XEN_PV_DOMAIN;
  
@@ -3406,7 +3464,7 @@ index 3578688..565ab25 100644
  	/* Install Xen paravirt ops */
  	pv_info = xen_info;
  	pv_init_ops = xen_init_ops;
-@@ -1086,6 +1123,12 @@ asmlinkage void __init xen_start_kernel(void)
+@@ -1086,6 +1127,12 @@ asmlinkage void __init xen_start_kernel(void)
  
  	xen_init_mmu_ops();
  
@@ -3419,7 +3477,7 @@ index 3578688..565ab25 100644
  	/* Prevent unwanted bits from being set in PTEs. */
  	__supported_pte_mask &= ~_PAGE_GLOBAL;
  	if (!xen_initial_domain())
-@@ -1116,6 +1159,10 @@ asmlinkage void __init xen_start_kernel(void)
+@@ -1116,6 +1163,10 @@ asmlinkage void __init xen_start_kernel(void)
  	 */
  	xen_setup_stackprotector();
  
@@ -3430,7 +3488,7 @@ index 3578688..565ab25 100644
  	xen_init_irq_ops();
  	xen_init_cpuid_mask();
  
-@@ -1144,6 +1191,8 @@ asmlinkage void __init xen_start_kernel(void)
+@@ -1144,6 +1195,8 @@ asmlinkage void __init xen_start_kernel(void)
  
  	pgd = (pgd_t *)xen_start_info->pt_base;
  
@@ -3439,7 +3497,7 @@ index 3578688..565ab25 100644
  	/* Don't do the full vcpu_info placement stuff until we have a
  	   possible map and a non-dummy shared_info. */
  	per_cpu(xen_vcpu, 0) = &HYPERVISOR_shared_info->vcpu_info[0];
-@@ -1153,6 +1202,7 @@ asmlinkage void __init xen_start_kernel(void)
+@@ -1153,6 +1206,7 @@ asmlinkage void __init xen_start_kernel(void)
  
  	xen_raw_console_write("mapping kernel into physical memory\n");
  	pgd = xen_setup_kernel_pagetable(pgd, xen_start_info->nr_pages);
@@ -3447,7 +3505,7 @@ index 3578688..565ab25 100644
  
  	init_mm.pgd = pgd;
  
-@@ -1162,6 +1212,14 @@ asmlinkage void __init xen_start_kernel(void)
+@@ -1162,6 +1216,14 @@ asmlinkage void __init xen_start_kernel(void)
  	if (xen_feature(XENFEAT_supervisor_mode_kernel))
  		pv_info.kernel_rpl = 0;
  
@@ -3462,7 +3520,7 @@ index 3578688..565ab25 100644
  	/* set the limit of our address space */
  	xen_reserve_top();
  
-@@ -1184,6 +1242,16 @@ asmlinkage void __init xen_start_kernel(void)
+@@ -1184,6 +1246,16 @@ asmlinkage void __init xen_start_kernel(void)
  		add_preferred_console("xenboot", 0, NULL);
  		add_preferred_console("tty", 0, NULL);
  		add_preferred_console("hvc", 0, NULL);
@@ -3480,20 +3538,29 @@ index 3578688..565ab25 100644
  
  	xen_raw_console_write("about to get started...\n");
 diff --git a/arch/x86/xen/mmu.c b/arch/x86/xen/mmu.c
-index 350a3de..44a4cd1 100644
+index 350a3de..8c6a858 100644
 --- a/arch/x86/xen/mmu.c
 +++ b/arch/x86/xen/mmu.c
-@@ -50,7 +50,9 @@
+@@ -42,6 +42,7 @@
+ #include <linux/highmem.h>
+ #include <linux/debugfs.h>
+ #include <linux/bug.h>
++#include <linux/vmalloc.h>
+ #include <linux/module.h>
+ 
+ #include <asm/pgtable.h>
+@@ -50,7 +51,10 @@
  #include <asm/mmu_context.h>
  #include <asm/setup.h>
  #include <asm/paravirt.h>
 +#include <asm/e820.h>
  #include <asm/linkage.h>
++#include <asm/pat.h>
 +#include <asm/page.h>
  
  #include <asm/xen/hypercall.h>
  #include <asm/xen/hypervisor.h>
-@@ -58,6 +60,7 @@
+@@ -58,6 +62,7 @@
  #include <xen/page.h>
  #include <xen/interface/xen.h>
  #include <xen/interface/version.h>
@@ -3501,7 +3568,7 @@ index 350a3de..44a4cd1 100644
  #include <xen/hvc-console.h>
  
  #include "multicalls.h"
-@@ -66,6 +69,13 @@
+@@ -66,6 +71,13 @@
  
  #define MMU_UPDATE_HISTO	30
  
@@ -3515,7 +3582,7 @@ index 350a3de..44a4cd1 100644
  #ifdef CONFIG_XEN_DEBUG_FS
  
  static struct {
-@@ -184,6 +194,26 @@ static inline unsigned p2m_index(unsigned long pfn)
+@@ -184,6 +196,26 @@ static inline unsigned p2m_index(unsigned long pfn)
  	return pfn % P2M_ENTRIES_PER_PAGE;
  }
  
@@ -3542,7 +3609,7 @@ index 350a3de..44a4cd1 100644
  /* Build the parallel p2m_top_mfn structures */
  void xen_build_mfn_list_list(void)
  {
-@@ -315,6 +345,7 @@ unsigned long arbitrary_virt_to_mfn(void *vaddr)
+@@ -315,6 +347,7 @@ unsigned long arbitrary_virt_to_mfn(void *vaddr)
  
  	return PFN_DOWN(maddr.maddr);
  }
@@ -3550,7 +3617,7 @@ index 350a3de..44a4cd1 100644
  
  xmaddr_t arbitrary_virt_to_machine(void *vaddr)
  {
-@@ -376,6 +407,34 @@ static bool xen_page_pinned(void *ptr)
+@@ -376,6 +409,34 @@ static bool xen_page_pinned(void *ptr)
  	return PagePinned(page);
  }
  
@@ -3585,7 +3652,7 @@ index 350a3de..44a4cd1 100644
  static void xen_extend_mmu_update(const struct mmu_update *update)
  {
  	struct multicall_space mcs;
-@@ -452,6 +511,11 @@ void set_pte_mfn(unsigned long vaddr, unsigned long mfn, pgprot_t flags)
+@@ -452,6 +513,11 @@ void set_pte_mfn(unsigned long vaddr, unsigned long mfn, pgprot_t flags)
  void xen_set_pte_at(struct mm_struct *mm, unsigned long addr,
  		    pte_t *ptep, pte_t pteval)
  {
@@ -3597,7 +3664,7 @@ index 350a3de..44a4cd1 100644
  	ADD_STATS(set_pte_at, 1);
  //	ADD_STATS(set_pte_at_pinned, xen_page_pinned(ptep));
  	ADD_STATS(set_pte_at_current, mm == current->mm);
-@@ -522,8 +586,25 @@ static pteval_t pte_pfn_to_mfn(pteval_t val)
+@@ -522,9 +588,34 @@ static pteval_t pte_pfn_to_mfn(pteval_t val)
  	return val;
  }
  
@@ -3617,18 +3684,68 @@ index 350a3de..44a4cd1 100644
 +
  pteval_t xen_pte_val(pte_t pte)
  {
-+	if (xen_initial_domain() && (pte.pte & _PAGE_IOMAP))
-+		return pte.pte;
+-	return pte_mfn_to_pfn(pte.pte);
++	pteval_t pteval = pte.pte;
 +
- 	return pte_mfn_to_pfn(pte.pte);
++	/* If this is a WC pte, convert back from Xen WC to Linux WC */
++	if ((pteval & (_PAGE_PAT | _PAGE_PCD | _PAGE_PWT)) == _PAGE_PAT) {
++		WARN_ON(!pat_enabled);
++		pteval = (pteval & ~_PAGE_PAT) | _PAGE_PWT;
++	}
++
++	if (xen_initial_domain() && (pteval & _PAGE_IOMAP))
++		return pteval;
++
++	return pte_mfn_to_pfn(pteval);
  }
  PV_CALLEE_SAVE_REGS_THUNK(xen_pte_val);
-@@ -536,7 +617,22 @@ PV_CALLEE_SAVE_REGS_THUNK(xen_pgd_val);
  
+@@ -534,9 +625,62 @@ pgdval_t xen_pgd_val(pgd_t pgd)
+ }
+ PV_CALLEE_SAVE_REGS_THUNK(xen_pgd_val);
+ 
++/*
++ * Xen's PAT setup is part of its ABI, though I assume entries 6 & 7
++ * are reserved for now, to correspond to the Intel-reserved PAT
++ * types.
++ *
++ * We expect Linux's PAT set as follows:
++ *
++ * Idx  PTE flags        Linux    Xen    Default
++ * 0                     WB       WB     WB
++ * 1            PWT      WC       WT     WT
++ * 2        PCD          UC-      UC-    UC-
++ * 3        PCD PWT      UC       UC     UC
++ * 4    PAT              WB       WC     WB
++ * 5    PAT     PWT      WC       WP     WT
++ * 6    PAT PCD          UC-      UC     UC-
++ * 7    PAT PCD PWT      UC       UC     UC
++ */
++
++void xen_set_pat(u64 pat)
++{
++	/* We expect Linux to use a PAT setting of
++	 * UC UC- WC WB (ignoring the PAT flag) */
++	WARN_ON(pat != 0x0007010600070106ull);
++}
++
  pte_t xen_make_pte(pteval_t pte)
  {
 -	pte = pte_pfn_to_mfn(pte);
 +	phys_addr_t addr = (pte & PTE_PFN_MASK);
++
++	/* If Linux is trying to set a WC pte, then map to the Xen WC.
++	 * If _PAGE_PAT is set, then it probably means it is really
++	 * _PAGE_PSE, so avoid fiddling with the PAT mapping and hope
++	 * things work out OK...
++	 *
++	 * (We should never see kernel mappings with _PAGE_PSE set,
++	 * but we could see hugetlbfs mappings, I think.).
++	 */
++	if (pat_enabled && !WARN_ON(pte & _PAGE_PAT)) {
++		if ((pte & (_PAGE_PCD | _PAGE_PWT)) == _PAGE_PWT)
++			pte = (pte & ~(_PAGE_PCD | _PAGE_PWT)) | _PAGE_PAT;
++	}
 +
 +	/*
 +	 * Unprivileged domains are allowed to do IOMAPpings for
@@ -3647,7 +3764,7 @@ index 350a3de..44a4cd1 100644
  	return native_make_pte(pte);
  }
  PV_CALLEE_SAVE_REGS_THUNK(xen_make_pte);
-@@ -592,6 +688,11 @@ void xen_set_pud(pud_t *ptr, pud_t val)
+@@ -592,6 +736,11 @@ void xen_set_pud(pud_t *ptr, pud_t val)
  
  void xen_set_pte(pte_t *ptep, pte_t pte)
  {
@@ -3659,7 +3776,7 @@ index 350a3de..44a4cd1 100644
  	ADD_STATS(pte_update, 1);
  //	ADD_STATS(pte_update_pinned, xen_page_pinned(ptep));
  	ADD_STATS(pte_update_batched, paravirt_get_lazy_mode() == PARAVIRT_LAZY_MMU);
-@@ -608,6 +709,11 @@ void xen_set_pte(pte_t *ptep, pte_t pte)
+@@ -608,6 +757,11 @@ void xen_set_pte(pte_t *ptep, pte_t pte)
  #ifdef CONFIG_X86_PAE
  void xen_set_pte_atomic(pte_t *ptep, pte_t pte)
  {
@@ -3671,7 +3788,16 @@ index 350a3de..44a4cd1 100644
  	set_64bit((u64 *)ptep, native_pte_val(pte));
  }
  
-@@ -1219,7 +1325,7 @@ void xen_exit_mmap(struct mm_struct *mm)
+@@ -934,8 +1088,6 @@ static int xen_pin_page(struct mm_struct *mm, struct page *page,
+    read-only, and can be pinned. */
+ static void __xen_pgd_pin(struct mm_struct *mm, pgd_t *pgd)
+ {
+-	vm_unmap_aliases();
+-
+ 	xen_mc_batch();
+ 
+ 	if (__xen_pgd_walk(mm, pgd, xen_pin_page, USER_LIMIT)) {
+@@ -1219,7 +1371,7 @@ void xen_exit_mmap(struct mm_struct *mm)
  	spin_lock(&mm->page_table_lock);
  
  	/* pgd may not be pinned in the error exit path of execve */
@@ -3680,7 +3806,7 @@ index 350a3de..44a4cd1 100644
  		xen_pgd_unpin(mm);
  
  	spin_unlock(&mm->page_table_lock);
-@@ -1288,12 +1394,19 @@ static void xen_flush_tlb_single(unsigned long addr)
+@@ -1288,12 +1440,19 @@ static void xen_flush_tlb_single(unsigned long addr)
  	preempt_enable();
  }
  
@@ -3701,7 +3827,7 @@ index 350a3de..44a4cd1 100644
  	} *args;
  	struct multicall_space mcs;
  
-@@ -1417,6 +1530,13 @@ static int xen_pgd_alloc(struct mm_struct *mm)
+@@ -1417,6 +1576,13 @@ static int xen_pgd_alloc(struct mm_struct *mm)
  	return ret;
  }
  
@@ -3715,7 +3841,7 @@ index 350a3de..44a4cd1 100644
  static void xen_pgd_free(struct mm_struct *mm, pgd_t *pgd)
  {
  #ifdef CONFIG_X86_64
-@@ -1448,10 +1568,17 @@ static void *xen_kmap_atomic_pte(struct page *page, enum km_type type)
+@@ -1448,10 +1614,17 @@ static void *xen_kmap_atomic_pte(struct page *page, enum km_type type)
  #ifdef CONFIG_X86_32
  static __init pte_t mask_rw_pte(pte_t *ptep, pte_t pte)
  {
@@ -3735,7 +3861,15 @@ index 350a3de..44a4cd1 100644
  
  	return pte;
  }
-@@ -1620,6 +1747,7 @@ static void *m2v(phys_addr_t maddr)
+@@ -1517,7 +1690,6 @@ static void xen_alloc_ptpage(struct mm_struct *mm, unsigned long pfn, unsigned l
+ 	if (PagePinned(virt_to_page(mm->pgd))) {
+ 		SetPagePinned(page);
+ 
+-		vm_unmap_aliases();
+ 		if (!PageHighMem(page)) {
+ 			make_lowmem_page_readonly(__va(PFN_PHYS((unsigned long)pfn)));
+ 			if (level == PT_PTE && USE_SPLIT_PTLOCKS)
+@@ -1620,6 +1792,7 @@ static void *m2v(phys_addr_t maddr)
  	return __ka(m2p(maddr));
  }
  
@@ -3743,7 +3877,7 @@ index 350a3de..44a4cd1 100644
  static void set_page_prot(void *addr, pgprot_t prot)
  {
  	unsigned long pfn = __pa(addr) >> PAGE_SHIFT;
-@@ -1675,6 +1803,20 @@ static __init void xen_map_identity_early(pmd_t *pmd, unsigned long max_pfn)
+@@ -1675,6 +1848,20 @@ static __init void xen_map_identity_early(pmd_t *pmd, unsigned long max_pfn)
  	set_page_prot(pmd, PAGE_KERNEL_RO);
  }
  
@@ -3764,7 +3898,7 @@ index 350a3de..44a4cd1 100644
  #ifdef CONFIG_X86_64
  static void convert_pfn_mfn(void *v)
  {
-@@ -1766,6 +1908,7 @@ __init pgd_t *xen_setup_kernel_pagetable(pgd_t *pgd,
+@@ -1766,6 +1953,7 @@ __init pgd_t *xen_setup_kernel_pagetable(pgd_t *pgd,
  					 unsigned long max_pfn)
  {
  	pmd_t *kernel_pmd;
@@ -3772,7 +3906,7 @@ index 350a3de..44a4cd1 100644
  
  	max_pfn_mapped = PFN_DOWN(__pa(xen_start_info->pt_base) +
  				  xen_start_info->nr_pt_frames * PAGE_SIZE +
-@@ -1777,6 +1920,20 @@ __init pgd_t *xen_setup_kernel_pagetable(pgd_t *pgd,
+@@ -1777,6 +1965,20 @@ __init pgd_t *xen_setup_kernel_pagetable(pgd_t *pgd,
  	xen_map_identity_early(level2_kernel_pgt, max_pfn);
  
  	memcpy(swapper_pg_dir, pgd, sizeof(pgd_t) * PTRS_PER_PGD);
@@ -3793,7 +3927,7 @@ index 350a3de..44a4cd1 100644
  	set_pgd(&swapper_pg_dir[KERNEL_PGD_BOUNDARY],
  			__pgd(__pa(level2_kernel_pgt) | _PAGE_PRESENT));
  
-@@ -1799,6 +1956,8 @@ __init pgd_t *xen_setup_kernel_pagetable(pgd_t *pgd,
+@@ -1799,6 +2001,8 @@ __init pgd_t *xen_setup_kernel_pagetable(pgd_t *pgd,
  }
  #endif	/* CONFIG_X86_64 */
  
@@ -3802,7 +3936,7 @@ index 350a3de..44a4cd1 100644
  static void xen_set_fixmap(unsigned idx, phys_addr_t phys, pgprot_t prot)
  {
  	pte_t pte;
-@@ -1828,9 +1987,26 @@ static void xen_set_fixmap(unsigned idx, phys_addr_t phys, pgprot_t prot)
+@@ -1828,9 +2032,26 @@ static void xen_set_fixmap(unsigned idx, phys_addr_t phys, pgprot_t prot)
  		pte = pfn_pte(phys, prot);
  		break;
  
@@ -3830,7 +3964,7 @@ index 350a3de..44a4cd1 100644
  	}
  
  	__native_set_fixmap(idx, pte);
-@@ -1845,6 +2021,29 @@ static void xen_set_fixmap(unsigned idx, phys_addr_t phys, pgprot_t prot)
+@@ -1845,6 +2066,29 @@ static void xen_set_fixmap(unsigned idx, phys_addr_t phys, pgprot_t prot)
  #endif
  }
  
@@ -3860,10 +3994,14 @@ index 350a3de..44a4cd1 100644
  static __init void xen_post_allocator_init(void)
  {
  	pv_mmu_ops.set_pte = xen_set_pte;
-@@ -1962,6 +2161,271 @@ void __init xen_init_mmu_ops(void)
+@@ -1960,7 +2204,270 @@ void __init xen_init_mmu_ops(void)
+ 	x86_init.paging.pagetable_setup_start = xen_pagetable_setup_start;
+ 	x86_init.paging.pagetable_setup_done = xen_pagetable_setup_done;
  	pv_mmu_ops = xen_mmu_ops;
- }
- 
++
++	vmap_lazy_unmap = false;
++}
++
 +/* Protected by xen_reservation_lock. */
 +#define MAX_CONTIG_ORDER 9 /* 2MB */
 +static unsigned long discontig_frames[1<<MAX_CONTIG_ORDER];
@@ -4000,8 +4138,6 @@ index 350a3de..44a4cd1 100644
 +
 +	memset((void *) vstart, 0, PAGE_SIZE << order);
 +
-+	vm_unmap_aliases();
-+
 +	spin_lock_irqsave(&xen_reservation_lock, flags);
 +
 +	/* 1. Zap current PTEs, remembering MFNs. */
@@ -4038,8 +4174,6 @@ index 350a3de..44a4cd1 100644
 +		return;
 +
 +	memset((void *) vstart, 0, PAGE_SIZE << order);
-+
-+	vm_unmap_aliases();
 +
 +	spin_lock_irqsave(&xen_reservation_lock, flags);
 +
@@ -4126,12 +4260,11 @@ index 350a3de..44a4cd1 100644
 +	flush_tlb_all();
 +
 +	return err;
-+}
+ }
 +EXPORT_SYMBOL_GPL(xen_remap_domain_mfn_range);
-+
+ 
  #ifdef CONFIG_XEN_DEBUG_FS
  
- static struct dentry *d_mmu_debug;
 diff --git a/arch/x86/xen/pci-swiotlb-xen.c b/arch/x86/xen/pci-swiotlb-xen.c
 new file mode 100644
 index 0000000..4d55524
@@ -4192,10 +4325,10 @@ index 0000000..4d55524
 +}
 diff --git a/arch/x86/xen/pci.c b/arch/x86/xen/pci.c
 new file mode 100644
-index 0000000..956e0d0
+index 0000000..3def132
 --- /dev/null
 +++ b/arch/x86/xen/pci.c
-@@ -0,0 +1,299 @@
+@@ -0,0 +1,296 @@
 +#include <linux/kernel.h>
 +#include <linux/acpi.h>
 +#include <linux/pci.h>
@@ -4258,9 +4391,6 @@ index 0000000..956e0d0
 +{
 +	int rc, irq;
 +	struct physdev_setup_gsi setup_gsi;
-+	struct physdev_map_pirq map_irq;
-+	int shareable = 0;
-+	char *name;
 +
 +	if (!xen_domain())
 +		return -1;
@@ -4707,6 +4837,34 @@ index 360f8d8..632ea35 100644
  	per_cpu(cpu_state, cpu) = CPU_UP_PREPARE;
  
  	/* make sure interrupts start blocked */
+diff --git a/arch/x86/xen/time.c b/arch/x86/xen/time.c
+index 9d1f853..af5463a 100644
+--- a/arch/x86/xen/time.c
++++ b/arch/x86/xen/time.c
+@@ -239,8 +239,22 @@ unsigned long xen_get_wallclock(void)
+ 
+ int xen_set_wallclock(unsigned long now)
+ {
++	struct xen_platform_op op;
++	int rc;
++
+ 	/* do nothing for domU */
+-	return -1;
++	if (!xen_initial_domain())
++		return -1;
++
++	op.cmd = XENPF_settime;
++	op.u.settime.secs = now;
++	op.u.settime.nsecs = 0;
++	op.u.settime.system_time = xen_clocksource_read();
++
++	rc = HYPERVISOR_dom0_op(&op);
++	WARN(rc != 0, "XENPF_settime failed: now=%ld\n", now);
++
++	return rc;
+ }
+ 
+ static struct clocksource xen_clocksource __read_mostly = {
 diff --git a/arch/x86/xen/vga.c b/arch/x86/xen/vga.c
 new file mode 100644
 index 0000000..1cd7f4d
@@ -4781,18 +4939,20 @@ index 0000000..1cd7f4d
 +	}
 +}
 diff --git a/arch/x86/xen/xen-ops.h b/arch/x86/xen/xen-ops.h
-index f9153a3..5afc1fe 100644
+index f9153a3..1c1eff4 100644
 --- a/arch/x86/xen/xen-ops.h
 +++ b/arch/x86/xen/xen-ops.h
-@@ -30,6 +30,7 @@ void xen_setup_machphys_mapping(void);
+@@ -30,6 +30,9 @@ void xen_setup_machphys_mapping(void);
  pgd_t *xen_setup_kernel_pagetable(pgd_t *pgd, unsigned long max_pfn);
  void xen_ident_map_ISA(void);
  void xen_reserve_top(void);
 +void xen_ident_map_ISA(void);
++
++void xen_set_pat(u64);
  
  char * __init xen_memory_setup(void);
  void __init xen_arch_setup(void);
-@@ -82,6 +83,23 @@ static inline void xen_uninit_lock_cpu(int cpu)
+@@ -82,6 +85,23 @@ static inline void xen_uninit_lock_cpu(int cpu)
  }
  #endif
  
@@ -4836,6 +4996,936 @@ index 71da511..32d305c 100644
  
  static inline void blk_free_request(struct request_queue *q, struct request *rq)
  {
+diff --git a/drivers/acpi/Makefile b/drivers/acpi/Makefile
+index 7702118..1be123c 100644
+--- a/drivers/acpi/Makefile
++++ b/drivers/acpi/Makefile
+@@ -61,6 +61,7 @@ obj-$(CONFIG_ACPI_POWER_METER)	+= power_meter.o
+ # processor has its own "processor." module_param namespace
+ processor-y			:= processor_core.o processor_throttling.o
+ processor-y			+= processor_idle.o processor_thermal.o
++processor-y			+= processor_xen.o
+ processor-$(CONFIG_CPU_FREQ)	+= processor_perflib.o
+ 
+ obj-$(CONFIG_ACPI_PROCESSOR_AGGREGATOR) += acpi_pad.o
+diff --git a/drivers/acpi/acpi_memhotplug.c b/drivers/acpi/acpi_memhotplug.c
+index 28ccdbc..b0f9ed6 100644
+--- a/drivers/acpi/acpi_memhotplug.c
++++ b/drivers/acpi/acpi_memhotplug.c
+@@ -31,6 +31,7 @@
+ #include <linux/types.h>
+ #include <linux/memory_hotplug.h>
+ #include <acpi/acpi_drivers.h>
++#include <xen/acpi.h>
+ 
+ #define ACPI_MEMORY_DEVICE_CLASS		"memory"
+ #define ACPI_MEMORY_DEVICE_HID			"PNP0C80"
+@@ -70,21 +71,6 @@ static struct acpi_driver acpi_memory_device_driver = {
+ 		},
+ };
+ 
+-struct acpi_memory_info {
+-	struct list_head list;
+-	u64 start_addr;		/* Memory Range start physical addr */
+-	u64 length;		/* Memory Range length */
+-	unsigned short caching;	/* memory cache attribute */
+-	unsigned short write_protect;	/* memory read/write attribute */
+-	unsigned int enabled:1;
+-};
+-
+-struct acpi_memory_device {
+-	struct acpi_device * device;
+-	unsigned int state;	/* State of the memory device */
+-	struct list_head res_list;
+-};
+-
+ static int acpi_hotmem_initialized;
+ 
+ static acpi_status
+@@ -228,6 +214,9 @@ static int acpi_memory_enable_device(struct acpi_memory_device *mem_device)
+ 		return result;
+ 	}
+ 
++	if (xen_initial_domain())
++		return xen_hotadd_memory(mem_device);
++
+ 	node = acpi_get_node(mem_device->device->handle);
+ 	/*
+ 	 * Tell the VM there is more memory here...
+diff --git a/drivers/acpi/acpica/hwsleep.c b/drivers/acpi/acpica/hwsleep.c
+index cc22f9a..747d96f 100644
+--- a/drivers/acpi/acpica/hwsleep.c
++++ b/drivers/acpi/acpica/hwsleep.c
+@@ -47,6 +47,9 @@
+ #include "actables.h"
+ #include <linux/tboot.h>
+ 
++#include <xen/acpi.h>
++#include <asm/xen/hypervisor.h>
++
+ #define _COMPONENT          ACPI_HARDWARE
+ ACPI_MODULE_NAME("hwsleep")
+ 
+@@ -346,6 +349,19 @@ acpi_status asmlinkage acpi_enter_sleep_state(u8 sleep_state)
+ 	tboot_sleep(sleep_state, pm1a_control, pm1b_control);
+ 
+ 	/* Write #2: Write both SLP_TYP + SLP_EN */
++	if (xen_pv_acpi()) {
++		int err;
++
++		err = acpi_notify_hypervisor_state(sleep_state,
++						   pm1a_control, pm1b_control);
++		if (err) {
++			ACPI_DEBUG_PRINT((ACPI_DB_INIT,
++					  "Hypervisor failure [%d]\n", err));
++			return_ACPI_STATUS(AE_ERROR);
++		}
++
++		return_ACPI_STATUS(AE_OK);
++	}
+ 
+ 	status = acpi_hw_write_pm1_control(pm1a_control, pm1b_control);
+ 	if (ACPI_FAILURE(status)) {
+diff --git a/drivers/acpi/processor_core.c b/drivers/acpi/processor_core.c
+index ec742a4..4ccecf6 100644
+--- a/drivers/acpi/processor_core.c
++++ b/drivers/acpi/processor_core.c
+@@ -58,6 +58,7 @@
+ #include <acpi/acpi_bus.h>
+ #include <acpi/acpi_drivers.h>
+ #include <acpi/processor.h>
++#include <xen/acpi.h>
+ 
+ #define PREFIX "ACPI: "
+ 
+@@ -81,11 +82,9 @@ MODULE_DESCRIPTION("ACPI Processor Driver");
+ MODULE_LICENSE("GPL");
+ 
+ static int acpi_processor_add(struct acpi_device *device);
+-static int acpi_processor_remove(struct acpi_device *device, int type);
+ #ifdef CONFIG_ACPI_PROCFS
+ static int acpi_processor_info_open_fs(struct inode *inode, struct file *file);
+ #endif
+-static void acpi_processor_notify(struct acpi_device *device, u32 event);
+ static acpi_status acpi_processor_hotadd_init(acpi_handle handle, int *p_cpu);
+ static int acpi_processor_handle_eject(struct acpi_processor *pr);
+ 
+@@ -253,7 +252,7 @@ static int acpi_processor_errata_piix4(struct pci_dev *dev)
+ 	return 0;
+ }
+ 
+-static int acpi_processor_errata(struct acpi_processor *pr)
++int acpi_processor_errata(struct acpi_processor *pr)
+ {
+ 	int result = 0;
+ 	struct pci_dev *dev = NULL;
+@@ -284,7 +283,7 @@ static int acpi_processor_errata(struct acpi_processor *pr)
+  * _PDC is required for a BIOS-OS handshake for most of the newer
+  * ACPI processor features.
+  */
+-static int acpi_processor_set_pdc(struct acpi_processor *pr)
++int acpi_processor_set_pdc(struct acpi_processor *pr)
+ {
+ 	struct acpi_object_list *pdc_in = pr->pdc;
+ 	acpi_status status = AE_OK;
+@@ -353,7 +352,7 @@ static int acpi_processor_info_open_fs(struct inode *inode, struct file *file)
+ 			   PDE(inode)->data);
+ }
+ 
+-static int acpi_processor_add_fs(struct acpi_device *device)
++int acpi_processor_add_fs(struct acpi_device *device)
+ {
+ 	struct proc_dir_entry *entry = NULL;
+ 
+@@ -392,7 +391,7 @@ static int acpi_processor_add_fs(struct acpi_device *device)
+ 		return -EIO;
+ 	return 0;
+ }
+-static int acpi_processor_remove_fs(struct acpi_device *device)
++int acpi_processor_remove_fs(struct acpi_device *device)
+ {
+ 
+ 	if (acpi_device_dir(device)) {
+@@ -711,7 +710,7 @@ static int acpi_processor_get_info(struct acpi_device *device)
+ 
+ static DEFINE_PER_CPU(void *, processor_device_array);
+ 
+-static void acpi_processor_notify(struct acpi_device *device, u32 event)
++void acpi_processor_notify(struct acpi_device *device, u32 event)
+ {
+ 	struct acpi_processor *pr = acpi_driver_data(device);
+ 	int saved;
+@@ -879,7 +878,7 @@ err_free_cpumask:
+ 	return result;
+ }
+ 
+-static int acpi_processor_remove(struct acpi_device *device, int type)
++int acpi_processor_remove(struct acpi_device *device, int type)
+ {
+ 	struct acpi_processor *pr = NULL;
+ 
+@@ -1154,7 +1153,11 @@ static int __init acpi_processor_init(void)
+ 	if (result < 0)
+ 		goto out_proc;
+ 
+-	result = acpi_bus_register_driver(&acpi_processor_driver);
++	if (xen_initial_domain())
++		result = xen_acpi_processor_init();
++	else
++		result = acpi_bus_register_driver(&acpi_processor_driver);
++
+ 	if (result < 0)
+ 		goto out_cpuidle;
+ 
+@@ -1190,7 +1193,10 @@ static void __exit acpi_processor_exit(void)
+ 
+ 	acpi_processor_uninstall_hotplug_notify();
+ 
+-	acpi_bus_unregister_driver(&acpi_processor_driver);
++	if (xen_initial_domain())
++		xen_acpi_processor_exit();
++	else
++		acpi_bus_unregister_driver(&acpi_processor_driver);
+ 
+ 	cpuidle_unregister_driver(&acpi_idle_driver);
+ 
+diff --git a/drivers/acpi/processor_idle.c b/drivers/acpi/processor_idle.c
+index c8f0797..bdee59e 100644
+--- a/drivers/acpi/processor_idle.c
++++ b/drivers/acpi/processor_idle.c
+@@ -58,6 +58,7 @@
+ 
+ #include <acpi/acpi_bus.h>
+ #include <acpi/processor.h>
++#include <xen/acpi.h>
+ #include <asm/processor.h>
+ 
+ #define PREFIX "ACPI: "
+@@ -477,6 +478,9 @@ static int acpi_processor_get_power_info_cst(struct acpi_processor *pr)
+ 
+ 		cx.power = obj->integer.value;
+ 
++		/* cache control methods to notify xen*/
++		processor_cntl_xen_power_cache(pr->acpi_id, i, reg);
++
+ 		current_count++;
+ 		memcpy(&(pr->power.states[current_count]), &cx, sizeof(cx));
+ 
+@@ -653,7 +657,7 @@ static int acpi_processor_power_verify(struct acpi_processor *pr)
+ 	return (working);
+ }
+ 
+-static int acpi_processor_get_power_info(struct acpi_processor *pr)
++int acpi_processor_get_power_info(struct acpi_processor *pr)
+ {
+ 	unsigned int i;
+ 	int result;
+@@ -1223,9 +1227,14 @@ int __cpuinit acpi_processor_power_init(struct acpi_processor *pr,
+ 	 * platforms that only support C1.
+ 	 */
+ 	if (pr->flags.power) {
+-		acpi_processor_setup_cpuidle(pr);
+-		if (cpuidle_register_device(&pr->power.dev))
+-			return -EIO;
++		if (xen_initial_domain()) {
++			processor_cntl_xen_notify(pr,
++					PROCESSOR_PM_INIT, PM_TYPE_IDLE);
++		} else {
++			acpi_processor_setup_cpuidle(pr);
++			if (cpuidle_register_device(&pr->power.dev))
++				return -EIO;
++		}
+ 	}
+ #ifdef CONFIG_ACPI_PROCFS
+ 	/* 'power' [R] */
+diff --git a/drivers/acpi/processor_perflib.c b/drivers/acpi/processor_perflib.c
+index 8ba0ed0..86b8102 100644
+--- a/drivers/acpi/processor_perflib.c
++++ b/drivers/acpi/processor_perflib.c
+@@ -332,7 +332,7 @@ static int acpi_processor_get_performance_states(struct acpi_processor *pr)
+ 	return result;
+ }
+ 
+-static int acpi_processor_get_performance_info(struct acpi_processor *pr)
++int acpi_processor_get_performance_info(struct acpi_processor *pr)
+ {
+ 	int result = 0;
+ 	acpi_status status = AE_OK;
+@@ -434,7 +434,7 @@ int acpi_processor_notify_smm(struct module *calling_module)
+ 
+ EXPORT_SYMBOL(acpi_processor_notify_smm);
+ 
+-static int acpi_processor_get_psd(struct acpi_processor	*pr)
++int acpi_processor_get_psd(struct acpi_processor	*pr)
+ {
+ 	int result = 0;
+ 	acpi_status status = AE_OK;
+diff --git a/drivers/acpi/processor_xen.c b/drivers/acpi/processor_xen.c
+new file mode 100644
+index 0000000..2f37c9c
+--- /dev/null
++++ b/drivers/acpi/processor_xen.c
+@@ -0,0 +1,616 @@
++/*
++ * processor_xen.c - ACPI Processor Driver for xen
++ *
++ * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
++ *
++ *  This program is free software; you can redistribute it and/or modify
++ *  it under the terms of the GNU General Public License as published by
++ *  the Free Software Foundation; either version 2 of the License, or (at
++ *  your option) any later version.
++ *
++ *  This program is distributed in the hope that it will be useful, but
++ *  WITHOUT ANY WARRANTY; without even the implied warranty of
++ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ *  General Public License for more details.
++ *
++ *  You should have received a copy of the GNU General Public License along
++ *  with this program; if not, write to the Free Software Foundation, Inc.,
++ *  59 Temple Place, Suite 330, Boston, MA 02111-1307 USA.
++ *
++ * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
++ */
++
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/init.h>
++#include <linux/types.h>
++#include <linux/pci.h>
++#include <linux/pm.h>
++#include <linux/cpufreq.h>
++#include <linux/cpu.h>
++#include <linux/proc_fs.h>
++#include <linux/seq_file.h>
++#include <linux/dmi.h>
++#include <linux/moduleparam.h>
++#include <linux/cpuidle.h>
++#include <linux/acpi.h>
++
++#include <acpi/acpi_bus.h>
++#include <acpi/acpi_drivers.h>
++#include <acpi/processor.h>
++#include <xen/acpi.h>
++
++#define PREFIX "ACPI: "
++
++#define ACPI_PROCESSOR_CLASS            "processor"
++#define ACPI_PROCESSOR_DEVICE_NAME	"Processor"
++#define ACPI_PROCESSOR_FILE_INFO	"info"
++#define ACPI_PROCESSOR_FILE_THROTTLING	"throttling"
++#define ACPI_PROCESSOR_FILE_LIMIT	"limit"
++#define ACPI_PROCESSOR_NOTIFY_PERFORMANCE 0x80
++#define ACPI_PROCESSOR_NOTIFY_POWER	0x81
++#define ACPI_PROCESSOR_NOTIFY_THROTTLING	0x82
++
++#define _COMPONENT              ACPI_PROCESSOR_COMPONENT
++ACPI_MODULE_NAME("processor_xen");
++
++static const struct acpi_device_id processor_device_ids[] = {
++	{ACPI_PROCESSOR_OBJECT_HID, 0},
++	{"ACPI0007", 0},
++	{"", 0},
++};
++
++/*
++ * Xen ACPI processor driver
++ */
++
++/* from processor_core.c */
++
++static int xen_acpi_processor_add(struct acpi_device *device);
++static void xen_acpi_processor_notify(struct acpi_device *device, u32 event);
++
++struct acpi_driver xen_acpi_processor_driver = {
++	.name = "processor",
++	.class = ACPI_PROCESSOR_CLASS,
++	.ids = processor_device_ids,
++	.ops = {
++		.add = xen_acpi_processor_add,
++		.remove = acpi_processor_remove,
++		.suspend = acpi_processor_suspend,
++		.resume = acpi_processor_resume,
++		.notify = xen_acpi_processor_notify,
++		},
++};
++
++static int xen_acpi_processor_get_info(struct acpi_device *device)
++{
++	acpi_status status = 0;
++	union acpi_object object = { 0 };
++	struct acpi_buffer buffer = { sizeof(union acpi_object), &object };
++	struct acpi_processor *pr;
++	int cpu_index, device_declaration = 0;
++	static int cpu0_initialized;
++
++	pr = acpi_driver_data(device);
++	if (!pr)
++		return -EINVAL;
++
++	if (num_online_cpus() > 1)
++		errata.smp = TRUE;
++
++	acpi_processor_errata(pr);
++
++	/*
++	 * Check to see if we have bus mastering arbitration control.  This
++	 * is required for proper C3 usage (to maintain cache coherency).
++	 */
++	if (acpi_gbl_FADT.pm2_control_block &&
++			acpi_gbl_FADT.pm2_control_length) {
++		pr->flags.bm_control = 1;
++		ACPI_DEBUG_PRINT((ACPI_DB_INFO,
++				  "Bus mastering arbitration control present\n"
++				  ));
++	} else
++		ACPI_DEBUG_PRINT((ACPI_DB_INFO,
++				  "No bus mastering arbitration control\n"));
++
++	if (!strcmp(acpi_device_hid(device), ACPI_PROCESSOR_OBJECT_HID)) {
++		/* Declared with "Processor" statement; match ProcessorID */
++		status = acpi_evaluate_object(pr->handle, NULL, NULL, &buffer);
++		if (ACPI_FAILURE(status)) {
++			printk(KERN_ERR PREFIX "Evaluating processor object\n");
++			return -ENODEV;
++		}
++
++		/*
++		 * TBD: Synch processor ID (via LAPIC/LSAPIC structures) on SMP.
++		 *      >>> 'acpi_get_processor_id(acpi_id, &id)' in
++		 *      arch/xxx/acpi.c
++		 */
++		pr->acpi_id = object.processor.proc_id;
++	} else {
++		/*
++		 * Declared with "Device" statement; match _UID.
++		 * Note that we don't handle string _UIDs yet.
++		 */
++		unsigned long long value;
++		status = acpi_evaluate_integer(pr->handle, METHOD_NAME__UID,
++						NULL, &value);
++		if (ACPI_FAILURE(status)) {
++			printk(KERN_ERR PREFIX
++			    "Evaluating processor _UID [%#x]\n", status);
++			return -ENODEV;
++		}
++		device_declaration = 1;
++		pr->acpi_id = value;
++	}
++
++	/* TBD: add Xen specific code to query cpu_index */
++	cpu_index = -1;
++
++	/* Handle UP system running SMP kernel, with no LAPIC in MADT */
++	if (!cpu0_initialized && (cpu_index == -1) &&
++	    (num_online_cpus() == 1)) {
++		cpu_index = 0;
++	}
++
++	cpu0_initialized = 1;
++
++	pr->id = cpu_index;
++
++	/*
++	 *  Extra Processor objects may be enumerated on MP systems with
++	 *  less than the max # of CPUs, or Xen vCPU < pCPU.
++	 *  They should be ignored _iff they are physically not present.
++	 *
++	 */
++#if 0
++	if (pr->id == -1) {
++		if (ACPI_FAILURE
++		    (acpi_processor_hotadd_init(pr->handle, &pr->id))) {
++			return -ENODEV;
++		}
++	}
++#endif
++
++	/*
++	 * On some boxes several processors use the same processor bus id.
++	 * But they are located in different scope. For example:
++	 * \_SB.SCK0.CPU0
++	 * \_SB.SCK1.CPU0
++	 * Rename the processor device bus id. And the new bus id will be
++	 * generated as the following format:
++	 * CPU+CPU ID.
++	 */
++	sprintf(acpi_device_bid(device), "CPU%X", pr->id);
++	ACPI_DEBUG_PRINT((ACPI_DB_INFO, "Processor [%d:%d]\n", pr->id,
++				pr->acpi_id));
++
++	if (!object.processor.pblk_address)
++		ACPI_DEBUG_PRINT((ACPI_DB_INFO, "No PBLK (NULL address)\n"));
++	else if (object.processor.pblk_length != 6)
++		printk(KERN_ERR PREFIX "Invalid PBLK length [%d]\n",
++				object.processor.pblk_length);
++	else {
++		pr->throttling.address = object.processor.pblk_address;
++		pr->throttling.duty_offset = acpi_gbl_FADT.duty_offset;
++		pr->throttling.duty_width = acpi_gbl_FADT.duty_width;
++
++		pr->pblk = object.processor.pblk_address;
++
++		/*
++		 * We don't care about error returns - we just try to mark
++		 * these reserved so that nobody else is confused into thinking
++		 * that this region might be unused..
++		 *
++		 * (In particular, allocating the IO range for Cardbus)
++		 */
++		request_region(pr->throttling.address, 6, "ACPI CPU throttle");
++	}
++
++	/*
++	 * If ACPI describes a slot number for this CPU, we can use it
++	 * ensure we get the right value in the "physical id" field
++	 * of /proc/cpuinfo
++	 */
++	status = acpi_evaluate_object(pr->handle, "_SUN", NULL, &buffer);
++	if (ACPI_SUCCESS(status))
++		arch_fix_phys_package_id(pr->id, object.integer.value);
++
++	return 0;
++}
++
++static struct acpi_device *processor_device_array[XEN_MAX_ACPI_ID + 1];
++
++static int __cpuinit xen_acpi_processor_add(struct acpi_device *device)
++{
++	struct acpi_processor *pr = NULL;
++	int result = 0;
++	struct sys_device *sysdev;
++
++	pr = kzalloc(sizeof(struct acpi_processor), GFP_KERNEL);
++	if (!pr)
++		return -ENOMEM;
++
++	if (!zalloc_cpumask_var(&pr->throttling.shared_cpu_map, GFP_KERNEL)) {
++		kfree(pr);
++		return -ENOMEM;
++	}
++
++	pr->handle = device->handle;
++	strcpy(acpi_device_name(device), ACPI_PROCESSOR_DEVICE_NAME);
++	strcpy(acpi_device_class(device), ACPI_PROCESSOR_CLASS);
++	device->driver_data = pr;
++
++	result = xen_acpi_processor_get_info(device);
++	if (result) {
++		/* Processor is physically not present */
++		return 0;
++	}
++
++	/*
++	 * Buggy BIOS check
++	 * ACPI id of processors can be reported wrongly by the BIOS.
++	 * Don't trust it blindly
++	 */
++	if (pr->acpi_id > XEN_MAX_ACPI_ID ||
++			(processor_device_array[pr->acpi_id] != NULL &&
++			 processor_device_array[pr->acpi_id] != device)) {
++		printk(KERN_WARNING "BIOS reported wrong ACPI id "
++			"for the processor\n");
++		result = -ENODEV;
++		goto err_free_cpumask;
++	}
++
++	processor_device_array[pr->acpi_id] = device;
++
++	if (pr->id != -1) {
++		per_cpu(processors, pr->id) = pr;
++
++		result = acpi_processor_add_fs(device);
++		if (result)
++			goto err_free_cpumask;
++
++		sysdev = get_cpu_sysdev(pr->id);
++		if (sysdev != NULL && sysfs_create_link(&device->dev.kobj,
++					&sysdev->kobj, "sysdev")) {
++			result = -EFAULT;
++			goto err_remove_fs;
++		}
++	}
++
++	/* _PDC call should be done before doing anything else (if reqd.). */
++	xen_arch_acpi_processor_init_pdc(pr);
++	acpi_processor_set_pdc(pr);
++	arch_acpi_processor_cleanup_pdc(pr);
++
++#ifdef CONFIG_CPU_FREQ
++	xen_acpi_processor_ppc_has_changed(pr);
++	result = xen_acpi_processor_get_performance(pr);
++	if (result)
++		goto err_remove_fs;
++#endif
++
++	if (pr->id != -1) {
++		acpi_processor_get_throttling_info(pr);
++		acpi_processor_get_limit_info(pr);
++	}
++
++	xen_acpi_processor_power_init(pr, device);
++
++	if (pr->id != -1) {
++		pr->cdev = thermal_cooling_device_register("Processor", device,
++				&processor_cooling_ops);
++		if (IS_ERR(pr->cdev)) {
++			result = PTR_ERR(pr->cdev);
++			goto err_power_exit;
++		}
++
++		dev_info(&device->dev, "registered as cooling_device%d\n",
++				pr->cdev->id);
++
++		result = sysfs_create_link(&device->dev.kobj,
++				&pr->cdev->device.kobj,
++				"thermal_cooling");
++		if (result) {
++			printk(KERN_ERR PREFIX "Create sysfs link\n");
++			goto err_thermal_unregister;
++		}
++		result = sysfs_create_link(&pr->cdev->device.kobj,
++				&device->dev.kobj,
++				"device");
++		if (result) {
++			printk(KERN_ERR PREFIX "Create sysfs link\n");
++			goto err_remove_sysfs;
++		}
++	}
++
++	return 0;
++
++err_remove_sysfs:
++	sysfs_remove_link(&device->dev.kobj, "thermal_cooling");
++err_thermal_unregister:
++	thermal_cooling_device_unregister(pr->cdev);
++err_power_exit:
++	acpi_processor_power_exit(pr, device);
++err_remove_fs:
++	acpi_processor_remove_fs(device);
++err_free_cpumask:
++	free_cpumask_var(pr->throttling.shared_cpu_map);
++
++	return result;
++}
++
++static void xen_acpi_processor_notify(struct acpi_device *device, u32 event)
++{
++	struct acpi_processor *pr = acpi_driver_data(device);
++	int saved;
++
++	if (!pr)
++		return;
++
++	switch (event) {
++	case ACPI_PROCESSOR_NOTIFY_PERFORMANCE:
++		saved = pr->performance_platform_limit;
++		xen_acpi_processor_ppc_has_changed(pr);
++		if (saved == pr->performance_platform_limit)
++			break;
++		acpi_bus_generate_proc_event(device, event,
++					pr->performance_platform_limit);
++		acpi_bus_generate_netlink_event(device->pnp.device_class,
++					dev_name(&device->dev), event,
++					pr->performance_platform_limit);
++		break;
++	case ACPI_PROCESSOR_NOTIFY_POWER:
++		xen_acpi_processor_cst_has_changed(pr);
++		acpi_bus_generate_proc_event(device, event, 0);
++		acpi_bus_generate_netlink_event(device->pnp.device_class,
++					dev_name(&device->dev), event, 0);
++		break;
++	case ACPI_PROCESSOR_NOTIFY_THROTTLING:
++		acpi_processor_tstate_has_changed(pr);
++		acpi_bus_generate_proc_event(device, event, 0);
++		acpi_bus_generate_netlink_event(device->pnp.device_class,
++					dev_name(&device->dev), event, 0);
++	default:
++		ACPI_DEBUG_PRINT((ACPI_DB_INFO,
++				  "Unsupported event [0x%x]\n", event));
++		break;
++	}
++
++	return;
++}
++
++/* from processor_idle.c */
++
++static int xen_acpi_processor_get_power_info(struct acpi_processor *pr)
++{
++	int ret;
++	int invalid_pr_id = 0;
++
++	/*
++	 * acpi_processor_get_power_info need valid pr->id
++	 * so set pr->id=0 temporarily
++	 */
++	if (pr->id == -1) {
++		invalid_pr_id = 1;
++		pr->id = 0;
++	}
++
++	ret = acpi_processor_get_power_info(pr);
++
++	if (invalid_pr_id)
++		pr->id = -1;
++
++	return ret;
++}
++
++int xen_acpi_processor_cst_has_changed(struct acpi_processor *pr)
++{
++	if (!pr)
++		return -EINVAL;
++
++	if (!pr->flags.power_setup_done)
++		return -ENODEV;
++
++	xen_acpi_processor_get_power_info(pr);
++
++	processor_cntl_xen_notify(pr,
++			PROCESSOR_PM_CHANGE, PM_TYPE_IDLE);
++
++	return 0;
++}
++
++
++int __cpuinit xen_acpi_processor_power_init(struct acpi_processor *pr,
++			      struct acpi_device *device)
++{
++	acpi_status status = 0;
++	unsigned int i;
++
++	if (!pr)
++		return -EINVAL;
++
++	if (acpi_gbl_FADT.cst_control) {
++		status = acpi_os_write_port(acpi_gbl_FADT.smi_command,
++				acpi_gbl_FADT.cst_control, 8);
++		if (ACPI_FAILURE(status)) {
++			ACPI_EXCEPTION((AE_INFO, status,
++				"Notifying BIOS of _CST ability failed"));
++		}
++	}
++
++	xen_acpi_processor_get_power_info(pr);
++
++	pr->flags.power_setup_done = 1;
++
++	if (pr->flags.power) {
++			processor_cntl_xen_notify(pr,
++					PROCESSOR_PM_INIT, PM_TYPE_IDLE);
++
++		printk(KERN_INFO PREFIX "CPU%d (power states:", pr->id);
++		for (i = 1; i <= pr->power.count; i++)
++			if (pr->power.states[i].valid)
++				printk(" C%d[C%d]", i,
++				       pr->power.states[i].type);
++		printk(")\n");
++	}
++
++	return 0;
++}
++
++/* from processor_perflib.c */
++
++#ifdef CONFIG_CPU_FREQ
++static int xen_processor_notify_smm(void)
++{
++	acpi_status status;
++	static int is_done;
++
++	/* only need successfully notify BIOS once */
++	/* avoid double notification which may lead to unexpected result */
++	if (is_done)
++		return 0;
++
++	/* Can't write pstate_cnt to smi_cmd if either value is zero */
++	if ((!acpi_gbl_FADT.smi_command) || (!acpi_gbl_FADT.pstate_control)) {
++		ACPI_DEBUG_PRINT((ACPI_DB_INFO, "No SMI port or pstate_cnt\n"));
++		return 0;
++	}
++
++	ACPI_DEBUG_PRINT((ACPI_DB_INFO,
++		"Writing pstate_cnt [0x%x] to smi_cmd [0x%x]\n",
++		acpi_gbl_FADT.pstate_control, acpi_gbl_FADT.smi_command));
++
++	status = acpi_os_write_port(acpi_gbl_FADT.smi_command,
++				    (u32) acpi_gbl_FADT.pstate_control, 8);
++	if (ACPI_FAILURE(status))
++		return status;
++
++	is_done = 1;
++
++	return 0;
++}
++
++static int xen_acpi_processor_get_platform_limit(struct acpi_processor *pr)
++{
++	acpi_status status = 0;
++	unsigned long long ppc = 0;
++
++	if (!pr)
++		return -EINVAL;
++
++	/*
++	 * _PPC indicates the maximum state currently supported by the platform
++	 * (e.g. 0 = states 0..n; 1 = states 1..n; etc.
++	 */
++	status = acpi_evaluate_integer(pr->handle, "_PPC", NULL, &ppc);
++
++	if (ACPI_FAILURE(status) && status != AE_NOT_FOUND) {
++		ACPI_EXCEPTION((AE_INFO, status, "Evaluating _PPC"));
++		return -ENODEV;
++	}
++
++	pr->performance_platform_limit = (int)ppc;
++
++	return 0;
++}
++
++int xen_acpi_processor_ppc_has_changed(struct acpi_processor *pr)
++{
++	int ret;
++
++	ret = xen_acpi_processor_get_platform_limit(pr);
++
++	if (ret < 0)
++		return ret;
++	else
++		return processor_cntl_xen_notify(pr,
++				PROCESSOR_PM_CHANGE, PM_TYPE_PERF);
++}
++
++/*
++ * Existing ACPI module does parse performance states at some point,
++ * when acpi-cpufreq driver is loaded which however is something
++ * we'd like to disable to avoid confliction with xen PM
++ * logic. So we have to collect raw performance information here
++ * when ACPI processor object is found and started.
++ */
++int xen_acpi_processor_get_performance(struct acpi_processor *pr)
++{
++	int ret;
++	struct acpi_processor_performance *perf;
++	struct acpi_psd_package *pdomain;
++
++	if (pr->performance)
++		return -EBUSY;
++
++	perf = kzalloc(sizeof(struct acpi_processor_performance), GFP_KERNEL);
++	if (!perf)
++		return -ENOMEM;
++
++	pr->performance = perf;
++	/* Get basic performance state information */
++	ret = acpi_processor_get_performance_info(pr);
++	if (ret < 0)
++		goto err_out;
++
++	/*
++	 * Well, here we need retrieve performance dependency information
++	 * from _PSD object. The reason why existing interface is not used
++	 * is due to the reason that existing interface sticks to Linux cpu
++	 * id to construct some bitmap, however we want to split ACPI
++	 * processor objects from Linux cpu id logic. For example, even
++	 * when Linux is configured as UP, we still want to parse all ACPI
++	 * processor objects to xen. In this case, it's preferred
++	 * to use ACPI ID instead.
++	 */
++	pdomain = &pr->performance->domain_info;
++	pdomain->num_processors = 0;
++	ret = acpi_processor_get_psd(pr);
++	if (ret < 0) {
++		/*
++		 * _PSD is optional - assume no coordination if absent (or
++		 * broken), matching native kernels' behavior.
++		 */
++		pdomain->num_entries = ACPI_PSD_REV0_ENTRIES;
++		pdomain->revision = ACPI_PSD_REV0_REVISION;
++		pdomain->domain = pr->acpi_id;
++		pdomain->coord_type = DOMAIN_COORD_TYPE_SW_ALL;
++		pdomain->num_processors = 1;
++	}
++
++	/* Some sanity check */
++	if ((pdomain->revision != ACPI_PSD_REV0_REVISION) ||
++	    (pdomain->num_entries != ACPI_PSD_REV0_ENTRIES) ||
++	    ((pdomain->coord_type != DOMAIN_COORD_TYPE_SW_ALL) &&
++	     (pdomain->coord_type != DOMAIN_COORD_TYPE_SW_ANY) &&
++	     (pdomain->coord_type != DOMAIN_COORD_TYPE_HW_ALL))) {
++		ret = -EINVAL;
++		goto err_out;
++	}
++
++	/* Last step is to notify BIOS that xen exists */
++	xen_processor_notify_smm();
++
++	processor_cntl_xen_notify(pr, PROCESSOR_PM_INIT, PM_TYPE_PERF);
++
++	return 0;
++err_out:
++	pr->performance = NULL;
++	kfree(perf);
++	return ret;
++}
++#endif /* CONFIG_CPU_FREQ */
++
++/* init and exit */
++
++int xen_acpi_processor_init(void)
++{
++	return acpi_bus_register_driver(&xen_acpi_processor_driver);
++}
++
++void xen_acpi_processor_exit(void)
++{
++	acpi_bus_unregister_driver(&xen_acpi_processor_driver);
++}
+diff --git a/drivers/acpi/sleep.c b/drivers/acpi/sleep.c
+index 5f2c379..930b870 100644
+--- a/drivers/acpi/sleep.c
++++ b/drivers/acpi/sleep.c
+@@ -19,6 +19,8 @@
+ 
+ #include <asm/io.h>
+ 
++#include <xen/acpi.h>
++
+ #include <acpi/acpi_bus.h>
+ #include <acpi/acpi_drivers.h>
+ 
+@@ -211,6 +213,21 @@ static int acpi_suspend_begin(suspend_state_t pm_state)
+ 	return error;
+ }
+ 
++static void do_suspend(void)
++{
++	if (!xen_pv_acpi()) {
++		do_suspend_lowlevel();
++		return;
++	}
++
++	/*
++	 * Xen will save and restore CPU context, so
++	 * we can skip that and just go straight to
++	 * the suspend.
++	 */
++	acpi_enter_sleep_state(ACPI_STATE_S3);
++}
++
+ /**
+  *	acpi_suspend_enter - Actually enter a sleep state.
+  *	@pm_state: ignored
+@@ -244,7 +261,7 @@ static int acpi_suspend_enter(suspend_state_t pm_state)
+ 		break;
+ 
+ 	case ACPI_STATE_S3:
+-		do_suspend_lowlevel();
++		do_suspend();
+ 		break;
+ 	}
+ 
 diff --git a/drivers/block/Kconfig b/drivers/block/Kconfig
 index 1d886e0..f4a2b10 100644
 --- a/drivers/block/Kconfig
@@ -7315,7 +8405,7 @@ index 54cd916..7ec2c90 100644
  	case XenbusStateClosed:
  		break;
 diff --git a/drivers/xen/Kconfig b/drivers/xen/Kconfig
-index cab100a..c4f36b7 100644
+index cab100a..d6d6f3e 100644
 --- a/drivers/xen/Kconfig
 +++ b/drivers/xen/Kconfig
 @@ -28,6 +28,110 @@ config XEN_DEV_EVTCHN
@@ -7429,7 +8519,7 @@ index cab100a..c4f36b7 100644
  config XENFS
  	tristate "Xen filesystem"
  	depends on XEN
-@@ -60,4 +164,14 @@ config XEN_SYS_HYPERVISOR
+@@ -60,4 +164,23 @@ config XEN_SYS_HYPERVISOR
           Create entries under /sys/hypervisor describing the Xen
  	 hypervisor environment.  When running native or in another
  	 virtual environment, /sys/hypervisor will still be present,
@@ -7446,13 +8536,22 @@ index cab100a..c4f36b7 100644
 +	select MMU_NOTIFIER
 +	help
 +	  Allows userspace processes use grants.
++
++config XEN_S3
++       def_bool y
++       depends on XEN_DOM0 && ACPI
++
++config ACPI_PROCESSOR_XEN
++	   tristate
++	   depends on XEN_DOM0 && ACPI_PROCESSOR && CPU_FREQ
++	   default y
 diff --git a/drivers/xen/Makefile b/drivers/xen/Makefile
-index 7c28434..c5f71db 100644
+index 7c28434..23bc06e 100644
 --- a/drivers/xen/Makefile
 +++ b/drivers/xen/Makefile
-@@ -1,12 +1,21 @@
+@@ -1,12 +1,24 @@
 -obj-y	+= grant-table.o features.o events.o manage.o
-+obj-y	+= grant-table.o features.o events.o manage.o biomerge.o
++obj-y	+= grant-table.o features.o events.o manage.o biomerge.o pcpu.o
  obj-y	+= xenbus/
  
  nostackp := $(call cc-option, -fno-stack-protector)
@@ -7477,9 +8576,464 @@ index 7c28434..c5f71db 100644
 +obj-$(CONFIG_XEN_NETDEV_BACKEND)	+= netback/
 +obj-$(CONFIG_XENFS)			+= xenfs/
 +obj-$(CONFIG_XEN_SYS_HYPERVISOR)	+= sys-hypervisor.o
++obj-$(CONFIG_XEN_S3)           += acpi.o
++obj-$(CONFIG_ACPI_PROCESSOR_XEN) += acpi_processor.o
++obj-$(CONFIG_ACPI_HOTPLUG_MEMORY)  += xen_acpi_memhotplug.o
 +
 +xen-evtchn-y				:= evtchn.o
 +xen-gntdev-y				:= gntdev.o
+diff --git a/drivers/xen/acpi.c b/drivers/xen/acpi.c
+new file mode 100644
+index 0000000..e6d3d0e
+--- /dev/null
++++ b/drivers/xen/acpi.c
+@@ -0,0 +1,23 @@
++#include <xen/acpi.h>
++
++#include <xen/interface/platform.h>
++#include <asm/xen/hypercall.h>
++#include <asm/xen/hypervisor.h>
++
++int acpi_notify_hypervisor_state(u8 sleep_state,
++				 u32 pm1a_cnt, u32 pm1b_cnt)
++{
++	struct xen_platform_op op = {
++		.cmd = XENPF_enter_acpi_sleep,
++		.interface_version = XENPF_INTERFACE_VERSION,
++		.u = {
++			.enter_acpi_sleep = {
++				.pm1a_cnt_val = (u16)pm1a_cnt,
++				.pm1b_cnt_val = (u16)pm1b_cnt,
++				.sleep_state = sleep_state,
++			},
++		},
++	};
++
++	return HYPERVISOR_dom0_op(&op);
++}
+diff --git a/drivers/xen/acpi_processor.c b/drivers/xen/acpi_processor.c
+new file mode 100644
+index 0000000..77be04b
+--- /dev/null
++++ b/drivers/xen/acpi_processor.c
+@@ -0,0 +1,417 @@
++/*
++ *  acpi_processor.c - interface to notify Xen on acpi processor object
++ *                     info parsing
++ *
++ *  Copyright (C) 2008, Intel corporation
++ *
++ * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
++ *
++ *  This program is free software; you can redistribute it and/or modify
++ *  it under the terms of the GNU General Public License as published by
++ *  the Free Software Foundation; either version 2 of the License, or (at
++ *  your option) any later version.
++ *
++ *  This program is distributed in the hope that it will be useful, but
++ *  WITHOUT ANY WARRANTY; without even the implied warranty of
++ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ *  General Public License for more details.
++ *
++ *  You should have received a copy of the GNU General Public License along
++ *  with this program; if not, write to the Free Software Foundation, Inc.,
++ *  59 Temple Place, Suite 330, Boston, MA 02111-1307 USA.
++ *
++ */
++
++#include <linux/kernel.h>
++#include <linux/init.h>
++#include <linux/types.h>
++#include <linux/acpi.h>
++#include <linux/pm.h>
++#include <linux/cpu.h>
++
++#include <linux/cpufreq.h>
++#include <acpi/processor.h>
++#include <xen/acpi.h>
++#include <xen/pcpu.h>
++
++#include <asm/xen/hypercall.h>
++#include <asm/xen/hypervisor.h>
++
++static int xen_hotplug_notifier(struct acpi_processor *pr, int event);
++
++static struct processor_cntl_xen_ops xen_ops = {
++	.hotplug		= xen_hotplug_notifier,
++};
++
++static struct acpi_power_register *power_registers[XEN_MAX_ACPI_ID + 1];
++
++int processor_cntl_xen_power_cache(int cpu, int cx,
++		struct acpi_power_register *reg)
++{
++	struct acpi_power_register *buf;
++
++	if (cpu < 0 || cpu > XEN_MAX_ACPI_ID ||
++			cx < 1 || cx > ACPI_PROCESSOR_MAX_POWER) {
++		return -EINVAL;
++	}
++
++	if (power_registers[cpu] == NULL) {
++		buf = kzalloc(ACPI_PROCESSOR_MAX_POWER *
++				sizeof(struct xen_processor_cx), GFP_KERNEL);
++		if (buf == NULL)
++			return -ENOMEM;
++
++		power_registers[cpu] = buf;
++	}
++
++	memcpy(power_registers[cpu]+cx-1, reg, sizeof(*reg));
++
++	return 0;
++}
++EXPORT_SYMBOL(processor_cntl_xen_power_cache);
++
++#ifdef CONFIG_ACPI_HOTPLUG_CPU
++static int xen_get_apic_id(acpi_handle handle)
++{
++	struct acpi_buffer buffer = { ACPI_ALLOCATE_BUFFER, NULL };
++	union acpi_object *obj;
++	struct acpi_madt_local_apic *lapic;
++	u8 physid;
++
++	if (ACPI_FAILURE(acpi_evaluate_object(handle, "_MAT", NULL, &buffer)))
++		return -EINVAL;
++
++	if (!buffer.length || !buffer.pointer)
++		return -EINVAL;
++
++	obj = buffer.pointer;
++	if (obj->type != ACPI_TYPE_BUFFER ||
++	    obj->buffer.length < sizeof(*lapic)) {
++		kfree(buffer.pointer);
++		return -EINVAL;
++	}
++
++	lapic = (struct acpi_madt_local_apic *)obj->buffer.pointer;
++
++	if (lapic->header.type != ACPI_MADT_TYPE_LOCAL_APIC ||
++	    !(lapic->lapic_flags & ACPI_MADT_ENABLED)) {
++		kfree(buffer.pointer);
++		return -EINVAL;
++	}
++
++	physid = lapic->id;
++	kfree(buffer.pointer);
++	buffer.length = ACPI_ALLOCATE_BUFFER;
++	buffer.pointer = NULL;
++
++	return physid;
++}
++#else
++static int xen_get_apic_id(acpi_handle handle)
++{
++	return -1;
++}
++#endif
++
++int processor_cntl_xen_notify(struct acpi_processor *pr, int event, int type)
++{
++	int ret = -EINVAL;
++
++	switch (event) {
++	case PROCESSOR_PM_INIT:
++	case PROCESSOR_PM_CHANGE:
++		if ((type >= PM_TYPE_MAX) ||
++			!xen_ops.pm_ops[type])
++			break;
++
++		ret = xen_ops.pm_ops[type](pr, event);
++		break;
++	case PROCESSOR_HOTPLUG:
++	{
++		int apic_id;
++
++		apic_id = xen_get_apic_id(pr->handle);
++		if (apic_id < 0)
++			break;
++		if (xen_ops.hotplug)
++			ret = xen_ops.hotplug(pr, type);
++		xen_pcpu_hotplug(type, apic_id);
++		break;
++	}
++	default:
++		printk(KERN_ERR "Unsupport processor events %d.\n", event);
++		break;
++	}
++
++	return ret;
++}
++EXPORT_SYMBOL(processor_cntl_xen_notify);
++
++static inline void xen_convert_pct_reg(struct xen_pct_register *xpct,
++	struct acpi_pct_register *apct)
++{
++	xpct->descriptor = apct->descriptor;
++	xpct->length     = apct->length;
++	xpct->space_id   = apct->space_id;
++	xpct->bit_width  = apct->bit_width;
++	xpct->bit_offset = apct->bit_offset;
++	xpct->reserved   = apct->reserved;
++	xpct->address    = apct->address;
++}
++
++static inline void xen_convert_pss_states(struct xen_processor_px *xpss,
++	struct acpi_processor_px *apss, int state_count)
++{
++	int i;
++	for (i = 0; i < state_count; i++) {
++		xpss->core_frequency     = apss->core_frequency;
++		xpss->power              = apss->power;
++		xpss->transition_latency = apss->transition_latency;
++		xpss->bus_master_latency = apss->bus_master_latency;
++		xpss->control            = apss->control;
++		xpss->status             = apss->status;
++		xpss++;
++		apss++;
++	}
++}
++
++static inline void xen_convert_psd_pack(struct xen_psd_package *xpsd,
++	struct acpi_psd_package *apsd)
++{
++	xpsd->num_entries    = apsd->num_entries;
++	xpsd->revision       = apsd->revision;
++	xpsd->domain         = apsd->domain;
++	xpsd->coord_type     = apsd->coord_type;
++	xpsd->num_processors = apsd->num_processors;
++}
++
++static int xen_cx_notifier(struct acpi_processor *pr, int action)
++{
++	int ret, count = 0, i;
++	xen_platform_op_t op = {
++		.cmd			= XENPF_set_processor_pminfo,
++		.interface_version	= XENPF_INTERFACE_VERSION,
++		.u.set_pminfo.id	= pr->acpi_id,
++		.u.set_pminfo.type	= XEN_PM_CX,
++	};
++	struct xen_processor_cx *data, *buf;
++	struct acpi_processor_cx *cx;
++	struct acpi_power_register *reg;
++
++	if (action == PROCESSOR_PM_CHANGE)
++		return -EINVAL;
++
++	if (power_registers[pr->acpi_id] == NULL) {
++		printk(KERN_WARNING "No C state info for acpi processor %d\n",
++				pr->acpi_id);
++		return -EINVAL;
++	}
++
++	/* Convert to Xen defined structure and hypercall */
++	buf = kzalloc(pr->power.count * sizeof(struct xen_processor_cx),
++			GFP_KERNEL);
++	if (!buf)
++		return -ENOMEM;
++
++	data = buf;
++	for (i = 1; i <= pr->power.count; i++) {
++		cx = &pr->power.states[i];
++		reg = power_registers[pr->acpi_id]+i-1;
++		/* Skip invalid cstate entry */
++		if (!cx->valid)
++			continue;
++
++		data->type = cx->type;
++		data->latency = cx->latency;
++		data->power = cx->power;
++		data->reg.space_id = reg->space_id;
++		data->reg.bit_width = reg->bit_width;
++		data->reg.bit_offset = reg->bit_offset;
++		data->reg.access_size = reg->reserved;
++		data->reg.address = reg->address;
++
++		/* Get dependency relationships, _CSD is not supported yet */
++		data->dpcnt = 0;
++		set_xen_guest_handle(data->dp, NULL);
++
++		data++;
++		count++;
++	}
++
++	if (!count) {
++		printk(KERN_ERR "No available Cx info for cpu %d\n",
++				pr->acpi_id);
++		kfree(buf);
++		return -EINVAL;
++	}
++
++	op.u.set_pminfo.power.count = count;
++	op.u.set_pminfo.power.flags.bm_control = pr->flags.bm_control;
++	op.u.set_pminfo.power.flags.bm_check = pr->flags.bm_check;
++	op.u.set_pminfo.power.flags.has_cst = pr->flags.has_cst;
++	op.u.set_pminfo.power.flags.power_setup_done =
++		pr->flags.power_setup_done;
++
++	set_xen_guest_handle(op.u.set_pminfo.power.states, buf);
++	ret = HYPERVISOR_dom0_op(&op);
++	kfree(buf);
++	return ret;
++}
++
++static int xen_px_notifier(struct acpi_processor *pr, int action)
++{
++	int ret = -EINVAL;
++	xen_platform_op_t op = {
++		.cmd			= XENPF_set_processor_pminfo,
++		.interface_version	= XENPF_INTERFACE_VERSION,
++		.u.set_pminfo.id	= pr->acpi_id,
++		.u.set_pminfo.type	= XEN_PM_PX,
++	};
++	struct xen_processor_performance *perf;
++	struct xen_processor_px *states = NULL;
++	struct acpi_processor_performance *px;
++	struct acpi_psd_package *pdomain;
++
++	if (!pr)
++		return -EINVAL;
++
++	perf = &op.u.set_pminfo.perf;
++	px = pr->performance;
++
++	switch (action) {
++	case PROCESSOR_PM_CHANGE:
++		/* ppc dynamic handle */
++		perf->flags = XEN_PX_PPC;
++		perf->platform_limit = pr->performance_platform_limit;
++
++		ret = HYPERVISOR_dom0_op(&op);
++		break;
++
++	case PROCESSOR_PM_INIT:
++		/* px normal init */
++		perf->flags = XEN_PX_PPC |
++			      XEN_PX_PCT |
++			      XEN_PX_PSS |
++			      XEN_PX_PSD;
++
++		/* ppc */
++		perf->platform_limit = pr->performance_platform_limit;
++
++		/* pct */
++		xen_convert_pct_reg(&perf->control_register,
++				&px->control_register);
++		xen_convert_pct_reg(&perf->status_register,
++				&px->status_register);
++
++		/* pss */
++		perf->state_count = px->state_count;
++		states = kzalloc(px->state_count*sizeof(xen_processor_px_t),
++				GFP_KERNEL);
++		if (!states)
++			return -ENOMEM;
++		xen_convert_pss_states(states, px->states, px->state_count);
++		set_xen_guest_handle(perf->states, states);
++
++		/* psd */
++		pdomain = &px->domain_info;
++		xen_convert_psd_pack(&perf->domain_info, pdomain);
++		if (pdomain->coord_type == DOMAIN_COORD_TYPE_SW_ALL)
++			perf->shared_type = CPUFREQ_SHARED_TYPE_ALL;
++		else if (pdomain->coord_type == DOMAIN_COORD_TYPE_SW_ANY)
++			perf->shared_type = CPUFREQ_SHARED_TYPE_ANY;
++		else if (pdomain->coord_type == DOMAIN_COORD_TYPE_HW_ALL)
++			perf->shared_type = CPUFREQ_SHARED_TYPE_HW;
++		else {
++			ret = -ENODEV;
++			kfree(states);
++			break;
++		}
++
++		ret = HYPERVISOR_dom0_op(&op);
++		kfree(states);
++		break;
++
++	default:
++		break;
++	}
++
++	return ret;
++}
++
++static int xen_tx_notifier(struct acpi_processor *pr, int action)
++{
++	return -EINVAL;
++}
++
++#ifdef CONFIG_ACPI_HOTPLUG_CPU
++static int xen_hotplug_notifier(struct acpi_processor *pr, int event)
++{
++	int ret = -EINVAL;
++	uint32_t apic_id;
++	unsigned long long pxm;
++	acpi_status status = 0;
++
++	xen_platform_op_t op = {
++		.interface_version  = XENPF_INTERFACE_VERSION,
++	};
++
++	apic_id = xen_get_apic_id(pr->handle);
++	if (apic_id < 0) {
++		printk(KERN_WARNING "Can't get apic_id for acpi_id %x\n",
++		  pr->acpi_id);
++		return -1;
++	}
++
++	status = acpi_evaluate_integer(pr->handle, "_PXM",
++	  NULL, &pxm);
++	if (ACPI_FAILURE(status)) {
++		printk(KERN_WARNING "can't get pxm for acpi_id %x\n",
++		  pr->acpi_id);
++		return -1;
++	}
++
++	switch (event) {
++	case HOTPLUG_TYPE_ADD:
++		op.cmd = XENPF_cpu_hotadd;
++		op.u.cpu_add.apic_id = apic_id;
++		op.u.cpu_add.acpi_id = pr->acpi_id;
++		op.u.cpu_add.pxm = pxm;
++		ret = HYPERVISOR_dom0_op(&op);
++		break;
++	case HOTPLUG_TYPE_REMOVE:
++		printk(KERN_WARNING "Xen not support CPU hotremove\n");
++		ret = -ENOSYS;
++		break;
++	}
++
++	return ret;
++}
++#else
++static int xen_hotplug_notifier(struct acpi_processor *pr, int event)
++{
++	return -ENOSYS;
++}
++#endif
++
++static int __init xen_acpi_processor_extcntl_init(void)
++{
++	unsigned int pmbits;
++
++	/* Only xen dom0 is allowed to handle ACPI processor info */
++	if (!xen_initial_domain())
++		return 0;
++
++	pmbits = (xen_start_info->flags & SIF_PM_MASK) >> 8;
++
++	if (pmbits & XEN_PROCESSOR_PM_CX)
++		xen_ops.pm_ops[PM_TYPE_IDLE] = xen_cx_notifier;
++	if (pmbits & XEN_PROCESSOR_PM_PX)
++		xen_ops.pm_ops[PM_TYPE_PERF] = xen_px_notifier;
++	if (pmbits & XEN_PROCESSOR_PM_TX)
++		xen_ops.pm_ops[PM_TYPE_THR] = xen_tx_notifier;
++
++	return 0;
++}
++
++subsys_initcall(xen_acpi_processor_extcntl_init);
++MODULE_LICENSE("GPL");
 diff --git a/drivers/xen/balloon.c b/drivers/xen/balloon.c
 index 4204336..d7c0eae 100644
 --- a/drivers/xen/balloon.c
@@ -12988,7 +14542,7 @@ index bdfd584..6625ffe 100644
  
  #include <asm/xen/hypervisor.h>
 diff --git a/drivers/xen/events.c b/drivers/xen/events.c
-index ce602dd..60b31e6 100644
+index ce602dd..660774a 100644
 --- a/drivers/xen/events.c
 +++ b/drivers/xen/events.c
 @@ -16,7 +16,7 @@
@@ -13522,7 +15076,15 @@ index ce602dd..60b31e6 100644
  int bind_virq_to_irqhandler(unsigned int virq, unsigned int cpu,
  			    irq_handler_t handler,
  			    unsigned long irqflags, const char *devname, void *dev_id)
-@@ -649,9 +1045,13 @@ void xen_evtchn_do_upcall(struct pt_regs *regs)
+@@ -535,6 +931,7 @@ int bind_ipi_to_irqhandler(enum ipi_vector ipi,
+ 	if (irq < 0)
+ 		return irq;
+ 
++	irqflags |= IRQF_NO_SUSPEND;
+ 	retval = request_irq(irq, handler, irqflags, devname, dev_id);
+ 	if (retval != 0) {
+ 		unbind_from_irq(irq);
+@@ -649,9 +1046,13 @@ void xen_evtchn_do_upcall(struct pt_regs *regs)
  				int bit_idx = __ffs(pending_bits);
  				int port = (word_idx * BITS_PER_LONG) + bit_idx;
  				int irq = evtchn_to_irq[port];
@@ -13538,7 +15100,7 @@ index ce602dd..60b31e6 100644
  			}
  		}
  
-@@ -855,7 +1255,7 @@ void xen_clear_irq_pending(int irq)
+@@ -855,7 +1256,7 @@ void xen_clear_irq_pending(int irq)
  	if (VALID_EVTCHN(evtchn))
  		clear_evtchn(evtchn);
  }
@@ -13547,7 +15109,7 @@ index ce602dd..60b31e6 100644
  void xen_set_irq_pending(int irq)
  {
  	int evtchn = evtchn_from_irq(irq);
-@@ -875,9 +1275,9 @@ bool xen_test_irq_pending(int irq)
+@@ -875,9 +1276,9 @@ bool xen_test_irq_pending(int irq)
  	return ret;
  }
  
@@ -13559,7 +15121,7 @@ index ce602dd..60b31e6 100644
  {
  	evtchn_port_t evtchn = evtchn_from_irq(irq);
  
-@@ -885,13 +1285,20 @@ void xen_poll_irq(int irq)
+@@ -885,13 +1286,20 @@ void xen_poll_irq(int irq)
  		struct sched_poll poll;
  
  		poll.nr_ports = 1;
@@ -13581,7 +15143,7 @@ index ce602dd..60b31e6 100644
  
  void xen_irq_resume(void)
  {
-@@ -928,13 +1335,38 @@ static struct irq_chip xen_dynamic_chip __read_mostly = {
+@@ -928,13 +1336,38 @@ static struct irq_chip xen_dynamic_chip __read_mostly = {
  	.retrigger	= retrigger_dynirq,
  };
  
@@ -13621,7 +15183,7 @@ index ce602dd..60b31e6 100644
  
  	init_evtchn_cpu_bindings();
  
-@@ -943,4 +1375,6 @@ void __init xen_init_IRQ(void)
+@@ -943,4 +1376,6 @@ void __init xen_init_IRQ(void)
  		mask_evtchn(i);
  
  	irq_ctx_init(smp_processor_id());
@@ -22423,6 +23985,432 @@ index 0000000..d448bf5
 +	destroy_workqueue(pciback_wq);
 +	xenbus_unregister_driver(&xenbus_pciback_driver);
 +}
+diff --git a/drivers/xen/pcpu.c b/drivers/xen/pcpu.c
+new file mode 100644
+index 0000000..6450c17
+--- /dev/null
++++ b/drivers/xen/pcpu.c
+@@ -0,0 +1,420 @@
++/*
++ * pcpu.c - management physical cpu in dom0 environment
++ */
++#include <linux/interrupt.h>
++#include <linux/spinlock.h>
++#include <asm/xen/hypervisor.h>
++#include <asm/xen/hypercall.h>
++#include <linux/cpu.h>
++#include <xen/xenbus.h>
++#include <xen/pcpu.h>
++#include <xen/events.h>
++#include <xen/acpi.h>
++
++static struct sysdev_class xen_pcpu_sysdev_class = {
++	.name = "xen_pcpu",
++};
++
++static DEFINE_MUTEX(xen_pcpu_lock);
++static RAW_NOTIFIER_HEAD(xen_pcpu_chain);
++
++/* No need for irq disable since hotplug notify is in workqueue context */
++#define get_pcpu_lock() mutex_lock(&xen_pcpu_lock);
++#define put_pcpu_lock() mutex_unlock(&xen_pcpu_lock);
++
++struct xen_pcpus {
++	struct list_head list;
++	int present;
++};
++static struct xen_pcpus xen_pcpus;
++
++int register_xen_pcpu_notifier(struct notifier_block *nb)
++{
++	int ret;
++
++	/* All refer to the chain notifier is protected by the pcpu_lock */
++	get_pcpu_lock();
++	ret = raw_notifier_chain_register(&xen_pcpu_chain, nb);
++	put_pcpu_lock();
++	return ret;
++}
++EXPORT_SYMBOL_GPL(register_xen_pcpu_notifier);
++
++void unregister_xen_pcpu_notifier(struct notifier_block *nb)
++{
++	get_pcpu_lock();
++	raw_notifier_chain_unregister(&xen_pcpu_chain, nb);
++	put_pcpu_lock();
++}
++EXPORT_SYMBOL_GPL(unregister_xen_pcpu_notifier);
++
++static int xen_pcpu_down(uint32_t xen_id)
++{
++	int ret;
++	xen_platform_op_t op = {
++		.cmd			= XENPF_cpu_offline,
++		.interface_version	= XENPF_INTERFACE_VERSION,
++		.u.cpu_ol.cpuid	= xen_id,
++	};
++
++	ret = HYPERVISOR_dom0_op(&op);
++	return ret;
++}
++
++static int xen_pcpu_up(uint32_t xen_id)
++{
++	int ret;
++	xen_platform_op_t op = {
++		.cmd			= XENPF_cpu_online,
++		.interface_version	= XENPF_INTERFACE_VERSION,
++		.u.cpu_ol.cpuid	= xen_id,
++	};
++
++	ret = HYPERVISOR_dom0_op(&op);
++	return ret;
++}
++
++static ssize_t show_online(struct sys_device *dev,
++			struct sysdev_attribute *attr,
++			char *buf)
++{
++	struct pcpu *cpu = container_of(dev, struct pcpu, sysdev);
++
++	return sprintf(buf, "%u\n", !!(cpu->flags & XEN_PCPU_FLAGS_ONLINE));
++}
++
++static ssize_t __ref store_online(struct sys_device *dev,
++				  struct sysdev_attribute *attr,
++				  const char *buf, size_t count)
++{
++	struct pcpu *cpu = container_of(dev, struct pcpu, sysdev);
++	ssize_t ret;
++
++	switch (buf[0]) {
++	case '0':
++		ret = xen_pcpu_down(cpu->xen_id);
++		break;
++	case '1':
++		ret = xen_pcpu_up(cpu->xen_id);
++		break;
++	default:
++		ret = -EINVAL;
++	}
++
++	if (ret >= 0)
++		ret = count;
++	return ret;
++}
++
++static SYSDEV_ATTR(online, 0644, show_online, store_online);
++
++static ssize_t show_apicid(struct sys_device *dev,
++			struct sysdev_attribute *attr,
++			char *buf)
++{
++	struct pcpu *cpu = container_of(dev, struct pcpu, sysdev);
++
++	return sprintf(buf, "%u\n", cpu->apic_id);
++}
++
++static ssize_t show_acpiid(struct sys_device *dev,
++			struct sysdev_attribute *attr,
++			char *buf)
++{
++	struct pcpu *cpu = container_of(dev, struct pcpu, sysdev);
++
++	return sprintf(buf, "%u\n", cpu->acpi_id);
++}
++static SYSDEV_ATTR(apic_id, 0444, show_apicid, NULL);
++static SYSDEV_ATTR(acpi_id, 0444, show_acpiid, NULL);
++
++static int xen_pcpu_free(struct pcpu *pcpu)
++{
++	if (!pcpu)
++		return 0;
++
++	sysdev_remove_file(&pcpu->sysdev, &attr_online);
++	sysdev_unregister(&pcpu->sysdev);
++	list_del(&pcpu->pcpu_list);
++	kfree(pcpu);
++
++	return 0;
++}
++
++static inline int same_pcpu(struct xenpf_pcpuinfo *info,
++			    struct pcpu *pcpu)
++{
++	return (pcpu->apic_id == info->apic_id) &&
++		(pcpu->xen_id == info->xen_cpuid);
++}
++
++/*
++ * Return 1 if online status changed
++ */
++static int xen_pcpu_online_check(struct xenpf_pcpuinfo *info,
++				 struct pcpu *pcpu)
++{
++	int result = 0;
++
++	if (info->xen_cpuid != pcpu->xen_id)
++		return 0;
++
++	if (xen_pcpu_online(info->flags) && !xen_pcpu_online(pcpu->flags)) {
++		/* the pcpu is onlined */
++		pcpu->flags |= XEN_PCPU_FLAGS_ONLINE;
++		kobject_uevent(&pcpu->sysdev.kobj, KOBJ_ONLINE);
++		raw_notifier_call_chain(&xen_pcpu_chain,
++			XEN_PCPU_ONLINE, (void *)(long)pcpu->xen_id);
++		result = 1;
++	} else if (!xen_pcpu_online(info->flags) &&
++		 xen_pcpu_online(pcpu->flags))  {
++		/* The pcpu is offlined now */
++		pcpu->flags &= ~XEN_PCPU_FLAGS_ONLINE;
++		kobject_uevent(&pcpu->sysdev.kobj, KOBJ_OFFLINE);
++		raw_notifier_call_chain(&xen_pcpu_chain,
++			XEN_PCPU_OFFLINE, (void *)(long)pcpu->xen_id);
++		result = 1;
++	}
++
++	return result;
++}
++
++static int pcpu_sysdev_init(struct pcpu *cpu)
++{
++	int error;
++
++	error = sysdev_register(&cpu->sysdev);
++	if (error) {
++		printk(KERN_WARNING "xen_pcpu_add: Failed to register pcpu\n");
++		kfree(cpu);
++		return -1;
++	}
++	sysdev_create_file(&cpu->sysdev, &attr_online);
++	sysdev_create_file(&cpu->sysdev, &attr_apic_id);
++	sysdev_create_file(&cpu->sysdev, &attr_acpi_id);
++	return 0;
++}
++
++static struct pcpu *get_pcpu(int xen_id)
++{
++	struct pcpu *pcpu = NULL;
++
++	list_for_each_entry(pcpu, &xen_pcpus.list, pcpu_list) {
++		if (pcpu->xen_id == xen_id)
++			return pcpu;
++	}
++	return NULL;
++}
++
++static struct pcpu *init_pcpu(struct xenpf_pcpuinfo *info)
++{
++	struct pcpu *pcpu;
++
++	if (info->flags & XEN_PCPU_FLAGS_INVALID)
++		return NULL;
++
++	/* The PCPU is just added */
++	pcpu = kzalloc(sizeof(struct pcpu), GFP_KERNEL);
++	if (!pcpu)
++		return NULL;
++
++	INIT_LIST_HEAD(&pcpu->pcpu_list);
++	pcpu->xen_id = info->xen_cpuid;
++	pcpu->apic_id = info->apic_id;
++	pcpu->acpi_id = info->acpi_id;
++	pcpu->flags = info->flags;
++
++	pcpu->sysdev.cls = &xen_pcpu_sysdev_class;
++	pcpu->sysdev.id = info->xen_cpuid;
++
++	if (pcpu_sysdev_init(pcpu)) {
++		kfree(pcpu);
++		return NULL;
++	}
++
++	list_add_tail(&pcpu->pcpu_list, &xen_pcpus.list);
++	raw_notifier_call_chain(&xen_pcpu_chain,
++				XEN_PCPU_ADD,
++				(void *)(long)pcpu->xen_id);
++	return pcpu;
++}
++
++#define PCPU_NO_CHANGE			0
++#define PCPU_ADDED			1
++#define PCPU_ONLINE_OFFLINE		2
++#define PCPU_REMOVED			3
++/*
++ * Caller should hold the pcpu lock
++ * < 0: Something wrong
++ * 0: No changes
++ * > 0: State changed
++ */
++static struct pcpu *_sync_pcpu(int cpu_num, int *max_id, int *result)
++{
++	struct pcpu *pcpu = NULL;
++	struct xenpf_pcpuinfo *info;
++	xen_platform_op_t op = {
++		.cmd            = XENPF_get_cpuinfo,
++		.interface_version  = XENPF_INTERFACE_VERSION,
++	};
++	int ret;
++
++	*result = -1;
++
++	info = &op.u.pcpu_info;
++	info->xen_cpuid = cpu_num;
++
++	ret = HYPERVISOR_dom0_op(&op);
++	if (ret)
++		return NULL;
++
++	if (max_id)
++		*max_id = op.u.pcpu_info.max_present;
++
++	pcpu = get_pcpu(cpu_num);
++
++	if (info->flags & XEN_PCPU_FLAGS_INVALID) {
++		/* The pcpu has been removed */
++		*result = PCPU_NO_CHANGE;
++		if (pcpu) {
++			raw_notifier_call_chain(&xen_pcpu_chain,
++			  XEN_PCPU_REMOVE,
++			  (void *)(long)pcpu->xen_id);
++			xen_pcpu_free(pcpu);
++			*result = PCPU_REMOVED;
++		}
++		return NULL;
++	}
++
++
++	if (!pcpu) {
++		*result = PCPU_ADDED;
++		pcpu = init_pcpu(info);
++		if (pcpu == NULL) {
++			printk(KERN_WARNING "Failed to init pcpu %x\n",
++			  info->xen_cpuid);
++			  *result = -1;
++		}
++	} else {
++		*result = PCPU_NO_CHANGE;
++		/*
++		 * Old PCPU is replaced with a new pcpu, this means
++		 * several virq is missed, will it happen?
++		 */
++		if (!same_pcpu(info, pcpu)) {
++			printk(KERN_WARNING "Pcpu %x changed!\n",
++			  pcpu->xen_id);
++			pcpu->apic_id = info->apic_id;
++			pcpu->acpi_id = info->acpi_id;
++		}
++		if (xen_pcpu_online_check(info, pcpu))
++			*result = PCPU_ONLINE_OFFLINE;
++	}
++	return pcpu;
++}
++
++/*
++ * Sync dom0's pcpu information with xen hypervisor's
++ */
++static int xen_sync_pcpus(void)
++{
++	/*
++	 * Boot cpu always have cpu_id 0 in xen
++	 */
++	int cpu_num = 0, max_id = 0, result = 0, present = 0;
++	struct list_head *elem, *tmp;
++	struct pcpu *pcpu;
++
++	get_pcpu_lock();
++
++	while ((result >= 0) && (cpu_num <= max_id)) {
++		pcpu = _sync_pcpu(cpu_num, &max_id, &result);
++
++		printk(KERN_DEBUG "sync cpu %x get result %x max_id %x\n",
++			cpu_num, result, max_id);
++
++		switch (result)	{
++		case PCPU_NO_CHANGE:
++			if (pcpu)
++				present++;
++			break;
++		case PCPU_ADDED:
++		case PCPU_ONLINE_OFFLINE:
++			present++;
++		case PCPU_REMOVED:
++			break;
++		default:
++			printk(KERN_WARNING "Failed to sync pcpu %x\n",
++			  cpu_num);
++			break;
++
++		}
++		cpu_num++;
++	}
++
++	if (result < 0) {
++		list_for_each_safe(elem, tmp, &xen_pcpus.list) {
++			pcpu = list_entry(elem, struct pcpu, pcpu_list);
++			xen_pcpu_free(pcpu);
++		}
++		present = 0;
++	}
++
++	xen_pcpus.present = present;
++
++	put_pcpu_lock();
++
++	return 0;
++}
++
++static void xen_pcpu_dpc(struct work_struct *work)
++{
++	if (xen_sync_pcpus() < 0)
++		printk(KERN_WARNING
++			"xen_pcpu_dpc: Failed to sync pcpu information\n");
++}
++static DECLARE_WORK(xen_pcpu_work, xen_pcpu_dpc);
++
++int xen_pcpu_hotplug(int type, uint32_t apic_id)
++{
++	schedule_work(&xen_pcpu_work);
++
++	return 0;
++}
++EXPORT_SYMBOL(xen_pcpu_hotplug);
++
++static irqreturn_t xen_pcpu_interrupt(int irq, void *dev_id)
++{
++	schedule_work(&xen_pcpu_work);
++	return IRQ_HANDLED;
++}
++
++static int __init xen_pcpu_init(void)
++{
++	int err;
++
++	if (!xen_initial_domain())
++		return 0;
++
++	err = sysdev_class_register(&xen_pcpu_sysdev_class);
++	if (err) {
++		printk(KERN_WARNING
++			"xen_pcpu_init: register xen_pcpu sysdev Failed!\n");
++		return err;
++	}
++
++	INIT_LIST_HEAD(&xen_pcpus.list);
++	xen_pcpus.present = 0;
++
++	xen_sync_pcpus();
++	if (xen_pcpus.present > 0)
++		err = bind_virq_to_irqhandler(VIRQ_PCPU_STATE,
++			0, xen_pcpu_interrupt, 0, "pcpu", NULL);
++	if (err < 0)
++		printk(KERN_WARNING "xen_pcpu_init: "
++			"Failed to bind pcpu_state virq\n"
++			"You will lost latest information! \n");
++	return err;
++}
++
++subsys_initcall(xen_pcpu_init);
 diff --git a/drivers/xen/sys-hypervisor.c b/drivers/xen/sys-hypervisor.c
 index 88a60e0..ae5cb05 100644
 --- a/drivers/xen/sys-hypervisor.c
@@ -22435,6 +24423,221 @@ index 88a60e0..ae5cb05 100644
  #include <xen/xenbus.h>
  #include <xen/interface/xen.h>
  #include <xen/interface/version.h>
+diff --git a/drivers/xen/xen_acpi_memhotplug.c b/drivers/xen/xen_acpi_memhotplug.c
+new file mode 100644
+index 0000000..0c4af99
+--- /dev/null
++++ b/drivers/xen/xen_acpi_memhotplug.c
+@@ -0,0 +1,209 @@
++/*
++ *  xen_acpi_memhotplug.c - interface to notify Xen on memory device hotadd
++ *
++ *  Copyright (C) 2008, Intel corporation
++ *
++ * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
++ *
++ *  This program is free software; you can redistribute it and/or modify
++ *  it under the terms of the GNU General Public License as published by
++ *  the Free Software Foundation; either version 2 of the License, or (at
++ *  your option) any later version.
++ *
++ *  This program is distributed in the hope that it will be useful, but
++ *  WITHOUT ANY WARRANTY; without even the implied warranty of
++ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ *  General Public License for more details.
++ *
++ *  You should have received a copy of the GNU General Public License along
++ *  with this program; if not, write to the Free Software Foundation, Inc.,
++ *  59 Temple Place, Suite 330, Boston, MA 02111-1307 USA.
++ *
++ */
++
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/init.h>
++#include <linux/types.h>
++#include <linux/memory_hotplug.h>
++#include <acpi/acpi_drivers.h>
++#include <xen/interface/platform.h>
++#include <linux/interrupt.h>
++#include <linux/spinlock.h>
++#include <asm/xen/hypervisor.h>
++#include <asm/xen/hypercall.h>
++#include <xen/acpi.h>
++
++struct xen_hotmem_entry {
++	struct list_head hotmem_list;
++	uint64_t start;
++	uint64_t end;
++	uint32_t flags;
++	uint32_t pxm;
++};
++
++struct xen_hotmem_list {
++	struct list_head list;
++	int entry_nr;
++} xen_hotmem;
++
++DEFINE_SPINLOCK(xen_hotmem_lock);
++
++static int xen_hyper_addmem(struct xen_hotmem_entry *entry)
++{
++	int ret;
++
++	xen_platform_op_t op = {
++		.cmd            = XENPF_mem_hotadd,
++		.interface_version  = XENPF_INTERFACE_VERSION,
++	};
++	op.u.mem_add.spfn = entry->start >> PAGE_SHIFT;
++	op.u.mem_add.epfn = entry->end >> PAGE_SHIFT;
++	op.u.mem_add.flags = entry->flags;
++	op.u.mem_add.pxm = entry->pxm;
++
++	ret = HYPERVISOR_dom0_op(&op);
++	return ret;
++}
++
++static int add_hotmem_entry(int pxm, uint64_t start,
++			uint64_t length, uint32_t flags)
++{
++	struct xen_hotmem_entry *entry;
++
++	if (pxm < 0 || !length)
++		return -EINVAL;
++
++	entry = kzalloc(sizeof(struct xen_hotmem_entry), GFP_ATOMIC);
++	if (!entry)
++		return -ENOMEM;
++
++	INIT_LIST_HEAD(&entry->hotmem_list);
++	entry->start = start;
++	entry->end = start + length;
++	entry->flags = flags;
++	entry->pxm = pxm;
++
++	spin_lock(&xen_hotmem_lock);
++
++	list_add_tail(&entry->hotmem_list, &xen_hotmem.list);
++	xen_hotmem.entry_nr++;
++
++	spin_unlock(&xen_hotmem_lock);
++
++	return 0;
++}
++
++static int free_hotmem_entry(struct xen_hotmem_entry *entry)
++{
++	list_del(&entry->hotmem_list);
++	kfree(entry);
++
++	return 0;
++}
++
++static void xen_hotadd_mem_dpc(struct work_struct *work)
++{
++	struct list_head *elem, *tmp;
++	struct xen_hotmem_entry *entry;
++	unsigned long flags;
++	int ret;
++
++	spin_lock_irqsave(&xen_hotmem_lock, flags);
++	list_for_each_safe(elem, tmp, &xen_hotmem.list) {
++		entry = list_entry(elem, struct xen_hotmem_entry, hotmem_list);
++		ret = xen_hyper_addmem(entry);
++		if (ret)
++			printk(KERN_WARNING "xen addmem failed with %x\n", ret);
++		free_hotmem_entry(entry);
++		xen_hotmem.entry_nr--;
++	}
++	spin_unlock_irqrestore(&xen_hotmem_lock, flags);
++}
++
++static DECLARE_WORK(xen_hotadd_mem_work, xen_hotadd_mem_dpc);
++
++static int xen_acpi_get_pxm(acpi_handle h)
++{
++	unsigned long long pxm;
++	acpi_status status;
++	acpi_handle handle;
++	acpi_handle phandle = h;
++
++	do {
++		handle = phandle;
++		status = acpi_evaluate_integer(handle, "_PXM", NULL, &pxm);
++		if (ACPI_SUCCESS(status))
++			return pxm;
++		status = acpi_get_parent(handle, &phandle);
++	} while (ACPI_SUCCESS(status));
++
++	return -1;
++}
++
++int xen_hotadd_memory(struct acpi_memory_device *mem_device)
++{
++	int pxm, result;
++	int num_enabled = 0;
++	struct acpi_memory_info *info;
++
++	if (!mem_device)
++		return -EINVAL;
++
++	pxm = xen_acpi_get_pxm(mem_device->device->handle);
++
++	if (pxm < 0)
++		return -EINVAL;
++
++	/*
++	 * Always return success to ACPI driver, and notify hypervisor later
++	 * because hypervisor will utilize the memory in memory hotadd hypercall
++	 */
++	list_for_each_entry(info, &mem_device->res_list, list) {
++		if (info->enabled) { /* just sanity check...*/
++			num_enabled++;
++			continue;
++		}
++		/*
++		 * If the memory block size is zero, please ignore it.
++		 * Don't try to do the following memory hotplug flowchart.
++		 */
++		if (!info->length)
++			continue;
++
++		result = add_hotmem_entry(pxm, info->start_addr,
++					info->length, 0);
++		if (result)
++			continue;
++		info->enabled = 1;
++		num_enabled++;
++	}
++
++	if (!num_enabled)
++		return -EINVAL;
++
++	schedule_work(&xen_hotadd_mem_work);
++
++	return 0;
++}
++EXPORT_SYMBOL(xen_hotadd_memory);
++
++static int xen_hotadd_mem_init(void)
++{
++	if (!xen_initial_domain())
++		return -ENODEV;
++
++	INIT_LIST_HEAD(&xen_hotmem.list);
++	xen_hotmem.entry_nr = 0;
++
++	return 0;
++}
++
++static void xen_hotadd_mem_exit(void)
++{
++	flush_scheduled_work();
++}
++
++module_init(xen_hotadd_mem_init);
++module_exit(xen_hotadd_mem_exit);
++MODULE_LICENSE("GPL");
 diff --git a/drivers/xen/xenbus/Makefile b/drivers/xen/xenbus/Makefile
 index 5571f5b..8dca685 100644
 --- a/drivers/xen/xenbus/Makefile
@@ -22461,20 +24664,8 @@ index 92a1ef8..da3ca9e 100644
  	};
  	return (state < ARRAY_SIZE(name)) ? name[state] : "INVALID";
  }
-diff --git a/drivers/xen/xenbus/xenbus_comms.c b/drivers/xen/xenbus/xenbus_comms.c
-index 090c61e..700dc77 100644
---- a/drivers/xen/xenbus/xenbus_comms.c
-+++ b/drivers/xen/xenbus/xenbus_comms.c
-@@ -49,6 +49,7 @@ static DECLARE_WAIT_QUEUE_HEAD(xb_waitq);
- static irqreturn_t wake_waiting(int irq, void *unused)
- {
- 	if (unlikely(xenstored_ready == 0)) {
-+		printk(KERN_CRIT "xenbus_probe wake_waiting\n");
- 		xenstored_ready = 1;
- 		schedule_work(&probe_work);
- 	}
 diff --git a/drivers/xen/xenbus/xenbus_probe.c b/drivers/xen/xenbus/xenbus_probe.c
-index 649fcdf..a90e0bf 100644
+index 649fcdf..ab04a1b 100644
 --- a/drivers/xen/xenbus/xenbus_probe.c
 +++ b/drivers/xen/xenbus/xenbus_probe.c
 @@ -49,6 +49,8 @@
@@ -22745,56 +24936,24 @@ index 649fcdf..a90e0bf 100644
  
  static int xenbus_probe_device_type(struct xen_bus_type *bus, const char *type)
  {
-@@ -569,15 +476,23 @@ static int xenbus_probe_device_type(struct xen_bus_type *bus, const char *type)
- 	unsigned int dir_n = 0;
- 	int i;
- 
-+	printk(KERN_CRIT "%s type %s\n", __func__, type);
-+
- 	dir = xenbus_directory(XBT_NIL, bus->root, type, &dir_n);
--	if (IS_ERR(dir))
-+	if (IS_ERR(dir)) {
-+		printk(KERN_CRIT "%s failed xenbus_directory\n", __func__);
+@@ -574,10 +481,11 @@ static int xenbus_probe_device_type(struct xen_bus_type *bus, const char *type)
  		return PTR_ERR(dir);
-+	}
  
  	for (i = 0; i < dir_n; i++) {
 -		err = bus->probe(type, dir[i]);
--		if (err)
-+		printk(KERN_CRIT "%s %d/%d %s\n", __func__, i+1,dir_n, dir[i]);
 +		err = bus->probe(bus, type, dir[i]);
-+		if (err) {
-+			printk(KERN_CRIT "%s failed\n", __func__);
+ 		if (err)
  			break;
-+		}
  	}
-+	printk("%s done\n", __func__);
++
  	kfree(dir);
  	return err;
  }
-@@ -588,18 +503,27 @@ int xenbus_probe_devices(struct xen_bus_type *bus)
- 	char **dir;
- 	unsigned int i, dir_n;
- 
-+	printk(KERN_CRIT "%s %s\n", __func__, bus->root);
-+
- 	dir = xenbus_directory(XBT_NIL, bus->root, "", &dir_n);
--	if (IS_ERR(dir))
-+	if (IS_ERR(dir)) {
-+		printk(KERN_CRIT "%s failed xenbus_directory\n", __func__);
- 		return PTR_ERR(dir);
-+	}
- 
- 	for (i = 0; i < dir_n; i++) {
-+		printk(KERN_CRIT "%s %d/%d %s\n", __func__, i+1,dir_n, dir[i]);
- 		err = xenbus_probe_device_type(bus, dir[i]);
--		if (err)
-+		if (err) {
-+			printk(KERN_CRIT "%s failed\n", __func__);
+@@ -597,9 +505,11 @@ int xenbus_probe_devices(struct xen_bus_type *bus)
+ 		if (err)
  			break;
-+		}
  	}
-+	printk("%s done\n", __func__);
++
  	kfree(dir);
  	return err;
  }
@@ -22802,7 +24961,7 @@ index 649fcdf..a90e0bf 100644
  
  static unsigned int char_count(const char *str, char c)
  {
-@@ -662,32 +586,17 @@ void xenbus_dev_changed(const char *node, struct xen_bus_type *bus)
+@@ -662,32 +572,17 @@ void xenbus_dev_changed(const char *node, struct xen_bus_type *bus)
  }
  EXPORT_SYMBOL_GPL(xenbus_dev_changed);
  
@@ -22838,7 +24997,7 @@ index 649fcdf..a90e0bf 100644
  	if (drv->suspend)
  		err = drv->suspend(xdev, state);
  	if (err)
-@@ -695,21 +604,19 @@ static int xenbus_dev_suspend(struct device *dev, pm_message_t state)
+@@ -695,21 +590,19 @@ static int xenbus_dev_suspend(struct device *dev, pm_message_t state)
  		       "xenbus: suspend %s failed: %i\n", dev_name(dev), err);
  	return 0;
  }
@@ -22864,7 +25023,7 @@ index 649fcdf..a90e0bf 100644
  	err = talk_to_otherend(xdev);
  	if (err) {
  		printk(KERN_WARNING
-@@ -740,6 +647,7 @@ static int xenbus_dev_resume(struct device *dev)
+@@ -740,6 +633,7 @@ static int xenbus_dev_resume(struct device *dev)
  
  	return 0;
  }
@@ -22872,7 +25031,7 @@ index 649fcdf..a90e0bf 100644
  
  /* A flag to determine if xenstored is 'ready' (i.e. has started) */
  int xenstored_ready = 0;
-@@ -768,10 +676,7 @@ void xenbus_probe(struct work_struct *unused)
+@@ -768,11 +662,6 @@ void xenbus_probe(struct work_struct *unused)
  {
  	BUG_ON((xenstored_ready <= 0));
  
@@ -22880,11 +25039,11 @@ index 649fcdf..a90e0bf 100644
 -	xenbus_probe_devices(&xenbus_frontend);
 -	register_xenbus_watch(&fe_watch);
 -	xenbus_backend_probe_and_watch();
-+	printk(KERN_CRIT "xenbus_probe wake_waiting\n");
- 
+-
  	/* Notify others that xenstore is up */
  	blocking_notifier_call_chain(&xenstore_chain, 0, NULL);
-@@ -780,27 +685,43 @@ void xenbus_probe(struct work_struct *unused)
+ }
+@@ -780,27 +669,43 @@ void xenbus_probe(struct work_struct *unused)
  static int __init xenbus_probe_init(void)
  {
  	int err = 0;
@@ -22939,7 +25098,7 @@ index 649fcdf..a90e0bf 100644
  	} else {
  		xenstored_ready = 1;
  		xen_store_evtchn = xen_start_info->store_evtchn;
-@@ -813,7 +734,7 @@ static int __init xenbus_probe_init(void)
+@@ -813,7 +718,7 @@ static int __init xenbus_probe_init(void)
  	if (err) {
  		printk(KERN_WARNING
  		       "XENBUS: Error initializing xenstore comms: %i\n", err);
@@ -22948,11 +25107,8 @@ index 649fcdf..a90e0bf 100644
  	}
  
  	if (!xen_initial_domain())
-@@ -827,130 +748,17 @@ static int __init xenbus_probe_init(void)
- 	proc_mkdir("xen", NULL);
- #endif
+@@ -829,128 +734,13 @@ static int __init xenbus_probe_init(void)
  
-+	printk(KERN_CRIT "%s ok\n", __func__);
  	return 0;
  
 -  out_unreg_back:
@@ -22965,7 +25121,6 @@ index 649fcdf..a90e0bf 100644
 +	if (page != 0)
 +		free_page(page);
 +
-+	printk(KERN_CRIT "err %d in %s\n", err, __func__);
  	return err;
  }
  
@@ -23136,10 +25291,10 @@ index 6c5e318..0e5fc4c 100644
  #endif
 diff --git a/drivers/xen/xenbus/xenbus_probe_backend.c b/drivers/xen/xenbus/xenbus_probe_backend.c
 new file mode 100644
-index 0000000..a3cc535
+index 0000000..9b9dd36
 --- /dev/null
 +++ b/drivers/xen/xenbus/xenbus_probe_backend.c
-@@ -0,0 +1,298 @@
+@@ -0,0 +1,293 @@
 +/******************************************************************************
 + * Talks to Xen Store to figure out what devices we have (backend half).
 + *
@@ -23409,10 +25564,8 @@ index 0000000..a3cc535
 +{
 +	/* Enumerate devices in xenstore and watch for changes. */
 +	xenbus_probe_devices(&xenbus_backend);
-+	printk(KERN_CRIT "%s devices probed ok\n", __func__);
 +	register_xenbus_watch(&be_watch);
-+	printk(KERN_CRIT "%s watch add ok ok\n", __func__);
-+	printk(KERN_CRIT "%s all done\n", __func__);
++
 +	return NOTIFY_DONE;
 +}
 +
@@ -23427,11 +25580,8 @@ index 0000000..a3cc535
 +
 +	/* Register ourselves with the kernel bus subsystem */
 +	err = bus_register(&xenbus_backend.bus);
-+	if (err) {
-+		printk(KERN_CRIT "%s didn't register bus!\n", __func__);
++	if (err)
 +		return err;
-+	}
-+	printk(KERN_CRIT "%s bus registered ok\n", __func__);
 +
 +	register_xenstore_notifier(&xenstore_notifier);
 +
@@ -23440,10 +25590,10 @@ index 0000000..a3cc535
 +subsys_initcall(xenbus_probe_backend_init);
 diff --git a/drivers/xen/xenbus/xenbus_probe_frontend.c b/drivers/xen/xenbus/xenbus_probe_frontend.c
 new file mode 100644
-index 0000000..47be902
+index 0000000..77af5c3
 --- /dev/null
 +++ b/drivers/xen/xenbus/xenbus_probe_frontend.c
-@@ -0,0 +1,292 @@
+@@ -0,0 +1,287 @@
 +#define DPRINTK(fmt, args...)				\
 +	pr_debug("xenbus_probe (%s:%d) " fmt ".\n",	\
 +		 __func__, __LINE__, ##args)
@@ -23693,10 +25843,8 @@ index 0000000..47be902
 +{
 +	/* Enumerate devices in xenstore and watch for changes. */
 +	xenbus_probe_devices(&xenbus_frontend);
-+	printk(KERN_CRIT "%s devices probed ok\n", __func__);
 +	register_xenbus_watch(&fe_watch);
-+	printk(KERN_CRIT "%s watch add ok ok\n", __func__);
-+	printk(KERN_CRIT "%s all done\n", __func__);
++
 +	return NOTIFY_DONE;
 +}
 +
@@ -23712,11 +25860,8 @@ index 0000000..47be902
 +
 +	/* Register ourselves with the kernel bus subsystem */
 +	err = bus_register(&xenbus_frontend.bus);
-+	if (err) {
-+		printk(KERN_CRIT "%s didn't register bus!\n", __func__);
++	if (err)
 +		return err;
-+	}
-+	printk(KERN_CRIT "%s bus registered ok\n", __func__);
 +
 +	register_xenstore_notifier(&xenstore_notifier);
 +
@@ -24518,6 +26663,71 @@ index 0000000..af10804
 +	.read = xsd_read,
 +	.release = xsd_release,
 +};
+diff --git a/include/acpi/acpi_drivers.h b/include/acpi/acpi_drivers.h
+index f4906f6..e7233e8 100644
+--- a/include/acpi/acpi_drivers.h
++++ b/include/acpi/acpi_drivers.h
+@@ -154,4 +154,25 @@ static inline void unregister_hotplug_dock_device(acpi_handle handle)
+ }
+ #endif
+ 
++/*--------------------------------------------------------------------------
++				Memory
++  -------------------------------------------------------------------------- */
++#if defined(CONFIG_ACPI_HOTPLUG_MEMORY) || \
++	defined(CONFIG_ACPI_HOTPLUG_MEMORY_MODULE)
++struct acpi_memory_info {
++	struct list_head list;
++	u64 start_addr;		/* Memory Range start physical addr */
++	u64 length;		/* Memory Range length */
++	unsigned short caching;	/* memory cache attribute */
++	unsigned short write_protect;	/* memory read/write attribute */
++	unsigned int enabled:1;
++};
++
++struct acpi_memory_device {
++	struct acpi_device *device;
++	unsigned int state;	/* State of the memory device */
++	struct list_head res_list;
++};
++#endif
++
+ #endif /*__ACPI_DRIVERS_H__*/
+diff --git a/include/acpi/processor.h b/include/acpi/processor.h
+index 740ac3a..3d1205f 100644
+--- a/include/acpi/processor.h
++++ b/include/acpi/processor.h
+@@ -238,6 +238,13 @@ struct acpi_processor_errata {
+ 	} piix4;
+ };
+ 
++extern int acpi_processor_errata(struct acpi_processor *pr);
++extern int acpi_processor_add_fs(struct acpi_device *device);
++extern int acpi_processor_remove_fs(struct acpi_device *device);
++extern int acpi_processor_set_pdc(struct acpi_processor *pr);
++extern int acpi_processor_remove(struct acpi_device *device, int type);
++extern void acpi_processor_notify(struct acpi_device *device, u32 event);
++
+ extern int acpi_processor_preregister_performance(struct
+ 						  acpi_processor_performance
+ 						  *performance);
+@@ -295,6 +302,8 @@ static inline void acpi_processor_ffh_cstate_enter(struct acpi_processor_cx
+ void acpi_processor_ppc_init(void);
+ void acpi_processor_ppc_exit(void);
+ int acpi_processor_ppc_has_changed(struct acpi_processor *pr);
++int acpi_processor_get_performance_info(struct acpi_processor *pr);
++int acpi_processor_get_psd(struct acpi_processor	*pr);
+ #else
+ static inline void acpi_processor_ppc_init(void)
+ {
+@@ -331,6 +340,7 @@ int acpi_processor_power_init(struct acpi_processor *pr,
+ int acpi_processor_cst_has_changed(struct acpi_processor *pr);
+ int acpi_processor_power_exit(struct acpi_processor *pr,
+ 			      struct acpi_device *device);
++int acpi_processor_get_power_info(struct acpi_processor *pr);
+ int acpi_processor_suspend(struct acpi_device * device, pm_message_t state);
+ int acpi_processor_resume(struct acpi_device * device);
+ extern struct cpuidle_driver acpi_idle_driver;
 diff --git a/include/asm-generic/pci.h b/include/asm-generic/pci.h
 index 26373cf..9fb4270 100644
 --- a/include/asm-generic/pci.h
@@ -24593,38 +26803,18 @@ index de9c722..369767b 100644
  #define FBINFO_PARTIAL_PAN_OK	0x0040 /* otw use pan only for double-buffering */
  #define FBINFO_READS_FAST	0x0080 /* soft-copy faster than rendering */
  
-diff --git a/include/linux/hrtimer.h b/include/linux/hrtimer.h
-index 9bace4b..040b679 100644
---- a/include/linux/hrtimer.h
-+++ b/include/linux/hrtimer.h
-@@ -162,10 +162,11 @@ struct hrtimer_clock_base {
-  * @expires_next:	absolute time of the next event which was scheduled
-  *			via clock_set_next_event()
-  * @hres_active:	State of high resolution mode
-- * @check_clocks:	Indictator, when set evaluate time source and clock
-- *			event devices whether high resolution mode can be
-- *			activated.
-- * @nr_events:		Total number of timer interrupt events
-+ * @hang_detected:	The last hrtimer interrupt detected a hang
-+ * @nr_events:		Total number of hrtimer interrupt events
-+ * @nr_retries:		Total number of hrtimer interrupt retries
-+ * @nr_hangs:		Total number of hrtimer interrupt hangs
-+ * @max_hang_time:	Maximum time spent in hrtimer_interrupt
-  */
- struct hrtimer_cpu_base {
- 	spinlock_t			lock;
-@@ -173,7 +174,11 @@ struct hrtimer_cpu_base {
- #ifdef CONFIG_HIGH_RES_TIMERS
- 	ktime_t				expires_next;
- 	int				hres_active;
-+	int				hang_detected;
- 	unsigned long			nr_events;
-+	unsigned long			nr_retries;
-+	unsigned long			nr_hangs;
-+	ktime_t				max_hang_time;
- #endif
- };
+diff --git a/include/linux/interrupt.h b/include/linux/interrupt.h
+index 7ca72b7..1c30adf 100644
+--- a/include/linux/interrupt.h
++++ b/include/linux/interrupt.h
+@@ -62,6 +62,7 @@
+ #define IRQF_NOBALANCING	0x00000800
+ #define IRQF_IRQPOLL		0x00001000
+ #define IRQF_ONESHOT		0x00002000
++#define IRQF_NO_SUSPEND		0x00004000
  
+ /*
+  * Bits used by threaded handlers:
 diff --git a/include/linux/mm.h b/include/linux/mm.h
 index 24c3956..3d74515 100644
 --- a/include/linux/mm.h
@@ -24834,6 +27024,19 @@ index 73b1f1c..113585a 100644
 +
 +
  #endif /* __LINUX_SWIOTLB_H */
+diff --git a/include/linux/vmalloc.h b/include/linux/vmalloc.h
+index 3c123c3..1a2ba21 100644
+--- a/include/linux/vmalloc.h
++++ b/include/linux/vmalloc.h
+@@ -7,6 +7,8 @@
+ 
+ struct vm_area_struct;		/* vma defining user mapping in mm_types.h */
+ 
++extern bool vmap_lazy_unmap;
++
+ /* bits in flags of vmalloc's vm_struct below */
+ #define VM_IOREMAP	0x00000001	/* ioremap() and friends */
+ #define VM_ALLOC	0x00000002	/* vmalloc() */
 diff --git a/include/xen/Kbuild b/include/xen/Kbuild
 index 4e65c16..84ad8f0 100644
 --- a/include/xen/Kbuild
@@ -24841,6 +27044,118 @@ index 4e65c16..84ad8f0 100644
 @@ -1 +1,2 @@
  header-y += evtchn.h
 +header-y += privcmd.h
+diff --git a/include/xen/acpi.h b/include/xen/acpi.h
+new file mode 100644
+index 0000000..279142d
+--- /dev/null
++++ b/include/xen/acpi.h
+@@ -0,0 +1,106 @@
++#ifndef _XEN_ACPI_H
++#define _XEN_ACPI_H
++
++#include <linux/types.h>
++#include <acpi/acpi_drivers.h>
++#include <acpi/processor.h>
++#include <xen/xen.h>
++
++#ifdef CONFIG_XEN_S3
++#include <asm/xen/hypervisor.h>
++
++static inline bool xen_pv_acpi(void)
++{
++	return xen_pv_domain();
++}
++#else
++static inline bool xen_pv_acpi(void)
++{
++	return false;
++}
++#endif
++
++int acpi_notify_hypervisor_state(u8 sleep_state,
++				 u32 pm1a_cnt, u32 pm1b_cnd);
++
++/*
++ * Following are interfaces for xen acpi processor control
++ */
++
++/* Events notified to xen */
++#define PROCESSOR_PM_INIT	1
++#define PROCESSOR_PM_CHANGE	2
++#define PROCESSOR_HOTPLUG	3
++
++/* Objects for the PM events */
++#define PM_TYPE_IDLE		0
++#define PM_TYPE_PERF		1
++#define PM_TYPE_THR		2
++#define PM_TYPE_MAX		3
++
++#define XEN_MAX_ACPI_ID 255
++
++/* Processor hotplug events */
++#define HOTPLUG_TYPE_ADD	0
++#define HOTPLUG_TYPE_REMOVE	1
++
++int xen_acpi_processor_init(void);
++void xen_acpi_processor_exit(void);
++
++int xen_acpi_processor_power_init(struct acpi_processor *pr,
++		struct acpi_device *device);
++int xen_acpi_processor_cst_has_changed(struct acpi_processor *pr);
++
++void xen_arch_acpi_processor_init_pdc(struct acpi_processor *pr);
++
++#ifdef CONFIG_CPU_FREQ
++int xen_acpi_processor_ppc_has_changed(struct acpi_processor *pr);
++int xen_acpi_processor_get_performance(struct acpi_processor *pr);
++#else
++static inline int xen_acpi_processor_ppc_has_changed(struct acpi_processor *pr)
++{
++	return acpi_processor_ppc_has_changed(pr);
++}
++static inline int xen_acpi_processor_get_performance(struct acpi_processor *pr)
++{
++	printk(KERN_WARNING
++		"Warning: xen_acpi_processor_get_performance not supported\n"
++		"Consider compiling CPUfreq support into your kernel.\n");
++	return 0;
++}
++#endif
++
++#if defined(CONFIG_ACPI_HOTPLUG_MEMORY) || \
++	defined(CONFIG_ACPI_HOTPLUG_MEMORY_MODULE)
++int xen_hotadd_memory(struct acpi_memory_device *mem_device);
++#endif
++
++#if defined(CONFIG_ACPI_PROCESSOR_XEN) || \
++defined(CONFIG_ACPI_PROCESSOR_XEN_MODULE)
++
++struct processor_cntl_xen_ops {
++	/* Transfer processor PM events to xen */
++int (*pm_ops[PM_TYPE_MAX])(struct acpi_processor *pr, int event);
++	/* Notify physical processor status to xen */
++	int (*hotplug)(struct acpi_processor *pr, int type);
++};
++
++extern int processor_cntl_xen_notify(struct acpi_processor *pr,
++			int event, int type);
++extern int processor_cntl_xen_power_cache(int cpu, int cx,
++		struct acpi_power_register *reg);
++#else
++
++static inline int processor_cntl_xen_notify(struct acpi_processor *pr,
++			int event, int type)
++{
++	return 0;
++}
++static inline int processor_cntl_xen_power_cache(int cpu, int cx,
++		struct acpi_power_register *reg)
++{
++	return 0;
++}
++#endif /* CONFIG_ACPI_PROCESSOR_XEN */
++
++#endif	/* _XEN_ACPI_H */
 diff --git a/include/xen/balloon.h b/include/xen/balloon.h
 new file mode 100644
 index 0000000..e751514
@@ -25654,10 +27969,10 @@ index cd69391..66122aa 100644
   * ** This command is obsolete since interface version 0x00030202 and is **
 diff --git a/include/xen/interface/platform.h b/include/xen/interface/platform.h
 new file mode 100644
-index 0000000..83e4714
+index 0000000..17ae622
 --- /dev/null
 +++ b/include/xen/interface/platform.h
-@@ -0,0 +1,222 @@
+@@ -0,0 +1,381 @@
 +/******************************************************************************
 + * platform.h
 + *
@@ -25859,6 +28174,160 @@ index 0000000..83e4714
 +typedef struct xenpf_getidletime xenpf_getidletime_t;
 +DEFINE_GUEST_HANDLE_STRUCT(xenpf_getidletime_t);
 +
++#define XENPF_set_processor_pminfo      54
++
++/* ability bits */
++#define XEN_PROCESSOR_PM_CX	1
++#define XEN_PROCESSOR_PM_PX	2
++#define XEN_PROCESSOR_PM_TX	4
++
++/* cmd type */
++#define XEN_PM_CX   0
++#define XEN_PM_PX   1
++#define XEN_PM_TX   2
++
++/* Px sub info type */
++#define XEN_PX_PCT   1
++#define XEN_PX_PSS   2
++#define XEN_PX_PPC   4
++#define XEN_PX_PSD   8
++
++struct xen_power_register {
++	uint32_t     space_id;
++	uint32_t     bit_width;
++	uint32_t     bit_offset;
++	uint32_t     access_size;
++	uint64_t     address;
++};
++
++struct xen_processor_csd {
++	uint32_t    domain;      /* domain number of one dependent group */
++	uint32_t    coord_type;  /* coordination type */
++	uint32_t    num;         /* number of processors in same domain */
++};
++typedef struct xen_processor_csd xen_processor_csd_t;
++DEFINE_GUEST_HANDLE_STRUCT(xen_processor_csd);
++
++struct xen_processor_cx {
++	struct xen_power_register  reg; /* GAS for Cx trigger register */
++	uint8_t     type;     /* cstate value, c0: 0, c1: 1, ... */
++	uint32_t    latency;  /* worst latency (ms) to enter/exit this cstate */
++	uint32_t    power;    /* average power consumption(mW) */
++	uint32_t    dpcnt;    /* number of dependency entries */
++	GUEST_HANDLE(xen_processor_csd) dp; /* NULL if no dependency */
++};
++typedef struct xen_processor_cx xen_processor_cx_t;
++DEFINE_GUEST_HANDLE_STRUCT(xen_processor_cx);
++
++struct xen_processor_flags {
++	uint32_t bm_control:1;
++	uint32_t bm_check:1;
++	uint32_t has_cst:1;
++	uint32_t power_setup_done:1;
++	uint32_t bm_rld_set:1;
++};
++
++struct xen_processor_power {
++	uint32_t count;  /* number of C state entries in array below */
++	struct xen_processor_flags flags;  /* global flags of this processor */
++	GUEST_HANDLE(xen_processor_cx) states; /* supported c states */
++};
++
++struct xen_pct_register {
++	uint8_t  descriptor;
++	uint16_t length;
++	uint8_t  space_id;
++	uint8_t  bit_width;
++	uint8_t  bit_offset;
++	uint8_t  reserved;
++	uint64_t address;
++};
++
++struct xen_processor_px {
++	uint64_t core_frequency; /* megahertz */
++	uint64_t power;      /* milliWatts */
++	uint64_t transition_latency; /* microseconds */
++	uint64_t bus_master_latency; /* microseconds */
++	uint64_t control;        /* control value */
++	uint64_t status;     /* success indicator */
++};
++typedef struct xen_processor_px xen_processor_px_t;
++DEFINE_GUEST_HANDLE_STRUCT(xen_processor_px);
++
++struct xen_psd_package {
++	uint64_t num_entries;
++	uint64_t revision;
++	uint64_t domain;
++	uint64_t coord_type;
++	uint64_t num_processors;
++};
++
++struct xen_processor_performance {
++	uint32_t flags;     /* flag for Px sub info type */
++	uint32_t platform_limit;  /* Platform limitation on freq usage */
++	struct xen_pct_register control_register;
++	struct xen_pct_register status_register;
++	uint32_t state_count;     /* total available performance states */
++	GUEST_HANDLE(xen_processor_px) states;
++	struct xen_psd_package domain_info;
++	uint32_t shared_type;     /* coordination type of this processor */
++};
++typedef struct xen_processor_performance xen_processor_performance_t;
++DEFINE_GUEST_HANDLE_STRUCT(xen_processor_performance);
++
++struct xenpf_set_processor_pminfo {
++	/* IN variables */
++	uint32_t id;    /* ACPI CPU ID */
++	uint32_t type;  /* {XEN_PM_CX, XEN_PM_PX} */
++	union {
++		struct xen_processor_power          power;/* Cx: _CST/_CSD */
++		struct xen_processor_performance    perf; /* Px: _PPC/_PCT/_PSS/_PSD */
++	};
++};
++typedef struct xenpf_set_processor_pminfo xenpf_set_processor_pminfo_t;
++DEFINE_GUEST_HANDLE_STRUCT(xenpf_set_processor_pminfo);
++
++#define XENPF_get_cpuinfo 55
++struct xenpf_pcpuinfo {
++    /* IN */
++    uint32_t xen_cpuid;
++    /* OUT */
++    /* The maxium cpu_id that is present */
++    uint32_t max_present;
++#define XEN_PCPU_FLAGS_ONLINE   1
++    /* Correponding xen_cpuid is not present*/
++#define XEN_PCPU_FLAGS_INVALID  2
++    uint32_t flags;
++    uint32_t apic_id;
++    uint32_t acpi_id;
++};
++typedef struct xenpf_pcpuinfo xenpf_pcpuinfo_t;
++DEFINE_GUEST_HANDLE_STRUCT(xenpf_pcpuinfo_t);
++
++#define XENPF_cpu_online    56
++#define XENPF_cpu_offline   57
++struct xenpf_cpu_ol {
++    uint32_t cpuid;
++};
++typedef struct xenpf_cpu_ol xenpf_cpu_ol_t;
++DEFINE_GUEST_HANDLE_STRUCT(xenpf_cpu_ol_t);
++
++#define XENPF_cpu_hotadd    58
++struct xenpf_cpu_hotadd {
++	uint32_t apic_id;
++	uint32_t acpi_id;
++	uint32_t pxm;
++};
++
++
++#define XENPF_mem_hotadd    59
++struct xenpf_mem_hotadd {
++	uint64_t spfn;
++	uint64_t epfn;
++	uint32_t pxm;
++	uint32_t flags;
++};
++
 +struct xen_platform_op {
 +	uint32_t cmd;
 +	uint32_t interface_version; /* XENPF_INTERFACE_VERSION */
@@ -25873,6 +28342,11 @@ index 0000000..83e4714
 +		struct xenpf_enter_acpi_sleep  enter_acpi_sleep;
 +		struct xenpf_change_freq       change_freq;
 +		struct xenpf_getidletime       getidletime;
++		struct xenpf_set_processor_pminfo set_pminfo;
++		struct xenpf_pcpuinfo          pcpu_info;
++		struct xenpf_cpu_ol            cpu_ol;
++		struct xenpf_cpu_hotadd        cpu_add;
++		struct xenpf_mem_hotadd        mem_add;
 +		uint8_t                        pad[128];
 +	} u;
 +};
@@ -25881,10 +28355,18 @@ index 0000000..83e4714
 +
 +#endif /* __XEN_PUBLIC_PLATFORM_H__ */
 diff --git a/include/xen/interface/xen.h b/include/xen/interface/xen.h
-index 2befa3e..327db61 100644
+index 2befa3e..9ffaee0 100644
 --- a/include/xen/interface/xen.h
 +++ b/include/xen/interface/xen.h
-@@ -184,6 +184,8 @@
+@@ -79,6 +79,7 @@
+ #define VIRQ_CONSOLE    2  /* (DOM0) Bytes received on emergency console. */
+ #define VIRQ_DOM_EXC    3  /* (DOM0) Exceptional event for some domain.   */
+ #define VIRQ_DEBUGGER   6  /* (DOM0) A domain has paused for debugging.   */
++#define VIRQ_PCPU_STATE 9  /* (DOM0) PCPU state changed                   */
+ 
+ /* Architecture-specific VIRQ definitions. */
+ #define VIRQ_ARCH_0    16
+@@ -184,6 +185,8 @@
  #define MMUEXT_NEW_USER_BASEPTR 15
  
  #ifndef __ASSEMBLY__
@@ -25893,7 +28375,7 @@ index 2befa3e..327db61 100644
  struct mmuext_op {
  	unsigned int cmd;
  	union {
-@@ -449,6 +451,45 @@ struct start_info {
+@@ -449,9 +452,49 @@ struct start_info {
  	int8_t cmd_line[MAX_GUEST_CMDLINE];
  };
  
@@ -25939,7 +28421,11 @@ index 2befa3e..327db61 100644
  /* These flags are passed in the 'flags' field of start_info_t. */
  #define SIF_PRIVILEGED    (1<<0)  /* Is the domain privileged? */
  #define SIF_INITDOMAIN    (1<<1)  /* Is this the initial control domain? */
-@@ -461,6 +502,8 @@ typedef uint8_t xen_domain_handle_t[16];
++#define SIF_PM_MASK       (0xFF<<8) /* reserve 1 byte for xen-pm options */
+ 
+ typedef uint64_t cpumap_t;
+ 
+@@ -461,6 +504,8 @@ typedef uint8_t xen_domain_handle_t[16];
  #define __mk_unsigned_long(x) x ## UL
  #define mk_unsigned_long(x) __mk_unsigned_long(x)
  
@@ -25948,6 +28434,42 @@ index 2befa3e..327db61 100644
  #else /* __ASSEMBLY__ */
  
  /* In assembly code we cannot use C numeric constant suffixes. */
+diff --git a/include/xen/pcpu.h b/include/xen/pcpu.h
+new file mode 100644
+index 0000000..fb2bf6b
+--- /dev/null
++++ b/include/xen/pcpu.h
+@@ -0,0 +1,30 @@
++#ifndef _XEN_PCPU_H
++#define _XEN_PCPU_H
++
++#include <xen/interface/platform.h>
++#include <linux/sysdev.h>
++
++extern int xen_pcpu_hotplug(int type, uint32_t apic_id);
++#define XEN_PCPU_ONLINE     0x01
++#define XEN_PCPU_OFFLINE    0x02
++#define XEN_PCPU_ADD        0x04
++#define XEN_PCPU_REMOVE     0x08
++
++struct pcpu {
++	struct list_head pcpu_list;
++	struct sys_device sysdev;
++	uint32_t xen_id;
++	uint32_t apic_id;
++	uint32_t acpi_id;
++	uint32_t flags;
++};
++
++static inline int xen_pcpu_online(uint32_t flags)
++{
++	return !!(flags & XEN_PCPU_FLAGS_ONLINE);
++}
++
++extern int register_xen_pcpu_notifier(struct notifier_block *nb);
++
++extern void unregister_xen_pcpu_notifier(struct notifier_block *nb);
++#endif
 diff --git a/include/xen/privcmd.h b/include/xen/privcmd.h
 new file mode 100644
 index 0000000..b42cdfd
@@ -26105,179 +28627,22 @@ index b9763ba..542ca7c 100644
  	struct device_driver driver;
  	int (*read_otherend_details)(struct xenbus_device *dev);
  	int (*is_ready)(struct xenbus_device *dev);
-diff --git a/kernel/hrtimer.c b/kernel/hrtimer.c
-index 3e1c36e..931a4d9 100644
---- a/kernel/hrtimer.c
-+++ b/kernel/hrtimer.c
-@@ -557,7 +557,7 @@ hrtimer_force_reprogram(struct hrtimer_cpu_base *cpu_base, int skip_equal)
- static int hrtimer_reprogram(struct hrtimer *timer,
- 			     struct hrtimer_clock_base *base)
+diff --git a/kernel/irq/manage.c b/kernel/irq/manage.c
+index bde4c66..3687da2 100644
+--- a/kernel/irq/manage.c
++++ b/kernel/irq/manage.c
+@@ -200,7 +200,8 @@ static inline int setup_affinity(unsigned int irq, struct irq_desc *desc)
+ void __disable_irq(struct irq_desc *desc, unsigned int irq, bool suspend)
  {
--	ktime_t *expires_next = &__get_cpu_var(hrtimer_bases).expires_next;
-+	struct hrtimer_cpu_base *cpu_base = &__get_cpu_var(hrtimer_bases);
- 	ktime_t expires = ktime_sub(hrtimer_get_expires(timer), base->offset);
- 	int res;
- 
-@@ -582,7 +582,16 @@ static int hrtimer_reprogram(struct hrtimer *timer,
- 	if (expires.tv64 < 0)
- 		return -ETIME;
- 
--	if (expires.tv64 >= expires_next->tv64)
-+	if (expires.tv64 >= cpu_base->expires_next.tv64)
-+		return 0;
-+
-+	/*
-+	 * If a hang was detected in the last timer interrupt then we
-+	 * do not schedule a timer which is earlier than the expiry
-+	 * which we enforced in the hang detection. We want the system
-+	 * to make progress.
-+	 */
-+	if (cpu_base->hang_detected)
- 		return 0;
- 
- 	/*
-@@ -590,7 +599,7 @@ static int hrtimer_reprogram(struct hrtimer *timer,
- 	 */
- 	res = tick_program_event(expires, 0);
- 	if (!IS_ERR_VALUE(res))
--		*expires_next = expires;
-+		cpu_base->expires_next = expires;
- 	return res;
- }
- 
-@@ -1217,29 +1226,6 @@ static void __run_hrtimer(struct hrtimer *timer, ktime_t *now)
- 
- #ifdef CONFIG_HIGH_RES_TIMERS
- 
--static int force_clock_reprogram;
--
--/*
-- * After 5 iteration's attempts, we consider that hrtimer_interrupt()
-- * is hanging, which could happen with something that slows the interrupt
-- * such as the tracing. Then we force the clock reprogramming for each future
-- * hrtimer interrupts to avoid infinite loops and use the min_delta_ns
-- * threshold that we will overwrite.
-- * The next tick event will be scheduled to 3 times we currently spend on
-- * hrtimer_interrupt(). This gives a good compromise, the cpus will spend
-- * 1/4 of their time to process the hrtimer interrupts. This is enough to
-- * let it running without serious starvation.
-- */
--
--static inline void
--hrtimer_interrupt_hanging(struct clock_event_device *dev,
--			ktime_t try_time)
--{
--	force_clock_reprogram = 1;
--	dev->min_delta_ns = (unsigned long)try_time.tv64 * 3;
--	printk(KERN_WARNING "hrtimer: interrupt too slow, "
--		"forcing clock min delta to %lu ns\n", dev->min_delta_ns);
--}
- /*
-  * High resolution timer interrupt
-  * Called with interrupts disabled
-@@ -1248,21 +1234,15 @@ void hrtimer_interrupt(struct clock_event_device *dev)
- {
- 	struct hrtimer_cpu_base *cpu_base = &__get_cpu_var(hrtimer_bases);
- 	struct hrtimer_clock_base *base;
--	ktime_t expires_next, now;
--	int nr_retries = 0;
--	int i;
-+	ktime_t expires_next, now, entry_time, delta;
-+	int i, retries = 0;
- 
- 	BUG_ON(!cpu_base->hres_active);
- 	cpu_base->nr_events++;
- 	dev->next_event.tv64 = KTIME_MAX;
- 
-- retry:
--	/* 5 retries is enough to notice a hang */
--	if (!(++nr_retries % 5))
--		hrtimer_interrupt_hanging(dev, ktime_sub(ktime_get(), now));
--
--	now = ktime_get();
--
-+	entry_time = now = ktime_get();
-+retry:
- 	expires_next.tv64 = KTIME_MAX;
- 
- 	spin_lock(&cpu_base->lock);
-@@ -1324,10 +1304,48 @@ void hrtimer_interrupt(struct clock_event_device *dev)
- 	spin_unlock(&cpu_base->lock);
- 
- 	/* Reprogramming necessary ? */
--	if (expires_next.tv64 != KTIME_MAX) {
--		if (tick_program_event(expires_next, force_clock_reprogram))
--			goto retry;
-+	if (expires_next.tv64 == KTIME_MAX ||
-+	    !tick_program_event(expires_next, 0)) {
-+		cpu_base->hang_detected = 0;
-+		return;
+ 	if (suspend) {
+-		if (!desc->action || (desc->action->flags & IRQF_TIMER))
++		if (!desc->action ||
++		    (desc->action->flags & (IRQF_TIMER | IRQF_NO_SUSPEND)))
+ 			return;
+ 		desc->status |= IRQ_SUSPENDED;
  	}
-+
-+	/*
-+	 * The next timer was already expired due to:
-+	 * - tracing
-+	 * - long lasting callbacks
-+	 * - being scheduled away when running in a VM
-+	 *
-+	 * We need to prevent that we loop forever in the hrtimer
-+	 * interrupt routine. We give it 3 attempts to avoid
-+	 * overreacting on some spurious event.
-+	 */
-+	now = ktime_get();
-+	cpu_base->nr_retries++;
-+	if (++retries < 3)
-+		goto retry;
-+	/*
-+	 * Give the system a chance to do something else than looping
-+	 * here. We stored the entry time, so we know exactly how long
-+	 * we spent here. We schedule the next event this amount of
-+	 * time away.
-+	 */
-+	cpu_base->nr_hangs++;
-+	cpu_base->hang_detected = 1;
-+	delta = ktime_sub(now, entry_time);
-+	if (delta.tv64 > cpu_base->max_hang_time.tv64)
-+		cpu_base->max_hang_time = delta;
-+	/*
-+	 * Limit it to a sensible value as we enforce a longer
-+	 * delay. Give the CPU at least 100ms to catch up.
-+	 */
-+	if (delta.tv64 > 100 * NSEC_PER_MSEC)
-+		expires_next = ktime_add_ns(now, 100 * NSEC_PER_MSEC);
-+	else
-+		expires_next = ktime_add(now, delta);
-+	tick_program_event(expires_next, 1);
-+	printk_once(KERN_WARNING "hrtimer: interrupt took %llu ns\n",
-+		    ktime_to_ns(delta));
- }
- 
- /*
-diff --git a/kernel/time/timer_list.c b/kernel/time/timer_list.c
-index 1b5b7aa..54c0dda 100644
---- a/kernel/time/timer_list.c
-+++ b/kernel/time/timer_list.c
-@@ -150,6 +150,9 @@ static void print_cpu(struct seq_file *m, int cpu, u64 now)
- 	P_ns(expires_next);
- 	P(hres_active);
- 	P(nr_events);
-+	P(nr_retries);
-+	P(nr_hangs);
-+	P_ns(max_hang_time);
- #endif
- #undef P
- #undef P_ns
-@@ -252,7 +255,7 @@ static int timer_list_show(struct seq_file *m, void *v)
- 	u64 now = ktime_to_ns(ktime_get());
- 	int cpu;
- 
--	SEQ_printf(m, "Timer List Version: v0.4\n");
-+	SEQ_printf(m, "Timer List Version: v0.5\n");
- 	SEQ_printf(m, "HRTIMER_MAX_CLOCK_BASES: %d\n", HRTIMER_MAX_CLOCK_BASES);
- 	SEQ_printf(m, "now at %Ld nsecs\n", (unsigned long long)now);
- 
 diff --git a/lib/Makefile b/lib/Makefile
-index 2e78277..7c31e3d 100644
+index 452f188..001e918 100644
 --- a/lib/Makefile
 +++ b/lib/Makefile
 @@ -77,7 +77,8 @@ obj-$(CONFIG_TEXTSEARCH_FSM) += ts_fsm.o
@@ -28240,3 +30605,36 @@ index 36992b6..bc1b6e9 100644
  	if (PageAnon(page))
  		page->mapping = NULL;
  	if (free_pages_check(page))
+diff --git a/mm/vmalloc.c b/mm/vmalloc.c
+index c228731..cb459fb 100644
+--- a/mm/vmalloc.c
++++ b/mm/vmalloc.c
+@@ -31,6 +31,7 @@
+ #include <asm/tlbflush.h>
+ #include <asm/shmparam.h>
+ 
++bool vmap_lazy_unmap __read_mostly = true;
+ 
+ /*** Page table manipulation functions ***/
+ 
+@@ -502,6 +503,9 @@ static unsigned long lazy_max_pages(void)
+ {
+ 	unsigned int log;
+ 
++	if (!vmap_lazy_unmap)
++		return 0;
++
+ 	log = fls(num_online_cpus());
+ 
+ 	return log * (32UL * 1024 * 1024 / PAGE_SIZE);
+@@ -561,8 +565,9 @@ static void __purge_vmap_area_lazy(unsigned long *start, unsigned long *end,
+ 	}
+ 	rcu_read_unlock();
+ 
+-	if (nr)
++	if (nr) {
+ 		atomic_sub(nr, &vmap_lazy_nr);
++	}
+ 
+ 	if (nr || force_flush)
+ 		flush_tlb_kernel_range(*start, *end);
