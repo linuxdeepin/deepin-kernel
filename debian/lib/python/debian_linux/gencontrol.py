@@ -65,7 +65,7 @@ class MakeFlags(dict):
         return "%s(%s)" % (self.__class__.__name__, repr)
 
     def __str__(self):
-        return ' '.join(["%s='%s'" % i for i in self.iteritems()])
+        return ' '.join(["%s='%s'" % i for i in sorted(self.iteritems())])
 
     def copy(self):
         return self.__class__(super(MakeFlags, self).copy())
