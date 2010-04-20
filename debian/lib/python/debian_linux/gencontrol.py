@@ -90,7 +90,7 @@ class Gencontrol(object):
     def do_source(self, packages):
         source = self.templates["control.source"][0]
         source['Source'] = self.changelog[0].source
-        packages['source'] = self.process_package(source, self.vars)
+        packages['source'] = self.process_package(source)
 
     def do_main(self, packages, makefile):
         config_entry = self.config['base',]
@@ -251,7 +251,7 @@ class Gencontrol(object):
             desc.append(self.substitute(i, vars))
         return desc
 
-    def process_package(self, in_entry, vars):
+    def process_package(self, in_entry, vars={}):
         entry = in_entry.__class__()
         for key, value in in_entry.iteritems():
             if isinstance(value, PackageRelation):
