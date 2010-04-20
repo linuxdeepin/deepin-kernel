@@ -14,6 +14,11 @@ class Gencontrol(Base):
         self.process_changelog()
         self.config_dirs = config_dirs
 
+    def _setup_makeflags(self, names, makeflags, data):
+        for src, dst, optional in names:
+            if src in data or not optional:
+                makeflags[dst] = data[src]
+
     def do_main_setup(self, vars, makeflags, extra):
         super(Gencontrol, self).do_main_setup(vars, makeflags, extra)
         makeflags.update({
@@ -27,16 +32,13 @@ class Gencontrol(Base):
     def do_main_packages(self, packages, vars, makeflags, extra):
         packages.extend(self.process_packages(self.templates["control.main"], self.vars))
 
+    arch_makeflags = (
+        ('kernel-arch', 'KERNEL_ARCH', False),
+    )
+
     def do_arch_setup(self, vars, makeflags, arch, extra):
         config_base = self.config.merge('base', arch)
-
-        data = vars.copy()
-        data.update(config_base)
-
-        for i in (
-            ('kernel-arch', 'KERNEL_ARCH'),
-        ):
-            makeflags[i[1]] = data[i[0]]
+        self._setup_makeflags(self.arch_makeflags, makeflags, config_base)
 
     def do_arch_packages(self, packages, makefile, arch, vars, makeflags, extra):
         headers_arch = self.templates["control.headers.arch"]
@@ -69,6 +71,23 @@ class Gencontrol(Base):
         makefile.add('binary-arch_%s_%s_real' % (arch, featureset), cmds = cmds_binary_arch)
         makefile.add('source_%s_%s_real' % (arch, featureset), cmds = cmds_source)
 
+    flavour_makeflags_base = (
+        ('compiler', 'COMPILER', False),
+        ('kernel-arch', 'KERNEL_ARCH', False),
+        ('cflags', 'CFLAGS_KERNEL', True),
+        ('override-host-type', 'OVERRIDE_HOST_TYPE', True),
+    )
+
+    flavour_makeflags_image = (
+        ('type', 'TYPE', False),
+        ('initramfs', 'INITRAMFS', True),
+    )
+
+    flavour_makeflags_other = (
+        ('localversion', 'LOCALVERSION', False),
+        ('localversion-image', 'LOCALVERSION_IMAGE', True),
+    )
+
     def do_flavour_setup(self, vars, makeflags, arch, featureset, flavour, extra):
         config_base = self.config.merge('base', arch, featureset, flavour)
         config_description = self.config.merge('description', arch, featureset, flavour)
@@ -82,27 +101,9 @@ class Gencontrol(Base):
         if override_localversion is not None:
             vars['localversion-image'] = vars['localversion_headers'] + '-' + override_localversion
 
-        data = vars.copy()
-        data.update(config_base)
-        data.update(config_image)
-
-        for i in (
-            ('compiler', 'COMPILER'),
-            ('kernel-arch', 'KERNEL_ARCH'),
-            ('localversion', 'LOCALVERSION'),
-            ('type', 'TYPE'),
-        ):
-            makeflags[i[1]] = data[i[0]]
-        for i in (
-            ('cflags', 'CFLAGS_KERNEL'),
-            ('initramfs', 'INITRAMFS'),
-            ('kpkg-arch', 'KPKG_ARCH'),
-            ('kpkg-subarch', 'KPKG_SUBARCH'),
-            ('localversion-image', 'LOCALVERSION_IMAGE'),
-            ('override-host-type', 'OVERRIDE_HOST_TYPE'),
-        ):
-            if data.has_key(i[0]):
-                makeflags[i[1]] = data[i[0]]
+        self._setup_makeflags(self.flavour_makeflags_base, makeflags, config_base)
+        self._setup_makeflags(self.flavour_makeflags_image, makeflags, config_image)
+        self._setup_makeflags(self.flavour_makeflags_other, makeflags, vars)
 
     def do_flavour_packages(self, packages, makefile, arch, featureset, flavour, vars, makeflags, extra):
         headers = self.templates["control.headers"]
