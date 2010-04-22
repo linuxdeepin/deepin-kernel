@@ -1,0 +1,428 @@
+diff --git a/drivers/gpu/drm/drm_crtc_helper.c b/drivers/gpu/drm/drm_crtc_helper.c
+index 7d0f00a..99907c3 100644
+--- a/drivers/gpu/drm/drm_crtc_helper.c
++++ b/drivers/gpu/drm/drm_crtc_helper.c
+@@ -104,6 +104,7 @@ int drm_helper_probe_single_connector_modes(struct drm_connector *connector,
+ 	if (connector->status == connector_status_disconnected) {
+ 		DRM_DEBUG_KMS("%s is disconnected\n",
+ 			  drm_get_connector_name(connector));
++		drm_mode_connector_update_edid_property(connector, NULL);
+ 		goto prune;
+ 	}
+ 
+diff --git a/drivers/gpu/drm/drm_edid.c b/drivers/gpu/drm/drm_edid.c
+index ab6c973..bfd0e4a 100644
+--- a/drivers/gpu/drm/drm_edid.c
++++ b/drivers/gpu/drm/drm_edid.c
+@@ -85,6 +85,8 @@ static struct edid_quirk {
+ 
+ 	/* Envision Peripherals, Inc. EN-7100e */
+ 	{ "EPI", 59264, EDID_QUIRK_135_CLOCK_TOO_HIGH },
++	/* Envision EN2028 */
++	{ "EPI", 8232, EDID_QUIRK_PREFER_LARGE_60 },
+ 
+ 	/* Funai Electronics PM36B */
+ 	{ "FCM", 13600, EDID_QUIRK_PREFER_LARGE_75 |
+@@ -707,15 +709,6 @@ static struct drm_display_mode *drm_mode_detailed(struct drm_device *dev,
+ 	mode->vsync_end = mode->vsync_start + vsync_pulse_width;
+ 	mode->vtotal = mode->vdisplay + vblank;
+ 
+-	/* perform the basic check for the detailed timing */
+-	if (mode->hsync_end > mode->htotal ||
+-		mode->vsync_end > mode->vtotal) {
+-		drm_mode_destroy(dev, mode);
+-		DRM_DEBUG_KMS("Incorrect detailed timing. "
+-				"Sync is beyond the blank.\n");
+-		return NULL;
+-	}
+-
+ 	/* Some EDIDs have bogus h/vtotal values */
+ 	if (mode->hsync_end > mode->htotal)
+ 		mode->htotal = mode->hsync_end + 1;
+diff --git a/drivers/gpu/drm/drm_fops.c b/drivers/gpu/drm/drm_fops.c
+index 08d14df..4804872 100644
+--- a/drivers/gpu/drm/drm_fops.c
++++ b/drivers/gpu/drm/drm_fops.c
+@@ -140,14 +140,16 @@ int drm_open(struct inode *inode, struct file *filp)
+ 		spin_unlock(&dev->count_lock);
+ 	}
+ out:
+-	mutex_lock(&dev->struct_mutex);
+-	if (minor->type == DRM_MINOR_LEGACY) {
+-		BUG_ON((dev->dev_mapping != NULL) &&
+-			(dev->dev_mapping != inode->i_mapping));
+-		if (dev->dev_mapping == NULL)
+-			dev->dev_mapping = inode->i_mapping;
++	if (!retcode) {
++		mutex_lock(&dev->struct_mutex);
++		if (minor->type == DRM_MINOR_LEGACY) {
++			if (dev->dev_mapping == NULL)
++				dev->dev_mapping = inode->i_mapping;
++			else if (dev->dev_mapping != inode->i_mapping)
++				retcode = -ENODEV;
++		}
++		mutex_unlock(&dev->struct_mutex);
+ 	}
+-	mutex_unlock(&dev->struct_mutex);
+ 
+ 	return retcode;
+ }
+diff --git a/drivers/gpu/drm/i915/intel_lvds.c b/drivers/gpu/drm/i915/intel_lvds.c
+index 93031a7..1238bc9 100644
+--- a/drivers/gpu/drm/i915/intel_lvds.c
++++ b/drivers/gpu/drm/i915/intel_lvds.c
+@@ -899,6 +899,14 @@ static const struct dmi_system_id intel_no_lvds[] = {
+ 			DMI_MATCH(DMI_PRODUCT_VERSION, "AO00001JW"),
+ 		},
+ 	},
++	{
++		.callback = intel_no_lvds_dmi_callback,
++		.ident = "Clientron U800",
++		.matches = {
++			DMI_MATCH(DMI_SYS_VENDOR, "Clientron"),
++			DMI_MATCH(DMI_PRODUCT_NAME, "U800"),
++		},
++	},
+ 
+ 	{ }	/* terminating entry */
+ };
+diff --git a/drivers/gpu/drm/radeon/atom.c b/drivers/gpu/drm/radeon/atom.c
+index d75788f..b1f929d 100644
+--- a/drivers/gpu/drm/radeon/atom.c
++++ b/drivers/gpu/drm/radeon/atom.c
+@@ -881,11 +881,16 @@ static void atom_op_shl(atom_exec_context *ctx, int *ptr, int arg)
+ 	uint8_t attr = U8((*ptr)++), shift;
+ 	uint32_t saved, dst;
+ 	int dptr = *ptr;
++	uint32_t dst_align = atom_dst_to_src[(attr >> 3) & 7][(attr >> 6) & 3];
+ 	SDEBUG("   dst: ");
+ 	dst = atom_get_dst(ctx, arg, attr, ptr, &saved, 1);
++	/* op needs to full dst value */
++	dst = saved;
+ 	shift = atom_get_src(ctx, attr, ptr);
+ 	SDEBUG("   shift: %d\n", shift);
+ 	dst <<= shift;
++	dst &= atom_arg_mask[dst_align];
++	dst >>= atom_arg_shift[dst_align];
+ 	SDEBUG("   dst: ");
+ 	atom_put_dst(ctx, arg, attr, &dptr, dst, saved);
+ }
+@@ -895,11 +900,16 @@ static void atom_op_shr(atom_exec_context *ctx, int *ptr, int arg)
+ 	uint8_t attr = U8((*ptr)++), shift;
+ 	uint32_t saved, dst;
+ 	int dptr = *ptr;
++	uint32_t dst_align = atom_dst_to_src[(attr >> 3) & 7][(attr >> 6) & 3];
+ 	SDEBUG("   dst: ");
+ 	dst = atom_get_dst(ctx, arg, attr, ptr, &saved, 1);
++	/* op needs to full dst value */
++	dst = saved;
+ 	shift = atom_get_src(ctx, attr, ptr);
+ 	SDEBUG("   shift: %d\n", shift);
+ 	dst >>= shift;
++	dst &= atom_arg_mask[dst_align];
++	dst >>= atom_arg_shift[dst_align];
+ 	SDEBUG("   dst: ");
+ 	atom_put_dst(ctx, arg, attr, &dptr, dst, saved);
+ }
+diff --git a/drivers/gpu/drm/radeon/r300.c b/drivers/gpu/drm/radeon/r300.c
+index 43b55a0..5bdfaf2 100644
+--- a/drivers/gpu/drm/radeon/r300.c
++++ b/drivers/gpu/drm/radeon/r300.c
+@@ -364,11 +364,12 @@ void r300_gpu_init(struct radeon_device *rdev)
+ 
+ 	r100_hdp_reset(rdev);
+ 	/* FIXME: rv380 one pipes ? */
+-	if ((rdev->family == CHIP_R300) || (rdev->family == CHIP_R350)) {
++	if ((rdev->family == CHIP_R300 && rdev->pdev->device != 0x4144) ||
++	    (rdev->family == CHIP_R350)) {
+ 		/* r300,r350 */
+ 		rdev->num_gb_pipes = 2;
+ 	} else {
+-		/* rv350,rv370,rv380 */
++		/* rv350,rv370,rv380,r300 AD */
+ 		rdev->num_gb_pipes = 1;
+ 	}
+ 	rdev->num_z_pipes = 1;
+diff --git a/drivers/gpu/drm/radeon/radeon_combios.c b/drivers/gpu/drm/radeon/radeon_combios.c
+index e7b1944..81b832e 100644
+--- a/drivers/gpu/drm/radeon/radeon_combios.c
++++ b/drivers/gpu/drm/radeon/radeon_combios.c
+@@ -670,7 +670,9 @@ struct radeon_encoder_primary_dac *radeon_combios_get_primary_dac_info(struct
+ 			dac = RBIOS8(dac_info + 0x3) & 0xf;
+ 			p_dac->ps2_pdac_adj = (bg << 8) | (dac);
+ 		}
+-		found = 1;
++		/* if the values are all zeros, use the table */
++		if (p_dac->ps2_pdac_adj)
++			found = 1;
+ 	}
+ 
+ out:
+@@ -812,7 +814,9 @@ struct radeon_encoder_tv_dac *radeon_combios_get_tv_dac_info(struct
+ 			bg = RBIOS8(dac_info + 0x10) & 0xf;
+ 			dac = RBIOS8(dac_info + 0x11) & 0xf;
+ 			tv_dac->ntsc_tvdac_adj = (bg << 16) | (dac << 20);
+-			found = 1;
++			/* if the values are all zeros, use the table */
++			if (tv_dac->ps2_tvdac_adj)
++				found = 1;
+ 		} else if (rev > 1) {
+ 			bg = RBIOS8(dac_info + 0xc) & 0xf;
+ 			dac = (RBIOS8(dac_info + 0xc) >> 4) & 0xf;
+@@ -825,7 +829,9 @@ struct radeon_encoder_tv_dac *radeon_combios_get_tv_dac_info(struct
+ 			bg = RBIOS8(dac_info + 0xe) & 0xf;
+ 			dac = (RBIOS8(dac_info + 0xe) >> 4) & 0xf;
+ 			tv_dac->ntsc_tvdac_adj = (bg << 16) | (dac << 20);
+-			found = 1;
++			/* if the values are all zeros, use the table */
++			if (tv_dac->ps2_tvdac_adj)
++				found = 1;
+ 		}
+ 		tv_dac->tv_std = radeon_combios_get_tv_info(rdev);
+ 	}
+@@ -842,7 +848,9 @@ struct radeon_encoder_tv_dac *radeon_combios_get_tv_dac_info(struct
+ 				    (bg << 16) | (dac << 20);
+ 				tv_dac->pal_tvdac_adj = tv_dac->ps2_tvdac_adj;
+ 				tv_dac->ntsc_tvdac_adj = tv_dac->ps2_tvdac_adj;
+-				found = 1;
++				/* if the values are all zeros, use the table */
++				if (tv_dac->ps2_tvdac_adj)
++					found = 1;
+ 			} else {
+ 				bg = RBIOS8(dac_info + 0x4) & 0xf;
+ 				dac = RBIOS8(dac_info + 0x5) & 0xf;
+@@ -850,7 +858,9 @@ struct radeon_encoder_tv_dac *radeon_combios_get_tv_dac_info(struct
+ 				    (bg << 16) | (dac << 20);
+ 				tv_dac->pal_tvdac_adj = tv_dac->ps2_tvdac_adj;
+ 				tv_dac->ntsc_tvdac_adj = tv_dac->ps2_tvdac_adj;
+-				found = 1;
++				/* if the values are all zeros, use the table */
++				if (tv_dac->ps2_tvdac_adj)
++					found = 1;
+ 			}
+ 		} else {
+ 			DRM_INFO("No TV DAC info found in BIOS\n");
+diff --git a/drivers/gpu/drm/radeon/radeon_connectors.c b/drivers/gpu/drm/radeon/radeon_connectors.c
+index 65f8194..2bdfbcd 100644
+--- a/drivers/gpu/drm/radeon/radeon_connectors.c
++++ b/drivers/gpu/drm/radeon/radeon_connectors.c
+@@ -162,12 +162,14 @@ radeon_connector_analog_encoder_conflict_solve(struct drm_connector *connector,
+ {
+ 	struct drm_device *dev = connector->dev;
+ 	struct drm_connector *conflict;
++	struct radeon_connector *radeon_conflict;
+ 	int i;
+ 
+ 	list_for_each_entry(conflict, &dev->mode_config.connector_list, head) {
+ 		if (conflict == connector)
+ 			continue;
+ 
++		radeon_conflict = to_radeon_connector(conflict);
+ 		for (i = 0; i < DRM_CONNECTOR_MAX_ENCODER; i++) {
+ 			if (conflict->encoder_ids[i] == 0)
+ 				break;
+@@ -177,6 +179,9 @@ radeon_connector_analog_encoder_conflict_solve(struct drm_connector *connector,
+ 				if (conflict->status != connector_status_connected)
+ 					continue;
+ 
++				if (radeon_conflict->use_digital)
++					continue;
++
+ 				if (priority == true) {
+ 					DRM_INFO("1: conflicting encoders switching off %s\n", drm_get_connector_name(conflict));
+ 					DRM_INFO("in favor of %s\n", drm_get_connector_name(connector));
+@@ -315,7 +320,7 @@ int radeon_connector_set_property(struct drm_connector *connector, struct drm_pr
+ 		radeon_encoder = to_radeon_encoder(encoder);
+ 		if (!radeon_encoder->enc_priv)
+ 			return 0;
+-		if (rdev->is_atom_bios) {
++		if (ASIC_IS_AVIVO(rdev) || radeon_r4xx_atom) {
+ 			struct radeon_encoder_atom_dac *dac_int;
+ 			dac_int = radeon_encoder->enc_priv;
+ 			dac_int->tv_std = val;
+diff --git a/drivers/gpu/drm/radeon/radeon_cp.c b/drivers/gpu/drm/radeon/radeon_cp.c
+index 06123ba..f129bbb 100644
+--- a/drivers/gpu/drm/radeon/radeon_cp.c
++++ b/drivers/gpu/drm/radeon/radeon_cp.c
+@@ -417,8 +417,9 @@ static int radeon_do_wait_for_idle(drm_radeon_private_t * dev_priv)
+ 	return -EBUSY;
+ }
+ 
+-static void radeon_init_pipes(drm_radeon_private_t *dev_priv)
++static void radeon_init_pipes(struct drm_device *dev)
+ {
++	drm_radeon_private_t *dev_priv = dev->dev_private;
+ 	uint32_t gb_tile_config, gb_pipe_sel = 0;
+ 
+ 	if ((dev_priv->flags & RADEON_FAMILY_MASK) == CHIP_RV530) {
+@@ -436,11 +437,12 @@ static void radeon_init_pipes(drm_radeon_private_t *dev_priv)
+ 		dev_priv->num_gb_pipes = ((gb_pipe_sel >> 12) & 0x3) + 1;
+ 	} else {
+ 		/* R3xx */
+-		if (((dev_priv->flags & RADEON_FAMILY_MASK) == CHIP_R300) ||
++		if (((dev_priv->flags & RADEON_FAMILY_MASK) == CHIP_R300 &&
++		     dev->pdev->device != 0x4144) ||
+ 		    ((dev_priv->flags & RADEON_FAMILY_MASK) == CHIP_R350)) {
+ 			dev_priv->num_gb_pipes = 2;
+ 		} else {
+-			/* R3Vxx */
++			/* RV3xx/R300 AD */
+ 			dev_priv->num_gb_pipes = 1;
+ 		}
+ 	}
+@@ -736,7 +738,7 @@ static int radeon_do_engine_reset(struct drm_device * dev)
+ 
+ 	/* setup the raster pipes */
+ 	if ((dev_priv->flags & RADEON_FAMILY_MASK) >= CHIP_R300)
+-	    radeon_init_pipes(dev_priv);
++	    radeon_init_pipes(dev);
+ 
+ 	/* Reset the CP ring */
+ 	radeon_do_cp_reset(dev_priv);
+diff --git a/drivers/gpu/drm/radeon/radeon_cs.c b/drivers/gpu/drm/radeon/radeon_cs.c
+index e9d0850..9933c2c 100644
+--- a/drivers/gpu/drm/radeon/radeon_cs.c
++++ b/drivers/gpu/drm/radeon/radeon_cs.c
+@@ -193,11 +193,13 @@ static void radeon_cs_parser_fini(struct radeon_cs_parser *parser, int error)
+ 		radeon_bo_list_fence(&parser->validated, parser->ib->fence);
+ 	}
+ 	radeon_bo_list_unreserve(&parser->validated);
+-	for (i = 0; i < parser->nrelocs; i++) {
+-		if (parser->relocs[i].gobj) {
+-			mutex_lock(&parser->rdev->ddev->struct_mutex);
+-			drm_gem_object_unreference(parser->relocs[i].gobj);
+-			mutex_unlock(&parser->rdev->ddev->struct_mutex);
++	if (parser->relocs != NULL) {
++		for (i = 0; i < parser->nrelocs; i++) {
++			if (parser->relocs[i].gobj) {
++				mutex_lock(&parser->rdev->ddev->struct_mutex);
++				drm_gem_object_unreference(parser->relocs[i].gobj);
++				mutex_unlock(&parser->rdev->ddev->struct_mutex);
++			}
+ 		}
+ 	}
+ 	kfree(parser->track);
+@@ -246,7 +248,8 @@ int radeon_cs_ioctl(struct drm_device *dev, void *data, struct drm_file *filp)
+ 	}
+ 	r = radeon_cs_parser_relocs(&parser);
+ 	if (r) {
+-		DRM_ERROR("Failed to parse relocation !\n");
++		if (r != -ERESTARTSYS)
++			DRM_ERROR("Failed to parse relocation %d!\n", r);
+ 		radeon_cs_parser_fini(&parser, r);
+ 		mutex_unlock(&rdev->cs_mutex);
+ 		return r;
+diff --git a/drivers/gpu/drm/radeon/radeon_device.c b/drivers/gpu/drm/radeon/radeon_device.c
+index 768b150..509ba3f 100644
+--- a/drivers/gpu/drm/radeon/radeon_device.c
++++ b/drivers/gpu/drm/radeon/radeon_device.c
+@@ -655,6 +655,14 @@ int radeon_device_init(struct radeon_device *rdev,
+ 		return r;
+ 	radeon_check_arguments(rdev);
+ 
++	/* all of the newer IGP chips have an internal gart
++	 * However some rs4xx report as AGP, so remove that here.
++	 */
++	if ((rdev->family >= CHIP_RS400) &&
++	    (rdev->flags & RADEON_IS_IGP)) {
++		rdev->flags &= ~RADEON_IS_AGP;
++	}
++
+ 	if (rdev->flags & RADEON_IS_AGP && radeon_agpmode == -1) {
+ 		radeon_agp_disable(rdev);
+ 	}
+diff --git a/drivers/gpu/drm/radeon/radeon_encoders.c b/drivers/gpu/drm/radeon/radeon_encoders.c
+index 3c91724..7626bd5 100644
+--- a/drivers/gpu/drm/radeon/radeon_encoders.c
++++ b/drivers/gpu/drm/radeon/radeon_encoders.c
+@@ -1276,8 +1276,12 @@ radeon_atom_encoder_mode_set(struct drm_encoder *encoder,
+ 	case ENCODER_OBJECT_ID_INTERNAL_DAC2:
+ 	case ENCODER_OBJECT_ID_INTERNAL_KLDSCP_DAC2:
+ 		atombios_dac_setup(encoder, ATOM_ENABLE);
+-		if (radeon_encoder->active_device & (ATOM_DEVICE_TV_SUPPORT | ATOM_DEVICE_CV_SUPPORT))
+-			atombios_tv_setup(encoder, ATOM_ENABLE);
++		if (radeon_encoder->devices & (ATOM_DEVICE_TV_SUPPORT | ATOM_DEVICE_CV_SUPPORT)) {
++			if (radeon_encoder->active_device & (ATOM_DEVICE_TV_SUPPORT | ATOM_DEVICE_CV_SUPPORT))
++				atombios_tv_setup(encoder, ATOM_ENABLE);
++			else
++				atombios_tv_setup(encoder, ATOM_DISABLE);
++		}
+ 		break;
+ 	}
+ 	atombios_apply_encoder_quirks(encoder, adjusted_mode);
+diff --git a/drivers/gpu/drm/radeon/radeon_legacy_tv.c b/drivers/gpu/drm/radeon/radeon_legacy_tv.c
+index 417684d..f2ed27c 100644
+--- a/drivers/gpu/drm/radeon/radeon_legacy_tv.c
++++ b/drivers/gpu/drm/radeon/radeon_legacy_tv.c
+@@ -57,6 +57,10 @@
+ #define NTSC_TV_PLL_N_14 693
+ #define NTSC_TV_PLL_P_14 7
+ 
++#define PAL_TV_PLL_M_14 19
++#define PAL_TV_PLL_N_14 353
++#define PAL_TV_PLL_P_14 5
++
+ #define VERT_LEAD_IN_LINES 2
+ #define FRAC_BITS 0xe
+ #define FRAC_MASK 0x3fff
+@@ -205,9 +209,24 @@ static const struct radeon_tv_mode_constants available_tv_modes[] = {
+ 		630627,             /* defRestart */
+ 		347,                /* crtcPLL_N */
+ 		14,                 /* crtcPLL_M */
+-			8,                  /* crtcPLL_postDiv */
++		8,                  /* crtcPLL_postDiv */
+ 		1022,               /* pixToTV */
+ 	},
++	{ /* PAL timing for 14 Mhz ref clk */
++		800,                /* horResolution */
++		600,                /* verResolution */
++		TV_STD_PAL,         /* standard */
++		1131,               /* horTotal */
++		742,                /* verTotal */
++		813,                /* horStart */
++		840,                /* horSyncStart */
++		633,                /* verSyncStart */
++		708369,             /* defRestart */
++		211,                /* crtcPLL_N */
++		9,                  /* crtcPLL_M */
++		8,                  /* crtcPLL_postDiv */
++		759,                /* pixToTV */
++	},
+ };
+ 
+ #define N_AVAILABLE_MODES ARRAY_SIZE(available_tv_modes)
+@@ -242,7 +261,7 @@ static const struct radeon_tv_mode_constants *radeon_legacy_tv_get_std_mode(stru
+ 		if (pll->reference_freq == 2700)
+ 			const_ptr = &available_tv_modes[1];
+ 		else
+-			const_ptr = &available_tv_modes[1]; /* FIX ME */
++			const_ptr = &available_tv_modes[3];
+ 	}
+ 	return const_ptr;
+ }
+@@ -685,9 +704,9 @@ void radeon_legacy_tv_mode_set(struct drm_encoder *encoder,
+ 			n = PAL_TV_PLL_N_27;
+ 			p = PAL_TV_PLL_P_27;
+ 		} else {
+-			m = PAL_TV_PLL_M_27;
+-			n = PAL_TV_PLL_N_27;
+-			p = PAL_TV_PLL_P_27;
++			m = PAL_TV_PLL_M_14;
++			n = PAL_TV_PLL_N_14;
++			p = PAL_TV_PLL_P_14;
+ 		}
+ 	}
+ 
+diff --git a/drivers/gpu/drm/radeon/rs600.c b/drivers/gpu/drm/radeon/rs600.c
+index c381856..a27c09f 100644
+--- a/drivers/gpu/drm/radeon/rs600.c
++++ b/drivers/gpu/drm/radeon/rs600.c
+@@ -175,7 +175,7 @@ void rs600_gart_tlb_flush(struct radeon_device *rdev)
+ 	WREG32_MC(R_000100_MC_PT0_CNTL, tmp);
+ 
+ 	tmp = RREG32_MC(R_000100_MC_PT0_CNTL);
+-	tmp |= S_000100_INVALIDATE_ALL_L1_TLBS(1) & S_000100_INVALIDATE_L2_CACHE(1);
++	tmp |= S_000100_INVALIDATE_ALL_L1_TLBS(1) | S_000100_INVALIDATE_L2_CACHE(1);
+ 	WREG32_MC(R_000100_MC_PT0_CNTL, tmp);
+ 
+ 	tmp = RREG32_MC(R_000100_MC_PT0_CNTL);
