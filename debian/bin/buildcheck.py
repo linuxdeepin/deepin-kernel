@@ -13,33 +13,22 @@ from debian_linux.debian import *
 
 class CheckAbi(object):
     class SymbolInfo(object):
-        def __init__(self, symbol):
+        def __init__(self, symbol, symbol_ref=None):
             self.symbol = symbol
+            self.symbol_ref = symbol_ref or symbol
 
         def write(self, out, ignored):
             info = []
             if ignored:
                 info.append("ignored")
-            for i in ('module', 'version', 'export'):
-                info.append("%s: %s" % (i, getattr(self.symbol, i)))
-            out.write("%-48s %s\n" % (self.symbol.name, ", ".join(info)))
-
-    class SymbolChangeInfo(object):
-        def __init__(self, symbol_ref, symbol_new):
-            self.symbol_ref, self.symbol_new = symbol_ref, symbol_new
-
-        def write(self, out, ignored):
-            info = []
-            if ignored:
-                info.append("ignored")
-            for i in ('module', 'version', 'export'):
-                d_ref = getattr(self.symbol_ref, i)
-                d_new = getattr(self.symbol_new, i)
-                if d_ref != d_new:
-                    info.append("%s: %s -> %s" % (i, d_ref, d_new))
+            for name in ('module', 'version', 'export'):
+                data = getattr(self.symbol, name)
+                data_ref = getattr(self.symbol_ref, name)
+                if data != data_ref:
+                    info.append("%s: %s -> %s" % (name, data_ref, data))
                 else:
-                    info.append("%s: %s" % (i, d_new))
-            out.write("%-48s %s\n" % (self.symbol_new.name, ", ".join(info)))
+                    info.append("%s: %s" % (name, data))
+            out.write("%-48s %s\n" % (self.symbol.name, ", ".join(info)))
 
     def __init__(self, config, dir, arch, featureset, flavour):
         self.config = config
@@ -64,7 +53,7 @@ class CheckAbi(object):
 
         symbols, add, change, remove = self._cmp(ref, new)
 
-        ignore = self._ignore(symbols.keys())
+        ignore = self._ignore(symbols)
 
         add_effective = add - ignore
         change_effective = change - ignore
@@ -84,23 +73,17 @@ class CheckAbi(object):
 
         if add:
             out.write("\nAdded symbols:\n")
-            t = list(add)
-            t.sort()
-            for name in t:
+            for name in sorted(add):
                 symbols[name].write(out, name in ignore)
 
         if change:
             out.write("\nChanged symbols:\n")
-            t = list(change)
-            t.sort()
-            for name in t:
+            for name in sorted(change):
                 symbols[name].write(out, name in ignore)
 
         if remove:
             out.write("\nRemoved symbols:\n")
-            t = list(remove)
-            t.sort()
-            for name in t:
+            for name in sorted(remove):
                 symbols[name].write(out, name in ignore)
 
         return ret
@@ -125,7 +108,7 @@ class CheckAbi(object):
 
             if s_ref != s_new:
                 change.add(name)
-                symbols[name] = self.SymbolChangeInfo(s_ref, s_new)
+                symbols[name] = self.SymbolInfo(s_new, s_ref)
 
         for name in ref_names - new_names:
             remove.add(name)
@@ -133,20 +116,34 @@ class CheckAbi(object):
 
         return symbols, add, change, remove
 
-    def _ignore(self, all):
+    def _ignore(self, symbols):
         # TODO: let config merge this lists
         configs = []
         configs.append(self.config.get(('abi', self.arch, self.featureset, self.flavour), {}))
         configs.append(self.config.get(('abi', self.arch, None, self.flavour), {}))
         configs.append(self.config.get(('abi', self.arch, self.featureset), {}))
         configs.append(self.config.get(('abi', self.arch), {}))
+        configs.append(self.config.get(('abi', None, self.featureset), {}))
         configs.append(self.config.get(('abi',), {}))
+
         ignores = set()
         for config in configs:
             ignores.update(config.get('ignore-changes', []))
+
         filtered = set()
-        for m in ignores:
-            filtered.update(fnmatch.filter(all, m))
+        for ignore in ignores:
+            type = 'symbolmatch'
+            if ':' in ignore:
+                type, ignore = ignore.split(':')
+            if type == 'symbolmatch':
+                filtered.update(fnmatch.filter(symbols.iterkeys(), ignore))
+            elif type == 'module':
+                for symbol in symbols.itervalues():
+                    symbol = symbol.symbol
+                    if symbol.module == ignore:
+                        filtered.add(symbol.name)
+            else:
+                raise NotImplementedError
         return filtered
  
 

@@ -24,6 +24,31 @@ use FileHandle;
 use POSIX ();
 use UUID;
 
+# Since debconf clients get their standard input and output redirected
+# to the debconf front-end, we need to redirect them again before
+# running any other program.
+sub _system {
+    my $pid = fork();
+    die "$!" unless defined($pid);
+    if ($pid == 0) {
+       # </dev/null
+       POSIX::close(0);
+       POSIX::open('/dev/null', POSIX::O_RDONLY) or die "$!";
+       # >&2
+       POSIX::dup2(2, 1) or die "$!";
+       exec(@_);
+       exit(255); # usual exit code for failed exec
+    } else {
+       waitpid($pid, 0);
+       # The built-in system() function does this substitution
+       if (POSIX::WIFEXITED($?) && POSIX::WEXITSTATUS($?) == 255) {
+	   return -1;
+       } else {
+	   return $?;
+       }
+    }
+}
+
 package DebianKernel::DiskId;
 
 ### utility
@@ -319,7 +344,7 @@ sub grub1_update {
 }
 
 sub grub1_post {
-    system('update-grub');
+    _system('update-grub');
 }
 
 ### GRUB 2 config
@@ -356,7 +381,7 @@ sub grub2_update {
 }
 
 sub grub2_post {
-    system('grub-mkconfig', '-o', '/boot/grub/grub.cfg');
+    _system('grub-mkconfig', '-o', '/boot/grub/grub.cfg');
 }
 
 ### LILO
@@ -519,13 +544,19 @@ sub lilo_update {
 }
 
 sub lilo_post {
-    system('lilo');
+    _system('lilo');
+}
+
+### SILO
+
+sub silo_post {
+    _system('silo');
 }
 
 ### ELILO
 
 sub elilo_post {
-    system('elilo');
+    _system('elilo');
 }
 
 ### extlinux
@@ -588,7 +619,7 @@ sub extlinux_new_update {
 }
 
 sub extlinux_post {
-    system('update-extlinux');
+    _system('update-extlinux');
 }
 
 # udev persistent-cd
@@ -662,7 +693,8 @@ sub udev_cd_find_unmatched_ide_rules {
 		}
 	    } elsif ($path =~ /-scsi-\d+:\d+:\d+:\d+$/) {
 		my $rule_key =  $path . ' ' . $symlink;
-		if (defined(my $j = $wanted_rule{$rule_key})) {
+		my $j = $wanted_rule{$rule_key};
+		if (defined($j) && $j >= 0) {
 		    $unmatched[$j] = undef;
 		}
 		$wanted_rule{$rule_key} = -1;
@@ -808,6 +840,70 @@ sub uswsusp_resume_update {
     }
 }
 
+# cryptsetup
+
+sub cryptsetup_next {
+    my ($file) = @_;
+    my $text = <$file>;
+    unless (defined($text)) {
+	return ();
+    }
+
+    my $line = $text;
+    if ($line =~ /^\s*(#|$)/) {
+	return ($text);
+    } else {
+	$line =~ s/\s*$//;
+	$line =~ s/^\s*//;
+	return ($text, split(/\s+/, $line, 4));
+    }
+}
+
+sub cryptsetup_list {
+    my ($file) = @_;
+    my (@results) = ();
+
+    while (1) {
+	my ($text, undef, $src) = cryptsetup_next($file);
+	last unless defined($text);
+	if (defined($src)) {
+	    push @results, $src;
+	}
+    }
+
+    return @results;
+}
+
+sub cryptsetup_update {
+    my ($old, $new, $map) = @_;
+
+    while (1) {
+	my ($text, $dst, $src, $key, $opts) = cryptsetup_next($old);
+	last unless defined($text);
+	if (defined($src) && defined($map->{$src})) {
+	    $text = "# $text" . join(' ', $dst, $map->{$src}, $key, $opts);
+	}
+	$new->print($text);
+    }
+}
+
+# hdparm
+
+sub hdparm_list {
+    my ($file) = @_;
+    my (@results) = ();
+
+    # I really can't be bothered to parse this mess.  Just see if
+    # there's anything like a device name on a non-comment line.
+    while (<$file>) {
+	if (!/^\s*#/) {
+	    push @results, grep({m|^/dev/|} split(/\s+/));
+	}
+    }
+
+    return @results;
+}
+
 ### list of all configuration files and functions
 
 my @config_files = ({packages => 'mount',
@@ -818,32 +914,54 @@ my @config_files = ({packages => 'mount',
 		     path => '/boot/grub/menu.lst',
 		     list => \&grub1_list,
 		     update => \&grub1_update,
-		     post_update => \&grub1_post},
+		     post_update => \&grub1_post,
+		     is_boot_loader => 1},
 		    {packages => 'grub-common',
 		     path => '/etc/default/grub',
 		     list => \&grub2_list,
 		     update => \&grub2_update,
-		     post_update => \&grub2_post},
+		     post_update => \&grub2_post,
+		     is_boot_loader => 1},
 		    {packages => 'lilo',
 		     path => '/etc/lilo.conf',
 		     list => \&lilo_list,
 		     update => \&lilo_update,
-		     post_update => \&lilo_post},
+		     post_update => \&lilo_post,
+		     is_boot_loader => 1},
+		    {packages => 'silo',
+		     path => '/etc/silo.conf',
+		     list => \&lilo_list,
+		     update => \&lilo_update,
+		     post_update => \&silo_post,
+		     is_boot_loader => 1},
+		    {packages => 'quik',
+		     path => '/etc/quik.conf',
+		     list => \&lilo_list,
+		     update => \&lilo_update,
+		     is_boot_loader => 1},
+		    {packages => 'yaboot',
+		     path => '/etc/yaboot.conf',
+		     list => \&lilo_list,
+		     update => \&lilo_update,
+		     is_boot_loader => 1},
 		    {packages => 'elilo',
 		     path => '/etc/elilo.conf',
 		     list => \&lilo_list,
 		     update => \&lilo_update,
-		     post_update => \&elilo_post},
+		     post_update => \&elilo_post,
+		     is_boot_loader => 1},
 		    {packages => 'extlinux',
 		     path => extlinux_old_path(),
 		     list => \&extlinux_old_list,
 		     update => \&extlinux_old_update,
-		     post_update => \&extlinux_post},
+		     post_update => \&extlinux_post,
+		     is_boot_loader => 1},
 		    {packages => 'extlinux',
 		     path => '/etc/default/extlinux',
 		     list => \&extlinux_new_list,
 		     update => \&extlinux_new_update,
-		     post_update => \&extlinux_post},
+		     post_update => \&extlinux_post,
+		     is_boot_loader => 1},
 		    {packages => 'udev',
 		     path => '/etc/udev/rules.d/70-persistent-cd.rules',
 		     needs_update => \&udev_cd_needs_update,
@@ -858,46 +976,61 @@ my @config_files = ({packages => 'mount',
 		    {packages => 'uswsusp',
 		     path => '/etc/uswsusp.conf',
 		     list => \&uswsusp_resume_list,
-		     update => \&uswsusp_resume_update});
+		     update => \&uswsusp_resume_update},
+		    {packages => 'cryptsetup',
+		     path => '/etc/crypttab',
+		     list => \&cryptsetup_list,
+		     update => \&cryptsetup_update},
+		    # mdadm.conf requires manual update because it may
+		    # contain wildcards.
+		    {packages => 'mdadm',
+		     path => '/etc/mdadm/mdadm.conf'},
+		    # hdparm.conf requires manual update because it
+		    # (1) refers to whole disks (2) might not work
+		    # properly with the new drivers (3) is in a very
+		    # special format.
+		    {packages => 'hdparm',
+		     path => '/etc/hdparm.conf',
+		     list => \&hdparm_list});
 
 ### Filesystem labels and UUIDs
 
 sub ext2_set_label {
     my ($bdev, $label) = @_;
-    system('tune2fs', '-L', $label, $bdev) == 0 or die "tune2fs failed: $?";
+    _system('tune2fs', '-L', $label, $bdev) == 0 or die "tune2fs failed: $?";
 }
 sub ext2_set_uuid {
     my ($bdev, $uuid) = @_;
-    system('tune2fs', '-U', $uuid, $bdev) == 0 or die "tune2fs failed: $?";
+    _system('tune2fs', '-U', $uuid, $bdev) == 0 or die "tune2fs failed: $?";
 }
 
 sub jfs_set_label {
     my ($bdev, $label) = @_;
-    system('jfs_tune', '-L', $label, $bdev) == 0 or die "jfs_tune failed: $?";
+    _system('jfs_tune', '-L', $label, $bdev) == 0 or die "jfs_tune failed: $?";
 }
 sub jfs_set_uuid {
     my ($bdev, $uuid) = @_;
-    system('jfs_tune', '-U', $uuid, $bdev) == 0 or die "jfs_tune failed: $?";
+    _system('jfs_tune', '-U', $uuid, $bdev) == 0 or die "jfs_tune failed: $?";
 }
 
 sub fat_set_label {
     my ($bdev, $label) = @_;
-    system('dosfslabel', $bdev, $label) == 0 or die "dosfslabel failed: $?";
+    _system('dosfslabel', $bdev, $label) == 0 or die "dosfslabel failed: $?";
 }
 
 sub ntfs_set_label {
     my ($bdev, $label) = @_;
-    system('ntfslabel', $bdev, $label) == 0 or die "ntfslabel failed: $?";
+    _system('ntfslabel', $bdev, $label) == 0 or die "ntfslabel failed: $?";
 }
 
 sub reiserfs_set_label {
     my ($bdev, $label) = @_;
-    system('reiserfstune', '--label', $label, $bdev)
+    _system('reiserfstune', '--label', $label, $bdev)
 	or die "reiserfstune failed: $?";
 }
 sub reiserfs_set_uuid {
     my ($bdev, $uuid) = @_;
-    system('reiserfstune', '--uuid', $uuid, $bdev)
+    _system('reiserfstune', '--uuid', $uuid, $bdev)
 	or die "reiserfstune failed: $?";
 }
 
@@ -961,16 +1094,16 @@ sub swap_set_uuid {
 
 sub ufs_set_label {
     my ($bdev, $label) = @_;
-    system('tunefs.ufs', '-L', $label, $bdev) or die "tunefs.ufs failed: $?";
+    _system('tunefs.ufs', '-L', $label, $bdev) or die "tunefs.ufs failed: $?";
 }
 
 sub xfs_set_label {
     my ($bdev, $label) = @_;
-    system('xfs_admin', '-L', $label, $bdev) or die "xfs_admin failed: $?";
+    _system('xfs_admin', '-L', $label, $bdev) or die "xfs_admin failed: $?";
 }
 sub xfs_set_uuid {
     my ($bdev, $uuid) = @_;
-    system('xfs_admin', '-U', $uuid, $bdev) or die "xfs_admin failed: $?";
+    _system('xfs_admin', '-U', $uuid, $bdev) or die "xfs_admin failed: $?";
 }
 
 my %filesystem_types = (
@@ -995,10 +1128,11 @@ my %filesystem_types = (
     );
 
 my %bdev_map;
-my @matched_configs;
 my %id_map;
 
 sub scan_config_files {
+    my @configs;
+
     # Find all IDE/SCSI disks mentioned in configurations
     for my $config (@config_files) {
 	# Is the file present?
@@ -1011,7 +1145,7 @@ sub scan_config_files {
 	    if ($! == POSIX::ENOENT) {
 		next;
 	    }
-	    die $!;
+	    die "$!";
 	}
 
 	# Are any of the related packages wanted or installed?
@@ -1029,10 +1163,12 @@ sub scan_config_files {
 
 	my @matched_bdevs = ();
 	my $id_map_text;
+	my $needs_update;
 
 	if (exists($config->{needs_update})) {
 	    $id_map_text = &{$config->{needs_update}}($file);
-	} else {
+	    $needs_update = defined($id_map_text) && $id_map_text ne '';
+	} elsif (exists($config->{list})) {
 	    for my $bdev (&{$config->{list}}($file)) {
 		if ($bdev =~ m{^/dev/(?:[hs]d[a-z]\d*|s(?:cd|r)\d+)$} &&
 		    -b $bdev) {
@@ -1040,17 +1176,20 @@ sub scan_config_files {
 		    push @matched_bdevs, $bdev;
 		}
 	    }
+	    $needs_update = @matched_bdevs > 0;
+	} else {
+	    # Needs manual update
+	    $needs_update = 1;
 	}
 
-	if (@matched_bdevs || $id_map_text) {
-	    push @matched_configs, {config => $config,
-				    devices => \@matched_bdevs,
-				    id_map_text => $id_map_text,
-				    installed => $installed};
-	}
+	push @configs, {config => $config,
+			devices => \@matched_bdevs,
+			id_map_text => $id_map_text,
+			installed => $installed,
+			needs_update => $needs_update};
     }
 
-    my $fstab = new FileHandle('/etc/fstab', 'r');
+    my $fstab = new FileHandle('/etc/fstab', 'r') or die "$!";
     while (1) {
 	my ($text, $bdev, $path, $type) = fstab_next($fstab);
 	last unless defined($text);
@@ -1060,6 +1199,8 @@ sub scan_config_files {
 	}
     }
     $fstab->close();
+
+    return @configs;
 }
 
 sub add_tag {
@@ -1089,9 +1230,15 @@ sub scan_devices {
     }
 
     # Discard all labels and UUIDs(!) that are ambiguous.
+    # Discard all labels with 'unsafe' characters (escaped by blkid using
+    # backslashes) as they will not be usable in all configuration files.
+    # Sort each device's IDs in reverse lexical order so that UUIDs are
+    # preferred.
     for my $bdev (keys(%bdev_map)) {
-	@{$bdev_map{$bdev}->{ids}} = grep({ $#{$id_map{$_}} == 0 }
-					  @{$bdev_map{$bdev}->{ids}});
+	@{$bdev_map{$bdev}->{ids}} =
+	    sort({$b cmp $a}
+		 grep({ @{$id_map{$_}} == 1 && $_ !~ /\\/ }
+		      @{$bdev_map{$bdev}->{ids}}));
     }
 
     # Add persistent aliases for CD/DVD/BD drives
@@ -1199,7 +1346,7 @@ sub update_config {
 	$map{$bdev} = $bdev_map{$bdev}->{ids}->[0];
     }
 
-    for my $match (@matched_configs) {
+    for my $match (@_) {
 	# Generate a new config
 	my $path = $match->{config}->{path};
 	my $old = new FileHandle($path, 'r') or die "$!";
@@ -1232,12 +1379,18 @@ sub transition {
     use Debconf::Client::ConfModule ':all';
 
     %bdev_map = ();
-    @matched_configs = ();
     %id_map = ();
 
-    scan_config_files();
+    my @found_configs = scan_config_files();
+    my @matched_configs = grep({$_->{needs_update}} @found_configs);
+    my @auto_configs = grep({defined($_->{config}->{update})} @matched_configs);
+    my $found_boot_loader =
+	grep({$_->{config}->{is_boot_loader} && $_->{installed}} @found_configs);
 
-    if ($#matched_configs < 0) {
+    # We can skip all of this if we didn't find any configuration
+    # files that need conversion and we found the configuration file
+    # for an installed boot loader.
+    if (!@matched_configs && $found_boot_loader) {
 	return;
     }
 
@@ -1255,7 +1408,7 @@ sub transition {
     ($ret, $answer) = get($question);
     die "Error retrieving answer for $question: $answer" if $ret;
 
-    if ($answer eq 'true') {
+    if (@auto_configs && $answer eq 'true') {
 	scan_devices();
 	assign_new_ids();
 
@@ -1277,11 +1430,11 @@ sub transition {
 				       grep({@{$bdev_map{$_}->{ids}}}
 					    keys(%bdev_map))),
 				   grep({defined}
-					map({$_->{id_map_text}} @matched_configs))));
+					map({$_->{id_map_text}} @auto_configs))));
 	die "Error setting debconf substitutions in $question: $seen" if $ret;
 	($ret, $seen) = subst($question, 'files',
 			      join(', ',
-				   map({$_->{config}->{path}} @matched_configs)));
+				   map({$_->{config}->{path}} @auto_configs)));
 	die "Error setting debconf substitutions in $question: $seen" if $ret;
 	($ret, $seen) = input('high', $question);
 	if ($ret && $ret != 30) {
@@ -1296,18 +1449,22 @@ sub transition {
     
 	if ($answer eq 'true') {
 	    set_new_ids();
-	    update_config();
+	    update_config(@auto_configs);
 	}
     }
 
     my @unconv_files = ();
     for my $match (@matched_configs) {
-	my @unconv_bdevs = grep({!exists($bdev_map{$_}->{ids}) ||
-				     @{$bdev_map{$_}->{ids}} == 0}
-				@{$match->{devices}});
-	if (@unconv_bdevs) {
-	    push @unconv_files, sprintf('%s: %s', $match->{config}->{path},
-					join(', ',@unconv_bdevs));
+	if (!defined($match->{config}->{update})) {
+	    push @unconv_files, $match->{config}->{path};
+	} else {
+	    my @unconv_bdevs = grep({!exists($bdev_map{$_}->{ids}) ||
+					 @{$bdev_map{$_}->{ids}} == 0}
+				    @{$match->{devices}});
+	    if (@unconv_bdevs) {
+		push @unconv_files, sprintf('%s: %s', $match->{config}->{path},
+					    join(', ',@unconv_bdevs));
+	    }
 	}
     }
     if (@unconv_files) {
@@ -1315,6 +1472,20 @@ sub transition {
 	($ret, $seen) = subst($question, 'unconverted',
 			      join("\\n", @unconv_files));
 	die "Error setting debconf substitutions in $question: $seen" if $ret;
+	($ret, $seen) = input('high', $question);
+	if ($ret && $ret != 30) {
+	    die "Error setting debconf note $question: $seen";
+	}
+	($ret, $seen) = go();
+	if ($ret && $ret != 30) {
+	    die "Error showing debconf note $question: $seen";
+	}
+    }
+
+    # Also note whether some (unknown) boot loader configuration file
+    # must be manually converted.
+    if (!$found_boot_loader) {
+	$question = 'linux-base/disk-id-manual-boot-loader';
 	($ret, $seen) = input('high', $question);
 	if ($ret && $ret != 30) {
 	    die "Error setting debconf note $question: $seen";
@@ -1334,12 +1505,33 @@ sub compare_versions {
     return $AptPkg::Config::_config->system->versioning->compare(@_);
 }
 
+# No upgrade work is necessary during a fresh system installation.
+# But since linux-base is a new dependency of linux-image-* and did
+# not exist until needed for the libata transition, we cannot simply
+# test whether this is a fresh installation of linux-base.  Instead,
+# we test:
+# - does /etc/fstab exist yet (this won't even work without it), and
+# - are any linux-image-* packages installed yet?
+sub is_fresh_installation {
+    if (-f '/etc/fstab') {
+	for (`dpkg-query 2>/dev/null --showformat '\${status}\\n' -W 'linux-image-*'`) {
+	    return 0 if / installed\n$/;
+	}
+    }
+    return 1;
+}
+
 my $deb_arch = `dpkg --print-architecture`;
 chomp $deb_arch;
 
-if (($deb_arch eq 'i386' || $deb_arch eq 'amd64') &&
-    ($ARGV[0] eq 'reconfigure' || compare_versions($ARGV[1], '2.6.32-10') < 0)) {
-    DebianKernel::DiskId::transition();
+if ($deb_arch ne 's390') {
+    my $libata_transition_ver =
+	($deb_arch eq 'i386' || $deb_arch eq 'amd64') ? '2.6.32-10' : '2.6.32-11';
+    if ($ARGV[0] eq 'reconfigure' || defined($ENV{DEBCONF_RECONFIGURE}) ||
+	(!is_fresh_installation() &&
+	 compare_versions($ARGV[1], $libata_transition_ver) < 0)) {
+	DebianKernel::DiskId::transition();
+    }
 }
 
 exec("set -e\nset -- @ARGV\n" . << 'EOF');
