@@ -121,6 +121,9 @@ class ConfigCoreHierarchy(ConfigCore):
             'initramfs': SchemaItemBoolean(),
             'initramfs-generators': SchemaItemList(),
         },
+        'image-dbg': {
+            'enabled': SchemaItemBoolean(),
+        },
         'relations': {
         },
         'xen': {

@@ -111,6 +111,7 @@ class Gencontrol(Base):
         config_entry_base = self.config.merge('base', arch, featureset, flavour)
         config_entry_description = self.config.merge('description', arch, featureset, flavour)
         config_entry_image = self.config.merge('image', arch, featureset, flavour)
+        config_entry_image_dbg = self.config.merge('image-dbg', arch, featureset, flavour)
         config_entry_relations = self.config.merge('relations', arch, featureset, flavour)
 
         compiler = config_entry_base.get('compiler', 'gcc')
@@ -185,6 +186,11 @@ class Gencontrol(Base):
             packages_own.append(package_headers)
             extra['headers_arch_depends'].append('%s (= ${binary:Version})' % packages_own[-1]['Package'])
 
+        build_debug = config_entry_image_dbg.get('enabled')
+        if build_debug:
+            makeflags['DEBUG'] = True
+            packages_own.extend(self.process_packages(self.templates['control.image-dbg'], vars))
+
         self.merge_packages(packages, packages_own + packages_dummy, arch)
 
         if config_entry_image['type'] == 'plain-xen':
@@ -233,6 +239,8 @@ class Gencontrol(Base):
         kconfig.extend(check_config("%s/%s/config" % (arch, featureset), False, arch, featureset))
         kconfig.extend(check_config("%s/%s/config.%s" % (arch, featureset, flavour), False, arch, featureset, flavour))
         makeflags['KCONFIG'] = ' '.join(kconfig)
+        if build_debug:
+            makeflags['KCONFIG_OPTIONS'] = '-o DEBUG_INFO=y'
 
         cmds_binary_arch = ["$(MAKE) -f debian/rules.real binary-arch-flavour %s" % makeflags]
         if packages_dummy:
