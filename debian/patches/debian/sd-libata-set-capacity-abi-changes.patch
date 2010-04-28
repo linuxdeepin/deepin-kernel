@@ -1,0 +1,96 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Subject: [PATCH] libata/sd: Interface changes to support set_capacity()
+
+Add a set_capacity operation to struct scsi_host_template and use it
+in sd to implement block_device_operations::set_capacity.
+
+Export a valid but non-functional implementation of
+scsi_host_template::set_capacity from libata.
+
+This is based on work by Tejun Heo, but with the functional
+implementation of ata_scsi_set_capacity() removed.
+
+--- a/drivers/ata/libata-core.c
++++ b/drivers/ata/libata-core.c
+@@ -6785,6 +6800,7 @@ EXPORT_SYMBOL_GPL(ata_dummy_port_info);
+ EXPORT_SYMBOL_GPL(ata_link_next);
+ EXPORT_SYMBOL_GPL(ata_dev_next);
+ EXPORT_SYMBOL_GPL(ata_std_bios_param);
++EXPORT_SYMBOL_GPL(ata_scsi_set_capacity);
+ EXPORT_SYMBOL_GPL(ata_host_init);
+ EXPORT_SYMBOL_GPL(ata_host_alloc);
+ EXPORT_SYMBOL_GPL(ata_host_alloc_pinfo);
+--- a/drivers/ata/libata-scsi.c
++++ b/drivers/ata/libata-scsi.c
+@@ -413,6 +413,12 @@ int ata_std_bios_param(struct scsi_device *sdev, struct block_device *bdev,
+ 	return 0;
+ }
+ 
++/* TODO */
++sector_t ata_scsi_set_capacity(struct scsi_device *sdev, sector_t new_capacity)
++{
++	return 0;
++}
++
+ /**
+  *	ata_get_identity - Handler for HDIO_GET_IDENTITY ioctl
+  *	@ap: target port
+--- a/drivers/scsi/sd.c
++++ b/drivers/scsi/sd.c
+@@ -96,6 +96,8 @@ MODULE_ALIAS_SCSI_DEVICE(TYPE_RBC);
+ #endif
+ 
+ static int  sd_revalidate_disk(struct gendisk *);
++static unsigned long long sd_set_capacity(struct gendisk *disk,
++					  unsigned long long new_capacity);
+ static int  sd_probe(struct device *);
+ static int  sd_remove(struct device *);
+ static void sd_shutdown(struct device *);
+@@ -1099,6 +1101,7 @@ static const struct block_device_operations sd_fops = {
+ #endif
+ 	.media_changed		= sd_media_changed,
+ 	.revalidate_disk	= sd_revalidate_disk,
++	.set_capacity		= sd_set_capacity,
+ };
+ 
+ static unsigned int sd_completed_bytes(struct scsi_cmnd *scmd)
+@@ -2099,6 +2102,17 @@ static int sd_revalidate_disk(struct gendisk *disk)
+ 	return 0;
+ }
+ 
++static unsigned long long sd_set_capacity(struct gendisk *disk,
++					  unsigned long long new_capacity)
++{
++	struct scsi_device *sdev = scsi_disk(disk)->device;
++	sector_t capacity = 0;
++
++	if (sdev->host->hostt->set_capacity)
++		capacity = sdev->host->hostt->set_capacity(sdev, new_capacity);
++	return capacity ?: get_capacity(disk);
++}
++
+ /**
+  *	sd_format_disk_name - format disk name
+  *	@prefix: name prefix - ie. "sd" for SCSI disks
+--- a/include/linux/libata.h
++++ b/include/linux/libata.h
+@@ -1025,6 +1026,8 @@ extern void ata_scsi_simulate(struct ata_device *dev, struct scsi_cmnd *cmd,
+ extern int ata_std_bios_param(struct scsi_device *sdev,
+ 			      struct block_device *bdev,
+ 			      sector_t capacity, int geom[]);
++extern sector_t ata_scsi_set_capacity(struct scsi_device *sdev,
++				      sector_t new_capacity);
+ extern int ata_scsi_slave_config(struct scsi_device *sdev);
+ extern void ata_scsi_slave_destroy(struct scsi_device *sdev);
+ extern int ata_scsi_change_queue_depth(struct scsi_device *sdev,
+--- a/include/scsi/scsi_host.h
++++ b/include/scsi/scsi_host.h
+@@ -326,6 +326,8 @@ struct scsi_host_template {
+ 	int (* bios_param)(struct scsi_device *, struct block_device *,
+ 			sector_t, int []);
+ 
++	sector_t (*set_capacity)(struct scsi_device *, sector_t);
++
+ 	/*
+ 	 * Can be used to export driver statistics and other infos to the
+ 	 * world outside the kernel ie. userspace and it also provides an
