@@ -53,6 +53,9 @@ package DebianKernel::DiskId;
 
 ### utility
 
+# Import _system() function
+*_system = \&main::_system;
+
 sub id_to_path {
     my ($id) = @_;
     $id =~ m|^/|
@@ -881,7 +884,8 @@ sub cryptsetup_update {
 	my ($text, $dst, $src, $key, $opts) = cryptsetup_next($old);
 	last unless defined($text);
 	if (defined($src) && defined($map->{$src})) {
-	    $text = "# $text" . join(' ', $dst, $map->{$src}, $key, $opts);
+	    $text = "# $text" .
+		join(' ', $dst, $map->{$src}, $key, $opts) . "\n";
 	}
 	$new->print($text);
     }
@@ -898,6 +902,25 @@ sub hdparm_list {
     while (<$file>) {
 	if (!/^\s*#/) {
 	    push @results, grep({m|^/dev/|} split(/\s+/));
+	}
+    }
+
+    return @results;
+}
+
+### mdadm
+
+sub mdadm_list {
+    my ($file) = @_;
+    my (@results) = ();
+
+    while (<$file>) {
+	# Look for DEVICE (case-insensitive, may be abbreviated to as
+	# little as 3 letters) followed by a whitespace-separated list
+	# of devices (or wildcards, or keywords!).  Ignore comments
+	# (hash preceded by whitespace).
+	if (/^DEV(?:I(?:C(?:E)?)?)?[ \t]*((?:[^ \t]|[ \t][^#])*)/i) {
+	    push @results, split(/[ \t]+/, $1);
 	}
     }
 
@@ -984,7 +1007,8 @@ my @config_files = ({packages => 'mount',
 		    # mdadm.conf requires manual update because it may
 		    # contain wildcards.
 		    {packages => 'mdadm',
-		     path => '/etc/mdadm/mdadm.conf'},
+		     path => '/etc/mdadm/mdadm.conf',
+		     list => \&mdadm_list},
 		    # hdparm.conf requires manual update because it
 		    # (1) refers to whole disks (2) might not work
 		    # properly with the new drivers (3) is in a very
@@ -1170,8 +1194,11 @@ sub scan_config_files {
 	    $needs_update = defined($id_map_text) && $id_map_text ne '';
 	} elsif (exists($config->{list})) {
 	    for my $bdev (&{$config->{list}}($file)) {
-		if ($bdev =~ m{^/dev/(?:[hs]d[a-z]\d*|s(?:cd|r)\d+)$} &&
-		    -b $bdev) {
+		# Match standard IDE and SCSI device names, plus wildcards
+		# in disk device names to allow for mdadm insanity.
+		if ($bdev =~ m{^/dev/(?:[hs]d[a-z\?\*][\d\?\*]*|
+                                        s(?:cd|r)\d+)$}x &&
+		    ($bdev =~ m/[\?\*]/ || -b $bdev)) {
 		    $bdev_map{$bdev} = {};
 		    push @matched_bdevs, $bdev;
 		}
@@ -1219,10 +1246,16 @@ sub add_tag {
 }
 
 sub scan_devices {
+    my $id_command;
+    if (-x '/sbin/vol_id') {
+	$id_command = '/sbin/vol_id';
+    } else {
+	$id_command = 'blkid -o udev -s LABEL -s UUID';
+    }
     for (`blkid -o device`) {
 	chomp;
 	my $bdev = $_;
-	for (`blkid -o udev -s LABEL -s UUID '$bdev'`) {
+	for (`$id_command '$bdev'`) {
 	    if (/^ID_FS_(LABEL|UUID)_ENC=(.+)\n$/) {
 		add_tag($bdev, $1, $2);
 	    }
@@ -1232,12 +1265,13 @@ sub scan_devices {
     # Discard all labels and UUIDs(!) that are ambiguous.
     # Discard all labels with 'unsafe' characters (escaped by blkid using
     # backslashes) as they will not be usable in all configuration files.
+    # Similarly for '#' which blkid surprisingly does not consider unsafe.
     # Sort each device's IDs in reverse lexical order so that UUIDs are
     # preferred.
     for my $bdev (keys(%bdev_map)) {
 	@{$bdev_map{$bdev}->{ids}} =
 	    sort({$b cmp $a}
-		 grep({ @{$id_map{$_}} == 1 && $_ !~ /\\/ }
+		 grep({ @{$id_map{$_}} == 1 && $_ !~ /[\\#]/ }
 		      @{$bdev_map{$bdev}->{ids}}));
     }
 
@@ -1341,10 +1375,7 @@ sub set_new_ids {
 }
 
 sub update_config {
-    my %map;
-    for my $bdev (keys(%bdev_map)) {
-	$map{$bdev} = $bdev_map{$bdev}->{ids}->[0];
-    }
+    my $map = shift;
 
     for my $match (@_) {
 	# Generate a new config
@@ -1353,7 +1384,7 @@ sub update_config {
 	my $new = new FileHandle("$path.new", POSIX::O_WRONLY | POSIX::O_CREAT,
 				 0600)
 	    or die "$!";
-	&{$match->{config}->{update}}($old, $new, \%map);
+	&{$match->{config}->{update}}($old, $new, $map);
 	$old->close();
 	$new->close();
 
@@ -1386,6 +1417,7 @@ sub transition {
     my @auto_configs = grep({defined($_->{config}->{update})} @matched_configs);
     my $found_boot_loader =
 	grep({$_->{config}->{is_boot_loader} && $_->{installed}} @found_configs);
+    my %update_map = ();
 
     # We can skip all of this if we didn't find any configuration
     # files that need conversion and we found the configuration file
@@ -1412,6 +1444,22 @@ sub transition {
 	scan_devices();
 	assign_new_ids();
 
+	# Construct the device ID update map
+	for my $bdev (keys(%bdev_map)) {
+	    if (@{$bdev_map{$bdev}->{ids}}) {
+		$update_map{$bdev} = $bdev_map{$bdev}->{ids}->[0];
+	    }
+	}
+
+	# Weed out configurations which will be unaffected by this
+	# mapping or by a custom mapping described in id_map_text.
+	@auto_configs = grep({ defined($_->{id_map_text}) ||
+				   grep({exists($update_map{$_})}
+					@{$_->{devices}}) }
+			     @auto_configs);
+    }
+
+    if (@auto_configs && $answer eq 'true') {
 	if (grep({$bdev_map{$_}->{new_id}} keys(%bdev_map))) {
 	    $question = 'linux-base/disk-id-convert-plan';
 	    ($ret, $seen) = subst($question, 'relabel',
@@ -1426,9 +1474,8 @@ sub transition {
 	}
 	($ret, $seen) = subst($question, 'id_map',
 			      join("\\n",
-				   map({sprintf("%s: %s", $_, $bdev_map{$_}->{ids}->[0])}
-				       grep({@{$bdev_map{$_}->{ids}}}
-					    keys(%bdev_map))),
+				   map({sprintf("%s: %s", $_, $update_map{$_})}
+				       keys(%update_map)),
 				   grep({defined}
 					map({$_->{id_map_text}} @auto_configs))));
 	die "Error setting debconf substitutions in $question: $seen" if $ret;
@@ -1449,7 +1496,7 @@ sub transition {
     
 	if ($answer eq 'true') {
 	    set_new_ids();
-	    update_config(@auto_configs);
+	    update_config(\%update_map, @auto_configs);
 	}
     }
 
@@ -1458,8 +1505,7 @@ sub transition {
 	if (!defined($match->{config}->{update})) {
 	    push @unconv_files, $match->{config}->{path};
 	} else {
-	    my @unconv_bdevs = grep({!exists($bdev_map{$_}->{ids}) ||
-					 @{$bdev_map{$_}->{ids}} == 0}
+	    my @unconv_bdevs = grep({!exists($update_map{$_})}
 				    @{$match->{devices}});
 	    if (@unconv_bdevs) {
 		push @unconv_files, sprintf('%s: %s', $match->{config}->{path},
