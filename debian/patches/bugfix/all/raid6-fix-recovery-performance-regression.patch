@@ -1,0 +1,73 @@
+From 5157b4aa5b7de8787b6318e61bcc285031bb9088 Mon Sep 17 00:00:00 2001
+From: Dan Williams <dan.j.williams@intel.com>
+Date: Tue, 4 May 2010 20:41:56 -0700
+Subject: [PATCH] raid6: fix recovery performance regression
+
+The raid6 recovery code should immediately drop back to the optimized
+synchronous path when a p+q dma resource is not available.  Otherwise we
+run the non-optimized/multi-pass async code in sync mode.
+
+Verified with raid6test (NDISKS=255)
+
+Applies to kernels >= 2.6.32.
+
+Cc: <stable@kernel.org>
+Acked-by: NeilBrown <neilb@suse.de>
+Reported-by: H. Peter Anvin <hpa@zytor.com>
+Signed-off-by: Dan Williams <dan.j.williams@intel.com>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+---
+ crypto/async_tx/async_raid6_recov.c |   21 +++++++++++++--------
+ 1 files changed, 13 insertions(+), 8 deletions(-)
+
+diff --git a/crypto/async_tx/async_raid6_recov.c b/crypto/async_tx/async_raid6_recov.c
+index 943f2ab..ce038d8 100644
+--- a/crypto/async_tx/async_raid6_recov.c
++++ b/crypto/async_tx/async_raid6_recov.c
+@@ -324,6 +324,7 @@ struct dma_async_tx_descriptor *
+ async_raid6_2data_recov(int disks, size_t bytes, int faila, int failb,
+ 			struct page **blocks, struct async_submit_ctl *submit)
+ {
++	void *scribble = submit->scribble;
+ 	int non_zero_srcs, i;
+ 
+ 	BUG_ON(faila == failb);
+@@ -332,11 +333,13 @@ async_raid6_2data_recov(int disks, size_t bytes, int faila, int failb,
+ 
+ 	pr_debug("%s: disks: %d len: %zu\n", __func__, disks, bytes);
+ 
+-	/* we need to preserve the contents of 'blocks' for the async
+-	 * case, so punt to synchronous if a scribble buffer is not available
++	/* if a dma resource is not available or a scribble buffer is not
++	 * available punt to the synchronous path.  In the 'dma not
++	 * available' case be sure to use the scribble buffer to
++	 * preserve the content of 'blocks' as the caller intended.
+ 	 */
+-	if (!submit->scribble) {
+-		void **ptrs = (void **) blocks;
++	if (!async_dma_find_channel(DMA_PQ) || !scribble) {
++		void **ptrs = scribble ? scribble : (void **) blocks;
+ 
+ 		async_tx_quiesce(&submit->depend_tx);
+ 		for (i = 0; i < disks; i++)
+@@ -406,11 +409,13 @@ async_raid6_datap_recov(int disks, size_t bytes, int faila,
+ 
+ 	pr_debug("%s: disks: %d len: %zu\n", __func__, disks, bytes);
+ 
+-	/* we need to preserve the contents of 'blocks' for the async
+-	 * case, so punt to synchronous if a scribble buffer is not available
++	/* if a dma resource is not available or a scribble buffer is not
++	 * available punt to the synchronous path.  In the 'dma not
++	 * available' case be sure to use the scribble buffer to
++	 * preserve the content of 'blocks' as the caller intended.
+ 	 */
+-	if (!scribble) {
+-		void **ptrs = (void **) blocks;
++	if (!async_dma_find_channel(DMA_PQ) || !scribble) {
++		void **ptrs = scribble ? scribble : (void **) blocks;
+ 
+ 		async_tx_quiesce(&submit->depend_tx);
+ 		for (i = 0; i < disks; i++)
+-- 
+1.6.5
+
