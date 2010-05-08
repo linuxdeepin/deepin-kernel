@@ -1,0 +1,56 @@
+From 77a4229719e511a0d38d9c355317ae1469adeb54 Mon Sep 17 00:00:00 2001
+From: James Bottomley <James.Bottomley@suse.de>
+Date: Tue, 4 May 2010 16:51:40 -0400
+Subject: [PATCH] [SCSI] Retry commands with UNIT_ATTENTION sense codes to fix ext3/ext4 I/O error
+
+There's nastyness in the way we currently handle barriers (and
+discards): They're effectively filesystem commands, but they get
+processed as BLOCK_PC commands.  Unfortunately BLOCK_PC commands are
+taken by SCSI to be SG_IO commands and the issuer expects to see and
+handle any returned errors, however trivial.  This leads to a huge
+problem, because the block layer doesn't expect this to happen and any
+trivially retryable error on a barrier causes an immediate I/O error
+to the filesystem.
+
+The only real way to hack around this is to take the usual class of
+offending errors (unit attentions) and make them all retryable in the
+case of a REQ_HARDBARRIER.  A correct fix would involve a rework of
+the entire block and SCSI submit system, and so is out of scope for a
+quick fix.
+
+Cc: Hannes Reinecke <hare@suse.de>
+Cc: Stable Tree <stable@kernel.org>
+Signed-off-by: James Bottomley <James.Bottomley@suse.de>
+---
+ drivers/scsi/scsi_error.c |   15 ++++++++++++++-
+ 1 files changed, 14 insertions(+), 1 deletions(-)
+
+diff --git a/drivers/scsi/scsi_error.c b/drivers/scsi/scsi_error.c
+index d45c69c..7ad53fa 100644
+--- a/drivers/scsi/scsi_error.c
++++ b/drivers/scsi/scsi_error.c
+@@ -302,7 +302,20 @@ static int scsi_check_sense(struct scsi_cmnd *scmd)
+ 		if (scmd->device->allow_restart &&
+ 		    (sshdr.asc == 0x04) && (sshdr.ascq == 0x02))
+ 			return FAILED;
+-		return SUCCESS;
++
++		if (blk_barrier_rq(scmd->request))
++			/*
++			 * barrier requests should always retry on UA
++			 * otherwise block will get a spurious error
++			 */
++			return NEEDS_RETRY;
++		else
++			/*
++			 * for normal (non barrier) commands, pass the
++			 * UA upwards for a determination in the
++			 * completion functions
++			 */
++			return SUCCESS;
+ 
+ 		/* these three are not supported */
+ 	case COPY_ABORTED:
+-- 
+1.6.5
+
