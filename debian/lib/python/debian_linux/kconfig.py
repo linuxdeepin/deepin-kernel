@@ -55,18 +55,21 @@ class KconfigFile(SortedDict):
                 i = line.find('=')
                 option = line[7:i]
                 value = line[i+1:]
-                if value in ('y', 'm'):
-                    entry = EntryTristate(option, value)
-                else:
-                    entry = EntryString(option, value)
-                self[option] = entry
+                self.set(option, value)
             elif line.startswith("# CONFIG_"):
                 option = line[9:-11]
-                self[option] = EntryTristate(option)
+                self.set(option, 'n')
             elif line.startswith("#") or not line:
                 pass
             else:
                 raise RuntimeError, "Can't recognize %s" % line
+
+    def set(self, key, value):
+        if value in ('y', 'm', 'n'):
+            entry = EntryTristate(key, value)
+        else:
+            entry = EntryString(key, value)
+        self[key] = entry
 
     def str_iter(self):
         for key, value in self.iteritems():
