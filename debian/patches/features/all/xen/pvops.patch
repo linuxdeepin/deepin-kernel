@@ -1,4 +1,4 @@
-Patch based on commit b1cb4e89c3d22864b169acb4574e950f87df8d5a of
+Patch based on commit ba739f9abd3f659b907a824af1161926b420a2ce of
 git://git.kernel.org/pub/scm/linux/kernel/git/jeremy/xen.git.
 
 diff --git a/Documentation/x86/x86_64/boot-options.txt b/Documentation/x86/x86_64/boot-options.txt
@@ -257,6 +257,69 @@ index 3251e23..fa152cb 100644
  static inline int is_hpet_enabled(void) { return 0; }
  #define hpet_readl(a) 0
  
+diff --git a/arch/x86/include/asm/hugetlb.h b/arch/x86/include/asm/hugetlb.h
+index 439a9ac..4cfd4de 100644
+--- a/arch/x86/include/asm/hugetlb.h
++++ b/arch/x86/include/asm/hugetlb.h
+@@ -36,16 +36,24 @@ static inline void hugetlb_free_pgd_range(struct mmu_gather *tlb,
+ 	free_pgd_range(tlb, addr, end, floor, ceiling);
+ }
+ 
++static inline pte_t huge_ptep_get(pte_t *ptep)
++{
++	return *ptep;
++}
++
+ static inline void set_huge_pte_at(struct mm_struct *mm, unsigned long addr,
+ 				   pte_t *ptep, pte_t pte)
+ {
+-	set_pte_at(mm, addr, ptep, pte);
++	set_pmd((pmd_t *)ptep, __pmd(pte_val(pte)));
+ }
+ 
+ static inline pte_t huge_ptep_get_and_clear(struct mm_struct *mm,
+ 					    unsigned long addr, pte_t *ptep)
+ {
+-	return ptep_get_and_clear(mm, addr, ptep);
++	pte_t pte = huge_ptep_get(ptep);
++
++	set_huge_pte_at(mm, addr, ptep, __pte(0));
++	return pte;
+ }
+ 
+ static inline void huge_ptep_clear_flush(struct vm_area_struct *vma,
+@@ -66,19 +74,25 @@ static inline pte_t huge_pte_wrprotect(pte_t pte)
+ static inline void huge_ptep_set_wrprotect(struct mm_struct *mm,
+ 					   unsigned long addr, pte_t *ptep)
+ {
+-	ptep_set_wrprotect(mm, addr, ptep);
++	pte_t pte = huge_ptep_get(ptep);
++
++	pte = pte_wrprotect(pte);
++	set_huge_pte_at(mm, addr, ptep, pte);
+ }
+ 
+ static inline int huge_ptep_set_access_flags(struct vm_area_struct *vma,
+ 					     unsigned long addr, pte_t *ptep,
+ 					     pte_t pte, int dirty)
+ {
+-	return ptep_set_access_flags(vma, addr, ptep, pte, dirty);
+-}
++	pte_t oldpte = huge_ptep_get(ptep);
++	int changed = !pte_same(oldpte, pte);
+ 
+-static inline pte_t huge_ptep_get(pte_t *ptep)
+-{
+-	return *ptep;
++	if (changed && dirty) {
++		set_huge_pte_at(vma->vm_mm, addr, ptep, pte);
++		flush_tlb_page(vma, addr);
++	}
++
++	return changed;
+ }
+ 
+ static inline int arch_prepare_hugepage(struct page *page)
 diff --git a/arch/x86/include/asm/io.h b/arch/x86/include/asm/io.h
 index 7373932..49ee1a9 100644
 --- a/arch/x86/include/asm/io.h
@@ -659,18 +722,19 @@ index 2c756fd..d8e7145 100644
  
  extern struct x86_init_ops x86_init;
 diff --git a/arch/x86/include/asm/xen/hypercall.h b/arch/x86/include/asm/xen/hypercall.h
-index 9c371e4..3da450b 100644
+index 9c371e4..41c4be0 100644
 --- a/arch/x86/include/asm/xen/hypercall.h
 +++ b/arch/x86/include/asm/xen/hypercall.h
-@@ -45,6 +45,7 @@
+@@ -45,6 +45,8 @@
  #include <xen/interface/xen.h>
  #include <xen/interface/sched.h>
  #include <xen/interface/physdev.h>
 +#include <xen/interface/platform.h>
++#include <xen/interface/xen-mca.h>
  
  /*
   * The hypercall asms have to meet several constraints:
-@@ -200,6 +201,23 @@ extern struct { char _entry[32]; } hypercall_page[];
+@@ -200,6 +202,23 @@ extern struct { char _entry[32]; } hypercall_page[];
  	(type)__res;							\
  })
  
@@ -694,10 +758,17 @@ index 9c371e4..3da450b 100644
  static inline int
  HYPERVISOR_set_trap_table(struct trap_info *table)
  {
-@@ -282,6 +300,13 @@ HYPERVISOR_set_timer_op(u64 timeout)
+@@ -282,6 +301,20 @@ HYPERVISOR_set_timer_op(u64 timeout)
  }
  
  static inline int
++HYPERVISOR_mca(struct xen_mc *mc_op)
++{
++	mc_op->interface_version = XEN_MCA_INTERFACE_VERSION;
++	return _hypercall1(int, mca, mc_op);
++}
++
++static inline int
 +HYPERVISOR_dom0_op(struct xen_platform_op *platform_op)
 +{
 +	platform_op->interface_version = XENPF_INTERFACE_VERSION;
@@ -708,7 +779,20 @@ index 9c371e4..3da450b 100644
  HYPERVISOR_set_debugreg(int reg, unsigned long value)
  {
  	return _hypercall2(int, set_debugreg, reg, value);
-@@ -424,6 +449,14 @@ MULTI_fpu_taskswitch(struct multicall_entry *mcl, int set)
+@@ -417,6 +450,12 @@ HYPERVISOR_nmi_op(unsigned long op, unsigned long arg)
+ 	return _hypercall2(int, nmi_op, op, arg);
+ }
+ 
++static inline unsigned long __must_check
++HYPERVISOR_hvm_op(int op, void *arg)
++{
++       return _hypercall2(unsigned long, hvm_op, op, arg);
++}
++
+ static inline void
+ MULTI_fpu_taskswitch(struct multicall_entry *mcl, int set)
+ {
+@@ -424,6 +463,14 @@ MULTI_fpu_taskswitch(struct multicall_entry *mcl, int set)
  	mcl->args[0] = set;
  }
  
@@ -723,7 +807,7 @@ index 9c371e4..3da450b 100644
  static inline void
  MULTI_update_va_mapping(struct multicall_entry *mcl, unsigned long va,
  			pte_t new_val, unsigned long flags)
-@@ -432,12 +465,11 @@ MULTI_update_va_mapping(struct multicall_entry *mcl, unsigned long va,
+@@ -432,12 +479,11 @@ MULTI_update_va_mapping(struct multicall_entry *mcl, unsigned long va,
  	mcl->args[0] = va;
  	if (sizeof(new_val) == sizeof(long)) {
  		mcl->args[1] = new_val.pte;
@@ -738,10 +822,10 @@ index 9c371e4..3da450b 100644
  
  static inline void
 diff --git a/arch/x86/include/asm/xen/hypervisor.h b/arch/x86/include/asm/xen/hypervisor.h
-index d5b7e90..396ff4c 100644
+index d5b7e90..8d5e15a 100644
 --- a/arch/x86/include/asm/xen/hypervisor.h
 +++ b/arch/x86/include/asm/xen/hypervisor.h
-@@ -37,31 +37,4 @@
+@@ -37,31 +37,10 @@
  extern struct shared_info *HYPERVISOR_shared_info;
  extern struct start_info *xen_start_info;
  
@@ -751,12 +835,14 @@ index d5b7e90..396ff4c 100644
 -	XEN_HVM_DOMAIN,		/* running in a Xen hvm domain */
 -};
 -
--#ifdef CONFIG_XEN
+ #ifdef CONFIG_XEN
 -extern enum xen_domain_type xen_domain_type;
--#else
++extern void xen_guest_init(void);
+ #else
 -#define xen_domain_type		XEN_NATIVE
--#endif
--
++#define xen_guest_init() do { } while (0)
+ #endif
+ 
 -#define xen_domain()		(xen_domain_type != XEN_NATIVE)
 -#define xen_pv_domain()		(xen_domain() &&			\
 -				 xen_domain_type == XEN_PV_DOMAIN)
@@ -1789,6 +1875,18 @@ index 0000000..852018b
 +		pat_init();
 +	}
 +}
+diff --git a/arch/x86/kernel/crash.c b/arch/x86/kernel/crash.c
+index ff95824..ebd4c51 100644
+--- a/arch/x86/kernel/crash.c
++++ b/arch/x86/kernel/crash.c
+@@ -28,7 +28,6 @@
+ #include <asm/reboot.h>
+ #include <asm/virtext.h>
+ 
+-
+ #if defined(CONFIG_SMP) && defined(CONFIG_X86_LOCAL_APIC)
+ 
+ static void kdump_nmi_callback(int cpu, struct die_args *args)
 diff --git a/arch/x86/kernel/hpet.c b/arch/x86/kernel/hpet.c
 index 74f5a3f..b69c4e8 100644
 --- a/arch/x86/kernel/hpet.c
@@ -2689,7 +2787,7 @@ index 269c2a3..8e1aac8 100644
  }
  
 diff --git a/arch/x86/kernel/setup.c b/arch/x86/kernel/setup.c
-index 8425f7e..9f1d581 100644
+index 8425f7e..abd6489 100644
 --- a/arch/x86/kernel/setup.c
 +++ b/arch/x86/kernel/setup.c
 @@ -89,6 +89,7 @@
@@ -2700,7 +2798,15 @@ index 8425f7e..9f1d581 100644
  
  #include <asm/system.h>
  #include <asm/vsyscall.h>
-@@ -955,6 +956,9 @@ void __init setup_arch(char **cmdline_p)
+@@ -102,6 +103,7 @@
+ 
+ #include <asm/paravirt.h>
+ #include <asm/hypervisor.h>
++#include <asm/xen/hypervisor.h>
+ 
+ #include <asm/percpu.h>
+ #include <asm/topology.h>
+@@ -955,6 +957,9 @@ void __init setup_arch(char **cmdline_p)
  
  	initmem_init(0, max_pfn);
  
@@ -2710,6 +2816,14 @@ index 8425f7e..9f1d581 100644
  #ifdef CONFIG_ACPI_SLEEP
  	/*
  	 * Reserve low memory region for sleep support.
+@@ -1023,6 +1028,7 @@ void __init setup_arch(char **cmdline_p)
+ 	probe_nr_irqs_gsi();
+ 
+ 	kvm_guest_init();
++	xen_guest_init();
+ 
+ 	e820_reserve_resources();
+ 	e820_mark_nosave_regions(max_low_pfn);
 diff --git a/arch/x86/kernel/x86_init.c b/arch/x86/kernel/x86_init.c
 index 4449a4a..d11c5ff 100644
 --- a/arch/x86/kernel/x86_init.c
@@ -3009,7 +3123,7 @@ index 25a1f8e..4e2f90a 100644
  #endif
 diff --git a/arch/x86/pci/xen.c b/arch/x86/pci/xen.c
 new file mode 100644
-index 0000000..9606bfa
+index 0000000..67fa926
 --- /dev/null
 +++ b/arch/x86/pci/xen.c
 @@ -0,0 +1,154 @@
@@ -3049,7 +3163,6 @@ index 0000000..9606bfa
 +	struct msi_desc *msidesc;
 +	int *v;
 +
-+
 +	/* Dom0 has another mechanism for this. The exit path
 +	 * (xen_pci_teardown_msi_irq) is shared with Dom0.
 +	 */
@@ -3079,6 +3192,7 @@ index 0000000..9606bfa
 +		ret = set_irq_msi(irq, msidesc);
 +		if (ret)
 +			goto error_while;
++		i++;
 +	}
 +	kfree(v);
 +	return 0;
@@ -3266,10 +3380,10 @@ index 0000000..21a3089
 +#endif
 +}
 diff --git a/arch/x86/xen/enlighten.c b/arch/x86/xen/enlighten.c
-index 3578688..cc0c7ed 100644
+index 3578688..e6a9f9f 100644
 --- a/arch/x86/xen/enlighten.c
 +++ b/arch/x86/xen/enlighten.c
-@@ -28,6 +28,7 @@
+@@ -28,12 +28,19 @@
  #include <linux/highmem.h>
  #include <linux/console.h>
  
@@ -3277,7 +3391,19 @@ index 3578688..cc0c7ed 100644
  #include <xen/interface/xen.h>
  #include <xen/interface/version.h>
  #include <xen/interface/physdev.h>
-@@ -66,6 +67,11 @@ DEFINE_PER_CPU(struct vcpu_info, xen_vcpu_info);
+ #include <xen/interface/vcpu.h>
++#include <xen/interface/memory.h>
++#include <xen/interface/hvm/hvm_op.h>
++#include <xen/interface/hvm/params.h>
++#include <xen/interface/platform_pci.h>
+ #include <xen/features.h>
+ #include <xen/page.h>
++#include <xen/hvm.h>
++#include <xen/events.h>
+ #include <xen/hvc-console.h>
+ 
+ #include <asm/paravirt.h>
+@@ -66,6 +73,11 @@ DEFINE_PER_CPU(struct vcpu_info, xen_vcpu_info);
  enum xen_domain_type xen_domain_type = XEN_NATIVE;
  EXPORT_SYMBOL_GPL(xen_domain_type);
  
@@ -3289,7 +3415,17 @@ index 3578688..cc0c7ed 100644
  struct start_info *xen_start_info;
  EXPORT_SYMBOL_GPL(xen_start_info);
  
-@@ -167,13 +173,16 @@ static void __init xen_banner(void)
+@@ -73,6 +85,9 @@ struct shared_info xen_dummy_shared_info;
+ 
+ void *xen_initial_gdt;
+ 
++int xen_have_vector_callback;
++int unplug;
++
+ /*
+  * Point at some empty memory to start with. We map the real shared_info
+  * page as soon as fixmap is up and running.
+@@ -167,13 +182,16 @@ static void __init xen_banner(void)
  
  	printk(KERN_INFO "Booting paravirtualized kernel on %s\n",
  	       pv_info.name);
@@ -3308,7 +3444,7 @@ index 3578688..cc0c7ed 100644
  
  static void xen_cpuid(unsigned int *ax, unsigned int *bx,
  		      unsigned int *cx, unsigned int *dx)
-@@ -187,7 +196,7 @@ static void xen_cpuid(unsigned int *ax, unsigned int *bx,
+@@ -187,7 +205,7 @@ static void xen_cpuid(unsigned int *ax, unsigned int *bx,
  	 * unsupported kernel subsystems as possible.
  	 */
  	switch (*ax) {
@@ -3317,7 +3453,7 @@ index 3578688..cc0c7ed 100644
  		maskecx = cpuid_leaf1_ecx_mask;
  		maskedx = cpuid_leaf1_edx_mask;
  		break;
-@@ -196,6 +205,10 @@ static void xen_cpuid(unsigned int *ax, unsigned int *bx,
+@@ -196,6 +214,10 @@ static void xen_cpuid(unsigned int *ax, unsigned int *bx,
  		/* Suppress extended topology stuff */
  		maskebx = 0;
  		break;
@@ -3328,16 +3464,27 @@ index 3578688..cc0c7ed 100644
  	}
  
  	asm(XEN_EMULATE_PREFIX "cpuid"
-@@ -219,6 +232,8 @@ static __init void xen_init_cpuid_mask(void)
- 		  (1 << X86_FEATURE_MCA)  |  /* disable MCA */
- 		  (1 << X86_FEATURE_ACC));   /* thermal monitoring */
+@@ -215,13 +237,15 @@ static __init void xen_init_cpuid_mask(void)
+ 	unsigned int ax, bx, cx, dx;
  
-+	cpuid_leaf81_edx_mask = ~(1 << (X86_FEATURE_GBPAGES % 32));
+ 	cpuid_leaf1_edx_mask =
+-		~((1 << X86_FEATURE_MCE)  |  /* disable MCE */
+-		  (1 << X86_FEATURE_MCA)  |  /* disable MCA */
+-		  (1 << X86_FEATURE_ACC));   /* thermal monitoring */
++		~(1 << X86_FEATURE_ACC);   /* thermal monitoring */
 +
++	cpuid_leaf81_edx_mask = ~(1 << (X86_FEATURE_GBPAGES % 32));
+ 
  	if (!xen_initial_domain())
  		cpuid_leaf1_edx_mask &=
- 			~((1 << X86_FEATURE_APIC) |  /* disable local APIC */
-@@ -406,7 +421,7 @@ static __init void xen_load_gdt_boot(const struct desc_ptr *dtr)
+-			~((1 << X86_FEATURE_APIC) |  /* disable local APIC */
++			~((1 << X86_FEATURE_MCE)  |  /* disable MCE */
++			  (1 << X86_FEATURE_MCA)  |  /* disable MCA */
++			  (1 << X86_FEATURE_APIC) |  /* disable local APIC */
+ 			  (1 << X86_FEATURE_ACPI));  /* disable ACPI */
+ 
+ 	ax = 1;
+@@ -406,7 +430,7 @@ static __init void xen_load_gdt_boot(const struct desc_ptr *dtr)
  
  		pte = pfn_pte(pfn, PAGE_KERNEL_RO);
  
@@ -3346,9 +3493,13 @@ index 3578688..cc0c7ed 100644
  			BUG();
  
  		frames[f] = mfn;
-@@ -519,11 +534,10 @@ static int cvt_gate_to_trap(int vector, const gate_desc *val,
- 	} else if (addr == (unsigned long)machine_check) {
+@@ -517,13 +541,13 @@ static int cvt_gate_to_trap(int vector, const gate_desc *val,
  		return 0;
+ #ifdef CONFIG_X86_MCE
+ 	} else if (addr == (unsigned long)machine_check) {
+-		return 0;
++		/* We can use the original machine_check handler,
++		   despite IST. */
  #endif
 -	} else {
 -		/* Some other trap using IST? */
@@ -3362,7 +3513,7 @@ index 3578688..cc0c7ed 100644
  #endif	/* CONFIG_X86_64 */
  	info->address = addr;
  
-@@ -679,6 +693,18 @@ static void xen_set_iopl_mask(unsigned mask)
+@@ -679,6 +703,18 @@ static void xen_set_iopl_mask(unsigned mask)
  	HYPERVISOR_physdev_op(PHYSDEVOP_set_iopl, &set_iopl);
  }
  
@@ -3381,7 +3532,7 @@ index 3578688..cc0c7ed 100644
  static void xen_io_delay(void)
  {
  }
-@@ -716,7 +742,7 @@ static u32 xen_safe_apic_wait_icr_idle(void)
+@@ -716,7 +752,7 @@ static u32 xen_safe_apic_wait_icr_idle(void)
          return 0;
  }
  
@@ -3390,7 +3541,7 @@ index 3578688..cc0c7ed 100644
  {
  	apic->read = xen_apic_read;
  	apic->write = xen_apic_write;
-@@ -728,7 +754,6 @@ static void set_xen_basic_apic_ops(void)
+@@ -728,7 +764,6 @@ static void set_xen_basic_apic_ops(void)
  
  #endif
  
@@ -3398,7 +3549,7 @@ index 3578688..cc0c7ed 100644
  static void xen_clts(void)
  {
  	struct multicall_space mcs;
-@@ -811,6 +836,11 @@ static int xen_write_msr_safe(unsigned int msr, unsigned low, unsigned high)
+@@ -811,6 +846,11 @@ static int xen_write_msr_safe(unsigned int msr, unsigned low, unsigned high)
  		   Xen console noise. */
  		break;
  
@@ -3410,7 +3561,7 @@ index 3578688..cc0c7ed 100644
  	default:
  		ret = native_write_msr_safe(msr, low, high);
  	}
-@@ -978,6 +1008,7 @@ static const struct pv_cpu_ops xen_cpu_ops __initdata = {
+@@ -978,6 +1018,7 @@ static const struct pv_cpu_ops xen_cpu_ops __initdata = {
  	.load_sp0 = xen_load_sp0,
  
  	.set_iopl_mask = xen_set_iopl_mask,
@@ -3418,7 +3569,7 @@ index 3578688..cc0c7ed 100644
  	.io_delay = xen_io_delay,
  
  	/* Xen takes care of %gs when switching to usermode for us */
-@@ -1020,6 +1051,14 @@ static void xen_machine_halt(void)
+@@ -1020,6 +1061,14 @@ static void xen_machine_halt(void)
  	xen_reboot(SHUTDOWN_poweroff);
  }
  
@@ -3433,7 +3584,7 @@ index 3578688..cc0c7ed 100644
  static void xen_crash_shutdown(struct pt_regs *regs)
  {
  	xen_reboot(SHUTDOWN_crash);
-@@ -1028,7 +1067,7 @@ static void xen_crash_shutdown(struct pt_regs *regs)
+@@ -1028,7 +1077,7 @@ static void xen_crash_shutdown(struct pt_regs *regs)
  static const struct machine_ops __initdata xen_machine_ops = {
  	.restart = xen_restart,
  	.halt = xen_machine_halt,
@@ -3442,7 +3593,7 @@ index 3578688..cc0c7ed 100644
  	.shutdown = xen_machine_halt,
  	.crash_shutdown = xen_crash_shutdown,
  	.emergency_restart = xen_emergency_restart,
-@@ -1061,6 +1100,8 @@ asmlinkage void __init xen_start_kernel(void)
+@@ -1061,6 +1110,8 @@ asmlinkage void __init xen_start_kernel(void)
  
  	xen_domain_type = XEN_PV_DOMAIN;
  
@@ -3451,7 +3602,7 @@ index 3578688..cc0c7ed 100644
  	/* Install Xen paravirt ops */
  	pv_info = xen_info;
  	pv_init_ops = xen_init_ops;
-@@ -1086,6 +1127,12 @@ asmlinkage void __init xen_start_kernel(void)
+@@ -1086,6 +1137,12 @@ asmlinkage void __init xen_start_kernel(void)
  
  	xen_init_mmu_ops();
  
@@ -3464,7 +3615,7 @@ index 3578688..cc0c7ed 100644
  	/* Prevent unwanted bits from being set in PTEs. */
  	__supported_pte_mask &= ~_PAGE_GLOBAL;
  	if (!xen_initial_domain())
-@@ -1116,6 +1163,10 @@ asmlinkage void __init xen_start_kernel(void)
+@@ -1116,6 +1173,10 @@ asmlinkage void __init xen_start_kernel(void)
  	 */
  	xen_setup_stackprotector();
  
@@ -3475,7 +3626,7 @@ index 3578688..cc0c7ed 100644
  	xen_init_irq_ops();
  	xen_init_cpuid_mask();
  
-@@ -1144,6 +1195,8 @@ asmlinkage void __init xen_start_kernel(void)
+@@ -1144,6 +1205,8 @@ asmlinkage void __init xen_start_kernel(void)
  
  	pgd = (pgd_t *)xen_start_info->pt_base;
  
@@ -3484,7 +3635,7 @@ index 3578688..cc0c7ed 100644
  	/* Don't do the full vcpu_info placement stuff until we have a
  	   possible map and a non-dummy shared_info. */
  	per_cpu(xen_vcpu, 0) = &HYPERVISOR_shared_info->vcpu_info[0];
-@@ -1153,6 +1206,7 @@ asmlinkage void __init xen_start_kernel(void)
+@@ -1153,6 +1216,7 @@ asmlinkage void __init xen_start_kernel(void)
  
  	xen_raw_console_write("mapping kernel into physical memory\n");
  	pgd = xen_setup_kernel_pagetable(pgd, xen_start_info->nr_pages);
@@ -3492,7 +3643,7 @@ index 3578688..cc0c7ed 100644
  
  	init_mm.pgd = pgd;
  
-@@ -1162,6 +1216,14 @@ asmlinkage void __init xen_start_kernel(void)
+@@ -1162,6 +1226,14 @@ asmlinkage void __init xen_start_kernel(void)
  	if (xen_feature(XENFEAT_supervisor_mode_kernel))
  		pv_info.kernel_rpl = 0;
  
@@ -3507,7 +3658,7 @@ index 3578688..cc0c7ed 100644
  	/* set the limit of our address space */
  	xen_reserve_top();
  
-@@ -1184,6 +1246,16 @@ asmlinkage void __init xen_start_kernel(void)
+@@ -1184,6 +1256,16 @@ asmlinkage void __init xen_start_kernel(void)
  		add_preferred_console("xenboot", 0, NULL);
  		add_preferred_console("tty", 0, NULL);
  		add_preferred_console("hvc", 0, NULL);
@@ -3524,6 +3675,149 @@ index 3578688..cc0c7ed 100644
  	}
  
  	xen_raw_console_write("about to get started...\n");
+@@ -1197,3 +1279,142 @@ asmlinkage void __init xen_start_kernel(void)
+ 	x86_64_start_reservations((char *)__pa_symbol(&boot_params));
+ #endif
+ }
++
++static uint32_t xen_cpuid_base(void)
++{
++	uint32_t base, eax, ebx, ecx, edx;
++	char signature[13];
++
++	for (base = 0x40000000; base < 0x40010000; base += 0x100) {
++		cpuid(base, &eax, &ebx, &ecx, &edx);
++		*(uint32_t*)(signature + 0) = ebx;
++		*(uint32_t*)(signature + 4) = ecx;
++		*(uint32_t*)(signature + 8) = edx;
++		signature[12] = 0;
++
++		if (!strcmp("XenVMMXenVMM", signature) && ((eax - base) >= 2))
++			return base;
++	}
++
++	return 0;
++}
++
++static int init_hvm_pv_info(int *major, int *minor)
++{
++	uint32_t eax, ebx, ecx, edx, pages, msr, base;
++	u64 pfn;
++
++	base = xen_cpuid_base();
++	if (!base)
++		return -EINVAL;
++
++	cpuid(base + 1, &eax, &ebx, &ecx, &edx);
++
++	*major = eax >> 16;
++	*minor = eax & 0xffff;
++	printk(KERN_INFO "Xen version %d.%d.\n", *major, *minor);
++
++	cpuid(base + 2, &pages, &msr, &ecx, &edx);
++
++	pfn = __pa(hypercall_page);
++	wrmsr_safe(msr, (u32)pfn, (u32)(pfn >> 32));
++
++	xen_setup_features();
++
++	pv_info = xen_info;
++	pv_info.kernel_rpl = 0;
++
++	xen_domain_type = XEN_HVM_DOMAIN;
++
++	return 0;
++}
++
++static void init_shared_info(void)
++{
++	struct xen_add_to_physmap xatp;
++	static struct shared_info *shared_info_page = 0;
++
++	if (!shared_info_page)
++		shared_info_page = (struct shared_info *) alloc_bootmem_pages(PAGE_SIZE);
++	xatp.domid = DOMID_SELF;
++	xatp.idx = 0;
++	xatp.space = XENMAPSPACE_shared_info;
++	xatp.gpfn = __pa(shared_info_page) >> PAGE_SHIFT;
++	if (HYPERVISOR_memory_op(XENMEM_add_to_physmap, &xatp))
++		BUG();
++
++	HYPERVISOR_shared_info = (struct shared_info *)shared_info_page;
++
++	/* Don't do the full vcpu_info placement stuff until we have a
++	   possible map and a non-dummy shared_info. */
++	per_cpu(xen_vcpu, 0) = &HYPERVISOR_shared_info->vcpu_info[0];
++}
++
++int xen_set_callback_via(uint64_t via)
++{
++	struct xen_hvm_param a;
++
++	a.domid = DOMID_SELF;
++	a.index = HVM_PARAM_CALLBACK_IRQ;
++	a.value = via;
++	return HYPERVISOR_hvm_op(HVMOP_set_param, &a);
++}
++
++void do_hvm_pv_evtchn_intr(void)
++{
++	xen_hvm_evtchn_do_upcall(get_irq_regs());
++}
++
++void xen_guest_init(void)
++{
++	int r;
++	int major, minor;
++	uint64_t callback_via;
++
++	if (xen_pv_domain())
++		return;
++
++	r = init_hvm_pv_info(&major, &minor);
++	if (r < 0)
++		return;
++
++	init_shared_info();
++
++	if (xen_feature(XENFEAT_hvm_callback_vector)) {
++		callback_via = HVM_CALLBACK_VECTOR(GENERIC_INTERRUPT_VECTOR);
++		xen_set_callback_via(callback_via);
++		generic_interrupt_extension = do_hvm_pv_evtchn_intr;
++		xen_have_vector_callback = 1;
++	}
++	if (unplug) {
++		/* unplug emulated devices */
++		outw(UNPLUG_ALL, XEN_IOPORT_UNPLUG);
++	}
++	have_vcpu_info_placement = 0;
++	x86_init.irqs.intr_init = xen_init_IRQ;
++	machine_ops = xen_machine_ops;
++}
++
++static int __init parse_unplug(char *arg)
++{
++	char *p, *q;
++
++	for (p = arg; p; p = q) {
++		q = strchr(arg, ',');
++		if (q)
++			*q++ = '\0';
++		if (!strcmp(p, "all"))
++			unplug |= UNPLUG_ALL;
++		else if (!strcmp(p, "ide-disks"))
++			unplug |= UNPLUG_ALL_IDE_DISKS;
++		else if (!strcmp(p, "aux-ide-disks"))
++			unplug |= UNPLUG_AUX_IDE_DISKS;
++		else if (!strcmp(p, "nics"))
++			unplug |= UNPLUG_ALL_NICS;
++		else
++			printk(KERN_WARNING "unrecognised option '%s' "
++				 "in module parameter 'dev_unplug'\n", p);
++	}
++	return 0;
++}
++early_param("xen_unplug", parse_unplug);
 diff --git a/arch/x86/xen/mmu.c b/arch/x86/xen/mmu.c
 index 350a3de..8c6a858 100644
 --- a/arch/x86/xen/mmu.c
@@ -4613,7 +4907,7 @@ index 0000000..3def132
 +}
 +EXPORT_SYMBOL(xen_unregister_device_domain_owner);
 diff --git a/arch/x86/xen/setup.c b/arch/x86/xen/setup.c
-index ad0047f..3c16973 100644
+index ad0047f..f008629 100644
 --- a/arch/x86/xen/setup.c
 +++ b/arch/x86/xen/setup.c
 @@ -10,6 +10,7 @@
@@ -4634,7 +4928,7 @@ index ad0047f..3c16973 100644
  #include <xen/features.h>
  
  #include "xen-ops.h"
-@@ -32,25 +35,125 @@ extern void xen_sysenter_target(void);
+@@ -32,25 +35,131 @@ extern void xen_sysenter_target(void);
  extern void xen_syscall_target(void);
  extern void xen_syscall32_target(void);
  
@@ -4683,18 +4977,24 @@ index ad0047f..3c16973 100644
 +	return len;
 +}
 +
-+static unsigned long __init xen_return_unused_memory(const struct e820map *e820)
++static unsigned long __init xen_return_unused_memory(unsigned long max_pfn,
++						     const struct e820map *e820)
 +{
++	phys_addr_t max_addr = PFN_PHYS(max_pfn);
 +	phys_addr_t last_end = 0;
 +	unsigned long released = 0;
 +	int i;
 +
-+	for (i = 0; i < e820->nr_map; i++) {
-+		released += xen_release_chunk(last_end, e820->map[i].addr);
++	for (i = 0; i < e820->nr_map && last_end < max_addr; i++) {
++		phys_addr_t end = e820->map[i].addr;
++		end = min(max_addr, end);
++
++		released += xen_release_chunk(last_end, end);
 +		last_end = e820->map[i].addr + e820->map[i].size;
 +	}
 +
-+	released += xen_release_chunk(last_end, PFN_PHYS(xen_start_info->nr_pages));
++	if (last_end < max_addr)
++		released += xen_release_chunk(last_end, max_addr);
 +
 +	printk(KERN_INFO "released %ld pages of unused memory\n", released);
 +	return released;
@@ -4763,16 +5063,16 @@ index ad0047f..3c16973 100644
  	 */
  	e820_add_region(ISA_START_ADDRESS, ISA_END_ADDRESS - ISA_START_ADDRESS,
  			E820_RESERVED);
-@@ -67,6 +170,8 @@ char * __init xen_memory_setup(void)
+@@ -67,6 +176,8 @@ char * __init xen_memory_setup(void)
  
  	sanitize_e820_map(e820.map, ARRAY_SIZE(e820.map), &e820.nr_map);
  
-+	xen_return_unused_memory(&e820);
++	xen_return_unused_memory(xen_start_info->nr_pages, &e820);
 +
  	return "Xen";
  }
  
-@@ -182,13 +287,17 @@ void __init xen_arch_setup(void)
+@@ -182,13 +293,17 @@ void __init xen_arch_setup(void)
  	}
  #endif
  
@@ -6637,7 +6937,7 @@ index 1c040d0..3dc8d6b 100644
  }
  EXPORT_SYMBOL(ttm_fbdev_mmap);
 diff --git a/drivers/input/xen-kbdfront.c b/drivers/input/xen-kbdfront.c
-index b115726..0859bb0 100644
+index b115726..80a072e 100644
 --- a/drivers/input/xen-kbdfront.c
 +++ b/drivers/input/xen-kbdfront.c
 @@ -21,7 +21,10 @@
@@ -6660,6 +6960,15 @@ index b115726..0859bb0 100644
  	case XenbusStateUnknown:
  	case XenbusStateClosed:
  		break;
+@@ -335,7 +340,7 @@ static struct xenbus_driver xenkbd_driver = {
+ 
+ static int __init xenkbd_init(void)
+ {
+-	if (!xen_domain())
++	if (!xen_domain() || xen_hvm_domain())
+ 		return -ENODEV;
+ 
+ 	/* Nothing to do if running in dom0. */
 diff --git a/drivers/net/Kconfig b/drivers/net/Kconfig
 index b2f71f7..b7feb84 100644
 --- a/drivers/net/Kconfig
@@ -7142,7 +7451,7 @@ index 0000000..ac6bcdb
 +
 diff --git a/drivers/pci/xen-pcifront.c b/drivers/pci/xen-pcifront.c
 new file mode 100644
-index 0000000..2c36004
+index 0000000..360eccf
 --- /dev/null
 +++ b/drivers/pci/xen-pcifront.c
 @@ -0,0 +1,1156 @@
@@ -7440,7 +7749,7 @@ index 0000000..2c36004
 +		if (likely(!op.value)) {
 +			/* we get the result */
 +			for (i = 0; i < nvec; i++)
-+				*vector[i] = op.msix_entries[i].vector;
++				*(*vector+i) = op.msix_entries[i].vector;
 +			return 0;
 +		} else {
 +			printk(KERN_DEBUG "enable msix get value %x\n",
@@ -7486,7 +7795,7 @@ index 0000000..2c36004
 +
 +	err = do_pci_op(pdev, &op);
 +	if (likely(!err)) {
-+		*vector[0] = op.value;
++		*(*vector) = op.value;
 +	} else {
 +		dev_err(&dev->dev, "pci frontend enable msi failed for dev "
 +				   "%x:%x \n", op.bus, op.devfn);
@@ -8369,7 +8678,7 @@ index df1f757..661bfd2 100644
  	info->fbdefio = &metronomefb_defio;
  	fb_deferred_io_init(info);
 diff --git a/drivers/video/xen-fbfront.c b/drivers/video/xen-fbfront.c
-index 54cd916..7ec2c90 100644
+index 54cd916..dc72563 100644
 --- a/drivers/video/xen-fbfront.c
 +++ b/drivers/video/xen-fbfront.c
 @@ -25,7 +25,10 @@
@@ -8401,8 +8710,17 @@ index 54cd916..7ec2c90 100644
  	case XenbusStateUnknown:
  	case XenbusStateClosed:
  		break;
+@@ -680,7 +685,7 @@ static struct xenbus_driver xenfb_driver = {
+ 
+ static int __init xenfb_init(void)
+ {
+-	if (!xen_domain())
++	if (!xen_domain() || xen_hvm_domain())
+ 		return -ENODEV;
+ 
+ 	/* Nothing to do if running in dom0. */
 diff --git a/drivers/xen/Kconfig b/drivers/xen/Kconfig
-index cab100a..d6d6f3e 100644
+index cab100a..c63eeae 100644
 --- a/drivers/xen/Kconfig
 +++ b/drivers/xen/Kconfig
 @@ -28,6 +28,110 @@ config XEN_DEV_EVTCHN
@@ -8516,13 +8834,26 @@ index cab100a..d6d6f3e 100644
  config XENFS
  	tristate "Xen filesystem"
  	depends on XEN
-@@ -60,4 +164,23 @@ config XEN_SYS_HYPERVISOR
+@@ -60,4 +164,36 @@ config XEN_SYS_HYPERVISOR
           Create entries under /sys/hypervisor describing the Xen
  	 hypervisor environment.  When running native or in another
  	 virtual environment, /sys/hypervisor will still be present,
 -	 but will have no xen contents.
 \ No newline at end of file
 +	 but will have no xen contents.
++
++config XEN_PLATFORM_PCI
++	tristate "xen platform pci device driver"
++	depends on XEN
++	help
++	  Driver for the Xen PCI Platform device: it is responsible for
++	  initializing xenbus and grant_table when running in a Xen HVM
++	  domain. As a consequence this driver is required to run any Xen PV
++	  frontend on Xen HVM.
++
++config XEN_MCE
++       def_bool y
++       depends on XEN_DOM0 && X86_64 && X86_MCE_INTEL
 +
 +config XEN_XENBUS_FRONTEND
 +       tristate
@@ -8543,10 +8874,10 @@ index cab100a..d6d6f3e 100644
 +	   depends on XEN_DOM0 && ACPI_PROCESSOR && CPU_FREQ
 +	   default y
 diff --git a/drivers/xen/Makefile b/drivers/xen/Makefile
-index 7c28434..23bc06e 100644
+index 7c28434..5771359 100644
 --- a/drivers/xen/Makefile
 +++ b/drivers/xen/Makefile
-@@ -1,12 +1,24 @@
+@@ -1,12 +1,27 @@
 -obj-y	+= grant-table.o features.o events.o manage.o
 +obj-y	+= grant-table.o features.o events.o manage.o biomerge.o pcpu.o
  obj-y	+= xenbus/
@@ -8573,6 +8904,9 @@ index 7c28434..23bc06e 100644
 +obj-$(CONFIG_XEN_NETDEV_BACKEND)	+= netback/
 +obj-$(CONFIG_XENFS)			+= xenfs/
 +obj-$(CONFIG_XEN_SYS_HYPERVISOR)	+= sys-hypervisor.o
++obj-$(CONFIG_XEN_PLATFORM_PCI)		+= platform-pci.o
++obj-$(CONFIG_XEN_MCE)		+= mce.o
++
 +obj-$(CONFIG_XEN_S3)           += acpi.o
 +obj-$(CONFIG_ACPI_PROCESSOR_XEN) += acpi_processor.o
 +obj-$(CONFIG_ACPI_HOTPLUG_MEMORY)  += xen_acpi_memhotplug.o
@@ -14539,7 +14873,7 @@ index bdfd584..6625ffe 100644
  
  #include <asm/xen/hypervisor.h>
 diff --git a/drivers/xen/events.c b/drivers/xen/events.c
-index ce602dd..660774a 100644
+index ce602dd..9c8ad5c 100644
 --- a/drivers/xen/events.c
 +++ b/drivers/xen/events.c
 @@ -16,7 +16,7 @@
@@ -14551,7 +14885,7 @@ index ce602dd..660774a 100644
   *
   * Jeremy Fitzhardinge <jeremy@xensource.com>, XenSource Inc, 2007
   */
-@@ -27,19 +27,27 @@
+@@ -27,19 +27,28 @@
  #include <linux/module.h>
  #include <linux/string.h>
  #include <linux/bootmem.h>
@@ -14569,6 +14903,7 @@ index ce602dd..660774a 100644
  #include <asm/xen/hypervisor.h>
 +#include <asm/xen/pci.h>
  
++#include <xen/hvm.h>
  #include <xen/xen-ops.h>
  #include <xen/events.h>
  #include <xen/interface/xen.h>
@@ -14579,7 +14914,7 @@ index ce602dd..660774a 100644
  /*
   * This lock protects updates to the following mapping and reference-count
   * arrays. The lock does not need to be acquired to read the mapping tables.
-@@ -67,7 +75,7 @@ enum xen_irq_type {
+@@ -67,7 +76,7 @@ enum xen_irq_type {
   * event channel - irq->event channel mapping
   * cpu - cpu this event channel is bound to
   * index - type-specific information:
@@ -14588,7 +14923,7 @@ index ce602dd..660774a 100644
   *    VIRQ - virq number
   *    IPI - IPI vector
   *    EVTCHN -
-@@ -83,20 +91,27 @@ struct irq_info
+@@ -83,20 +92,27 @@ struct irq_info
  		enum ipi_vector ipi;
  		struct {
  			unsigned short gsi;
@@ -14622,7 +14957,7 @@ index ce602dd..660774a 100644
  static inline unsigned long *cpu_evtchn_mask(int cpu)
  {
  	return cpu_evtchn_mask_p[cpu].bits;
-@@ -106,6 +121,7 @@ static inline unsigned long *cpu_evtchn_mask(int cpu)
+@@ -106,6 +122,7 @@ static inline unsigned long *cpu_evtchn_mask(int cpu)
  #define VALID_EVTCHN(chn)	((chn) != 0)
  
  static struct irq_chip xen_dynamic_chip;
@@ -14630,7 +14965,7 @@ index ce602dd..660774a 100644
  
  /* Constructor for packed IRQ information. */
  static struct irq_info mk_unbound_info(void)
-@@ -135,7 +151,8 @@ static struct irq_info mk_pirq_info(unsigned short evtchn,
+@@ -135,7 +152,8 @@ static struct irq_info mk_pirq_info(unsigned short evtchn,
  				    unsigned short gsi, unsigned short vector)
  {
  	return (struct irq_info) { .type = IRQT_PIRQ, .evtchn = evtchn,
@@ -14640,7 +14975,7 @@ index ce602dd..660774a 100644
  }
  
  /*
-@@ -218,6 +235,15 @@ static unsigned int cpu_from_evtchn(unsigned int evtchn)
+@@ -218,6 +236,15 @@ static unsigned int cpu_from_evtchn(unsigned int evtchn)
  	return ret;
  }
  
@@ -14656,7 +14991,7 @@ index ce602dd..660774a 100644
  static inline unsigned long active_evtchns(unsigned int cpu,
  					   struct shared_info *sh,
  					   unsigned int idx)
-@@ -329,17 +355,33 @@ static void unmask_evtchn(int port)
+@@ -329,17 +356,42 @@ static void unmask_evtchn(int port)
  	put_cpu();
  }
  
@@ -14682,9 +15017,18 @@ index ce602dd..660774a 100644
 +		goto no_irqs;
 +
 +	/* nr_irqs is a magic value. Must not use it.*/
-+	for (irq = nr_irqs-1; irq > start; irq--)
++	for (irq = nr_irqs-1; irq > start; irq--) {
++		desc = irq_to_desc(irq);
++		/* only 0->15 have init'd desc; handle irq > 16 */
++		if (desc == NULL)
++			break;
++		if (desc->chip == &no_irq_chip)
++			break;
++		if (desc->chip != &xen_dynamic_chip)
++			continue;
  		if (irq_info[irq].type == IRQT_UNBOUND)
  			break;
++	}
  
 -	if (irq == nr_irqs)
 -		panic("No available IRQ to bind to: increase nr_irqs!\n");
@@ -14693,7 +15037,7 @@ index ce602dd..660774a 100644
  
  	desc = irq_to_desc_alloc_node(irq, 0);
  	if (WARN_ON(desc == NULL))
-@@ -348,8 +390,324 @@ static int find_unbound_irq(void)
+@@ -348,8 +400,324 @@ static int find_unbound_irq(void)
  	dynamic_irq_init(irq);
  
  	return irq;
@@ -14733,8 +15077,8 @@ index ce602dd..660774a 100644
 +	info->u.pirq.flags &= ~PIRQ_NEEDS_EOI;
 +	if (irq_status.flags & XENIRQSTAT_needs_eoi)
 +		info->u.pirq.flags |= PIRQ_NEEDS_EOI;
- }
- 
++}
++
 +static bool probing_irq(int irq)
 +{
 +	struct irq_desc *desc = irq_to_desc(irq);
@@ -14805,8 +15149,8 @@ index ce602dd..660774a 100644
 +static void enable_pirq(unsigned int irq)
 +{
 +	startup_pirq(irq);
-+}
-+
+ }
+ 
 +static void disable_pirq(unsigned int irq)
 +{
 +}
@@ -15018,7 +15362,7 @@ index ce602dd..660774a 100644
  int bind_evtchn_to_irq(unsigned int evtchn)
  {
  	int irq;
-@@ -409,8 +767,23 @@ static int bind_ipi_to_irq(unsigned int ipi, unsigned int cpu)
+@@ -409,8 +777,23 @@ static int bind_ipi_to_irq(unsigned int ipi, unsigned int cpu)
  	return irq;
  }
  
@@ -15027,11 +15371,11 @@ index ce602dd..660774a 100644
 +{
 +        struct evtchn_bind_interdomain bind_interdomain;
 +        int err;
-+
-+        bind_interdomain.remote_dom  = remote_domain;
-+        bind_interdomain.remote_port = remote_port;
  
 -static int bind_virq_to_irq(unsigned int virq, unsigned int cpu)
++        bind_interdomain.remote_dom  = remote_domain;
++        bind_interdomain.remote_port = remote_port;
++
 +        err = HYPERVISOR_event_channel_op(EVTCHNOP_bind_interdomain,
 +                                          &bind_interdomain);
 +
@@ -15043,7 +15387,7 @@ index ce602dd..660774a 100644
  {
  	struct evtchn_bind_virq bind_virq;
  	int evtchn, irq;
-@@ -504,6 +877,29 @@ int bind_evtchn_to_irqhandler(unsigned int evtchn,
+@@ -504,6 +887,29 @@ int bind_evtchn_to_irqhandler(unsigned int evtchn,
  }
  EXPORT_SYMBOL_GPL(bind_evtchn_to_irqhandler);
  
@@ -15073,7 +15417,7 @@ index ce602dd..660774a 100644
  int bind_virq_to_irqhandler(unsigned int virq, unsigned int cpu,
  			    irq_handler_t handler,
  			    unsigned long irqflags, const char *devname, void *dev_id)
-@@ -535,6 +931,7 @@ int bind_ipi_to_irqhandler(enum ipi_vector ipi,
+@@ -535,6 +941,7 @@ int bind_ipi_to_irqhandler(enum ipi_vector ipi,
  	if (irq < 0)
  		return irq;
  
@@ -15081,7 +15425,26 @@ index ce602dd..660774a 100644
  	retval = request_irq(irq, handler, irqflags, devname, dev_id);
  	if (retval != 0) {
  		unbind_from_irq(irq);
-@@ -649,9 +1046,13 @@ void xen_evtchn_do_upcall(struct pt_regs *regs)
+@@ -616,17 +1023,13 @@ static DEFINE_PER_CPU(unsigned, xed_nesting_count);
+  * a bitset of words which contain pending event bits.  The second
+  * level is a bitset of pending events themselves.
+  */
+-void xen_evtchn_do_upcall(struct pt_regs *regs)
++void __xen_evtchn_do_upcall(struct pt_regs *regs)
+ {
+ 	int cpu = get_cpu();
+-	struct pt_regs *old_regs = set_irq_regs(regs);
+ 	struct shared_info *s = HYPERVISOR_shared_info;
+ 	struct vcpu_info *vcpu_info = __get_cpu_var(xen_vcpu);
+  	unsigned count;
+ 
+-	exit_idle();
+-	irq_enter();
+-
+ 	do {
+ 		unsigned long pending_words;
+ 
+@@ -649,9 +1052,13 @@ void xen_evtchn_do_upcall(struct pt_regs *regs)
  				int bit_idx = __ffs(pending_bits);
  				int port = (word_idx * BITS_PER_LONG) + bit_idx;
  				int irq = evtchn_to_irq[port];
@@ -15097,7 +15460,44 @@ index ce602dd..660774a 100644
  			}
  		}
  
-@@ -855,7 +1256,7 @@ void xen_clear_irq_pending(int irq)
+@@ -662,10 +1069,26 @@ void xen_evtchn_do_upcall(struct pt_regs *regs)
+ 	} while(count != 1);
+ 
+ out:
++
++	put_cpu();
++}
++
++void xen_evtchn_do_upcall(struct pt_regs *regs)
++{
++	struct pt_regs *old_regs = set_irq_regs(regs);
++
++	exit_idle();
++	irq_enter();
++
++	__xen_evtchn_do_upcall(regs);
++
+ 	irq_exit();
+ 	set_irq_regs(old_regs);
++}
+ 
+-	put_cpu();
++void xen_hvm_evtchn_do_upcall(struct pt_regs *regs)
++{
++	__xen_evtchn_do_upcall(regs);
+ }
+ 
+ /* Rebind a new event channel to an existing irq. */
+@@ -703,7 +1126,7 @@ static int rebind_irq_to_cpu(unsigned irq, unsigned tcpu)
+ 	struct evtchn_bind_vcpu bind_vcpu;
+ 	int evtchn = evtchn_from_irq(irq);
+ 
+-	if (!VALID_EVTCHN(evtchn))
++	if (!VALID_EVTCHN(evtchn) || xen_hvm_domain())
+ 		return -1;
+ 
+ 	/* Send future instances of this interrupt to other vcpu. */
+@@ -855,7 +1278,7 @@ void xen_clear_irq_pending(int irq)
  	if (VALID_EVTCHN(evtchn))
  		clear_evtchn(evtchn);
  }
@@ -15106,7 +15506,7 @@ index ce602dd..660774a 100644
  void xen_set_irq_pending(int irq)
  {
  	int evtchn = evtchn_from_irq(irq);
-@@ -875,9 +1276,9 @@ bool xen_test_irq_pending(int irq)
+@@ -875,9 +1298,9 @@ bool xen_test_irq_pending(int irq)
  	return ret;
  }
  
@@ -15118,7 +15518,7 @@ index ce602dd..660774a 100644
  {
  	evtchn_port_t evtchn = evtchn_from_irq(irq);
  
-@@ -885,13 +1286,20 @@ void xen_poll_irq(int irq)
+@@ -885,13 +1308,33 @@ void xen_poll_irq(int irq)
  		struct sched_poll poll;
  
  		poll.nr_ports = 1;
@@ -15137,10 +15537,23 @@ index ce602dd..660774a 100644
 +{
 +	xen_poll_irq_timeout(irq, 0 /* no timeout */);
 +}
++
++/* Check whether the IRQ line is shared with other guests. */
++int xen_ignore_irq(int irq)
++{
++	struct irq_info *info = info_for_irq(irq);
++	struct physdev_irq_status_query irq_status = { .irq =
++							info->u.pirq.gsi };
++
++	if (HYPERVISOR_physdev_op(PHYSDEVOP_irq_status_query, &irq_status))
++		return 0;
++	return !(irq_status.flags & XENIRQSTAT_shared);
++}
++EXPORT_SYMBOL_GPL(xen_ignore_irq);
  
  void xen_irq_resume(void)
  {
-@@ -928,13 +1336,38 @@ static struct irq_chip xen_dynamic_chip __read_mostly = {
+@@ -928,13 +1371,38 @@ static struct irq_chip xen_dynamic_chip __read_mostly = {
  	.retrigger	= retrigger_dynirq,
  };
  
@@ -15180,10 +15593,15 @@ index ce602dd..660774a 100644
  
  	init_evtchn_cpu_bindings();
  
-@@ -943,4 +1376,6 @@ void __init xen_init_IRQ(void)
+@@ -942,5 +1410,10 @@ void __init xen_init_IRQ(void)
+ 	for (i = 0; i < NR_EVENT_CHANNELS; i++)
  		mask_evtchn(i);
  
- 	irq_ctx_init(smp_processor_id());
+-	irq_ctx_init(smp_processor_id());
++	if (xen_hvm_domain())
++		native_init_IRQ();
++	else
++		irq_ctx_init(smp_processor_id());
 +
 +	xen_setup_pirqs();
  }
@@ -16012,18 +16430,64 @@ index 0000000..ddc59cc
 +
 +/* ------------------------------------------------------------------ */
 diff --git a/drivers/xen/grant-table.c b/drivers/xen/grant-table.c
-index 7d8f531..76fe621 100644
+index 7d8f531..8df6ae0 100644
 --- a/drivers/xen/grant-table.c
 +++ b/drivers/xen/grant-table.c
-@@ -37,6 +37,7 @@
+@@ -36,10 +36,14 @@
+ #include <linux/mm.h>
  #include <linux/vmalloc.h>
  #include <linux/uaccess.h>
++#include <linux/io.h>
  
 +#include <xen/xen.h>
  #include <xen/interface/xen.h>
  #include <xen/page.h>
  #include <xen/grant_table.h>
-@@ -472,6 +473,111 @@ static int gnttab_map(unsigned int start_idx, unsigned int end_idx)
++#include <xen/platform_pci.h>
++#include <xen/interface/memory.h>
+ #include <asm/xen/hypercall.h>
+ 
+ #include <asm/pgtable.h>
+@@ -57,6 +61,7 @@ static unsigned int boot_max_nr_grant_frames;
+ static int gnttab_free_count;
+ static grant_ref_t gnttab_free_head;
+ static DEFINE_SPINLOCK(gnttab_list_lock);
++static unsigned long hvm_pv_resume_frames;
+ 
+ static struct grant_entry *shared;
+ 
+@@ -447,6 +452,30 @@ static int gnttab_map(unsigned int start_idx, unsigned int end_idx)
+ 	unsigned int nr_gframes = end_idx + 1;
+ 	int rc;
+ 
++	if (xen_hvm_domain()) {
++		struct xen_add_to_physmap xatp;
++		unsigned int i = end_idx;
++		rc = 0;
++		/*
++		 * Loop backwards, so that the first hypercall has the largest
++		 * index, ensuring that the table will grow only once.
++		 */
++		do {
++			xatp.domid = DOMID_SELF;
++			xatp.idx = i;
++			xatp.space = XENMAPSPACE_grant_table;
++			xatp.gpfn = (hvm_pv_resume_frames >> PAGE_SHIFT) + i;
++			rc = HYPERVISOR_memory_op(XENMEM_add_to_physmap, &xatp);
++			if (rc != 0) {
++				printk(KERN_WARNING
++						"grant table add_to_physmap failed, err=%d\n", rc);
++				break;
++			}
++		} while (i-- > start_idx);
++
++		return rc;
++	}
++
+ 	frames = kmalloc(nr_gframes * sizeof(unsigned long), GFP_ATOMIC);
+ 	if (!frames)
+ 		return -ENOMEM;
+@@ -472,11 +501,135 @@ static int gnttab_map(unsigned int start_idx, unsigned int end_idx)
  	return 0;
  }
  
@@ -16134,7 +16598,445 @@ index 7d8f531..76fe621 100644
 +
  int gnttab_resume(void)
  {
- 	if (max_nr_grant_frames() < nr_grant_frames)
+-	if (max_nr_grant_frames() < nr_grant_frames)
++	unsigned int max_nr_gframes;
++
++	max_nr_gframes = max_nr_grant_frames();
++	if (max_nr_gframes < nr_grant_frames)
+ 		return -ENOSYS;
+-	return gnttab_map(0, nr_grant_frames - 1);
++
++	if (xen_pv_domain())
++		return gnttab_map(0, nr_grant_frames - 1);
++
++	if (!hvm_pv_resume_frames) {
++		hvm_pv_resume_frames = alloc_xen_mmio(PAGE_SIZE * max_nr_gframes);
++		shared = ioremap(hvm_pv_resume_frames, PAGE_SIZE * max_nr_gframes);
++		if (shared == NULL) {
++			printk(KERN_WARNING
++					"Fail to ioremap gnttab share frames\n");
++			return -ENOMEM;
++		}
++	}
++
++	gnttab_map(0, nr_grant_frames - 1);
++
++	return 0;
+ }
+ 
+ int gnttab_suspend(void)
+@@ -503,15 +656,12 @@ static int gnttab_expand(unsigned int req_entries)
+ 	return rc;
+ }
+ 
+-static int __devinit gnttab_init(void)
++int gnttab_init(void)
+ {
+ 	int i;
+ 	unsigned int max_nr_glist_frames, nr_glist_frames;
+ 	unsigned int nr_init_grefs;
+ 
+-	if (!xen_domain())
+-		return -ENODEV;
+-
+ 	nr_grant_frames = 1;
+ 	boot_max_nr_grant_frames = __max_nr_grant_frames();
+ 
+@@ -555,4 +705,16 @@ static int __devinit gnttab_init(void)
+ 	return -ENOMEM;
+ }
+ 
+-core_initcall(gnttab_init);
++static int __devinit __gnttab_init(void)
++{
++	/* Delay grant-table initialization in the PV on HVM case */
++	if (xen_hvm_domain())
++		return 0;
++
++	if (!xen_pv_domain())
++		return -ENODEV;
++
++	return gnttab_init();
++}
++
++core_initcall(__gnttab_init);
+diff --git a/drivers/xen/manage.c b/drivers/xen/manage.c
+index 5d42d55..004b1dd 100644
+--- a/drivers/xen/manage.c
++++ b/drivers/xen/manage.c
+@@ -7,15 +7,19 @@
+ #include <linux/sysrq.h>
+ #include <linux/stop_machine.h>
+ #include <linux/freezer.h>
++#include <linux/pci.h>
++#include <linux/cpumask.h>
+ 
+ #include <xen/xenbus.h>
+ #include <xen/grant_table.h>
+ #include <xen/events.h>
+ #include <xen/hvc-console.h>
+ #include <xen/xen-ops.h>
++#include <xen/platform_pci.h>
+ 
+ #include <asm/xen/hypercall.h>
+ #include <asm/xen/page.h>
++#include <asm/xen/hypervisor.h>
+ 
+ enum shutdown_state {
+ 	SHUTDOWN_INVALID = -1,
+@@ -32,10 +36,30 @@ enum shutdown_state {
+ static enum shutdown_state shutting_down = SHUTDOWN_INVALID;
+ 
+ #ifdef CONFIG_PM_SLEEP
+-static int xen_suspend(void *data)
++static int xen_hvm_suspend(void *data)
+ {
++	struct sched_shutdown r = { .reason = SHUTDOWN_suspend };
+ 	int *cancelled = data;
++
++	BUG_ON(!irqs_disabled());
++
++	*cancelled = HYPERVISOR_sched_op(SCHEDOP_shutdown, &r);
++
++	xen_guest_init();
++	gnttab_resume();
++
++	if (!*cancelled) {
++		xen_irq_resume();
++		platform_pci_resume();
++	}
++
++	return 0;
++}
++
++static int xen_suspend(void *data)
++{
+ 	int err;
++	int *cancelled = data;
+ 
+ 	BUG_ON(!irqs_disabled());
+ 
+@@ -72,6 +96,59 @@ static int xen_suspend(void *data)
+ 	return 0;
+ }
+ 
++static void do_hvm_suspend(void)
++{
++	int err;
++	int cancelled = 1;
++
++	shutting_down = SHUTDOWN_SUSPEND;
++
++	err = stop_machine_create();
++	if (err) {
++		printk(KERN_ERR "xen suspend: failed to setup stop_machine %d\n", err);
++		goto out;
++	}
++
++#ifdef CONFIG_PREEMPT
++	/* If the kernel is preemptible, we need to freeze all the processes
++	   to prevent them from being in the middle of a pagetable update
++	   during suspend. */
++	err = freeze_processes();
++	if (err) {
++		printk(KERN_ERR "xen suspend: freeze failed %d\n", err);
++		goto out_destroy_sm;
++	}
++#endif
++
++	printk(KERN_DEBUG "suspending xenstore... ");
++	xenbus_suspend();
++	printk(KERN_DEBUG "xenstore suspended\n");
++	platform_pci_disable_irq();
++	
++	err = stop_machine(xen_hvm_suspend, &cancelled, cpumask_of(0));
++	if (err) {
++		printk(KERN_ERR "failed to start xen_suspend: %d\n", err);
++		cancelled = 1;
++	}
++
++	platform_pci_enable_irq();
++
++	if (!cancelled) {
++		xen_arch_resume();
++		xenbus_resume();
++	} else
++		xs_suspend_cancel();
++
++	/* Make sure timer events get retriggered on all CPUs */
++	clock_was_set();
++
++out_destroy_sm:
++	stop_machine_destroy();
++
++out:
++	shutting_down = SHUTDOWN_INVALID;
++}
++
+ static void do_suspend(void)
+ {
+ 	int err;
+@@ -184,7 +261,10 @@ static void shutdown_handler(struct xenbus_watch *watch,
+ 		ctrl_alt_del();
+ #ifdef CONFIG_PM_SLEEP
+ 	} else if (strcmp(str, "suspend") == 0) {
+-		do_suspend();
++		if (xen_hvm_domain())
++			do_hvm_suspend();
++		else
++			do_suspend();
+ #endif
+ 	} else {
+ 		printk(KERN_INFO "Ignoring shutdown request: %s\n", str);
+@@ -260,7 +340,19 @@ static int shutdown_event(struct notifier_block *notifier,
+ 	return NOTIFY_DONE;
+ }
+ 
+-static int __init setup_shutdown_event(void)
++static int __init __setup_shutdown_event(void)
++{
++	/* Delay initialization in the PV on HVM case */
++	if (xen_hvm_domain())
++		return 0;
++
++	if (!xen_pv_domain())
++		return -ENODEV;
++
++	return xen_setup_shutdown_event();
++}
++
++int xen_setup_shutdown_event(void)
+ {
+ 	static struct notifier_block xenstore_notifier = {
+ 		.notifier_call = shutdown_event
+@@ -270,4 +362,4 @@ static int __init setup_shutdown_event(void)
+ 	return 0;
+ }
+ 
+-subsys_initcall(setup_shutdown_event);
++subsys_initcall(__setup_shutdown_event);
+diff --git a/drivers/xen/mce.c b/drivers/xen/mce.c
+new file mode 100644
+index 0000000..da566a5
+--- /dev/null
++++ b/drivers/xen/mce.c
+@@ -0,0 +1,216 @@
++/******************************************************************************
++ * mce.c
++ * Add Machine Check event Logging support in DOM0
++ *
++ * Driver for receiving and logging machine check event
++ *
++ * Copyright (c) 2008, 2009 Intel Corporation
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License version 2
++ * as published by the Free Software Foundation; or, when distributed
++ * separately from the Linux kernel or incorporated into other
++ * software packages, subject to the following license:
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this source file (the "Software"), to deal in the Software without
++ * restriction, including without limitation the rights to use, copy, modify,
++ * merge, publish, distribute, sublicense, and/or sell copies of the Software,
++ * and to permit persons to whom the Software is furnished to do so, subject to
++ * the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ */
++
++#include <linux/module.h>
++#include <linux/init.h>
++#include <linux/types.h>
++#include <linux/kernel.h>
++#include <xen/interface/xen.h>
++#include <asm/xen/hypervisor.h>
++#include <xen/events.h>
++#include <xen/interface/vcpu.h>
++#include <asm/xen/hypercall.h>
++#include <asm/mce.h>
++#include <xen/xen.h>
++
++static mc_info_t *g_mi;
++static mcinfo_logical_cpu_t *g_physinfo;
++static uint32_t ncpus;
++
++static int convert_log(struct mc_info *mi)
++{
++	struct mcinfo_common *mic = NULL;
++	struct mcinfo_global *mc_global;
++	struct mcinfo_bank *mc_bank;
++	struct mce m;
++	int i, found = 0;
++
++	x86_mcinfo_lookup(&mic, mi, MC_TYPE_GLOBAL);
++	WARN_ON(!mic);
++
++	mce_setup(&m);
++	mc_global = (struct mcinfo_global *)mic;
++	m.mcgstatus = mc_global->mc_gstatus;
++	m.apicid = mc_global->mc_apicid;
++	for (i = 0; i < ncpus; i++) {
++		if (g_physinfo[i].mc_apicid == m.apicid) {
++			found = 1;
++			break;
++		}
++	}
++	WARN_ON(!found);
++
++	m.socketid = g_physinfo[i].mc_chipid;
++	m.cpu = m.extcpu = g_physinfo[i].mc_cpunr;
++	m.cpuvendor = (__u8)g_physinfo[i].mc_vendor;
++	m.mcgcap = g_physinfo[i].mc_msrvalues[0].value;
++	x86_mcinfo_lookup(&mic, mi, MC_TYPE_BANK);
++	do {
++		if (mic == NULL || mic->size == 0)
++			break;
++		if (mic->type == MC_TYPE_BANK) {
++			mc_bank = (struct mcinfo_bank *)mic;
++			m.misc = mc_bank->mc_misc;
++			m.status = mc_bank->mc_status;
++			m.addr = mc_bank->mc_addr;
++			m.tsc = mc_bank->mc_tsc;
++			m.bank = mc_bank->mc_bank;
++			m.finished = 1;
++			/*log this record*/
++			mce_log(&m);
++		}
++		mic = x86_mcinfo_next(mic);
++	} while (1);
++
++	return 0;
++}
++
++/*pv_ops domain mce virq handler, logging physical mce error info*/
++static irqreturn_t mce_dom_interrupt(int irq, void *dev_id)
++{
++	xen_mc_t mc_op;
++	int result = 0;
++
++	mc_op.cmd = XEN_MC_fetch;
++	mc_op.interface_version = XEN_MCA_INTERFACE_VERSION;
++	set_xen_guest_handle(mc_op.u.mc_fetch.data, g_mi);
++urgent:
++	mc_op.u.mc_fetch.flags = XEN_MC_URGENT;
++	result = HYPERVISOR_mca(&mc_op);
++	if (result || mc_op.u.mc_fetch.flags & XEN_MC_NODATA ||
++			mc_op.u.mc_fetch.flags & XEN_MC_FETCHFAILED)
++		goto nonurgent;
++	else {
++		result = convert_log(g_mi);
++		if (result)
++			goto end;
++		/* After fetching the error event log entry from DOM0,
++		 * we need to dec the refcnt and release the entry.
++		 * The entry is reserved and inc refcnt when filling
++		 * the error log entry.
++		 */
++		mc_op.u.mc_fetch.flags = XEN_MC_URGENT | XEN_MC_ACK;
++		result = HYPERVISOR_mca(&mc_op);
++		goto urgent;
++	}
++nonurgent:
++	mc_op.u.mc_fetch.flags = XEN_MC_NONURGENT;
++	result = HYPERVISOR_mca(&mc_op);
++	if (result || mc_op.u.mc_fetch.flags & XEN_MC_NODATA ||
++			mc_op.u.mc_fetch.flags & XEN_MC_FETCHFAILED)
++		goto end;
++	else {
++		result = convert_log(g_mi);
++		if (result)
++			goto end;
++		/* After fetching the error event log entry from DOM0,
++		 * we need to dec the refcnt and release the entry. The
++		 * entry is reserved and inc refcnt when filling the
++		 * error log entry.
++		 */
++		mc_op.u.mc_fetch.flags = XEN_MC_NONURGENT | XEN_MC_ACK;
++		result = HYPERVISOR_mca(&mc_op);
++		goto nonurgent;
++	}
++end:
++	return IRQ_HANDLED;
++}
++
++static int bind_virq_for_mce(void)
++{
++	int ret;
++	xen_mc_t mc_op;
++
++	g_mi = kmalloc(sizeof(struct mc_info), GFP_KERNEL);
++
++	if (!g_mi)
++		return -ENOMEM;
++
++	/* Fetch physical CPU Numbers */
++	mc_op.cmd = XEN_MC_physcpuinfo;
++	mc_op.interface_version = XEN_MCA_INTERFACE_VERSION;
++	set_xen_guest_handle(mc_op.u.mc_physcpuinfo.info, g_physinfo);
++	ret = HYPERVISOR_mca(&mc_op);
++	if (ret) {
++		printk(KERN_ERR "MCE_DOM0_LOG: Fail to get physical CPU numbers\n");
++		kfree(g_mi);
++		return ret;
++	}
++
++	/* Fetch each CPU Physical Info for later reference*/
++	ncpus = mc_op.u.mc_physcpuinfo.ncpus;
++	g_physinfo = kmalloc(sizeof(struct mcinfo_logical_cpu)*ncpus,
++					GFP_KERNEL);
++	if (!g_physinfo) {
++		kfree(g_mi);
++		return -ENOMEM;
++	}
++	set_xen_guest_handle(mc_op.u.mc_physcpuinfo.info, g_physinfo);
++	ret = HYPERVISOR_mca(&mc_op);
++	if (ret) {
++		printk(KERN_ERR "MCE_DOM0_LOG: Fail to get physical CPUs info\n");
++		kfree(g_mi);
++		kfree(g_physinfo);
++		return ret;
++	}
++
++	ret  = bind_virq_to_irqhandler(VIRQ_MCA, 0,
++		mce_dom_interrupt, 0, "mce", NULL);
++
++	if (ret < 0) {
++		printk(KERN_ERR "MCE_DOM0_LOG: bind_virq for DOM0 failed\n");
++		return ret;
++	}
++
++	return 0;
++}
++
++static int __init mcelog_init(void)
++{
++	/* Only DOM0 is responsible for MCE logging */
++	if (xen_initial_domain())
++		return bind_virq_for_mce();
++
++	return 0;
++}
++
++
++static void __exit mcelog_cleanup(void)
++{
++	kfree(g_mi);
++	kfree(g_physinfo);
++}
++module_init(mcelog_init);
++module_exit(mcelog_cleanup);
++
++MODULE_LICENSE("GPL");
 diff --git a/drivers/xen/netback/Makefile b/drivers/xen/netback/Makefile
 new file mode 100644
 index 0000000..e346e81
@@ -19773,10 +20675,10 @@ index 0000000..8da3ac4
 +#endif
 diff --git a/drivers/xen/pciback/conf_space_capability_msi.c b/drivers/xen/pciback/conf_space_capability_msi.c
 new file mode 100644
-index 0000000..b70ea8b
+index 0000000..b15131e
 --- /dev/null
 +++ b/drivers/xen/pciback/conf_space_capability_msi.c
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,110 @@
 +/*
 + * PCI Backend -- Configuration overlay for MSI capability
 + */
@@ -19791,8 +20693,12 @@ index 0000000..b70ea8b
 +int pciback_enable_msi(struct pciback_device *pdev,
 +		struct pci_dev *dev, struct xen_pci_op *op)
 +{
++	struct pciback_dev_data *dev_data;
 +	int otherend = pdev->xdev->otherend_id;
 +	int status;
++
++ 	if (unlikely(verbose_request))
++		printk(KERN_DEBUG "pciback: %s: enable MSI\n", pci_name(dev));
 +
 +	status = pci_enable_msi(dev);
 +
@@ -19806,24 +20712,38 @@ index 0000000..b70ea8b
 +	/* The value the guest needs is actually the IDT vector, not the
 +	 * the local domain's IRQ number. */
 +	op->value = xen_gsi_from_irq(dev->irq);
++	dev_data = pci_get_drvdata(dev);
++	if (dev_data)
++		dev_data->ack_intr = 0;
++
 +	return 0;
 +}
 +
 +int pciback_disable_msi(struct pciback_device *pdev,
 +		struct pci_dev *dev, struct xen_pci_op *op)
 +{
++	struct pciback_dev_data *dev_data;
++
++ 	if (unlikely(verbose_request))
++		printk(KERN_DEBUG "pciback: %s: disable MSI\n", pci_name(dev));
 +	pci_disable_msi(dev);
 +
 +	op->value = xen_gsi_from_irq(dev->irq);
++	dev_data = pci_get_drvdata(dev);
++	if (dev_data)
++		dev_data->ack_intr = 1;
 +	return 0;
 +}
 +
 +int pciback_enable_msix(struct pciback_device *pdev,
 +		struct pci_dev *dev, struct xen_pci_op *op)
 +{
++	struct pciback_dev_data *dev_data;
 +	int i, result;
 +	struct msix_entry *entries;
 +
++ 	if (unlikely(verbose_request))
++		printk(KERN_DEBUG "pciback: %s: enable MSI-X\n", pci_name(dev));
 +	if (op->value > SH_INFO_MAX_VEC)
 +		return -EINVAL;
 +
@@ -19847,6 +20767,9 @@ index 0000000..b70ea8b
 +	kfree(entries);
 +
 +	op->value = result;
++	dev_data = pci_get_drvdata(dev);
++	if (dev_data)
++		dev_data->ack_intr = 0;
 +
 +	return result;
 +}
@@ -19854,10 +20777,15 @@ index 0000000..b70ea8b
 +int pciback_disable_msix(struct pciback_device *pdev,
 +		struct pci_dev *dev, struct xen_pci_op *op)
 +{
-+
++	struct pciback_dev_data *dev_data;
++ 	if (unlikely(verbose_request))
++		printk(KERN_DEBUG "pciback: %s: disable MSI-X\n", pci_name(dev));
 +	pci_disable_msix(dev);
 +
 +	op->value = xen_gsi_from_irq(dev->irq);
++	dev_data = pci_get_drvdata(dev);
++	if (dev_data)
++		dev_data->ack_intr = 1;
 +	return 0;
 +}
 +
@@ -20028,10 +20956,10 @@ index 0000000..e7b4d66
 +};
 diff --git a/drivers/xen/pciback/conf_space_header.c b/drivers/xen/pciback/conf_space_header.c
 new file mode 100644
-index 0000000..1f4f86e
+index 0000000..cb450f4
 --- /dev/null
 +++ b/drivers/xen/pciback/conf_space_header.c
-@@ -0,0 +1,379 @@
+@@ -0,0 +1,385 @@
 +/*
 + * PCI Backend - Handles the virtual fields in the configuration space headers.
 + *
@@ -20073,8 +21001,10 @@ index 0000000..1f4f86e
 +
 +static int command_write(struct pci_dev *dev, int offset, u16 value, void *data)
 +{
++	struct pciback_dev_data *dev_data;
 +	int err;
 +
++	dev_data = pci_get_drvdata(dev);
 +	if (!pci_is_enabled(dev) && is_enable_cmd(value)) {
 +		if (unlikely(verbose_request))
 +			printk(KERN_DEBUG "pciback: %s: enable\n",
@@ -20082,11 +21012,15 @@ index 0000000..1f4f86e
 +		err = pci_enable_device(dev);
 +		if (err)
 +			return err;
++		if (dev_data)
++			dev_data->enable_intx = 1;
 +	} else if (pci_is_enabled(dev) && !is_enable_cmd(value)) {
 +		if (unlikely(verbose_request))
 +			printk(KERN_DEBUG "pciback: %s: disable\n",
 +			       pci_name(dev));
 +		pci_disable_device(dev);
++		if (dev_data)
++			dev_data->enable_intx = 0;
 +	}
 +
 +	if (!dev->is_busmaster && is_master_cmd(value)) {
@@ -21232,10 +22166,10 @@ index 0000000..5386beb
 +}
 diff --git a/drivers/xen/pciback/pci_stub.c b/drivers/xen/pciback/pci_stub.c
 new file mode 100644
-index 0000000..02178e2
+index 0000000..88c7ca1
 --- /dev/null
 +++ b/drivers/xen/pciback/pci_stub.c
-@@ -0,0 +1,1287 @@
+@@ -0,0 +1,1370 @@
 +/*
 + * PCI Stub Driver - Grabs devices in backend to be exported later
 + *
@@ -21258,6 +22192,8 @@ index 0000000..02178e2
 +#include "pciback.h"
 +#include "conf_space.h"
 +#include "conf_space_quirks.h"
++
++#define DRV_NAME	"pciback"
 +
 +static char *pci_devs_to_hide;
 +wait_queue_head_t aer_wait_queue;
@@ -21528,12 +22464,19 @@ index 0000000..02178e2
 +	 * would need to be called somewhere to free the memory allocated
 +	 * here and then to call kfree(pci_get_drvdata(psdev->dev)).
 +	 */
-+	dev_data = kzalloc(sizeof(*dev_data), GFP_ATOMIC);
++	dev_data = kzalloc(sizeof(*dev_data) +  strlen(DRV_NAME "[]")
++				+ strlen(pci_name(dev)) + 1, GFP_ATOMIC);
 +	if (!dev_data) {
 +		err = -ENOMEM;
 +		goto out;
 +	}
 +	pci_set_drvdata(dev, dev_data);
++
++	/*
++	 * Setup name for fake IRQ handler. It will only be enabled
++	 * once the device is turned on by the guest.
++	 */
++	sprintf(dev_data->irq_name, DRV_NAME "[%s]", pci_name(dev));
 +
 +	dev_dbg(&dev->dev, "initializing config\n");
 +
@@ -22075,7 +23018,7 @@ index 0000000..02178e2
 + */
 +
 +static struct pci_driver pciback_pci_driver = {
-+	.name = "pciback",
++	.name = DRV_NAME,
 +	.id_table = pcistub_ids,
 +	.probe = pcistub_probe,
 +	.remove = pcistub_remove,
@@ -22267,6 +23210,71 @@ index 0000000..02178e2
 +
 +DRIVER_ATTR(slots, S_IRUSR, pcistub_slot_show, NULL);
 +
++static ssize_t pcistub_irq_handler_show(struct device_driver *drv, char *buf)
++{
++	struct pcistub_device *psdev;
++	struct pciback_dev_data *dev_data;
++	size_t count = 0;
++	unsigned long flags;
++
++	spin_lock_irqsave(&pcistub_devices_lock, flags);
++	list_for_each_entry(psdev, &pcistub_devices, dev_list) {
++		if (count >= PAGE_SIZE)
++			break;
++		if (!psdev->dev)
++			continue;
++		dev_data = pci_get_drvdata(psdev->dev);
++		if (!dev_data)
++			continue;
++		count +=
++		    scnprintf(buf + count, PAGE_SIZE - count, "%s:%s:%sing:%ld\n",
++			      pci_name(psdev->dev),
++			      dev_data->isr_on ? "on" : "off",
++			      dev_data->ack_intr ? "ack" : "not ack",
++			      dev_data->handled);
++	}
++	spin_unlock_irqrestore(&pcistub_devices_lock, flags);
++	return count;
++}
++
++DRIVER_ATTR(irq_handlers, S_IRUSR, pcistub_irq_handler_show, NULL);
++
++static ssize_t pcistub_irq_handler_switch(struct device_driver *drv,
++					  const char *buf,
++					  size_t count)
++{
++	struct pcistub_device *psdev;
++	struct pciback_dev_data *dev_data;
++	int domain, bus, slot, func;
++	int err = -ENOENT;
++
++	err = str_to_slot(buf, &domain, &bus, &slot, &func);
++	if (err)
++		goto out;
++
++	psdev = pcistub_device_find(domain, bus, slot, func);
++
++	if (!psdev)
++		goto out;
++
++	dev_data = pci_get_drvdata(psdev->dev);
++	if (!dev_data)
++		goto out;
++
++	dev_dbg(&psdev->dev->dev, "%s fake irq handler: %d->%d\n",
++		dev_data->irq_name, dev_data->isr_on,
++		!dev_data->isr_on);
++
++	dev_data->isr_on = !(dev_data->isr_on);
++	if (dev_data->isr_on)
++		dev_data->ack_intr = 1;
++out:
++	if (!err)
++		err = count;
++	return err;
++}
++DRIVER_ATTR(irq_handler_state, S_IWUSR, NULL, pcistub_irq_handler_switch);
++
 +static ssize_t pcistub_quirk_add(struct device_driver *drv, const char *buf,
 +				 size_t count)
 +{
@@ -22406,7 +23414,10 @@ index 0000000..02178e2
 +	driver_remove_file(&pciback_pci_driver.driver, &driver_attr_slots);
 +	driver_remove_file(&pciback_pci_driver.driver, &driver_attr_quirks);
 +	driver_remove_file(&pciback_pci_driver.driver, &driver_attr_permissive);
-+
++	driver_remove_file(&pciback_pci_driver.driver,
++			   &driver_attr_irq_handlers);
++	driver_remove_file(&pciback_pci_driver.driver,
++			   &driver_attr_irq_handler_state);
 +	pci_unregister_driver(&pciback_pci_driver);
 +}
 +
@@ -22465,6 +23476,12 @@ index 0000000..02178e2
 +		err = driver_create_file(&pciback_pci_driver.driver,
 +					 &driver_attr_permissive);
 +
++	if (!err)
++		err = driver_create_file(&pciback_pci_driver.driver,
++					 &driver_attr_irq_handlers);
++	if (!err)
++		err = driver_create_file(&pciback_pci_driver.driver,
++					&driver_attr_irq_handler_state);
 +	if (err)
 +		pcistub_exit();
 +
@@ -22525,10 +23542,10 @@ index 0000000..02178e2
 +MODULE_LICENSE("Dual BSD/GPL");
 diff --git a/drivers/xen/pciback/pciback.h b/drivers/xen/pciback/pciback.h
 new file mode 100644
-index 0000000..98e2912
+index 0000000..fc31052
 --- /dev/null
 +++ b/drivers/xen/pciback/pciback.h
-@@ -0,0 +1,133 @@
+@@ -0,0 +1,142 @@
 +/*
 + * PCI Backend Common Data Structures & Function Declarations
 + *
@@ -22576,8 +23593,14 @@ index 0000000..98e2912
 +
 +struct pciback_dev_data {
 +	struct list_head config_fields;
-+	int permissive;
-+	int warned_on_write;
++	unsigned int permissive : 1;
++	unsigned int warned_on_write : 1;
++	unsigned int enable_intx : 1;
++	unsigned int isr_on : 1; /* Whether the IRQ handler is installed. */ 
++	unsigned int ack_intr : 1; /* .. and ACK-ing */
++	unsigned long handled;
++	unsigned int irq; /* Saved in case device transitions to MSI/MSI-X */
++	char irq_name[0]; /* pciback[000:04:00.0] */
 +};
 +
 +/* Used by XenBus and pciback_ops.c */
@@ -22662,12 +23685,15 @@ index 0000000..98e2912
 +void test_and_schedule_op(struct pciback_device *pdev);
 +#endif
 +
++/* Handles shared IRQs that can to device domain and control domain. */
++void pciback_irq_handler(struct pci_dev *dev, int reset);
++irqreturn_t pciback_guest_interrupt(int irq, void *dev_id);
 diff --git a/drivers/xen/pciback/pciback_ops.c b/drivers/xen/pciback/pciback_ops.c
 new file mode 100644
-index 0000000..011db67
+index 0000000..5543881
 --- /dev/null
 +++ b/drivers/xen/pciback/pciback_ops.c
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,242 @@
 +/*
 + * PCI Backend Operations - respond to PCI requests from Frontend
 + *
@@ -22683,6 +23709,78 @@ index 0000000..011db67
 +int verbose_request;
 +module_param(verbose_request, int, 0644);
 +
++/* Ensure a device is has the fake IRQ handler "turned on/off" and is
++ * ready to be exported. This MUST be run after pciback_reset_device
++ * which does the actual PCI device enable/disable.
++ */
++void pciback_control_isr(struct pci_dev *dev, int reset)
++{
++	struct pciback_dev_data *dev_data;
++	int rc;
++	int enable = 0;
++
++	dev_data = pci_get_drvdata(dev);
++	if (!dev_data)
++		return;
++
++	/* We don't deal with bridges */
++	if (dev->hdr_type != PCI_HEADER_TYPE_NORMAL)
++		return;
++
++	if (reset) {
++		dev_data->enable_intx = 0;
++		dev_data->ack_intr = 0;
++	}
++	enable =  dev_data->enable_intx;
++
++	/* Asked to disable, but ISR isn't runnig */
++	if (!enable && !dev_data->isr_on)
++		return;
++
++	/* Squirrel away the IRQs in the dev_data. We need this
++	 * b/c when device transitions to MSI, the dev->irq is
++	 * overwritten with the MSI vector.
++	 */
++	if (enable)
++		dev_data->irq = dev->irq;
++
++	dev_dbg(&dev->dev, "%s: #%d %s %s%s %s-> %s\n",
++		dev_data->irq_name,
++		dev_data->irq,
++		pci_is_enabled(dev) ? "on" : "off",
++		dev->msi_enabled ? "MSI" : "",
++		dev->msix_enabled ? "MSI/X" : "",
++		dev_data->isr_on ? "enable" : "disable",
++		enable ? "enable" : "disable");
++
++	if (enable) {
++		rc = request_irq(dev_data->irq,
++				pciback_guest_interrupt, IRQF_SHARED,
++				dev_data->irq_name, dev);
++		if (rc) {
++			dev_err(&dev->dev, "%s: failed to install fake IRQ " \
++				"handler for IRQ %d! (rc:%d)\n", dev_data->irq_name,
++				dev_data->irq, rc);
++			goto out;
++		}
++	}
++	else {
++		free_irq(dev_data->irq, dev);
++		dev_data->irq = 0;
++	}
++	dev_data->isr_on = enable;
++	dev_data->ack_intr = enable;
++out:
++	dev_dbg(&dev->dev, "%s: #%d %s %s%s %s\n",
++		dev_data->irq_name,
++		dev_data->irq,
++		pci_is_enabled(dev) ? "on" : "off",
++		dev->msi_enabled ? "MSI" : "",
++		dev->msix_enabled ? "MSI/X" : "",
++		enable ? (dev_data->isr_on ? "enabled" : "failed to enable") :
++			(dev_data->isr_on ? "failed to disable" : "disabled"));
++}
++
 +/* Ensure a device is "turned off" and ready to be exported.
 + * (Also see pciback_config_reset to ensure virtual configuration space is
 + * ready to be re-exported)
@@ -22690,6 +23788,8 @@ index 0000000..011db67
 +void pciback_reset_device(struct pci_dev *dev)
 +{
 +	u16 cmd;
++
++	pciback_control_isr(dev, 1 /* reset device */);
 +
 +	/* Disable devices (but not bridges) */
 +	if (dev->hdr_type == PCI_HEADER_TYPE_NORMAL) {
@@ -22748,13 +23848,18 @@ index 0000000..011db67
 +	struct pciback_device *pdev =
 +		container_of(data, struct pciback_device, op_work);
 +	struct pci_dev *dev;
++	struct pciback_dev_data *dev_data = NULL;
 +	struct xen_pci_op *op = &pdev->sh_info->op;
++	int test_intx = 0;
 +
 +	dev = pciback_get_pci_dev(pdev, op->domain, op->bus, op->devfn);
 +
 +	if (dev == NULL)
 +		op->err = XEN_PCI_ERR_dev_not_found;
 +	else {
++		dev_data = pci_get_drvdata(dev);
++		if (dev_data)
++			test_intx = dev_data->enable_intx;
 +		switch (op->cmd) {
 +		case XEN_PCI_OP_conf_read:
 +			op->err = pciback_config_read(dev,
@@ -22779,9 +23884,14 @@ index 0000000..011db67
 +			break;
 +#endif
 +		default:
-+			op->err = XEN_PCI_ERR_not_implemented;
++			op->err = XEN_PCI_ERR_not_implemented;	
 +			break;
 +		}
++	}
++	if (!op->err && dev && dev_data) {
++		/* Transition detected */
++		if ((dev_data->enable_intx != test_intx))
++			pciback_control_isr(dev, 0 /* no reset */);
 +	}
 +	/* Tell the driver domain that we're done. */
 +	wmb();
@@ -22806,6 +23916,25 @@ index 0000000..011db67
 +	test_and_schedule_op(pdev);
 +
 +	return IRQ_HANDLED;
++}
++irqreturn_t pciback_guest_interrupt(int irq, void *dev_id)
++{
++	struct pci_dev *dev = (struct pci_dev *)dev_id;
++	struct pciback_dev_data *dev_data = pci_get_drvdata(dev);
++
++	if (dev_data->isr_on && dev_data->ack_intr) {
++		dev_data->handled++;
++		if ((dev_data->handled % 1000) == 0) {
++			if (xen_ignore_irq(irq)) {
++				printk(KERN_INFO "%s IRQ line is not shared "
++					"with other domains. Turning ISR off\n",
++					 dev_data->irq_name);
++				dev_data->ack_intr = 0;
++			}
++		}
++		return IRQ_HANDLED;
++	}
++	return IRQ_NONE;
 +}
 diff --git a/drivers/xen/pciback/slot.c b/drivers/xen/pciback/slot.c
 new file mode 100644
@@ -24408,6 +25537,271 @@ index 0000000..6450c17
 +}
 +
 +subsys_initcall(xen_pcpu_init);
+diff --git a/drivers/xen/platform-pci.c b/drivers/xen/platform-pci.c
+new file mode 100644
+index 0000000..a33074e
+--- /dev/null
++++ b/drivers/xen/platform-pci.c
+@@ -0,0 +1,259 @@
++/******************************************************************************
++ * platform-pci.c
++ *
++ * Xen platform PCI device driver
++ * Copyright (c) 2005, Intel Corporation.
++ * Copyright (c) 2007, XenSource Inc.
++ * Copyright (c) 2010, Citrix
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms and conditions of the GNU General Public License,
++ * version 2, as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
++ * Place - Suite 330, Boston, MA 02111-1307 USA.
++ *
++ */
++
++#include <asm/io.h>
++
++#include <linux/interrupt.h>
++#include <linux/module.h>
++#include <linux/pci.h>
++
++#include <xen/grant_table.h>
++#include <xen/platform_pci.h>
++#include <xen/interface/platform_pci.h>
++#include <xen/xenbus.h>
++#include <xen/events.h>
++#include <xen/hvm.h>
++#include <xen/xen-ops.h>
++
++#define DRV_NAME    "xen-platform-pci"
++
++MODULE_AUTHOR("ssmith@xensource.com and stefano.stabellini@eu.citrix.com");
++MODULE_DESCRIPTION("Xen platform PCI device");
++MODULE_LICENSE("GPL");
++
++static unsigned long platform_mmio;
++static unsigned long platform_mmio_alloc;
++static unsigned long platform_mmiolen;
++static uint64_t callback_via;
++struct pci_dev *xen_platform_pdev;
++
++unsigned long alloc_xen_mmio(unsigned long len)
++{
++	unsigned long addr;
++
++	addr = platform_mmio + platform_mmio_alloc;
++	platform_mmio_alloc += len;
++	BUG_ON(platform_mmio_alloc > platform_mmiolen);
++
++	return addr;
++}
++
++static uint64_t get_callback_via(struct pci_dev *pdev)
++{
++	u8 pin;
++	int irq;
++
++	irq = pdev->irq;
++	if (irq < 16)
++		return irq; /* ISA IRQ */
++
++	pin = pdev->pin;
++
++	/* We don't know the GSI. Specify the PCI INTx line instead. */
++	return ((uint64_t)0x01 << 56) | /* PCI INTx identifier */
++		((uint64_t)pci_domain_nr(pdev->bus) << 32) |
++		((uint64_t)pdev->bus->number << 16) |
++		((uint64_t)(pdev->devfn & 0xff) << 8) |
++		((uint64_t)(pin - 1) & 3);
++}
++
++static irqreturn_t do_hvm_evtchn_intr(int irq, void *dev_id)
++{
++	xen_hvm_evtchn_do_upcall(get_irq_regs());
++	return IRQ_HANDLED;
++}
++
++static int xen_allocate_irq(struct pci_dev *pdev)
++{
++	__set_irq_handler(pdev->irq, handle_edge_irq, 0, NULL);
++	return request_irq(pdev->irq, do_hvm_evtchn_intr,
++			IRQF_DISABLED | IRQF_NOBALANCING | IRQF_TRIGGER_RISING,
++			"xen-platform-pci", pdev);
++}
++
++void platform_pci_disable_irq(void)
++{
++	printk(KERN_DEBUG "platform_pci_disable_irq\n");
++	disable_irq(xen_platform_pdev->irq);
++}
++
++void platform_pci_enable_irq(void)
++{
++	printk(KERN_DEBUG "platform_pci_enable_irq\n");
++	enable_irq(xen_platform_pdev->irq);
++}
++
++void platform_pci_resume(void)
++{
++	if (xen_set_callback_via(callback_via)) {
++		printk("platform_pci_resume failure!\n");
++		return;
++	}
++}
++
++static int __devinit platform_pci_init(struct pci_dev *pdev,
++				       const struct pci_device_id *ent)
++{
++	int i, ret;
++	long ioaddr, iolen;
++	long mmio_addr, mmio_len;
++	xen_platform_pdev = pdev;
++
++	i = pci_enable_device(pdev);
++	if (i)
++		return i;
++
++	ioaddr = pci_resource_start(pdev, 0);
++	iolen = pci_resource_len(pdev, 0);
++
++	mmio_addr = pci_resource_start(pdev, 1);
++	mmio_len = pci_resource_len(pdev, 1);
++
++	if (mmio_addr == 0 || ioaddr == 0) {
++		dev_err(&pdev->dev, "no resources found\n");
++		ret = -ENOENT;
++	}
++
++	if (request_mem_region(mmio_addr, mmio_len, DRV_NAME) == NULL) {
++		dev_err(&pdev->dev, "MEM I/O resource 0x%lx @ 0x%lx busy\n",
++		       mmio_addr, mmio_len);
++		ret = -EBUSY;
++	}
++
++	if (request_region(ioaddr, iolen, DRV_NAME) == NULL) {
++		dev_err(&pdev->dev, "I/O resource 0x%lx @ 0x%lx busy\n",
++		       iolen, ioaddr);
++		ret = -EBUSY;
++		goto out;
++	}
++
++	platform_mmio = mmio_addr;
++	platform_mmiolen = mmio_len;
++
++	if (!xen_have_vector_callback) {
++		ret = xen_allocate_irq(pdev);
++		if (ret) {
++			printk(KERN_WARNING "request_irq failed err=%d\n", ret);
++			goto out;
++		}
++		callback_via = get_callback_via(pdev);
++		ret = xen_set_callback_via(callback_via);
++		if (ret) {
++			printk(KERN_WARNING
++					"Unable to set the evtchn callback err=%d\n", ret);
++			goto out;
++		}
++	}
++	ret = gnttab_init();
++	if (ret)
++		goto out;
++	ret = xenbus_probe_init();
++	if (ret)
++		goto out;
++	ret = xen_setup_shutdown_event();
++	if (ret)
++		goto out;
++
++
++out:
++	if (ret) {
++		release_mem_region(mmio_addr, mmio_len);
++		release_region(ioaddr, iolen);
++		pci_disable_device(pdev);
++	}
++
++	return ret;
++}
++
++#define XEN_PLATFORM_VENDOR_ID 0x5853
++#define XEN_PLATFORM_DEVICE_ID 0x0001
++static struct pci_device_id platform_pci_tbl[] __devinitdata = {
++	{XEN_PLATFORM_VENDOR_ID, XEN_PLATFORM_DEVICE_ID,
++	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
++	{0,}
++};
++
++MODULE_DEVICE_TABLE(pci, platform_pci_tbl);
++
++static struct pci_driver platform_driver = {
++	name:     DRV_NAME,
++	probe :    platform_pci_init,
++	id_table : platform_pci_tbl,
++};
++
++static int check_platform_magic(void)
++{
++	short magic;
++	char protocol, *err;
++
++	magic = inw(XEN_IOPORT_MAGIC);
++
++	if (magic != XEN_IOPORT_MAGIC_VAL) {
++		err = "unrecognised magic value";
++		goto no_dev;
++	}
++
++	protocol = inb(XEN_IOPORT_PROTOVER);
++
++	printk(KERN_DEBUG DRV_NAME "I/O protocol version %d\n", protocol);
++
++	switch (protocol) {
++	case 1:
++		outw(XEN_IOPORT_LINUX_PRODNUM, XEN_IOPORT_PRODNUM);
++		outl(XEN_IOPORT_LINUX_DRVVER, XEN_IOPORT_DRVVER);
++		if (inw(XEN_IOPORT_MAGIC) != XEN_IOPORT_MAGIC_VAL) {
++			printk(KERN_ERR DRV_NAME "blacklisted by host\n");
++			return -ENODEV;
++		}
++		break;
++	default:
++		err = "unknown I/O protocol version";
++		goto no_dev;
++	}
++
++	return 0;
++
++ no_dev:
++	printk(KERN_WARNING DRV_NAME  "failed backend handshake: %s\n", err);
++	return -ENODEV;
++}
++
++static int __init platform_pci_module_init(void)
++{
++	int rc;
++
++	rc = check_platform_magic();
++	if (rc < 0)
++		return rc;
++
++	rc = pci_register_driver(&platform_driver);
++	if (rc) {
++		printk(KERN_INFO DRV_NAME
++		       ": No platform pci device model found\n");
++		return rc;
++	}
++
++	return 0;
++}
++
++module_init(platform_pci_module_init);
 diff --git a/drivers/xen/sys-hypervisor.c b/drivers/xen/sys-hypervisor.c
 index 88a60e0..ae5cb05 100644
 --- a/drivers/xen/sys-hypervisor.c
@@ -24662,10 +26056,10 @@ index 92a1ef8..da3ca9e 100644
  	return (state < ARRAY_SIZE(name)) ? name[state] : "INVALID";
  }
 diff --git a/drivers/xen/xenbus/xenbus_probe.c b/drivers/xen/xenbus/xenbus_probe.c
-index 649fcdf..ab04a1b 100644
+index 649fcdf..57fb749 100644
 --- a/drivers/xen/xenbus/xenbus_probe.c
 +++ b/drivers/xen/xenbus/xenbus_probe.c
-@@ -49,6 +49,8 @@
+@@ -49,31 +49,28 @@
  #include <asm/page.h>
  #include <asm/pgtable.h>
  #include <asm/xen/hypervisor.h>
@@ -24674,7 +26068,11 @@ index 649fcdf..ab04a1b 100644
  #include <xen/xenbus.h>
  #include <xen/events.h>
  #include <xen/page.h>
-@@ -58,22 +60,15 @@
+ 
++#include <xen/hvm.h>
++
+ #include "xenbus_comms.h"
+ #include "xenbus_probe.h"
  
  
  int xen_store_evtchn;
@@ -24700,7 +26098,7 @@ index 649fcdf..ab04a1b 100644
  /* If something in array of ids matches this device, return it. */
  static const struct xenbus_device_id *
  match_device(const struct xenbus_device_id *arr, struct xenbus_device *dev)
-@@ -94,34 +89,7 @@ int xenbus_match(struct device *_dev, struct device_driver *_drv)
+@@ -94,34 +91,7 @@ int xenbus_match(struct device *_dev, struct device_driver *_drv)
  
  	return match_device(drv->ids, to_xenbus_device(_dev)) != NULL;
  }
@@ -24736,7 +26134,7 @@ index 649fcdf..ab04a1b 100644
  
  
  static void free_otherend_details(struct xenbus_device *dev)
-@@ -141,7 +109,28 @@ static void free_otherend_watch(struct xenbus_device *dev)
+@@ -141,7 +111,28 @@ static void free_otherend_watch(struct xenbus_device *dev)
  }
  
  
@@ -24766,7 +26164,7 @@ index 649fcdf..ab04a1b 100644
  				 char *id_node, char *path_node)
  {
  	int err = xenbus_gather(XBT_NIL, xendev->nodename,
-@@ -166,39 +155,11 @@ int read_otherend_details(struct xenbus_device *xendev,
+@@ -166,39 +157,11 @@ int read_otherend_details(struct xenbus_device *xendev,
  
  	return 0;
  }
@@ -24810,7 +26208,7 @@ index 649fcdf..ab04a1b 100644
  {
  	struct xenbus_device *dev =
  		container_of(watch, struct xenbus_device, otherend_watch);
-@@ -226,11 +187,7 @@ static void otherend_changed(struct xenbus_watch *watch,
+@@ -226,11 +189,7 @@ static void otherend_changed(struct xenbus_watch *watch,
  	 * work that can fail e.g., when the rootfs is gone.
  	 */
  	if (system_state > SYSTEM_RUNNING) {
@@ -24823,7 +26221,7 @@ index 649fcdf..ab04a1b 100644
  			xenbus_frontend_closed(dev);
  		return;
  	}
-@@ -238,25 +195,7 @@ static void otherend_changed(struct xenbus_watch *watch,
+@@ -238,25 +197,7 @@ static void otherend_changed(struct xenbus_watch *watch,
  	if (drv->otherend_changed)
  		drv->otherend_changed(dev, state);
  }
@@ -24850,7 +26248,7 @@ index 649fcdf..ab04a1b 100644
  
  int xenbus_dev_probe(struct device *_dev)
  {
-@@ -300,8 +239,9 @@ int xenbus_dev_probe(struct device *_dev)
+@@ -300,8 +241,9 @@ int xenbus_dev_probe(struct device *_dev)
  fail:
  	xenbus_dev_error(dev, err, "xenbus_dev_probe on %s", dev->nodename);
  	xenbus_switch_state(dev, XenbusStateClosed);
@@ -24861,7 +26259,7 @@ index 649fcdf..ab04a1b 100644
  
  int xenbus_dev_remove(struct device *_dev)
  {
-@@ -319,8 +259,9 @@ int xenbus_dev_remove(struct device *_dev)
+@@ -319,8 +261,9 @@ int xenbus_dev_remove(struct device *_dev)
  	xenbus_switch_state(dev, XenbusStateClosed);
  	return 0;
  }
@@ -24872,7 +26270,7 @@ index 649fcdf..ab04a1b 100644
  {
  	struct xenbus_device *dev = to_xenbus_device(_dev);
  	unsigned long timeout = 5*HZ;
-@@ -341,6 +282,7 @@ static void xenbus_dev_shutdown(struct device *_dev)
+@@ -341,6 +284,7 @@ static void xenbus_dev_shutdown(struct device *_dev)
   out:
  	put_device(&dev->dev);
  }
@@ -24880,7 +26278,7 @@ index 649fcdf..ab04a1b 100644
  
  int xenbus_register_driver_common(struct xenbus_driver *drv,
  				  struct xen_bus_type *bus,
-@@ -354,25 +296,7 @@ int xenbus_register_driver_common(struct xenbus_driver *drv,
+@@ -354,25 +298,7 @@ int xenbus_register_driver_common(struct xenbus_driver *drv,
  
  	return driver_register(&drv->driver);
  }
@@ -24907,7 +26305,7 @@ index 649fcdf..ab04a1b 100644
  
  void xenbus_unregister_driver(struct xenbus_driver *drv)
  {
-@@ -543,24 +467,7 @@ fail:
+@@ -543,24 +469,7 @@ fail:
  	kfree(xendev);
  	return err;
  }
@@ -24933,7 +26331,7 @@ index 649fcdf..ab04a1b 100644
  
  static int xenbus_probe_device_type(struct xen_bus_type *bus, const char *type)
  {
-@@ -574,10 +481,11 @@ static int xenbus_probe_device_type(struct xen_bus_type *bus, const char *type)
+@@ -574,10 +483,11 @@ static int xenbus_probe_device_type(struct xen_bus_type *bus, const char *type)
  		return PTR_ERR(dir);
  
  	for (i = 0; i < dir_n; i++) {
@@ -24946,7 +26344,7 @@ index 649fcdf..ab04a1b 100644
  	kfree(dir);
  	return err;
  }
-@@ -597,9 +505,11 @@ int xenbus_probe_devices(struct xen_bus_type *bus)
+@@ -597,9 +507,11 @@ int xenbus_probe_devices(struct xen_bus_type *bus)
  		if (err)
  			break;
  	}
@@ -24958,7 +26356,7 @@ index 649fcdf..ab04a1b 100644
  
  static unsigned int char_count(const char *str, char c)
  {
-@@ -662,32 +572,17 @@ void xenbus_dev_changed(const char *node, struct xen_bus_type *bus)
+@@ -662,32 +574,17 @@ void xenbus_dev_changed(const char *node, struct xen_bus_type *bus)
  }
  EXPORT_SYMBOL_GPL(xenbus_dev_changed);
  
@@ -24994,7 +26392,7 @@ index 649fcdf..ab04a1b 100644
  	if (drv->suspend)
  		err = drv->suspend(xdev, state);
  	if (err)
-@@ -695,21 +590,19 @@ static int xenbus_dev_suspend(struct device *dev, pm_message_t state)
+@@ -695,21 +592,19 @@ static int xenbus_dev_suspend(struct device *dev, pm_message_t state)
  		       "xenbus: suspend %s failed: %i\n", dev_name(dev), err);
  	return 0;
  }
@@ -25020,7 +26418,7 @@ index 649fcdf..ab04a1b 100644
  	err = talk_to_otherend(xdev);
  	if (err) {
  		printk(KERN_WARNING
-@@ -740,6 +633,7 @@ static int xenbus_dev_resume(struct device *dev)
+@@ -740,6 +635,7 @@ static int xenbus_dev_resume(struct device *dev)
  
  	return 0;
  }
@@ -25028,7 +26426,7 @@ index 649fcdf..ab04a1b 100644
  
  /* A flag to determine if xenstored is 'ready' (i.e. has started) */
  int xenstored_ready = 0;
-@@ -768,11 +662,6 @@ void xenbus_probe(struct work_struct *unused)
+@@ -768,52 +664,78 @@ void xenbus_probe(struct work_struct *unused)
  {
  	BUG_ON((xenstored_ready <= 0));
  
@@ -25040,27 +26438,39 @@ index 649fcdf..ab04a1b 100644
  	/* Notify others that xenstore is up */
  	blocking_notifier_call_chain(&xenstore_chain, 0, NULL);
  }
-@@ -780,27 +669,43 @@ void xenbus_probe(struct work_struct *unused)
- static int __init xenbus_probe_init(void)
+ 
+-static int __init xenbus_probe_init(void)
++static int __init __xenbus_probe_init(void)
  {
- 	int err = 0;
-+	unsigned long page = 0;
+-	int err = 0;
++	/* Delay initialization in the PV on HVM case */
++	if (xen_hvm_domain())
++		return 0;
  
- 	DPRINTK("");
+-	DPRINTK("");
++	if (!xen_pv_domain())
++		return -ENODEV;
  
- 	err = -ENODEV;
- 	if (!xen_domain())
+-	err = -ENODEV;
+-	if (!xen_domain())
 -		goto out_error;
--
++	return xenbus_probe_init();
++}
+ 
 -	/* Register ourselves with the kernel bus subsystem */
 -	err = bus_register(&xenbus_frontend.bus);
 -	if (err)
 -		goto out_error;
--
++int xenbus_probe_init(void)
++{
++	int err = 0;
++	unsigned long page = 0;
++
++	DPRINTK("");
+ 
 -	err = xenbus_backend_bus_register();
 -	if (err)
 -		goto out_unreg_front;
-+		return err;
  
  	/*
  	 * Domain0 doesn't have a store_evtchn or store_mfn yet.
@@ -25094,8 +26504,22 @@ index 649fcdf..ab04a1b 100644
 +		xen_store_interface = mfn_to_virt(xen_store_mfn);
  	} else {
  		xenstored_ready = 1;
- 		xen_store_evtchn = xen_start_info->store_evtchn;
-@@ -813,7 +718,7 @@ static int __init xenbus_probe_init(void)
+-		xen_store_evtchn = xen_start_info->store_evtchn;
+-		xen_store_mfn = xen_start_info->store_mfn;
++		if (xen_hvm_domain()) {
++			xen_store_evtchn = hvm_get_parameter(HVM_PARAM_STORE_EVTCHN);
++			xen_store_mfn = hvm_get_parameter(HVM_PARAM_STORE_PFN);
++			xen_store_interface = ioremap(xen_store_mfn << PAGE_SHIFT, PAGE_SIZE);
++		} else {
++			xen_store_evtchn = xen_start_info->store_evtchn;
++			xen_store_mfn = xen_start_info->store_mfn;
++			xen_store_interface = mfn_to_virt(xen_store_mfn);
++		}
+ 	}
+-	xen_store_interface = mfn_to_virt(xen_store_mfn);
+ 
+ 	/* Initialize the interface to xenstore. */
+ 	err = xs_init();
  	if (err) {
  		printk(KERN_WARNING
  		       "XENBUS: Error initializing xenstore comms: %i\n", err);
@@ -25104,7 +26528,7 @@ index 649fcdf..ab04a1b 100644
  	}
  
  	if (!xen_initial_domain())
-@@ -829,128 +734,13 @@ static int __init xenbus_probe_init(void)
+@@ -829,128 +751,13 @@ static int __init xenbus_probe_init(void)
  
  	return 0;
  
@@ -25121,7 +26545,8 @@ index 649fcdf..ab04a1b 100644
  	return err;
  }
  
- postcore_initcall(xenbus_probe_init);
+-postcore_initcall(xenbus_probe_init);
++postcore_initcall(__xenbus_probe_init);
  
  MODULE_LICENSE("GPL");
 -
@@ -25587,10 +27012,10 @@ index 0000000..9b9dd36
 +subsys_initcall(xenbus_probe_backend_init);
 diff --git a/drivers/xen/xenbus/xenbus_probe_frontend.c b/drivers/xen/xenbus/xenbus_probe_frontend.c
 new file mode 100644
-index 0000000..77af5c3
+index 0000000..54e4d70
 --- /dev/null
 +++ b/drivers/xen/xenbus/xenbus_probe_frontend.c
-@@ -0,0 +1,287 @@
+@@ -0,0 +1,314 @@
 +#define DPRINTK(fmt, args...)				\
 +	pr_debug("xenbus_probe (%s:%d) " fmt ".\n",	\
 +		 __func__, __LINE__, ##args)
@@ -25845,6 +27270,33 @@ index 0000000..77af5c3
 +	return NOTIFY_DONE;
 +}
 +
++static int dev_suspend(struct device *dev, void *data)
++{
++	return xenbus_dev_suspend(dev, PMSG_SUSPEND);
++}
++
++static int dev_resume(struct device *dev, void *data)
++{
++	return xenbus_dev_resume(dev);
++}
++
++void xenbus_suspend(void)
++{
++	DPRINTK("");
++
++	bus_for_each_dev(&xenbus_frontend.bus, NULL, NULL, dev_suspend);
++	xs_suspend();
++}
++EXPORT_SYMBOL_GPL(xenbus_suspend);
++
++void xenbus_resume(void)
++{
++	DPRINTK("");
++
++	xs_resume();
++	bus_for_each_dev(&xenbus_frontend.bus, NULL, NULL, dev_resume);
++}
++EXPORT_SYMBOL_GPL(xenbus_resume);
 +
 +static int __init xenbus_probe_frontend_init(void)
 +{
@@ -27297,7 +28749,7 @@ index 0000000..7172081
 +
 +#endif /* __XEN_BLKIF_H__ */
 diff --git a/include/xen/events.h b/include/xen/events.h
-index e68d59a..c9034af 100644
+index e68d59a..699108a 100644
 --- a/include/xen/events.h
 +++ b/include/xen/events.h
 @@ -12,6 +12,8 @@ int bind_evtchn_to_irqhandler(unsigned int evtchn,
@@ -27322,7 +28774,7 @@ index e68d59a..c9034af 100644
  
  /*
   * Common unbind function for all event sources. Takes IRQ to unbind from.
-@@ -53,7 +61,33 @@ bool xen_test_irq_pending(int irq);
+@@ -53,7 +61,39 @@ bool xen_test_irq_pending(int irq);
     irq will be disabled so it won't deliver an interrupt. */
  void xen_poll_irq(int irq);
  
@@ -27354,6 +28806,12 @@ index e68d59a..c9034af 100644
 +{
 +}
 +#endif
++
++/* Determine whether to ignore this IRQ if passed to a guest. */
++int xen_ignore_irq(int irq);
++
++void xen_evtchn_do_upcall(struct pt_regs *regs);
++void xen_hvm_evtchn_do_upcall(struct pt_regs *regs);
 +
  #endif	/* _XEN_EVENTS_H */
 diff --git a/include/xen/gntdev.h b/include/xen/gntdev.h
@@ -27482,7 +28940,7 @@ index 0000000..8bd1467
 +
 +#endif /* __LINUX_PUBLIC_GNTDEV_H__ */
 diff --git a/include/xen/grant_table.h b/include/xen/grant_table.h
-index a40f1cd..9e54167 100644
+index a40f1cd..7f8c7c8 100644
 --- a/include/xen/grant_table.h
 +++ b/include/xen/grant_table.h
 @@ -37,10 +37,16 @@
@@ -27503,16 +28961,17 @@ index a40f1cd..9e54167 100644
  /* NR_GRANT_FRAMES must be less than or equal to that configured in Xen */
  #define NR_GRANT_FRAMES 4
  
-@@ -51,6 +57,8 @@ struct gnttab_free_callback {
+@@ -51,6 +57,9 @@ struct gnttab_free_callback {
  	u16 count;
  };
  
++int gnttab_init(void);
 +void gnttab_reset_grant_page(struct page *page);
 +
  int gnttab_suspend(void);
  int gnttab_resume(void);
  
-@@ -80,6 +88,8 @@ unsigned long gnttab_end_foreign_transfer(grant_ref_t ref);
+@@ -80,6 +89,8 @@ unsigned long gnttab_end_foreign_transfer(grant_ref_t ref);
  
  int gnttab_query_foreign_access(grant_ref_t ref);
  
@@ -27521,7 +28980,7 @@ index a40f1cd..9e54167 100644
  /*
   * operations on reserved batches of grant references
   */
-@@ -106,6 +116,37 @@ void gnttab_grant_foreign_access_ref(grant_ref_t ref, domid_t domid,
+@@ -106,6 +117,37 @@ void gnttab_grant_foreign_access_ref(grant_ref_t ref, domid_t domid,
  void gnttab_grant_foreign_transfer_ref(grant_ref_t, domid_t domid,
  				       unsigned long pfn);
  
@@ -27559,11 +29018,71 @@ index a40f1cd..9e54167 100644
  int arch_gnttab_map_shared(unsigned long *frames, unsigned long nr_gframes,
  			   unsigned long max_nr_gframes,
  			   struct grant_entry **__shared);
+diff --git a/include/xen/hvm.h b/include/xen/hvm.h
+new file mode 100644
+index 0000000..a80c7b9
+--- /dev/null
++++ b/include/xen/hvm.h
+@@ -0,0 +1,32 @@
++/* Simple wrappers around HVM functions */
++#ifndef XEN_HVM_H__
++#define XEN_HVM_H__
++
++#include <xen/interface/hvm/params.h>
++#include <asm/xen/hypercall.h>
++
++static inline unsigned long hvm_get_parameter(int idx)
++{
++       struct xen_hvm_param xhv;
++       int r;
++
++       xhv.domid = DOMID_SELF;
++       xhv.index = idx;
++       r = HYPERVISOR_hvm_op(HVMOP_get_param, &xhv);
++       if (r < 0) {
++               printk(KERN_ERR "cannot get hvm parameter %d: %d.\n",
++                      idx, r);
++               return 0;
++       }
++       return xhv.value;
++}
++
++int xen_set_callback_via(uint64_t via);
++extern int xen_have_vector_callback;
++
++#define HVM_CALLBACK_VIA_TYPE_VECTOR 0x2
++#define HVM_CALLBACK_VIA_TYPE_SHIFT 56
++#define HVM_CALLBACK_VECTOR(x) (((uint64_t)HVM_CALLBACK_VIA_TYPE_VECTOR)<<\
++                               HVM_CALLBACK_VIA_TYPE_SHIFT | (x))
++
++#endif /* XEN_HVM_H__ */
+diff --git a/include/xen/interface/features.h b/include/xen/interface/features.h
+index f51b641..8ab08b9 100644
+--- a/include/xen/interface/features.h
++++ b/include/xen/interface/features.h
+@@ -41,6 +41,9 @@
+ /* x86: Does this Xen host support the MMU_PT_UPDATE_PRESERVE_AD hypercall? */
+ #define XENFEAT_mmu_pt_update_preserve_ad  5
+ 
++/* x86: Does this Xen host support the HVM callback vector type? */
++#define XENFEAT_hvm_callback_vector        8
++
+ #define XENFEAT_NR_SUBMAPS 1
+ 
+ #endif /* __XEN_PUBLIC_FEATURES_H__ */
 diff --git a/include/xen/interface/grant_table.h b/include/xen/interface/grant_table.h
-index 39da93c..8211af8 100644
+index 39da93c..c704fe5 100644
 --- a/include/xen/interface/grant_table.h
 +++ b/include/xen/interface/grant_table.h
-@@ -321,6 +321,28 @@ struct gnttab_query_size {
+@@ -28,6 +28,7 @@
+ #ifndef __XEN_PUBLIC_GRANT_TABLE_H__
+ #define __XEN_PUBLIC_GRANT_TABLE_H__
+ 
++#include <xen/interface/xen.h>
+ 
+ /***********************************
+  * GRANT TABLE REPRESENTATION
+@@ -321,6 +322,28 @@ struct gnttab_query_size {
  DEFINE_GUEST_HANDLE_STRUCT(gnttab_query_size);
  
  /*
@@ -27592,6 +29111,202 @@ index 39da93c..8211af8 100644
   * Bitfield values for update_pin_status.flags.
   */
   /* Map the grant entry for access by I/O devices. */
+diff --git a/include/xen/interface/hvm/hvm_op.h b/include/xen/interface/hvm/hvm_op.h
+new file mode 100644
+index 0000000..7c74ba4
+--- /dev/null
++++ b/include/xen/interface/hvm/hvm_op.h
+@@ -0,0 +1,72 @@
++/*
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to
++ * deal in the Software without restriction, including without limitation the
++ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
++ * sell copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
++ * DEALINGS IN THE SOFTWARE.
++ */
++
++#ifndef __XEN_PUBLIC_HVM_HVM_OP_H__
++#define __XEN_PUBLIC_HVM_HVM_OP_H__
++
++/* Get/set subcommands: extra argument == pointer to xen_hvm_param struct. */
++#define HVMOP_set_param           0
++#define HVMOP_get_param           1
++struct xen_hvm_param {
++    domid_t  domid;    /* IN */
++    uint32_t index;    /* IN */
++    uint64_t value;    /* IN/OUT */
++};
++DEFINE_GUEST_HANDLE_STRUCT(xen_hvm_param);
++
++/* Set the logical level of one of a domain's PCI INTx wires. */
++#define HVMOP_set_pci_intx_level  2
++struct xen_hvm_set_pci_intx_level {
++    /* Domain to be updated. */
++    domid_t  domid;
++    /* PCI INTx identification in PCI topology (domain:bus:device:intx). */
++    uint8_t  domain, bus, device, intx;
++    /* Assertion level (0 = unasserted, 1 = asserted). */
++    uint8_t  level;
++};
++DEFINE_GUEST_HANDLE_STRUCT(xen_hvm_set_pci_intx_level);
++
++/* Set the logical level of one of a domain's ISA IRQ wires. */
++#define HVMOP_set_isa_irq_level   3
++struct xen_hvm_set_isa_irq_level {
++    /* Domain to be updated. */
++    domid_t  domid;
++    /* ISA device identification, by ISA IRQ (0-15). */
++    uint8_t  isa_irq;
++    /* Assertion level (0 = unasserted, 1 = asserted). */
++    uint8_t  level;
++};
++DEFINE_GUEST_HANDLE_STRUCT(xen_hvm_set_isa_irq_level);
++
++#define HVMOP_set_pci_link_route  4
++struct xen_hvm_set_pci_link_route {
++    /* Domain to be updated. */
++    domid_t  domid;
++    /* PCI link identifier (0-3). */
++    uint8_t  link;
++    /* ISA IRQ (1-15), or 0 (disable link). */
++    uint8_t  isa_irq;
++};
++DEFINE_GUEST_HANDLE_STRUCT(xen_hvm_set_pci_link_route);
++
++/* Flushes all VCPU TLBs: @arg must be NULL. */
++#define HVMOP_flush_tlbs          5
++
++#endif /* __XEN_PUBLIC_HVM_HVM_OP_H__ */
+diff --git a/include/xen/interface/hvm/params.h b/include/xen/interface/hvm/params.h
+new file mode 100644
+index 0000000..aa9efd8
+--- /dev/null
++++ b/include/xen/interface/hvm/params.h
+@@ -0,0 +1,112 @@
++/*
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to
++ * deal in the Software without restriction, including without limitation the
++ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
++ * sell copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
++ * DEALINGS IN THE SOFTWARE.
++ */
++
++#ifndef __XEN_PUBLIC_HVM_PARAMS_H__
++#define __XEN_PUBLIC_HVM_PARAMS_H__
++
++#include "hvm_op.h"
++
++/*
++ * Parameter space for HVMOP_{set,get}_param.
++ */
++
++/*
++ * How should CPU0 event-channel notifications be delivered?
++ * val[63:56] == 0: val[55:0] is a delivery GSI (Global System Interrupt).
++ * val[63:56] == 1: val[55:0] is a delivery PCI INTx line, as follows:
++ *                  Domain = val[47:32], Bus  = val[31:16],
++ *                  DevFn  = val[15: 8], IntX = val[ 1: 0]
++ * val[63:56] == 2: val[7:0] is a vector number.
++ * If val == 0 then CPU0 event-channel notifications are not delivered.
++ */
++#define HVM_PARAM_CALLBACK_IRQ 0
++
++/*
++ * These are not used by Xen. They are here for convenience of HVM-guest
++ * xenbus implementations.
++ */
++#define HVM_PARAM_STORE_PFN    1
++#define HVM_PARAM_STORE_EVTCHN 2
++
++#define HVM_PARAM_PAE_ENABLED  4
++
++#define HVM_PARAM_IOREQ_PFN    5
++
++#define HVM_PARAM_BUFIOREQ_PFN 6
++
++#ifdef __ia64__
++
++#define HVM_PARAM_NVRAM_FD     7
++#define HVM_PARAM_VHPT_SIZE    8
++#define HVM_PARAM_BUFPIOREQ_PFN        9
++
++#elif defined(__i386__) || defined(__x86_64__)
++
++/* Expose Viridian interfaces to this HVM guest? */
++#define HVM_PARAM_VIRIDIAN     9
++
++#endif
++
++/*
++ * Set mode for virtual timers (currently x86 only):
++ *  delay_for_missed_ticks (default):
++ *   Do not advance a vcpu's time beyond the correct delivery time for
++ *   interrupts that have been missed due to preemption. Deliver missed
++ *   interrupts when the vcpu is rescheduled and advance the vcpu's virtual
++ *   time stepwise for each one.
++ *  no_delay_for_missed_ticks:
++ *   As above, missed interrupts are delivered, but guest time always tracks
++ *   wallclock (i.e., real) time while doing so.
++ *  no_missed_ticks_pending:
++ *   No missed interrupts are held pending. Instead, to ensure ticks are
++ *   delivered at some non-zero rate, if we detect missed ticks then the
++ *   internal tick alarm is not disabled if the VCPU is preempted during the
++ *   next tick period.
++ *  one_missed_tick_pending:
++ *   Missed interrupts are collapsed together and delivered as one 'late tick'.
++ *   Guest time always tracks wallclock (i.e., real) time.
++ */
++#define HVM_PARAM_TIMER_MODE   10
++#define HVMPTM_delay_for_missed_ticks    0
++#define HVMPTM_no_delay_for_missed_ticks 1
++#define HVMPTM_no_missed_ticks_pending   2
++#define HVMPTM_one_missed_tick_pending   3
++
++/* Boolean: Enable virtual HPET (high-precision event timer)? (x86-only) */
++#define HVM_PARAM_HPET_ENABLED 11
++
++/* Identity-map page directory used by Intel EPT when CR0.PG=0. */
++#define HVM_PARAM_IDENT_PT     12
++
++/* Device Model domain, defaults to 0. */
++#define HVM_PARAM_DM_DOMAIN    13
++
++/* ACPI S state: currently support S0 and S3 on x86. */
++#define HVM_PARAM_ACPI_S_STATE 14
++
++/* TSS used on Intel when CR0.PE=0. */
++#define HVM_PARAM_VM86_TSS     15
++
++/* Boolean: Enable aligning all periodic vpts to reduce interrupts */
++#define HVM_PARAM_VPT_ALIGN    16
++
++#define HVM_NR_PARAMS          17
++
++#endif /* __XEN_PUBLIC_HVM_PARAMS_H__ */
 diff --git a/include/xen/interface/io/pciif.h b/include/xen/interface/io/pciif.h
 new file mode 100644
 index 0000000..c4177f3
@@ -28351,6 +30066,492 @@ index 0000000..17ae622
 +DEFINE_GUEST_HANDLE_STRUCT(xen_platform_op_t);
 +
 +#endif /* __XEN_PUBLIC_PLATFORM_H__ */
+diff --git a/include/xen/interface/platform_pci.h b/include/xen/interface/platform_pci.h
+new file mode 100644
+index 0000000..bc230cd
+--- /dev/null
++++ b/include/xen/interface/platform_pci.h
+@@ -0,0 +1,45 @@
++/******************************************************************************
++ * platform_pci.h
++ *
++ * Interface for granting foreign access to page frames, and receiving
++ * page-ownership transfers.
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to
++ * deal in the Software without restriction, including without limitation the
++ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
++ * sell copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
++ * DEALINGS IN THE SOFTWARE.
++ */
++
++#ifndef __XEN_PUBLIC_PLATFORM_PCI_H__
++#define __XEN_PUBLIC_PLATFORM_PCI_H__
++
++#define XEN_IOPORT_BASE 0x10
++
++#define XEN_IOPORT_PLATFLAGS	(XEN_IOPORT_BASE + 0) /* 1 byte access (R/W) */
++#define XEN_IOPORT_MAGIC	(XEN_IOPORT_BASE + 0) /* 2 byte access (R) */
++#define XEN_IOPORT_UNPLUG	(XEN_IOPORT_BASE + 0) /* 2 byte access (W) */
++#define XEN_IOPORT_DRVVER	(XEN_IOPORT_BASE + 0) /* 4 byte access (W) */
++
++#define XEN_IOPORT_SYSLOG	(XEN_IOPORT_BASE + 2) /* 1 byte access (W) */
++#define XEN_IOPORT_PROTOVER	(XEN_IOPORT_BASE + 2) /* 1 byte access (R) */
++#define XEN_IOPORT_PRODNUM	(XEN_IOPORT_BASE + 2) /* 2 byte access (W) */
++
++#define UNPLUG_ALL_IDE_DISKS 1
++#define UNPLUG_ALL_NICS 2
++#define UNPLUG_AUX_IDE_DISKS 4
++#define UNPLUG_ALL 7
++
++#endif /* __XEN_PUBLIC_PLATFORM_PCI_H__ */
+diff --git a/include/xen/interface/xen-mca.h b/include/xen/interface/xen-mca.h
+new file mode 100644
+index 0000000..f31fdab
+--- /dev/null
++++ b/include/xen/interface/xen-mca.h
+@@ -0,0 +1,429 @@
++/******************************************************************************
++ * arch-x86/mca.h
++ *
++ * Contributed by Advanced Micro Devices, Inc.
++ * Author: Christoph Egger <Christoph.Egger@amd.com>
++ *
++ * Guest OS machine check interface to x86 Xen.
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to
++ * deal in the Software without restriction, including without limitation the
++ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
++ * sell copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
++ * DEALINGS IN THE SOFTWARE.
++ */
++
++/* Full MCA functionality has the following Usecases from the guest side:
++ *
++ * Must have's:
++ * 1. Dom0 and DomU register machine check trap callback handlers
++ *    (already done via "set_trap_table" hypercall)
++ * 2. Dom0 registers machine check event callback handler
++ *    (doable via EVTCHNOP_bind_virq)
++ * 3. Dom0 and DomU fetches machine check data
++ * 4. Dom0 wants Xen to notify a DomU
++ * 5. Dom0 gets DomU ID from physical address
++ * 6. Dom0 wants Xen to kill DomU (already done for "xm destroy")
++ *
++ * Nice to have's:
++ * 7. Dom0 wants Xen to deactivate a physical CPU
++ *    This is better done as separate task, physical CPU hotplugging,
++ *    and hypercall(s) should be sysctl's
++ * 8. Page migration proposed from Xen NUMA work, where Dom0 can tell Xen to
++ *    move a DomU (or Dom0 itself) away from a malicious page
++ *    producing correctable errors.
++ * 9. offlining physical page:
++ *    Xen free's and never re-uses a certain physical page.
++ * 10. Testfacility: Allow Dom0 to write values into machine check MSR's
++ *     and tell Xen to trigger a machine check
++ */
++
++#ifndef __XEN_PUBLIC_ARCH_X86_MCA_H__
++#define __XEN_PUBLIC_ARCH_X86_MCA_H__
++
++/* Hypercall */
++#define __HYPERVISOR_mca __HYPERVISOR_arch_0
++
++/*
++ * The xen-unstable repo has interface version 0x03000001; out interface
++ * is incompatible with that and any future minor revisions, so we
++ * choose a different version number range that is numerically less
++ * than that used in xen-unstable.
++ */
++#define XEN_MCA_INTERFACE_VERSION 0x01ecc003
++
++/* IN: Dom0 calls hypercall to retrieve nonurgent error log entry */
++#define XEN_MC_NONURGENT  0x0001
++/* IN: Dom0/DomU calls hypercall to retrieve urgent error log entry */
++#define XEN_MC_URGENT     0x0002
++/* IN: Dom0 acknowledges previosly-fetched error log entry */
++#define XEN_MC_ACK        0x0004
++
++/* OUT: All is ok */
++#define XEN_MC_OK           0x0
++/* OUT: Domain could not fetch data. */
++#define XEN_MC_FETCHFAILED  0x1
++/* OUT: There was no machine check data to fetch. */
++#define XEN_MC_NODATA       0x2
++/* OUT: Between notification time and this hypercall an other
++ *  (most likely) correctable error happened. The fetched data,
++ *  does not match the original machine check data. */
++#define XEN_MC_NOMATCH      0x4
++
++/* OUT: DomU did not register MC NMI handler. Try something else. */
++#define XEN_MC_CANNOTHANDLE 0x8
++/* OUT: Notifying DomU failed. Retry later or try something else. */
++#define XEN_MC_NOTDELIVERED 0x10
++/* Note, XEN_MC_CANNOTHANDLE and XEN_MC_NOTDELIVERED are mutually exclusive. */
++
++
++#ifndef __ASSEMBLY__
++
++#define VIRQ_MCA VIRQ_ARCH_0 /* G. (DOM0) Machine Check Architecture */
++
++/*
++ * Machine Check Architecure:
++ * structs are read-only and used to report all kinds of
++ * correctable and uncorrectable errors detected by the HW.
++ * Dom0 and DomU: register a handler to get notified.
++ * Dom0 only: Correctable errors are reported via VIRQ_MCA
++ */
++#define MC_TYPE_GLOBAL          0
++#define MC_TYPE_BANK            1
++#define MC_TYPE_EXTENDED        2
++#define MC_TYPE_RECOVERY        3
++
++struct mcinfo_common {
++	uint16_t type;      /* structure type */
++	uint16_t size;      /* size of this struct in bytes */
++};
++
++
++#define MC_FLAG_CORRECTABLE     (1 << 0)
++#define MC_FLAG_UNCORRECTABLE   (1 << 1)
++#define MC_FLAG_RECOVERABLE	(1 << 2)
++#define MC_FLAG_POLLED		(1 << 3)
++#define MC_FLAG_RESET		(1 << 4)
++#define MC_FLAG_CMCI		(1 << 5)
++#define MC_FLAG_MCE		(1 << 6)
++/* contains global x86 mc information */
++struct mcinfo_global {
++	struct mcinfo_common common;
++
++	/* running domain at the time in error (most likely
++	 * the impacted one) */
++	uint16_t mc_domid;
++	uint16_t mc_vcpuid; /* virtual cpu scheduled for mc_domid */
++	uint32_t mc_socketid; /* physical socket of the physical core */
++	uint16_t mc_coreid; /* physical impacted core */
++	uint16_t mc_core_threadid; /* core thread of physical core */
++	uint32_t mc_apicid;
++	uint32_t mc_flags;
++	uint64_t mc_gstatus; /* global status */
++};
++
++/* contains bank local x86 mc information */
++struct mcinfo_bank {
++	struct mcinfo_common common;
++
++	uint16_t mc_bank; /* bank nr */
++	uint16_t mc_domid; /* Usecase 5: domain referenced by mc_addr on
++			* privileged pv-ops dom and if mc_addr is valid.
++			* Never valid on DomU. */
++	uint64_t mc_status; /* bank status */
++	uint64_t mc_addr;   /* bank address, only valid
++					 * if addr bit is set in mc_status */
++	uint64_t mc_misc;
++	uint64_t mc_ctrl2;
++	uint64_t mc_tsc;
++};
++
++
++struct mcinfo_msr {
++	uint64_t reg;   /* MSR */
++	uint64_t value; /* MSR value */
++};
++
++/* contains mc information from other
++ * or additional mc MSRs */
++struct mcinfo_extended {
++	struct mcinfo_common common;
++
++	/* You can fill up to five registers.
++	 * If you need more, then use this structure
++	 * multiple times. */
++
++	uint32_t mc_msrs; /* Number of msr with valid values. */
++	/*
++	 * Currently Intel extended MSR (32/64) include all gp registers
++	 * and E(R)FLAGS, E(R)IP, E(R)MISC, up to 11/19 of them might be
++	 * useful at present. So expand this array to 16/32 to leave room.
++	 */
++	struct mcinfo_msr mc_msr[sizeof(void *) * 4];
++};
++
++/* Recovery Action flags. Giving recovery result information to DOM0 */
++
++/* Xen takes successful recovery action, the error is recovered */
++#define REC_ACTION_RECOVERED (0x1 << 0)
++/* No action is performed by XEN */
++#define REC_ACTION_NONE (0x1 << 1)
++/* It's possible DOM0 might take action ownership in some case */
++#define REC_ACTION_NEED_RESET (0x1 << 2)
++
++/* Different Recovery Action types, if the action is performed successfully,
++ * REC_ACTION_RECOVERED flag will be returned.
++ */
++
++/* Page Offline Action */
++#define MC_ACTION_PAGE_OFFLINE (0x1 << 0)
++/* CPU offline Action */
++#define MC_ACTION_CPU_OFFLINE (0x1 << 1)
++/* L3 cache disable Action */
++#define MC_ACTION_CACHE_SHRINK (0x1 << 2)
++
++/* Below interface used between XEN/DOM0 for passing XEN's recovery action
++ * information to DOM0.
++ * usage Senario: After offlining broken page, XEN might pass its page offline
++ * recovery action result to DOM0. DOM0 will save the information in
++ * non-volatile memory for further proactive actions, such as offlining the
++ * easy broken page earlier when doing next reboot.
++*/
++struct page_offline_action {
++	/* Params for passing the offlined page number to DOM0 */
++	uint64_t mfn;
++	uint64_t status;
++};
++
++struct cpu_offline_action {
++	/* Params for passing the identity of the offlined CPU to DOM0 */
++	uint32_t mc_socketid;
++	uint16_t mc_coreid;
++	uint16_t mc_core_threadid;
++};
++
++#define MAX_UNION_SIZE 16
++struct mcinfo_recovery {
++	struct mcinfo_common common;
++	uint16_t mc_bank; /* bank nr */
++	/* Recovery Action Flags defined above such as REC_ACTION_DONE */
++	uint8_t action_flags;
++	/* Recovery Action types defined above such as MC_ACTION_PAGE_OFFLINE */
++	uint8_t action_types;
++	/* In future if more than one recovery action permitted per error bank,
++	 * a mcinfo_recovery data array will be returned
++	 */
++	union {
++		struct page_offline_action page_retire;
++		struct cpu_offline_action cpu_offline;
++		uint8_t pad[MAX_UNION_SIZE];
++	} action_info;
++};
++
++
++#define MCINFO_HYPERCALLSIZE	1024
++#define MCINFO_MAXSIZE		768
++
++struct mc_info {
++	/* Number of mcinfo_* entries in mi_data */
++	uint32_t mi_nentries;
++	uint32_t _pad0;
++	uint64_t mi_data[(MCINFO_MAXSIZE - 1) / 8];
++};
++typedef struct mc_info mc_info_t;
++DEFINE_GUEST_HANDLE_STRUCT(mc_info);
++
++#define __MC_MSR_ARRAYSIZE 8
++#define __MC_NMSRS 1
++#define MC_NCAPS	7	/* 7 CPU feature flag words */
++#define MC_CAPS_STD_EDX	0	/* cpuid level 0x00000001 (%edx) */
++#define MC_CAPS_AMD_EDX	1	/* cpuid level 0x80000001 (%edx) */
++#define MC_CAPS_TM	2	/* cpuid level 0x80860001 (TransMeta) */
++#define MC_CAPS_LINUX	3	/* Linux-defined */
++#define MC_CAPS_STD_ECX	4	/* cpuid level 0x00000001 (%ecx) */
++#define MC_CAPS_VIA	5	/* cpuid level 0xc0000001 */
++#define MC_CAPS_AMD_ECX	6	/* cpuid level 0x80000001 (%ecx) */
++
++struct mcinfo_logical_cpu {
++	uint32_t mc_cpunr;
++	uint32_t mc_chipid;
++	uint16_t mc_coreid;
++	uint16_t mc_threadid;
++	uint32_t mc_apicid;
++	uint32_t mc_clusterid;
++	uint32_t mc_ncores;
++	uint32_t mc_ncores_active;
++	uint32_t mc_nthreads;
++	int32_t mc_cpuid_level;
++	uint32_t mc_family;
++	uint32_t mc_vendor;
++	uint32_t mc_model;
++	uint32_t mc_step;
++	char mc_vendorid[16];
++	char mc_brandid[64];
++	uint32_t mc_cpu_caps[MC_NCAPS];
++	uint32_t mc_cache_size;
++	uint32_t mc_cache_alignment;
++	int32_t mc_nmsrvals;
++	struct mcinfo_msr mc_msrvalues[__MC_MSR_ARRAYSIZE];
++};
++typedef struct mcinfo_logical_cpu mcinfo_logical_cpu_t;
++DEFINE_GUEST_HANDLE_STRUCT(mcinfo_logical_cpu);
++
++
++/*
++ * OS's should use these instead of writing their own lookup function
++ * each with its own bugs and drawbacks.
++ * We use macros instead of static inline functions to allow guests
++ * to include this header in assembly files (*.S).
++ */
++/* Prototype:
++ *    uint32_t x86_mcinfo_nentries(struct mc_info *mi);
++ */
++#define x86_mcinfo_nentries(_mi)    \
++    ((_mi)->mi_nentries)
++/* Prototype:
++ *    struct mcinfo_common *x86_mcinfo_first(struct mc_info *mi);
++ */
++#define x86_mcinfo_first(_mi)       \
++    ((struct mcinfo_common *)(_mi)->mi_data)
++/* Prototype:
++ *    struct mcinfo_common *x86_mcinfo_next(struct mcinfo_common *mic);
++ */
++#define x86_mcinfo_next(_mic)       \
++    ((struct mcinfo_common *)((uint8_t *)(_mic) + (_mic)->size))
++
++/* Prototype:
++ *    void x86_mcinfo_lookup(void *ret, struct mc_info *mi, uint16_t type);
++ */
++
++static inline void x86_mcinfo_lookup
++	(struct mcinfo_common **ret, struct mc_info *mi, uint16_t type)
++{
++	uint32_t found = 0, i;
++	struct mcinfo_common *mic;
++
++	*ret = NULL;
++	if (!mi)
++		return;
++	mic = x86_mcinfo_first(mi);
++
++	for (i = 0; i < x86_mcinfo_nentries(mi); i++) {
++		if (mic->type == type) {
++			found = 1;
++			break;
++		}
++		mic = x86_mcinfo_next(mic);
++	}
++
++	*ret = found ? mic : NULL;
++}
++/* Usecase 1
++ * Register machine check trap callback handler
++ *    (already done via "set_trap_table" hypercall)
++ */
++
++/* Usecase 2
++ * Dom0 registers machine check event callback handler
++ * done by EVTCHNOP_bind_virq
++ */
++
++/* Usecase 3
++ * Fetch machine check data from hypervisor.
++ * Note, this hypercall is special, because both Dom0 and DomU must use this.
++ */
++#define XEN_MC_fetch            1
++struct xen_mc_fetch {
++    /* IN/OUT variables.
++	 * IN: XEN_MC_NONURGENT, XEN_MC_URGENT,
++	 * XEN_MC_ACK if ack'king an earlier fetch
++	 * OUT: XEN_MC_OK, XEN_MC_FETCHAILED,
++	 * XEN_MC_NODATA, XEN_MC_NOMATCH
++	*/
++	uint32_t flags;
++	uint32_t _pad0;
++	/* OUT: id for ack, IN: id we are ack'ing */
++	uint64_t fetch_id;
++
++	/* OUT variables. */
++	GUEST_HANDLE(mc_info) data;
++};
++typedef struct xen_mc_fetch xen_mc_fetch_t;
++DEFINE_GUEST_HANDLE_STRUCT(xen_mc_fetch);
++
++
++/* Usecase 4
++ * This tells the hypervisor to notify a DomU about the machine check error
++ */
++#define XEN_MC_notifydomain     2
++struct xen_mc_notifydomain {
++	/* IN variables. */
++	uint16_t mc_domid;/* The unprivileged domain to notify. */
++	uint16_t mc_vcpuid;/* The vcpu in mc_domid to notify.
++			* Usually echo'd value from the fetch hypercall. */
++
++	/* IN/OUT variables. */
++	uint32_t flags;
++
++/* OUT: XEN_MC_OK, XEN_MC_CANNOTHANDLE, XEN_MC_NOTDELIVERED, XEN_MC_NOMATCH */
++};
++typedef struct xen_mc_notifydomain xen_mc_notifydomain_t;
++DEFINE_GUEST_HANDLE_STRUCT(xen_mc_notifydomain);
++
++#define XEN_MC_physcpuinfo 3
++struct xen_mc_physcpuinfo {
++	/* IN/OUT */
++	uint32_t ncpus;
++	uint32_t _pad0;
++	/* OUT */
++	GUEST_HANDLE(mcinfo_logical_cpu) info;
++};
++
++#define XEN_MC_msrinject    4
++#define MC_MSRINJ_MAXMSRS       8
++struct xen_mc_msrinject {
++	/* IN */
++	uint32_t mcinj_cpunr;/* target processor id */
++	uint32_t mcinj_flags;/* see MC_MSRINJ_F_* below */
++	uint32_t mcinj_count;/* 0 .. count-1 in array are valid */
++	uint32_t _pad0;
++	struct mcinfo_msr mcinj_msr[MC_MSRINJ_MAXMSRS];
++};
++
++/* Flags for mcinj_flags above; bits 16-31 are reserved */
++#define MC_MSRINJ_F_INTERPOSE   0x1
++
++#define XEN_MC_mceinject    5
++struct xen_mc_mceinject {
++	unsigned int mceinj_cpunr;      /* target processor id */
++};
++
++struct xen_mc {
++	uint32_t cmd;
++	uint32_t interface_version; /* XEN_MCA_INTERFACE_VERSION */
++	union {
++		struct xen_mc_fetch        mc_fetch;
++		struct xen_mc_notifydomain mc_notifydomain;
++		struct xen_mc_physcpuinfo  mc_physcpuinfo;
++		struct xen_mc_msrinject    mc_msrinject;
++		struct xen_mc_mceinject    mc_mceinject;
++	} u;
++};
++typedef struct xen_mc xen_mc_t;
++DEFINE_GUEST_HANDLE_STRUCT(xen_mc);
++
++#endif /* __ASSEMBLY__ */
++
++#endif /* __XEN_PUBLIC_ARCH_X86_MCA_H__ */
 diff --git a/include/xen/interface/xen.h b/include/xen/interface/xen.h
 index 2befa3e..9ffaee0 100644
 --- a/include/xen/interface/xen.h
@@ -28467,6 +30668,59 @@ index 0000000..fb2bf6b
 +
 +extern void unregister_xen_pcpu_notifier(struct notifier_block *nb);
 +#endif
+diff --git a/include/xen/platform_pci.h b/include/xen/platform_pci.h
+new file mode 100644
+index 0000000..ced434d
+--- /dev/null
++++ b/include/xen/platform_pci.h
+@@ -0,0 +1,47 @@
++/******************************************************************************
++ * platform-pci.h
++ *
++ * Xen platform PCI device driver
++ * Copyright (c) 2004, Intel Corporation. <xiaofeng.ling@intel.com>
++ * Copyright (c) 2007, XenSource Inc.
++ * Copyright (c) 2010, Citrix
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms and conditions of the GNU General Public License,
++ * version 2, as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
++ * Place - Suite 330, Boston, MA 02111-1307 USA.
++ */
++
++#ifndef _XEN_PLATFORM_PCI_H
++#define _XEN_PLATFORM_PCI_H
++
++#include <linux/version.h>
++
++#define XEN_IOPORT_MAGIC_VAL 0x49d2
++#define XEN_IOPORT_LINUX_PRODNUM 0xffff
++#define XEN_IOPORT_LINUX_DRVVER  ((LINUX_VERSION_CODE << 8) + 0x0)
++
++#ifdef CONFIG_XEN_PLATFORM_PCI
++unsigned long alloc_xen_mmio(unsigned long len);
++void platform_pci_resume(void);
++void platform_pci_disable_irq(void);
++void platform_pci_enable_irq(void);
++#else
++static inline unsigned long alloc_xen_mmio(unsigned long len)
++{
++	return ~0UL;
++}
++static inline void platform_pci_resume(void) {}
++static inline void platform_pci_disable_irq(void) {}
++static inline void platform_pci_enable_irq(void) {}
++#endif
++
++#endif /* _XEN_PLATFORM_PCI_H */
 diff --git a/include/xen/privcmd.h b/include/xen/privcmd.h
 new file mode 100644
 index 0000000..b42cdfd
@@ -28554,13 +30808,15 @@ index 0000000..b42cdfd
 +
 +#endif /* __LINUX_PUBLIC_PRIVCMD_H__ */
 diff --git a/include/xen/xen-ops.h b/include/xen/xen-ops.h
-index 883a21b..c7b3ce9 100644
+index 883a21b..323121a 100644
 --- a/include/xen/xen-ops.h
 +++ b/include/xen/xen-ops.h
-@@ -14,4 +14,15 @@ void xen_mm_unpin_all(void);
+@@ -14,4 +14,17 @@ void xen_mm_unpin_all(void);
  void xen_timer_resume(void);
  void xen_arch_resume(void);
  
++int xen_setup_shutdown_event(void);
++
 +int xen_remap_domain_mfn_range(struct vm_area_struct *vma,
 +			       unsigned long addr,
 +			       unsigned long mfn, int nr,
@@ -28612,7 +30868,7 @@ index 0000000..a164024
 +
 +#endif	/* _XEN_XEN_H */
 diff --git a/include/xen/xenbus.h b/include/xen/xenbus.h
-index b9763ba..542ca7c 100644
+index b9763ba..a7d13ff 100644
 --- a/include/xen/xenbus.h
 +++ b/include/xen/xenbus.h
 @@ -93,7 +93,7 @@ struct xenbus_driver {
@@ -28624,6 +30880,14 @@ index b9763ba..542ca7c 100644
  	struct device_driver driver;
  	int (*read_otherend_details)(struct xenbus_device *dev);
  	int (*is_ready)(struct xenbus_device *dev);
+@@ -173,6 +173,7 @@ void unregister_xenbus_watch(struct xenbus_watch *watch);
+ void xs_suspend(void);
+ void xs_resume(void);
+ void xs_suspend_cancel(void);
++int xenbus_probe_init(void);
+ 
+ /* Used by xenbus_dev to borrow kernel's store connection. */
+ void *xenbus_dev_request_and_reply(struct xsd_sockmsg *msg);
 diff --git a/kernel/irq/manage.c b/kernel/irq/manage.c
 index 986519e..cae345b 100644
 --- a/kernel/irq/manage.c
