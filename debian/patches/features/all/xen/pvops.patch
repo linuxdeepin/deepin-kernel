@@ -1,4 +1,4 @@
-Patch based on commit ba739f9abd3f659b907a824af1161926b420a2ce of
+Patch based on commit f6fe6583b77a49b569eef1b66c3d761eec2e561b of
 git://git.kernel.org/pub/scm/linux/kernel/git/jeremy/xen.git.
 
 diff --git a/Documentation/x86/x86_64/boot-options.txt b/Documentation/x86/x86_64/boot-options.txt
@@ -3380,7 +3380,7 @@ index 0000000..21a3089
 +#endif
 +}
 diff --git a/arch/x86/xen/enlighten.c b/arch/x86/xen/enlighten.c
-index 3578688..e6a9f9f 100644
+index 3578688..7638cd6 100644
 --- a/arch/x86/xen/enlighten.c
 +++ b/arch/x86/xen/enlighten.c
 @@ -28,12 +28,19 @@
@@ -3675,7 +3675,7 @@ index 3578688..e6a9f9f 100644
  	}
  
  	xen_raw_console_write("about to get started...\n");
-@@ -1197,3 +1279,142 @@ asmlinkage void __init xen_start_kernel(void)
+@@ -1197,3 +1279,141 @@ asmlinkage void __init xen_start_kernel(void)
  	x86_64_start_reservations((char *)__pa_symbol(&boot_params));
  #endif
  }
@@ -3792,7 +3792,6 @@ index 3578688..e6a9f9f 100644
 +	}
 +	have_vcpu_info_placement = 0;
 +	x86_init.irqs.intr_init = xen_init_IRQ;
-+	machine_ops = xen_machine_ops;
 +}
 +
 +static int __init parse_unplug(char *arg)
@@ -6236,7 +6235,7 @@ index 1d886e0..f4a2b10 100644
  	  This driver implements the front-end of the Xen virtual
  	  block device driver.  It communicates with a back-end driver
 diff --git a/drivers/block/xen-blkfront.c b/drivers/block/xen-blkfront.c
-index b8578bb..a8d30d7 100644
+index b8578bb..75f730b 100644
 --- a/drivers/block/xen-blkfront.c
 +++ b/drivers/block/xen-blkfront.c
 @@ -42,6 +42,7 @@
@@ -6247,7 +6246,25 @@ index b8578bb..a8d30d7 100644
  #include <xen/xenbus.h>
  #include <xen/grant_table.h>
  #include <xen/events.h>
-@@ -102,6 +103,10 @@ struct blkfront_info
+@@ -76,6 +77,7 @@ static const struct block_device_operations xlvbd_block_fops;
+  */
+ struct blkfront_info
+ {
++	struct mutex mutex;
+ 	struct xenbus_device *xbdev;
+ 	struct gendisk *gd;
+ 	int vdevice;
+@@ -92,16 +94,14 @@ struct blkfront_info
+ 	unsigned long shadow_free;
+ 	int feature_barrier;
+ 	int is_ready;
+-
+-	/**
+-	 * The number of people holding this device open.  We won't allow a
+-	 * hot-unplug unless this is 0.
+-	 */
+-	int users;
+ };
  
  static DEFINE_SPINLOCK(blkif_io_lock);
  
@@ -6258,7 +6275,7 @@ index b8578bb..a8d30d7 100644
  #define MAXIMUM_OUTSTANDING_BLOCK_REQS \
  	(BLKIF_MAX_SEGMENTS_PER_REQUEST * BLK_RING_SIZE)
  #define GRANT_INVALID_REF	0
-@@ -136,6 +141,55 @@ static void add_id_to_freelist(struct blkfront_info *info,
+@@ -136,6 +136,55 @@ static void add_id_to_freelist(struct blkfront_info *info,
  	info->shadow_free = id;
  }
  
@@ -6314,7 +6331,7 @@ index b8578bb..a8d30d7 100644
  static void blkif_restart_queue_callback(void *arg)
  {
  	struct blkfront_info *info = (struct blkfront_info *)arg;
-@@ -416,9 +470,14 @@ static int xlvbd_alloc_gendisk(blkif_sector_t capacity,
+@@ -416,9 +465,14 @@ static int xlvbd_alloc_gendisk(blkif_sector_t capacity,
  	if ((minor % nr_parts) == 0)
  		nr_minors = nr_parts;
  
@@ -6330,7 +6347,7 @@ index b8578bb..a8d30d7 100644
  
  	offset = minor / nr_parts;
  
-@@ -449,7 +508,7 @@ static int xlvbd_alloc_gendisk(blkif_sector_t capacity,
+@@ -449,7 +503,7 @@ static int xlvbd_alloc_gendisk(blkif_sector_t capacity,
  
  	if (xlvbd_init_blk_queue(gd, sector_size)) {
  		del_gendisk(gd);
@@ -6339,7 +6356,7 @@ index b8578bb..a8d30d7 100644
  	}
  
  	info->rq = gd->queue;
-@@ -469,6 +528,8 @@ static int xlvbd_alloc_gendisk(blkif_sector_t capacity,
+@@ -469,10 +523,45 @@ static int xlvbd_alloc_gendisk(blkif_sector_t capacity,
  
  	return 0;
  
@@ -6348,7 +6365,44 @@ index b8578bb..a8d30d7 100644
   out:
  	return err;
  }
-@@ -650,7 +711,7 @@ fail:
+ 
++static void xlvbd_release_gendisk(struct blkfront_info *info)
++{
++	unsigned int minor, nr_minors;
++	unsigned long flags;
++
++	if (info->rq == NULL)
++		return;
++
++	spin_lock_irqsave(&blkif_io_lock, flags);
++
++	/* No more blkif_request(). */
++	blk_stop_queue(info->rq);
++
++	/* No more gnttab callback work. */
++	gnttab_cancel_free_callback(&info->callback);
++	spin_unlock_irqrestore(&blkif_io_lock, flags);
++
++	/* Flush gnttab callback work. Must be done with no locks held. */
++	flush_scheduled_work();
++
++	del_gendisk(info->gd);
++
++	minor = info->gd->first_minor;
++	nr_minors = info->gd->minors;
++	xlbd_release_minors(minor, nr_minors);
++
++	blk_cleanup_queue(info->rq);
++	info->rq = NULL;
++
++	put_disk(info->gd);
++	info->gd = NULL;
++}
++
+ static void kick_pending_request_queues(struct blkfront_info *info)
+ {
+ 	if (!RING_FULL(&info->ring)) {
+@@ -650,7 +739,7 @@ fail:
  
  
  /* Common code used when first setting up, and when resuming. */
@@ -6357,7 +6411,23 @@ index b8578bb..a8d30d7 100644
  			   struct blkfront_info *info)
  {
  	const char *message = NULL;
-@@ -755,7 +816,7 @@ static int blkfront_probe(struct xenbus_device *dev,
+@@ -710,7 +799,6 @@ again:
+ 	return err;
+ }
+ 
+-
+ /**
+  * Entry point to this code when a new device is created.  Allocate the basic
+  * structures and the ring buffer for communication with the backend, and
+@@ -742,6 +830,7 @@ static int blkfront_probe(struct xenbus_device *dev,
+ 		return -ENOMEM;
+ 	}
+ 
++	mutex_init(&info->mutex);
+ 	info->xbdev = dev;
+ 	info->vdevice = vdevice;
+ 	info->connected = BLKIF_STATE_DISCONNECTED;
+@@ -755,7 +844,7 @@ static int blkfront_probe(struct xenbus_device *dev,
  	info->handle = simple_strtoul(strrchr(dev->nodename, '/')+1, NULL, 0);
  	dev_set_drvdata(&dev->dev, info);
  
@@ -6366,7 +6436,7 @@ index b8578bb..a8d30d7 100644
  	if (err) {
  		kfree(info);
  		dev_set_drvdata(&dev->dev, NULL);
-@@ -850,7 +911,7 @@ static int blkfront_resume(struct xenbus_device *dev)
+@@ -850,13 +939,50 @@ static int blkfront_resume(struct xenbus_device *dev)
  
  	blkif_free(info, info->connected == BLKIF_STATE_CONNECTED);
  
@@ -6375,7 +6445,50 @@ index b8578bb..a8d30d7 100644
  	if (info->connected == BLKIF_STATE_SUSPENDED && !err)
  		err = blkif_recover(info);
  
-@@ -869,10 +930,29 @@ static void blkfront_connect(struct blkfront_info *info)
+ 	return err;
+ }
+ 
++static void
++blkfront_closing(struct blkfront_info *info)
++{
++	struct xenbus_device *xbdev = info->xbdev;
++	struct block_device *bdev = NULL;
++
++	mutex_lock(&info->mutex);
++
++	if (xbdev->state == XenbusStateClosing) {
++		mutex_unlock(&info->mutex);
++		return;
++	}
++
++	if (info->gd)
++		bdev = bdget_disk(info->gd, 0);
++
++	mutex_unlock(&info->mutex);
++
++	if (!bdev) {
++		xenbus_frontend_closed(xbdev);
++		return;
++	}
++
++	mutex_lock(&bdev->bd_mutex);
++
++	if (bdev->bd_openers) {
++		xenbus_dev_error(xbdev, -EBUSY,
++				 "Device in use; refusing to close");
++		xenbus_switch_state(xbdev, XenbusStateClosing);
++	} else {
++		xlvbd_release_gendisk(info);
++		xenbus_frontend_closed(xbdev);
++	}
++
++	mutex_unlock(&bdev->bd_mutex);
++	bdput(bdev);
++}
+ 
+ /*
+  * Invoked when the backend is finally 'ready' (and has told produced
+@@ -869,10 +995,29 @@ static void blkfront_connect(struct blkfront_info *info)
  	unsigned int binfo;
  	int err;
  
@@ -6407,37 +6520,47 @@ index b8578bb..a8d30d7 100644
  	dev_dbg(&info->xbdev->dev, "%s:%s.\n",
  		__func__, info->xbdev->otherend);
  
-@@ -920,12 +1000,11 @@ static void blkfront_connect(struct blkfront_info *info)
-  * the backend.  Once is this done, we can switch to Closed in
-  * acknowledgement.
-  */
--static void blkfront_closing(struct xenbus_device *dev)
-+static void blkfront_closing(struct blkfront_info *info)
- {
--	struct blkfront_info *info = dev_get_drvdata(&dev->dev);
-+	unsigned int minor, nr_minors;
- 	unsigned long flags;
- 
--	dev_dbg(&dev->dev, "blkfront_closing: %s removed\n", dev->nodename);
- 
- 	if (info->rq == NULL)
- 		goto out;
-@@ -945,27 +1024,33 @@ static void blkfront_closing(struct xenbus_device *dev)
- 	blk_cleanup_queue(info->rq);
- 	info->rq = NULL;
- 
-+	minor = info->gd->first_minor;
-+	nr_minors = info->gd->minors;
- 	del_gendisk(info->gd);
-+	xlbd_release_minors(minor, nr_minors);
- 
-  out:
--	xenbus_frontend_closed(dev);
-+	if (info->xbdev)
-+		xenbus_frontend_closed(info->xbdev);
+@@ -915,57 +1060,21 @@ static void blkfront_connect(struct blkfront_info *info)
  }
  
  /**
+- * Handle the change of state of the backend to Closing.  We must delete our
+- * device-layer structures now, to ensure that writes are flushed through to
+- * the backend.  Once is this done, we can switch to Closed in
+- * acknowledgement.
+- */
+-static void blkfront_closing(struct xenbus_device *dev)
+-{
+-	struct blkfront_info *info = dev_get_drvdata(&dev->dev);
+-	unsigned long flags;
+-
+-	dev_dbg(&dev->dev, "blkfront_closing: %s removed\n", dev->nodename);
+-
+-	if (info->rq == NULL)
+-		goto out;
+-
+-	spin_lock_irqsave(&blkif_io_lock, flags);
+-
+-	/* No more blkif_request(). */
+-	blk_stop_queue(info->rq);
+-
+-	/* No more gnttab callback work. */
+-	gnttab_cancel_free_callback(&info->callback);
+-	spin_unlock_irqrestore(&blkif_io_lock, flags);
+-
+-	/* Flush gnttab callback work. Must be done with no locks held. */
+-	flush_scheduled_work();
+-
+-	blk_cleanup_queue(info->rq);
+-	info->rq = NULL;
+-
+-	del_gendisk(info->gd);
+-
+- out:
+-	xenbus_frontend_closed(dev);
+-}
+-
+-/**
   * Callback received when the backend's state changes.
   */
 -static void backend_changed(struct xenbus_device *dev,
@@ -6445,7 +6568,7 @@ index b8578bb..a8d30d7 100644
  			    enum xenbus_state backend_state)
  {
  	struct blkfront_info *info = dev_get_drvdata(&dev->dev);
- 	struct block_device *bd;
+-	struct block_device *bd;
  
 -	dev_dbg(&dev->dev, "blkfront:backend_changed.\n");
 +	dev_dbg(&dev->dev, "blkfront:blkback_changed to state %d.\n", backend_state);
@@ -6459,28 +6582,84 @@ index b8578bb..a8d30d7 100644
  	case XenbusStateUnknown:
  	case XenbusStateClosed:
  		break;
-@@ -988,7 +1073,7 @@ static void backend_changed(struct xenbus_device *dev,
- 			xenbus_dev_error(dev, -EBUSY,
- 					 "Device in use; refusing to close");
- 		else
--			blkfront_closing(dev);
-+			blkfront_closing(info);
- 		mutex_unlock(&bd->bd_mutex);
- 		bdput(bd);
+@@ -975,35 +1084,56 @@ static void backend_changed(struct xenbus_device *dev,
  		break;
-@@ -1003,7 +1088,10 @@ static int blkfront_remove(struct xenbus_device *dev)
+ 
+ 	case XenbusStateClosing:
+-		if (info->gd == NULL) {
+-			xenbus_frontend_closed(dev);
+-			break;
+-		}
+-		bd = bdget_disk(info->gd, 0);
+-		if (bd == NULL)
+-			xenbus_dev_fatal(dev, -ENODEV, "bdget failed");
+-
+-		mutex_lock(&bd->bd_mutex);
+-		if (info->users > 0)
+-			xenbus_dev_error(dev, -EBUSY,
+-					 "Device in use; refusing to close");
+-		else
+-			blkfront_closing(dev);
+-		mutex_unlock(&bd->bd_mutex);
+-		bdput(bd);
++		blkfront_closing(info);
+ 		break;
+ 	}
+ }
+ 
+-static int blkfront_remove(struct xenbus_device *dev)
++static int blkfront_remove(struct xenbus_device *xbdev)
+ {
+-	struct blkfront_info *info = dev_get_drvdata(&dev->dev);
++	struct blkfront_info *info = dev_get_drvdata(&xbdev->dev);
++	struct block_device *bdev = NULL;
++	struct gendisk *disk;
+ 
+-	dev_dbg(&dev->dev, "blkfront_remove: %s removed\n", dev->nodename);
++	dev_dbg(&xbdev->dev, "%s removed", xbdev->nodename);
  
  	blkif_free(info, 0);
  
 -	kfree(info);
-+	if(info->users == 0)
++	mutex_lock(&info->mutex);
++
++	disk = info->gd;
++	if (disk)
++		bdev = bdget_disk(disk, 0);
++
++	info->xbdev = NULL;
++	mutex_unlock(&info->mutex);
++
++	if (!bdev) {
 +		kfree(info);
-+	else
-+		info->xbdev = NULL;
++		return 0;
++	}
++
++	/*
++	 * The xbdev was removed before we reached the Closed
++	 * state. See if it's safe to remove the disk. If the bdev
++	 * isn't closed yet, we let release take care of it.
++	 */
++
++	mutex_lock(&bdev->bd_mutex);
++	info = disk->private_data;
++
++	dev_warn(disk_to_dev(disk),
++		 "%s was hot-unplugged, %d stale handles\n",
++		 xbdev->nodename, bdev->bd_openers);
++
++	if (info && !bdev->bd_openers) {
++		xlvbd_release_gendisk(info);
++		disk->private_data = NULL;
++		kfree(info);
++	}
++
++	mutex_unlock(&bdev->bd_mutex);
++	bdput(bdev);
  
  	return 0;
  }
-@@ -1012,12 +1100,15 @@ static int blkfront_is_ready(struct xenbus_device *dev)
+@@ -1012,30 +1142,68 @@ static int blkfront_is_ready(struct xenbus_device *dev)
  {
  	struct blkfront_info *info = dev_get_drvdata(&dev->dev);
  
@@ -6490,31 +6669,80 @@ index b8578bb..a8d30d7 100644
  
  static int blkif_open(struct block_device *bdev, fmode_t mode)
  {
- 	struct blkfront_info *info = bdev->bd_disk->private_data;
+-	struct blkfront_info *info = bdev->bd_disk->private_data;
+-	info->users++;
+-	return 0;
++	struct gendisk *disk = bdev->bd_disk;
++	struct blkfront_info *info;
++	int err = 0;
 +
-+	if (!info->xbdev)
-+		return -ENODEV;
- 	info->users++;
- 	return 0;
++	info = disk->private_data;
++	if (!info)
++		/* xbdev gone */
++		return -ERESTARTSYS;
++
++	mutex_lock(&info->mutex);
++
++	if (!info->gd)
++		/* xbdev is closed */
++		err = -ERESTARTSYS;
++
++	mutex_unlock(&info->mutex);
++
++	return err;
  }
-@@ -1031,10 +1122,13 @@ static int blkif_release(struct gendisk *disk, fmode_t mode)
- 		   have ignored this request initially, as the device was
- 		   still mounted. */
- 		struct xenbus_device *dev = info->xbdev;
--		enum xenbus_state state = xenbus_read_driver_state(dev->otherend);
  
+ static int blkif_release(struct gendisk *disk, fmode_t mode)
+ {
+ 	struct blkfront_info *info = disk->private_data;
+-	info->users--;
+-	if (info->users == 0) {
+-		/* Check whether we have been instructed to close.  We will
+-		   have ignored this request initially, as the device was
+-		   still mounted. */
+-		struct xenbus_device *dev = info->xbdev;
+-		enum xenbus_state state = xenbus_read_driver_state(dev->otherend);
+-
 -		if (state == XenbusStateClosing && info->is_ready)
 -			blkfront_closing(dev);
-+		if (!dev) {
-+			blkfront_closing(info);
-+			kfree(info);
-+		} else if (xenbus_read_driver_state(dev->otherend)
-+			   == XenbusStateClosing && info->is_ready)
-+			blkfront_closing(info);
++	struct block_device *bdev;
++	struct xenbus_device *xbdev;
++
++	bdev = bdget_disk(disk, 0);
++	bdput(bdev);
++
++	if (bdev->bd_openers)
++		return 0;
++
++	/*
++	 * Check if we have been instructed to close. We will have
++	 * deferred this request, because the bdev was still open.
++	 */
++
++	mutex_lock(&info->mutex);
++	xbdev = info->xbdev;
++
++	if (xbdev && xbdev->state == XenbusStateClosing) {
++		/* pending switch to state closed */
++		dev_info(disk_to_dev(bdev->bd_disk), "releasing disk\n");
++		xlvbd_release_gendisk(info);
++		xenbus_frontend_closed(info->xbdev);
++	}
++
++	mutex_unlock(&info->mutex);
++
++	if (!xbdev) {
++		/* sudden device removal */
++		dev_info(disk_to_dev(bdev->bd_disk), "releasing disk\n");
++		xlvbd_release_gendisk(info);
++		disk->private_data = NULL;
++		kfree(info);
  	}
++
  	return 0;
  }
-@@ -1061,7 +1155,7 @@ static struct xenbus_driver blkfront = {
+ 
+@@ -1061,7 +1229,7 @@ static struct xenbus_driver blkfront = {
  	.probe = blkfront_probe,
  	.remove = blkfront_remove,
  	.resume = blkfront_resume,
@@ -16661,7 +16889,7 @@ index 7d8f531..8df6ae0 100644
 +
 +core_initcall(__gnttab_init);
 diff --git a/drivers/xen/manage.c b/drivers/xen/manage.c
-index 5d42d55..004b1dd 100644
+index 5d42d55..3924018 100644
 --- a/drivers/xen/manage.c
 +++ b/drivers/xen/manage.c
 @@ -7,15 +7,19 @@
@@ -16716,7 +16944,7 @@ index 5d42d55..004b1dd 100644
  
  	BUG_ON(!irqs_disabled());
  
-@@ -72,6 +96,59 @@ static int xen_suspend(void *data)
+@@ -72,6 +96,62 @@ static int xen_suspend(void *data)
  	return 0;
  }
  
@@ -16770,13 +16998,16 @@ index 5d42d55..004b1dd 100644
 +	stop_machine_destroy();
 +
 +out:
++#ifdef CONFIG_PREEMPT
++	thaw_processes();
++#endif
 +	shutting_down = SHUTDOWN_INVALID;
 +}
 +
  static void do_suspend(void)
  {
  	int err;
-@@ -184,7 +261,10 @@ static void shutdown_handler(struct xenbus_watch *watch,
+@@ -184,7 +264,10 @@ static void shutdown_handler(struct xenbus_watch *watch,
  		ctrl_alt_del();
  #ifdef CONFIG_PM_SLEEP
  	} else if (strcmp(str, "suspend") == 0) {
@@ -16788,7 +17019,7 @@ index 5d42d55..004b1dd 100644
  #endif
  	} else {
  		printk(KERN_INFO "Ignoring shutdown request: %s\n", str);
-@@ -260,7 +340,19 @@ static int shutdown_event(struct notifier_block *notifier,
+@@ -260,7 +343,19 @@ static int shutdown_event(struct notifier_block *notifier,
  	return NOTIFY_DONE;
  }
  
@@ -16809,7 +17040,7 @@ index 5d42d55..004b1dd 100644
  {
  	static struct notifier_block xenstore_notifier = {
  		.notifier_call = shutdown_event
-@@ -270,4 +362,4 @@ static int __init setup_shutdown_event(void)
+@@ -270,4 +365,4 @@ static int __init setup_shutdown_event(void)
  	return 0;
  }
  
@@ -17697,10 +17928,10 @@ index 0000000..086d939
 +}
 diff --git a/drivers/xen/netback/netback.c b/drivers/xen/netback/netback.c
 new file mode 100644
-index 0000000..0bc6398
+index 0000000..5dc4f98
 --- /dev/null
 +++ b/drivers/xen/netback/netback.c
-@@ -0,0 +1,1613 @@
+@@ -0,0 +1,1609 @@
 +/******************************************************************************
 + * drivers/xen/netback/netback.c
 + *
@@ -19035,14 +19266,10 @@ index 0000000..0bc6398
 +			netif_idx_release(pending_idx);
 +		}
 +
-+		/*
-+		 * Old frontends do not assert data_validated but we
-+		 * can infer it from csum_blank so test both flags.
-+		 */
-+		if (txp->flags & (NETTXF_data_validated|NETTXF_csum_blank))
++		if (txp->flags & NETTXF_csum_blank)
 +			skb->ip_summed = CHECKSUM_PARTIAL;
-+		else
-+			skb->ip_summed = CHECKSUM_NONE;
++		else if (txp->flags & NETTXF_data_validated)
++			skb->ip_summed = CHECKSUM_UNNECESSARY;
 +
 +		netbk_fill_frags(skb);
 +
@@ -26043,7 +26270,7 @@ index 5571f5b..8dca685 100644
 +
 +obj-$(CONFIG_XEN_XENBUS_FRONTEND) += xenbus_probe_frontend.o
 diff --git a/drivers/xen/xenbus/xenbus_client.c b/drivers/xen/xenbus/xenbus_client.c
-index 92a1ef8..da3ca9e 100644
+index 92a1ef8..89f2e42 100644
 --- a/drivers/xen/xenbus/xenbus_client.c
 +++ b/drivers/xen/xenbus/xenbus_client.c
 @@ -49,6 +49,8 @@ const char *xenbus_strstate(enum xenbus_state state)
@@ -26055,6 +26282,133 @@ index 92a1ef8..da3ca9e 100644
  	};
  	return (state < ARRAY_SIZE(name)) ? name[state] : "INVALID";
  }
+@@ -132,17 +134,12 @@ int xenbus_watch_pathfmt(struct xenbus_device *dev,
+ }
+ EXPORT_SYMBOL_GPL(xenbus_watch_pathfmt);
+ 
++static void xenbus_switch_fatal(struct xenbus_device *, int, int,
++				const char *, ...);
+ 
+-/**
+- * xenbus_switch_state
+- * @dev: xenbus device
+- * @state: new state
+- *
+- * Advertise in the store a change of the given driver to the given new_state.
+- * Return 0 on success, or -errno on error.  On error, the device will switch
+- * to XenbusStateClosing, and the error will be saved in the store.
+- */
+-int xenbus_switch_state(struct xenbus_device *dev, enum xenbus_state state)
++static int
++__xenbus_switch_state(struct xenbus_device *dev,
++		      enum xenbus_state state, int depth)
+ {
+ 	/* We check whether the state is currently set to the given value, and
+ 	   if not, then the state is set.  We don't want to unconditionally
+@@ -151,35 +148,65 @@ int xenbus_switch_state(struct xenbus_device *dev, enum xenbus_state state)
+ 	   to it, as the device will be tearing down, and we don't want to
+ 	   resurrect that directory.
+ 
+-	   Note that, because of this cached value of our state, this function
+-	   will not work inside a Xenstore transaction (something it was
+-	   trying to in the past) because dev->state would not get reset if
+-	   the transaction was aborted.
+-
++	   Note that, because of this cached value of our state, this
++	   function will not take a caller's Xenstore transaction
++	   (something it was trying to in the past) because dev->state
++	   would not get reset if the transaction was aborted.
+ 	 */
+ 
++	struct xenbus_transaction xbt;
+ 	int current_state;
+-	int err;
++	int err, abort;
+ 
+ 	if (state == dev->state)
+ 		return 0;
+ 
+-	err = xenbus_scanf(XBT_NIL, dev->nodename, "state", "%d",
+-			   &current_state);
+-	if (err != 1)
++again:
++	abort = 1;
++
++	err = xenbus_transaction_start(&xbt);
++	if (err) {
++		xenbus_switch_fatal(dev, depth, err, "starting transaction");
+ 		return 0;
++	}
++
++	err = xenbus_scanf(xbt, dev->nodename, "state", "%d", &current_state);
++	if (err != 1)
++		goto abort;
+ 
+-	err = xenbus_printf(XBT_NIL, dev->nodename, "state", "%d", state);
++	err = xenbus_printf(xbt, dev->nodename, "state", "%d", state);
+ 	if (err) {
+-		if (state != XenbusStateClosing) /* Avoid looping */
+-			xenbus_dev_fatal(dev, err, "writing new state");
+-		return err;
++		xenbus_switch_fatal(dev, depth, err, "writing new state");
++		goto abort;
+ 	}
+ 
+-	dev->state = state;
++	abort = 0;
++abort:
++	err = xenbus_transaction_end(xbt, abort);
++	if (err) {
++		if (err == -EAGAIN && !abort)
++			goto again;
++		xenbus_switch_fatal(dev, depth, err, "ending transaction");
++	} else
++		dev->state = state;
+ 
+ 	return 0;
+ }
++
++/**
++ * xenbus_switch_state
++ * @dev: xenbus device
++ * @state: new state
++ *
++ * Advertise in the store a change of the given driver to the given new_state.
++ * Return 0 on success, or -errno on error.  On error, the device will switch
++ * to XenbusStateClosing, and the error will be saved in the store.
++ */
++int xenbus_switch_state(struct xenbus_device *dev, enum xenbus_state state)
++{
++	return __xenbus_switch_state(dev, state, 0);
++}
++
+ EXPORT_SYMBOL_GPL(xenbus_switch_state);
+ 
+ int xenbus_frontend_closed(struct xenbus_device *dev)
+@@ -283,6 +310,23 @@ void xenbus_dev_fatal(struct xenbus_device *dev, int err, const char *fmt, ...)
+ EXPORT_SYMBOL_GPL(xenbus_dev_fatal);
+ 
+ /**
++ * Equivalent to xenbus_dev_fatal(dev, err, fmt, args), but helps
++ * avoiding recursion within xenbus_switch_state.
++ */
++static void xenbus_switch_fatal(struct xenbus_device *dev, int depth, int err,
++				const char *fmt, ...)
++{
++	va_list ap;
++
++	va_start(ap, fmt);
++	xenbus_va_dev_error(dev, err, fmt, ap);
++	va_end(ap);
++
++	if (!depth)
++		__xenbus_switch_state(dev, XenbusStateClosing, 1);
++}
++
++/**
+  * xenbus_grant_ring
+  * @dev: xenbus device
+  * @ring_mfn: mfn of ring to grant
 diff --git a/drivers/xen/xenbus/xenbus_probe.c b/drivers/xen/xenbus/xenbus_probe.c
 index 649fcdf..57fb749 100644
 --- a/drivers/xen/xenbus/xenbus_probe.c
