@@ -1,0 +1,333 @@
+From e552eb7038a36d9b18860f525aa02875e313fe16 Mon Sep 17 00:00:00 2001
+From: Jesse Barnes <jbarnes@virtuousgeek.org>
+Date: Wed, 21 Apr 2010 11:39:23 -0700
+Subject: drm/i915: use PIPE_CONTROL instruction on Ironlake and Sandy Bridge
+
+From: Jesse Barnes <jbarnes@virtuousgeek.org>
+
+commit e552eb7038a36d9b18860f525aa02875e313fe16 upstream.
+
+Since 965, the hardware has supported the PIPE_CONTROL command, which
+provides fine grained GPU cache flushing control.  On recent chipsets,
+this instruction is required for reliable interrupt and sequence number
+reporting in the driver.
+
+So add support for this instruction, including workarounds, on Ironlake
+and Sandy Bridge hardware.
+
+https://bugs.freedesktop.org/show_bug.cgi?id=27108
+
+Signed-off-by: Jesse Barnes <jbarnes@virtuousgeek.org>
+Tested-by: Chris Wilson <chris@chris-wilson.co.uk>
+Signed-off-by: Eric Anholt <eric@anholt.net>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+
+---
+ drivers/gpu/drm/i915/i915_drv.h |    4 +
+ drivers/gpu/drm/i915/i915_gem.c |  145 ++++++++++++++++++++++++++++++++++++----
+ drivers/gpu/drm/i915/i915_irq.c |    8 +-
+ drivers/gpu/drm/i915/i915_reg.h |   11 +++
+ 4 files changed, 152 insertions(+), 16 deletions(-)
+
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -206,11 +206,14 @@ typedef struct drm_i915_private {
+ 
+ 	drm_dma_handle_t *status_page_dmah;
+ 	void *hw_status_page;
++	void *seqno_page;
+ 	dma_addr_t dma_status_page;
+ 	uint32_t counter;
+ 	unsigned int status_gfx_addr;
++	unsigned int seqno_gfx_addr;
+ 	drm_local_map_t hws_map;
+ 	struct drm_gem_object *hws_obj;
++	struct drm_gem_object *seqno_obj;
+ 	struct drm_gem_object *pwrctx;
+ 
+ 	struct resource mch_res;
+@@ -1090,6 +1093,7 @@ extern int i915_wait_ring(struct drm_dev
+ 
+ #define HAS_PCH_SPLIT(dev) (IS_IRONLAKE(dev) ||	\
+ 			    IS_GEN6(dev))
++#define HAS_PIPE_CONTROL(dev) (IS_IRONLAKE(dev) || IS_GEN6(dev))
+ 
+ #define PRIMARY_RINGBUFFER_SIZE         (128*1024)
+ 
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -1559,6 +1559,13 @@ i915_gem_object_move_to_inactive(struct
+ 	i915_verify_inactive(dev, __FILE__, __LINE__);
+ }
+ 
++#define PIPE_CONTROL_FLUSH(addr)					\
++	OUT_RING(GFX_OP_PIPE_CONTROL | PIPE_CONTROL_QW_WRITE |		\
++		 PIPE_CONTROL_DEPTH_STALL);				\
++	OUT_RING(addr | PIPE_CONTROL_GLOBAL_GTT);			\
++	OUT_RING(0);							\
++	OUT_RING(0);							\
++
+ /**
+  * Creates a new sequence number, emitting a write of it to the status page
+  * plus an interrupt, which will trigger i915_user_interrupt_handler.
+@@ -1593,13 +1600,47 @@ i915_add_request(struct drm_device *dev,
+ 	if (dev_priv->mm.next_gem_seqno == 0)
+ 		dev_priv->mm.next_gem_seqno++;
+ 
+-	BEGIN_LP_RING(4);
+-	OUT_RING(MI_STORE_DWORD_INDEX);
+-	OUT_RING(I915_GEM_HWS_INDEX << MI_STORE_DWORD_INDEX_SHIFT);
+-	OUT_RING(seqno);
++	if (HAS_PIPE_CONTROL(dev)) {
++		u32 scratch_addr = dev_priv->seqno_gfx_addr + 128;
+ 
+-	OUT_RING(MI_USER_INTERRUPT);
+-	ADVANCE_LP_RING();
++		/*
++		 * Workaround qword write incoherence by flushing the
++		 * PIPE_NOTIFY buffers out to memory before requesting
++		 * an interrupt.
++		 */
++		BEGIN_LP_RING(32);
++		OUT_RING(GFX_OP_PIPE_CONTROL | PIPE_CONTROL_QW_WRITE |
++			 PIPE_CONTROL_WC_FLUSH | PIPE_CONTROL_TC_FLUSH);
++		OUT_RING(dev_priv->seqno_gfx_addr | PIPE_CONTROL_GLOBAL_GTT);
++		OUT_RING(seqno);
++		OUT_RING(0);
++		PIPE_CONTROL_FLUSH(scratch_addr);
++		scratch_addr += 128; /* write to separate cachelines */
++		PIPE_CONTROL_FLUSH(scratch_addr);
++		scratch_addr += 128;
++		PIPE_CONTROL_FLUSH(scratch_addr);
++		scratch_addr += 128;
++		PIPE_CONTROL_FLUSH(scratch_addr);
++		scratch_addr += 128;
++		PIPE_CONTROL_FLUSH(scratch_addr);
++		scratch_addr += 128;
++		PIPE_CONTROL_FLUSH(scratch_addr);
++		OUT_RING(GFX_OP_PIPE_CONTROL | PIPE_CONTROL_QW_WRITE |
++			 PIPE_CONTROL_WC_FLUSH | PIPE_CONTROL_TC_FLUSH |
++			 PIPE_CONTROL_NOTIFY);
++		OUT_RING(dev_priv->seqno_gfx_addr | PIPE_CONTROL_GLOBAL_GTT);
++		OUT_RING(seqno);
++		OUT_RING(0);
++		ADVANCE_LP_RING();
++	} else {
++		BEGIN_LP_RING(4);
++		OUT_RING(MI_STORE_DWORD_INDEX);
++		OUT_RING(I915_GEM_HWS_INDEX << MI_STORE_DWORD_INDEX_SHIFT);
++		OUT_RING(seqno);
++
++		OUT_RING(MI_USER_INTERRUPT);
++		ADVANCE_LP_RING();
++	}
+ 
+ 	DRM_DEBUG_DRIVER("%d\n", seqno);
+ 
+@@ -1744,7 +1785,10 @@ i915_get_gem_seqno(struct drm_device *de
+ {
+ 	drm_i915_private_t *dev_priv = dev->dev_private;
+ 
+-	return READ_HWSP(dev_priv, I915_GEM_HWS_INDEX);
++	if (IS_I965G(dev))
++		return ((volatile u32 *)(dev_priv->seqno_page))[0];
++	else
++		return READ_HWSP(dev_priv, I915_GEM_HWS_INDEX);
+ }
+ 
+ /**
+@@ -4576,6 +4620,49 @@ i915_gem_idle(struct drm_device *dev)
+ 	return 0;
+ }
+ 
++/*
++ * 965+ support PIPE_CONTROL commands, which provide finer grained control
++ * over cache flushing.
++ */
++static int
++i915_gem_init_pipe_control(struct drm_device *dev)
++{
++	drm_i915_private_t *dev_priv = dev->dev_private;
++	struct drm_gem_object *obj;
++	struct drm_i915_gem_object *obj_priv;
++	int ret;
++
++	obj = drm_gem_object_alloc(dev, 4096);
++	if (obj == NULL) {
++		DRM_ERROR("Failed to allocate seqno page\n");
++		ret = -ENOMEM;
++		goto err;
++	}
++	obj_priv = obj->driver_private;
++	obj_priv->agp_type = AGP_USER_CACHED_MEMORY;
++
++	ret = i915_gem_object_pin(obj, 4096);
++	if (ret)
++		goto err_unref;
++
++	dev_priv->seqno_gfx_addr = obj_priv->gtt_offset;
++	dev_priv->seqno_page =  kmap(obj_priv->pages[0]);
++	if (dev_priv->seqno_page == NULL)
++		goto err_unpin;
++
++	dev_priv->seqno_obj = obj;
++	memset(dev_priv->seqno_page, 0, PAGE_SIZE);
++
++	return 0;
++
++err_unpin:
++	i915_gem_object_unpin(obj);
++err_unref:
++	drm_gem_object_unreference(obj);
++err:
++	return ret;
++}
++
+ static int
+ i915_gem_init_hws(struct drm_device *dev)
+ {
+@@ -4593,7 +4680,8 @@ i915_gem_init_hws(struct drm_device *dev
+ 	obj = drm_gem_object_alloc(dev, 4096);
+ 	if (obj == NULL) {
+ 		DRM_ERROR("Failed to allocate status page\n");
+-		return -ENOMEM;
++		ret = -ENOMEM;
++		goto err;
+ 	}
+ 	obj_priv = obj->driver_private;
+ 	obj_priv->agp_type = AGP_USER_CACHED_MEMORY;
+@@ -4601,7 +4689,7 @@ i915_gem_init_hws(struct drm_device *dev
+ 	ret = i915_gem_object_pin(obj, 4096);
+ 	if (ret != 0) {
+ 		drm_gem_object_unreference(obj);
+-		return ret;
++		goto err_unref;
+ 	}
+ 
+ 	dev_priv->status_gfx_addr = obj_priv->gtt_offset;
+@@ -4610,10 +4698,16 @@ i915_gem_init_hws(struct drm_device *dev
+ 	if (dev_priv->hw_status_page == NULL) {
+ 		DRM_ERROR("Failed to map status page.\n");
+ 		memset(&dev_priv->hws_map, 0, sizeof(dev_priv->hws_map));
+-		i915_gem_object_unpin(obj);
+-		drm_gem_object_unreference(obj);
+-		return -EINVAL;
++		ret = -EINVAL;
++		goto err_unpin;
+ 	}
++
++	if (HAS_PIPE_CONTROL(dev)) {
++		ret = i915_gem_init_pipe_control(dev);
++		if (ret)
++			goto err_unpin;
++	}
++
+ 	dev_priv->hws_obj = obj;
+ 	memset(dev_priv->hw_status_page, 0, PAGE_SIZE);
+ 	I915_WRITE(HWS_PGA, dev_priv->status_gfx_addr);
+@@ -4621,6 +4715,30 @@ i915_gem_init_hws(struct drm_device *dev
+ 	DRM_DEBUG_DRIVER("hws offset: 0x%08x\n", dev_priv->status_gfx_addr);
+ 
+ 	return 0;
++
++err_unpin:
++	i915_gem_object_unpin(obj);
++err_unref:
++	drm_gem_object_unreference(obj);
++err:
++	return 0;
++}
++
++static void
++i915_gem_cleanup_pipe_control(struct drm_device *dev)
++{
++	drm_i915_private_t *dev_priv = dev->dev_private;
++	struct drm_gem_object *obj;
++	struct drm_i915_gem_object *obj_priv;
++
++	obj = dev_priv->seqno_obj;
++	obj_priv = obj->driver_private;
++	kunmap(obj_priv->pages[0]);
++	i915_gem_object_unpin(obj);
++	drm_gem_object_unreference(obj);
++	dev_priv->seqno_obj = NULL;
++
++	dev_priv->seqno_page = NULL;
+ }
+ 
+ static void
+@@ -4644,6 +4762,9 @@ i915_gem_cleanup_hws(struct drm_device *
+ 	memset(&dev_priv->hws_map, 0, sizeof(dev_priv->hws_map));
+ 	dev_priv->hw_status_page = NULL;
+ 
++	if (HAS_PIPE_CONTROL(dev))
++		i915_gem_cleanup_pipe_control(dev);
++
+ 	/* Write high address into HWS_PGA when disabling. */
+ 	I915_WRITE(HWS_PGA, 0x1ffff000);
+ }
+--- a/drivers/gpu/drm/i915/i915_irq.c
++++ b/drivers/gpu/drm/i915/i915_irq.c
+@@ -297,7 +297,7 @@ irqreturn_t ironlake_irq_handler(struct
+ 				READ_BREADCRUMB(dev_priv);
+ 	}
+ 
+-	if (gt_iir & GT_USER_INTERRUPT) {
++	if (gt_iir & GT_PIPE_NOTIFY) {
+ 		u32 seqno = i915_get_gem_seqno(dev);
+ 		dev_priv->mm.irq_gem_seqno = seqno;
+ 		trace_i915_gem_request_complete(dev, seqno);
+@@ -738,7 +738,7 @@ void i915_user_irq_get(struct drm_device
+ 	spin_lock_irqsave(&dev_priv->user_irq_lock, irqflags);
+ 	if (dev->irq_enabled && (++dev_priv->user_irq_refcount == 1)) {
+ 		if (HAS_PCH_SPLIT(dev))
+-			ironlake_enable_graphics_irq(dev_priv, GT_USER_INTERRUPT);
++			ironlake_enable_graphics_irq(dev_priv, GT_PIPE_NOTIFY);
+ 		else
+ 			i915_enable_irq(dev_priv, I915_USER_INTERRUPT);
+ 	}
+@@ -754,7 +754,7 @@ void i915_user_irq_put(struct drm_device
+ 	BUG_ON(dev->irq_enabled && dev_priv->user_irq_refcount <= 0);
+ 	if (dev->irq_enabled && (--dev_priv->user_irq_refcount == 0)) {
+ 		if (HAS_PCH_SPLIT(dev))
+-			ironlake_disable_graphics_irq(dev_priv, GT_USER_INTERRUPT);
++			ironlake_disable_graphics_irq(dev_priv, GT_PIPE_NOTIFY);
+ 		else
+ 			i915_disable_irq(dev_priv, I915_USER_INTERRUPT);
+ 	}
+@@ -1034,7 +1034,7 @@ static int ironlake_irq_postinstall(stru
+ 	/* enable kind of interrupts always enabled */
+ 	u32 display_mask = DE_MASTER_IRQ_CONTROL | DE_GSE | DE_PCH_EVENT |
+ 			   DE_PLANEA_FLIP_DONE | DE_PLANEB_FLIP_DONE;
+-	u32 render_mask = GT_USER_INTERRUPT;
++	u32 render_mask = GT_PIPE_NOTIFY;
+ 	u32 hotplug_mask = SDE_CRT_HOTPLUG | SDE_PORTB_HOTPLUG |
+ 			   SDE_PORTC_HOTPLUG | SDE_PORTD_HOTPLUG;
+ 
+--- a/drivers/gpu/drm/i915/i915_reg.h
++++ b/drivers/gpu/drm/i915/i915_reg.h
+@@ -210,6 +210,16 @@
+ #define   ASYNC_FLIP                (1<<22)
+ #define   DISPLAY_PLANE_A           (0<<20)
+ #define   DISPLAY_PLANE_B           (1<<20)
++#define GFX_OP_PIPE_CONTROL	((0x3<<29)|(0x3<<27)|(0x2<<24)|2)
++#define   PIPE_CONTROL_QW_WRITE	(1<<14)
++#define   PIPE_CONTROL_DEPTH_STALL (1<<13)
++#define   PIPE_CONTROL_WC_FLUSH	(1<<12)
++#define   PIPE_CONTROL_IS_FLUSH	(1<<11) /* MBZ on Ironlake */
++#define   PIPE_CONTROL_TC_FLUSH (1<<10) /* GM45+ only */
++#define   PIPE_CONTROL_ISP_DIS	(1<<9)
++#define   PIPE_CONTROL_NOTIFY	(1<<8)
++#define   PIPE_CONTROL_GLOBAL_GTT (1<<2) /* in addr dword */
++#define   PIPE_CONTROL_STALL_EN	(1<<1) /* in addr word, Ironlake+ only */
+ 
+ /*
+  * Fence registers
+@@ -2111,6 +2121,7 @@
+ #define DEIER   0x4400c
+ 
+ /* GT interrupt */
++#define GT_PIPE_NOTIFY		(1 << 4)
+ #define GT_SYNC_STATUS          (1 << 2)
+ #define GT_USER_INTERRUPT       (1 << 0)
+ 
