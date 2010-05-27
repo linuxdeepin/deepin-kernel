@@ -5843,6 +5843,20 @@ Date:   Mon Feb 15 15:17:35 2010 +0300
     Neither compiles, nor works.
     
     Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+
+Fixups for 2.6.32.14 by Ben Hutchings <ben@decadent.org.uk>:
+
+Remove changes included both in this and in 2.6.32.14:
+002fdeea3c2cff663452bb92035074bb8bbb84ac = b3b38d842fa367d862b83e7670af4e0fd6a80fc0
+1cd8211f07663ebeac04b19ac849de7ed5eef969
+
+Adjust context in some other places.
+
+Add a call to fsnotify_put_mark() on the error path added to
+inotify_new_watch(), needed following
+c606e701ef469582a991aabd3a6f7816a9a9d351
+"inotify: race use after free/double free in inotify inode marks".
+
 diff --git a/COPYING.Parallels b/COPYING.Parallels
 new file mode 100644
 index 0000000..9856a2b
@@ -18421,23 +18435,14 @@ diff --git a/fs/notify/inotify/inotify_fsnotify.c b/fs/notify/inotify/inotify_fs
 index 1afb0a1..9b31a34 100644
 --- a/fs/notify/inotify/inotify_fsnotify.c
 +++ b/fs/notify/inotify/inotify_fsnotify.c
-@@ -28,6 +28,8 @@
- #include <linux/path.h> /* struct path */
+@@ -28,6 +28,7 @@
  #include <linux/slab.h> /* kmem_* */
  #include <linux/types.h>
-+#include <linux/sched.h>
+ #include <linux/sched.h>
 +#include <linux/mount.h>
  
  #include "inotify.h"
  
-@@ -146,6 +148,7 @@ static void inotify_free_group_priv(struct fsnotify_group *group)
- 	idr_for_each(&group->inotify_data.idr, idr_callback, group);
- 	idr_remove_all(&group->inotify_data.idr);
- 	idr_destroy(&group->inotify_data.idr);
-+	free_uid(group->inotify_data.user);
- }
- 
- void inotify_free_event_priv(struct fsnotify_event_private_data *fsn_event_priv)
 @@ -159,10 +162,25 @@ void inotify_free_event_priv(struct fsnotify_event_private_data *fsn_event_priv)
  	kmem_cache_free(event_priv_cachep, event_priv);
  }
@@ -18535,7 +18540,7 @@ index ca44337..745983d 100644
  
  	ret = -ENOSPC;
  	if (atomic_read(&group->inotify_data.user->inotify_watches) >= inotify_max_user_watches)
-@@ -556,10 +563,14 @@ retry:
+@@ -556,13 +563,17 @@ retry:
  	if (unlikely(!idr_pre_get(&group->inotify_data.idr, GFP_KERNEL)))
  		goto out_err;
  
@@ -18544,6 +18549,9 @@ index ca44337..745983d 100644
 +	else
 +		start_wd = wd;
 +
+ 	/* we are putting the mark on the idr, take a reference */
+ 	fsnotify_get_mark(&tmp_ientry->fsn_entry);
+ 
  	spin_lock(&group->inotify_data.idr_lock);
  	ret = idr_get_new_above(&group->inotify_data.idr, &tmp_ientry->fsn_entry,
 -				group->inotify_data.last_wd+1,
@@ -18552,19 +18560,19 @@ index ca44337..745983d 100644
  	spin_unlock(&group->inotify_data.idr_lock);
  	if (ret) {
  		/* idr was out of memory allocate and try again */
-@@ -568,11 +579,17 @@ retry:
+@@ -568,8 +579,17 @@ retry:
  		goto out_err;
  	}
  
 +	if (wd != -1 && tmp_ientry->wd != wd) {
++		/* we didn't get on the idr, drop the idr reference */
++		fsnotify_put_mark(&tmp_ientry->fsn_entry);
++
 +		ret = -EBUSY;
 +		inotify_remove_from_idr(group, tmp_ientry);
 +		goto out_err;
 +	}
 +
- 	/* we put the mark on the idr, take a reference */
- 	fsnotify_get_mark(&tmp_ientry->fsn_entry);
- 
  	/* we are on the idr, now get on the inode */
 -	ret = fsnotify_add_mark(&tmp_ientry->fsn_entry, group, inode);
 +	ret = fsnotify_add_mark(&tmp_ientry->fsn_entry, group, path->dentry->d_inode);
@@ -18920,8 +18928,8 @@ index 822c2d5..d29461e 100644
 --- a/fs/proc/array.c
 +++ b/fs/proc/array.c
 @@ -84,6 +84,8 @@
+ #include <linux/ptrace.h>
  #include <linux/tracehook.h>
- #include <linux/swapops.h>
  
 +#include <bc/beancounter.h>
 +
@@ -19043,9 +19051,9 @@ index 822c2d5..d29461e 100644
  	task_name(m, task);
  	task_state(m, ns, pid, task);
 @@ -430,6 +470,14 @@ int proc_pid_status(struct seq_file *m, struct pid_namespace *ns,
+ 	task_show_regs(m, task);
  #endif
  	task_context_switch_counts(m, task);
- 	task_show_stack_usage(m, task);
 +#ifdef CONFIG_BEANCOUNTERS
 +	ub_dump_task_info(task,
 +			tsk_ub_info, sizeof(tsk_ub_info),
@@ -33281,19 +33289,6 @@ index d74785c..21551aa 100644
  extern void put_mnt_ns(struct mnt_namespace *ns);
  static inline void get_mnt_ns(struct mnt_namespace *ns)
  {
-diff --git a/include/linux/module.h b/include/linux/module.h
-index 460df15..482efc8 100644
---- a/include/linux/module.h
-+++ b/include/linux/module.h
-@@ -455,7 +455,7 @@ void symbol_put_addr(void *addr);
- static inline local_t *__module_ref_addr(struct module *mod, int cpu)
- {
- #ifdef CONFIG_SMP
--	return (local_t *) per_cpu_ptr(mod->refptr, cpu);
-+	return (local_t *) (mod->refptr + per_cpu_offset(cpu));
- #else
- 	return &mod->ref;
- #endif
 diff --git a/include/linux/mount.h b/include/linux/mount.h
 index 5d52753..f4bf358 100644
 --- a/include/linux/mount.h
@@ -34302,9 +34297,9 @@ index 70abfd3..d6155c1 100644
  	 */
  	struct pipe_inode_info *splice_pipe;
 @@ -1542,6 +1581,19 @@ struct task_struct {
+ 	/* bitmask of trace recursion */
  	unsigned long trace_recursion;
  #endif /* CONFIG_TRACING */
- 	unsigned long stack_start;
 +#ifdef CONFIG_BEANCOUNTERS
 +	struct task_beancounter task_bc;
 +#endif
