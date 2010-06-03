@@ -1,0 +1,546 @@
+From bed5750526eb93a1e12733dd2c4d6baba0299cc5 Mon Sep 17 00:00:00 2001
+From: Manu Abraham <abraham.manu@gmail.com>
+Date: Fri, 4 Dec 2009 05:57:28 -0300
+Subject: [PATCH 098/120] V4L/DVB (13798): [Mantis] Enable power for all cards, use byte mode only on relevant devices
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Manu Abraham <manu@linuxtv.org>
+Signed-off-by: Mauro Carvalho Chehab <mchehab@redhat.com>
+(cherry picked from commit bc832fa2c0310c25ed60204616ccef4f8db088f3)
+
+Signed-off-by: Bjørn Mork <bjorn@mork.no>
+---
+ drivers/media/dvb/mantis/hopper_vp3028.c |   27 ++++++++++++----
+ drivers/media/dvb/mantis/mantis_common.h |   13 ++++++--
+ drivers/media/dvb/mantis/mantis_i2c.c    |   47 +++++++++++++++++++++------
+ drivers/media/dvb/mantis/mantis_vp1033.c |   36 ++++++++++++++++-----
+ drivers/media/dvb/mantis/mantis_vp1034.c |   32 ++++++++++++++-----
+ drivers/media/dvb/mantis/mantis_vp2033.c |   50 ++++++++++++++++++++---------
+ drivers/media/dvb/mantis/mantis_vp2040.c |   51 ++++++++++++++++++++----------
+ drivers/media/dvb/mantis/mantis_vp3030.c |   22 ++++++++++---
+ 8 files changed, 203 insertions(+), 75 deletions(-)
+
+diff --git a/drivers/media/dvb/mantis/hopper_vp3028.c b/drivers/media/dvb/mantis/hopper_vp3028.c
+index ba0c7e5..16b39d3 100644
+--- a/drivers/media/dvb/mantis/hopper_vp3028.c
++++ b/drivers/media/dvb/mantis/hopper_vp3028.c
+@@ -45,17 +45,30 @@ struct zl10353_config hopper_vp3028_config = {
+ static int vp3028_frontend_init(struct mantis_pci *mantis, struct dvb_frontend *fe)
+ {
+ 	struct i2c_adapter *adapter	= &mantis->adapter;
++	struct mantis_hwconfig *config	= mantis->hwconfig;
+ 	int err = 0;
+ 
++	gpio_set_bits(mantis, config->reset, 0);
++	msleep(100);
+ 	err = mantis_frontend_power(mantis, POWER_ON);
+-	mantis_frontend_soft_reset(mantis);
+-
+-	dprintk(MANTIS_ERROR, 1, "Probing for 10353 (DVB-T)");
+-	fe = zl10353_attach(&hopper_vp3028_config, adapter);
+-
+-	if (!fe)
+-		return -1;
++	msleep(100);
++	gpio_set_bits(mantis, config->reset, 1);
+ 
++	err = mantis_frontend_power(mantis, POWER_ON);
++	if (err == 0) {
++		msleep(250);
++		dprintk(MANTIS_ERROR, 1, "Probing for 10353 (DVB-T)");
++		fe = zl10353_attach(&hopper_vp3028_config, adapter);
++
++		if (!fe)
++			return -1;
++	} else {
++		dprintk(MANTIS_ERROR, 1, "Frontend on <%s> POWER ON failed! <%d>",
++			adapter->name,
++			err);
++
++		return -EIO;
++	}
+ 	dprintk(MANTIS_ERROR, 1, "Done!");
+ 
+ 	return 0;
+diff --git a/drivers/media/dvb/mantis/mantis_common.h b/drivers/media/dvb/mantis/mantis_common.h
+index e912c59..6ae3aab 100644
+--- a/drivers/media/dvb/mantis/mantis_common.h
++++ b/drivers/media/dvb/mantis/mantis_common.h
+@@ -32,6 +32,7 @@
+ #define MANTIS_NOTICE		1
+ #define MANTIS_INFO		2
+ #define MANTIS_DEBUG		3
++#define MANTIS_TMG		9
+ 
+ #define dprintk(y, z, format, arg...) do {								\
+ 	if (z) {											\
+@@ -43,6 +44,8 @@
+ 			printk(KERN_INFO "%s (%d): " format "\n" , __func__ , mantis->num , ##arg);	\
+ 		else if ((mantis->verbose > MANTIS_DEBUG) && (mantis->verbose > y))			\
+ 			printk(KERN_DEBUG "%s (%d): " format "\n" , __func__ , mantis->num , ##arg);	\
++		else if ((mantis->verbose > MANTIS_TMG) && (mantis->verbose > y))			\
++			printk(KERN_DEBUG "%s (%d): " format "\n" , __func__ , mantis->num , ##arg);	\
+ 	} else {											\
+ 		if (mantis->verbose > y)								\
+ 			printk(format , ##arg);								\
+@@ -54,9 +57,6 @@
+ 
+ #define mmwrite(dat, addr)	mwrite((dat), (mantis->mmio + (addr)))
+ #define mmread(addr)		mread(mantis->mmio + (addr))
+-#define mmand(dat, addr)	mmwrite((dat) & mmread(addr), addr)
+-#define mmor(dat, addr)		mmwrite((dat) | mmread(addr), addr)
+-#define mmaor(dat, addr)	mmwrite((dat) | ((mask) & mmread(addr)), addr)
+ 
+ #define MANTIS_TS_188		0
+ #define MANTIS_TS_204		1
+@@ -75,6 +75,11 @@
+ 		.driver_data	= (unsigned long) (__configptr)		\
+ }
+ 
++enum mantis_i2c_mode {
++	MANTIS_PAGE_MODE = 0,
++	MANTIS_BYTE_MODE,
++};
++
+ struct mantis_pci;
+ 
+ struct mantis_hwconfig {
+@@ -91,6 +96,8 @@ struct mantis_hwconfig {
+ 
+ 	u8			power;
+ 	u8			reset;
++
++	enum mantis_i2c_mode	i2c_mode;
+ };
+ 
+ struct mantis_pci {
+diff --git a/drivers/media/dvb/mantis/mantis_i2c.c b/drivers/media/dvb/mantis/mantis_i2c.c
+index 16b9e7e..758f32a 100644
+--- a/drivers/media/dvb/mantis/mantis_i2c.c
++++ b/drivers/media/dvb/mantis/mantis_i2c.c
+@@ -35,6 +35,8 @@
+ 
+ #define I2C_HW_B_MANTIS		0x1c
+ 
++#define TRIALS			10000
++
+ static int mantis_i2c_read(struct mantis_pci *mantis, const struct i2c_msg *msg)
+ {
+ 	u32 rxd, i, stat, trials;
+@@ -55,13 +57,25 @@ static int mantis_i2c_read(struct mantis_pci *mantis, const struct i2c_msg *msg)
+ 		mmwrite(rxd, MANTIS_I2CDATA_CTL);
+ 
+ 		/* wait for xfer completion */
+-		for (trials = 0; trials < 100; trials++) {
+-			udelay(500);
++		for (trials = 0; trials < TRIALS; trials++) {
++			msleep(1);
+ 			stat = mmread(MANTIS_INT_STAT);
+ 			if (stat & MANTIS_INT_I2CDONE)
+ 				break;
+ 		}
+ 
++		dprintk(MANTIS_TMG, 0, "I2CDONE: trials=%d\n", trials);
++
++		/* wait for xfer completion */
++		for (trials = 0; trials < TRIALS; trials++) {
++			stat = mmread(MANTIS_INT_STAT);
++			if (stat & MANTIS_INT_I2CRACK)
++				break;
++			msleep(1);
++		}
++
++		dprintk(MANTIS_TMG, 0, "I2CRACK: trials=%d\n", trials);
++
+ 		rxd = mmread(MANTIS_I2CDATA_CTL);
+ 		msg->buf[i] = (u8)((rxd >> 8) & 0xFF);
+ 		dprintk(MANTIS_INFO, 0, "%02x ", msg->buf[i]);
+@@ -93,12 +107,24 @@ static int mantis_i2c_write(struct mantis_pci *mantis, const struct i2c_msg *msg
+ 		mmwrite(txd, MANTIS_I2CDATA_CTL);
+ 
+ 		/* wait for xfer completion */
+-		for (trials = 0; trials < 100; trials++) {
+-			udelay(500);
++		for (trials = 0; trials < TRIALS; trials++) {
++			msleep(1);
+ 			stat = mmread(MANTIS_INT_STAT);
+ 			if (stat & MANTIS_INT_I2CDONE)
+ 				break;
+ 		}
++
++		dprintk(MANTIS_TMG, 0, "I2CDONE: trials=%d\n", trials);
++
++		/* wait for xfer completion */
++		for (trials = 0; trials < TRIALS; trials++) {
++			stat = mmread(MANTIS_INT_STAT);
++			if (stat & MANTIS_INT_I2CRACK)
++				break;
++			msleep(1);
++		}
++
++		dprintk(MANTIS_TMG, 0, "I2CRACK: trials=%d\n", trials);
+ 	}
+ 	dprintk(MANTIS_INFO, 0, "]\n");
+ 
+@@ -122,10 +148,11 @@ static int mantis_i2c_xfer(struct i2c_adapter *adapter, struct i2c_msg *msgs, in
+ 
+ 	while (i < num) {
+ 		/* Byte MODE */
+-		if (((i + 1) < num)		&&
+-			(msgs[i].len < 2)	&&
+-			(msgs[i + 1].len < 2)	&&
+-			(msgs[i + 1].flags & I2C_M_RD)) {
++		if ((config->i2c_mode & MANTIS_BYTE_MODE) &&
++		    ((i + 1) < num)			&&
++		    (msgs[i].len < 2)			&&
++		    (msgs[i + 1].len < 2)		&&
++		    (msgs[i + 1].flags & I2C_M_RD)) {
+ 
+ 			dprintk(MANTIS_DEBUG, 0, "        Byte MODE:\n");
+ 
+@@ -136,8 +163,8 @@ static int mantis_i2c_xfer(struct i2c_adapter *adapter, struct i2c_msg *msgs, in
+ 
+ 			mmwrite(txd, MANTIS_I2CDATA_CTL);
+ 			/* wait for xfer completion */
+-			for (trials = 0; trials < 100; trials++) {
+-				udelay(500);
++			for (trials = 0; trials < TRIALS; trials++) {
++				msleep(1);
+ 				stat = mmread(MANTIS_INT_STAT);
+ 				if (stat & MANTIS_INT_I2CDONE)
+ 					break;
+diff --git a/drivers/media/dvb/mantis/mantis_vp1033.c b/drivers/media/dvb/mantis/mantis_vp1033.c
+index f2092ce..0bea6e8 100644
+--- a/drivers/media/dvb/mantis/mantis_vp1033.c
++++ b/drivers/media/dvb/mantis/mantis_vp1033.c
+@@ -31,7 +31,10 @@
+ 
+ #include "stv0299.h"
+ #include "mantis_common.h"
++#include "mantis_ioc.h"
++#include "mantis_dvb.h"
+ #include "mantis_vp1033.h"
++#include "mantis_reg.h"
+ 
+ u8 lgtdqcs001f_inittab[] = {
+ 	0x01, 0x15,
+@@ -163,19 +166,32 @@ static int vp1033_frontend_init(struct mantis_pci *mantis, struct dvb_frontend *
+ {
+ 	struct i2c_adapter *adapter	= &mantis->adapter;
+ 
+-	dprintk(MANTIS_ERROR, 1, "Probing for STV0299 (DVB-S)");
+-	fe = stv0299_attach(&lgtdqcs001f_config, adapter);
++	int err = 0;
+ 
+-	if (fe) {
+-		fe->ops.tuner_ops.set_params = lgtdqcs001f_tuner_set;
+-		dprintk(MANTIS_ERROR, 1, "found STV0299 DVB-S frontend @ 0x%02x",
+-			lgtdqcs001f_config.demod_address);
++	err = mantis_frontend_power(mantis, POWER_ON);
++	if (err == 0) {
++		mantis_frontend_soft_reset(mantis);
++		msleep(250);
+ 
+-		dprintk(MANTIS_ERROR, 1, "Mantis DVB-S STV0299 frontend attach success");
++		dprintk(MANTIS_ERROR, 1, "Probing for STV0299 (DVB-S)");
++		fe = stv0299_attach(&lgtdqcs001f_config, adapter);
++
++		if (fe) {
++			fe->ops.tuner_ops.set_params = lgtdqcs001f_tuner_set;
++			dprintk(MANTIS_ERROR, 1, "found STV0299 DVB-S frontend @ 0x%02x",
++				lgtdqcs001f_config.demod_address);
++
++			dprintk(MANTIS_ERROR, 1, "Mantis DVB-S STV0299 frontend attach success");
++		} else {
++			return -1;
++		}
+ 	} else {
+-		return -1;
+-	}
++		dprintk(MANTIS_ERROR, 1, "Frontend on <%s> POWER ON failed! <%d>",
++			adapter->name,
++			err);
+ 
++		return -EIO;
++	}
+ 	mantis->fe = fe;
+ 	dprintk(MANTIS_ERROR, 1, "Done!");
+ 
+@@ -192,4 +208,6 @@ struct mantis_hwconfig vp1033_config = {
+ 	.bytes			= 0,
+ 
+ 	.frontend_init		= vp1033_frontend_init,
++	.power			= GPIF_A12,
++	.reset			= GPIF_A13,
+ };
+diff --git a/drivers/media/dvb/mantis/mantis_vp1034.c b/drivers/media/dvb/mantis/mantis_vp1034.c
+index 40778ec..98a4ec8 100644
+--- a/drivers/media/dvb/mantis/mantis_vp1034.c
++++ b/drivers/media/dvb/mantis/mantis_vp1034.c
+@@ -32,6 +32,7 @@
+ #include "mb86a16.h"
+ #include "mantis_common.h"
+ #include "mantis_ioc.h"
++#include "mantis_dvb.h"
+ #include "mantis_vp1034.h"
+ #include "mantis_reg.h"
+ 
+@@ -74,17 +75,30 @@ static int vp1034_frontend_init(struct mantis_pci *mantis, struct dvb_frontend *
+ {
+ 	struct i2c_adapter *adapter	= &mantis->adapter;
+ 
+-	dprintk(MANTIS_ERROR, 1, "Probing for MB86A16 (DVB-S/DSS)");
+-	fe = mb86a16_attach(&vp1034_mb86a16_config, adapter);
+-	if (fe) {
+-		dprintk(MANTIS_ERROR, 1,
+-		"found MB86A16 DVB-S/DSS frontend @0x%02x",
+-		vp1034_mb86a16_config.demod_address);
++	int err = 0;
+ 
++	err = mantis_frontend_power(mantis, POWER_ON);
++	if (err == 0) {
++		mantis_frontend_soft_reset(mantis);
++		msleep(250);
++
++		dprintk(MANTIS_ERROR, 1, "Probing for MB86A16 (DVB-S/DSS)");
++		fe = mb86a16_attach(&vp1034_mb86a16_config, adapter);
++		if (fe) {
++			dprintk(MANTIS_ERROR, 1,
++			"found MB86A16 DVB-S/DSS frontend @0x%02x",
++			vp1034_mb86a16_config.demod_address);
++
++		} else {
++			return -1;
++		}
+ 	} else {
+-		return -1;
+-	}
++		dprintk(MANTIS_ERROR, 1, "Frontend on <%s> POWER ON failed! <%d>",
++			adapter->name,
++			err);
+ 
++		return -EIO;
++	}
+ 	mantis->fe = fe;
+ 	dprintk(MANTIS_ERROR, 1, "Done!");
+ 
+@@ -101,4 +115,6 @@ struct mantis_hwconfig vp1034_config = {
+ 	.bytes		= 0,
+ 
+ 	.frontend_init	= vp1034_frontend_init,
++	.power		= GPIF_A12,
++	.reset		= GPIF_A13,
+ };
+diff --git a/drivers/media/dvb/mantis/mantis_vp2033.c b/drivers/media/dvb/mantis/mantis_vp2033.c
+index 8773291..cef108c 100644
+--- a/drivers/media/dvb/mantis/mantis_vp2033.c
++++ b/drivers/media/dvb/mantis/mantis_vp2033.c
+@@ -31,6 +31,8 @@
+ 
+ #include "tda1002x.h"
+ #include "mantis_common.h"
++#include "mantis_ioc.h"
++#include "mantis_dvb.h"
+ #include "mantis_vp2033.h"
+ 
+ #define MANTIS_MODEL_NAME	"VP-2033"
+@@ -123,32 +125,46 @@ static int vp2033_frontend_init(struct mantis_pci *mantis, struct dvb_frontend *
+ {
+ 	struct i2c_adapter *adapter = &mantis->adapter;
+ 
+-	dprintk(MANTIS_ERROR, 1, "Probing for CU1216 (DVB-C)");
+-	fe = tda10021_attach(&vp2033_tda1002x_cu1216_config,
+-			     adapter,
+-			     read_pwm(mantis));
++	int err = 0;
+ 
+-	if (fe) {
+-		dprintk(MANTIS_ERROR, 1,
+-			"found Philips CU1216 DVB-C frontend (TDA10021) @ 0x%02x",
+-			vp2033_tda1002x_cu1216_config.demod_address);
+-	} else {
+-		fe = tda10023_attach(&vp2033_tda10023_cu1216_config,
++	err = mantis_frontend_power(mantis, POWER_ON);
++	if (err == 0) {
++		mantis_frontend_soft_reset(mantis);
++		msleep(250);
++
++		dprintk(MANTIS_ERROR, 1, "Probing for CU1216 (DVB-C)");
++		fe = tda10021_attach(&vp2033_tda1002x_cu1216_config,
+ 				     adapter,
+ 				     read_pwm(mantis));
+ 
+ 		if (fe) {
+ 			dprintk(MANTIS_ERROR, 1,
+-				"found Philips CU1216 DVB-C frontend (TDA10023) @ 0x%02x",
++				"found Philips CU1216 DVB-C frontend (TDA10021) @ 0x%02x",
+ 				vp2033_tda1002x_cu1216_config.demod_address);
++		} else {
++			fe = tda10023_attach(&vp2033_tda10023_cu1216_config,
++					     adapter,
++					     read_pwm(mantis));
++
++			if (fe) {
++				dprintk(MANTIS_ERROR, 1,
++					"found Philips CU1216 DVB-C frontend (TDA10023) @ 0x%02x",
++					vp2033_tda1002x_cu1216_config.demod_address);
++			}
+ 		}
+-	}
+ 
+-	if (fe) {
+-		fe->ops.tuner_ops.set_params = tda1002x_cu1216_tuner_set;
+-		dprintk(MANTIS_ERROR, 1, "Mantis DVB-C Philips CU1216 frontend attach success");
++		if (fe) {
++			fe->ops.tuner_ops.set_params = tda1002x_cu1216_tuner_set;
++			dprintk(MANTIS_ERROR, 1, "Mantis DVB-C Philips CU1216 frontend attach success");
++		} else {
++			return -1;
++		}
+ 	} else {
+-		return -1;
++		dprintk(MANTIS_ERROR, 1, "Frontend on <%s> POWER ON failed! <%d>",
++			adapter->name,
++			err);
++
++		return -EIO;
+ 	}
+ 
+ 	mantis->fe = fe;
+@@ -167,4 +183,6 @@ struct mantis_hwconfig vp2033_config = {
+ 	.bytes		= 0,
+ 
+ 	.frontend_init	= vp2033_frontend_init,
++	.power		= GPIF_A12,
++	.reset		= GPIF_A13,
+ };
+diff --git a/drivers/media/dvb/mantis/mantis_vp2040.c b/drivers/media/dvb/mantis/mantis_vp2040.c
+index 51b082f..e201988 100644
+--- a/drivers/media/dvb/mantis/mantis_vp2040.c
++++ b/drivers/media/dvb/mantis/mantis_vp2040.c
+@@ -31,6 +31,8 @@
+ 
+ #include "tda1002x.h"
+ #include "mantis_common.h"
++#include "mantis_ioc.h"
++#include "mantis_dvb.h"
+ #include "mantis_vp2040.h"
+ 
+ #define MANTIS_MODEL_NAME	"VP-2040"
+@@ -123,34 +125,47 @@ static int vp2040_frontend_init(struct mantis_pci *mantis, struct dvb_frontend *
+ {
+ 	struct i2c_adapter *adapter = &mantis->adapter;
+ 
+-	dprintk(MANTIS_ERROR, 1, "Probing for CU1216 (DVB-C)");
+-	fe = tda10021_attach(&vp2040_tda1002x_cu1216_config,
+-			     adapter,
+-			     read_pwm(mantis));
++	int err = 0;
+ 
+-	if (fe) {
+-		dprintk(MANTIS_ERROR, 1,
+-			"found Philips CU1216 DVB-C frontend (TDA10021) @ 0x%02x",
+-			vp2040_tda1002x_cu1216_config.demod_address);
+-	} else {
+-		fe = tda10023_attach(&vp2040_tda10023_cu1216_config,
++	err = mantis_frontend_power(mantis, POWER_ON);
++	if (err == 0) {
++		mantis_frontend_soft_reset(mantis);
++		msleep(250);
++
++		dprintk(MANTIS_ERROR, 1, "Probing for CU1216 (DVB-C)");
++		fe = tda10021_attach(&vp2040_tda1002x_cu1216_config,
+ 				     adapter,
+ 				     read_pwm(mantis));
+ 
+ 		if (fe) {
+ 			dprintk(MANTIS_ERROR, 1,
+-				"found Philips CU1216 DVB-C frontend (TDA10023) @ 0x%02x",
++				"found Philips CU1216 DVB-C frontend (TDA10021) @ 0x%02x",
+ 				vp2040_tda1002x_cu1216_config.demod_address);
++		} else {
++			fe = tda10023_attach(&vp2040_tda10023_cu1216_config,
++					     adapter,
++					     read_pwm(mantis));
++
++			if (fe) {
++				dprintk(MANTIS_ERROR, 1,
++					"found Philips CU1216 DVB-C frontend (TDA10023) @ 0x%02x",
++					vp2040_tda1002x_cu1216_config.demod_address);
++			}
+ 		}
+-	}
+ 
+-	if (fe) {
+-		fe->ops.tuner_ops.set_params = tda1002x_cu1216_tuner_set;
+-		dprintk(MANTIS_ERROR, 1, "Mantis DVB-C Philips CU1216 frontend attach success");
++		if (fe) {
++			fe->ops.tuner_ops.set_params = tda1002x_cu1216_tuner_set;
++			dprintk(MANTIS_ERROR, 1, "Mantis DVB-C Philips CU1216 frontend attach success");
++		} else {
++			return -1;
++		}
+ 	} else {
+-		return -1;
+-	}
++		dprintk(MANTIS_ERROR, 1, "Frontend on <%s> POWER ON failed! <%d>",
++			adapter->name,
++			err);
+ 
++		return -EIO;
++	}
+ 	mantis->fe = fe;
+ 	dprintk(MANTIS_DEBUG, 1, "Done!");
+ 
+@@ -167,4 +182,6 @@ struct mantis_hwconfig vp2040_config = {
+ 	.bytes		= 0,
+ 
+ 	.frontend_init	= vp2040_frontend_init,
++	.power		= GPIF_A12,
++	.reset		= GPIF_A13,
+ };
+diff --git a/drivers/media/dvb/mantis/mantis_vp3030.c b/drivers/media/dvb/mantis/mantis_vp3030.c
+index 9efcfa7..a44fac3 100644
+--- a/drivers/media/dvb/mantis/mantis_vp3030.c
++++ b/drivers/media/dvb/mantis/mantis_vp3030.c
+@@ -66,13 +66,23 @@ static int vp3030_frontend_init(struct mantis_pci *mantis, struct dvb_frontend *
+ 	msleep(100);
+ 	gpio_set_bits(mantis, config->reset, 1);
+ 
+-	dprintk(MANTIS_ERROR, 1, "Probing for 10353 (DVB-T)");
+-	fe = zl10353_attach(&mantis_vp3030_config, adapter);
++	if (err == 0) {
++		msleep(250);
++		dprintk(MANTIS_ERROR, 1, "Probing for 10353 (DVB-T)");
++		fe = zl10353_attach(&mantis_vp3030_config, adapter);
+ 
+-	if (!fe)
+-		return -1;
++		if (!fe)
++			return -1;
+ 
+-	tda665x_attach(fe, &env57h12d5_config, adapter);
++		tda665x_attach(fe, &env57h12d5_config, adapter);
++	} else {
++		dprintk(MANTIS_ERROR, 1, "Frontend on <%s> POWER ON failed! <%d>",
++			adapter->name,
++			err);
++
++		return -EIO;
++
++	}
+ 	mantis->fe = fe;
+ 	dprintk(MANTIS_ERROR, 1, "Done!");
+ 
+@@ -91,4 +101,6 @@ struct mantis_hwconfig vp3030_config = {
+ 	.frontend_init	= vp3030_frontend_init,
+ 	.power		= GPIF_A12,
+ 	.reset		= GPIF_A13,
++
++	.i2c_mode	= MANTIS_BYTE_MODE
+ };
+-- 
+1.7.1
+

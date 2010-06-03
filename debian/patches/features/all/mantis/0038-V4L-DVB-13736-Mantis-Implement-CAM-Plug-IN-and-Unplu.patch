@@ -1,0 +1,136 @@
+From a82939e5aec354205b103cfe30ddb7d892e8fa73 Mon Sep 17 00:00:00 2001
+From: Manu Abraham <abraham.manu@gmail.com>
+Date: Fri, 4 Dec 2009 05:06:00 -0300
+Subject: [PATCH 038/120] V4L/DVB (13736): [Mantis] Implement CAM Plug IN and Unplug events
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Sigh! how i wish things were simpler ...
+
+Signed-off-by: Manu Abraham <manu@linuxtv.org>
+Signed-off-by: Mauro Carvalho Chehab <mchehab@redhat.com>
+(cherry picked from commit 8ce571f5e7eb7186f676af3b60af7980c2fc7929)
+
+Signed-off-by: Bjørn Mork <bjorn@mork.no>
+---
+ drivers/media/dvb/mantis/mantis_link.h   |    8 ++++
+ drivers/media/dvb/mantis/mantis_pcmcia.c |   66 ++++++++++++++++++++++++++++++
+ 2 files changed, 74 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/media/dvb/mantis/mantis_link.h b/drivers/media/dvb/mantis/mantis_link.h
+index 2d9b64f..c6b3222 100644
+--- a/drivers/media/dvb/mantis/mantis_link.h
++++ b/drivers/media/dvb/mantis/mantis_link.h
+@@ -31,6 +31,12 @@ struct mantis_slot {
+ 	u32				timeout;
+ };
+ 
++/* Physical layer */
++enum mantis_slot_state {
++	MODULE_INSERTED			= 3,
++	MODULE_XTRACTED			= 4
++};
++
+ struct mantis_ca {
+ 	struct mantis_slot		slot;
+ 
+@@ -44,6 +50,8 @@ struct mantis_ca {
+ 
+ 	enum mantis_sbuf_status		sbuf_status;
+ 
++	enum mantis_slot_state		slot_state;
++
+ 	struct dvb_device		*ca_dev;
+ 	void				*ca_priv;
+ };
+diff --git a/drivers/media/dvb/mantis/mantis_pcmcia.c b/drivers/media/dvb/mantis/mantis_pcmcia.c
+index 63f9621..960123f 100644
+--- a/drivers/media/dvb/mantis/mantis_pcmcia.c
++++ b/drivers/media/dvb/mantis/mantis_pcmcia.c
+@@ -19,11 +19,75 @@
+ */
+ 
+ #include "mantis_common.h"
++#include "mantis_link.h" /* temporary due to physical layer stuff */
++
++/*
++ * If Slot state is already PLUG_IN event and we are called
++ * again, definitely it is jitter alone
++ */
++void mantis_event_cam_plugin(struct mantis_ca *ca)
++{
++	struct mantis_pci *mantis = ca->ca_priv;
++
++	u32 gpif_irqcfg;
++
++	if (ca->slot_state == MODULE_XTRACTED) {
++		dprintk(mantis->verbose, MANTIS_DEBUG, 1, "Event: CAM Plugged IN: Adapter(%d) Slot(0)", mantis->num);
++		udelay(50);
++		mmwrite(0xda000000, MANTIS_CARD_RESET);
++		gpif_irqcfg  = mmread(MANTIS_GPIF_IRQCFG);
++		gpif_irqcfg |= MANTIS_MASK_PLUGOUT;
++		gpif_irqcfg &= ~MANTIS_MASK_PLUGIN;
++		mmwrite(gpif_irqcfg, MANTIS_GPIF_IRQCFG);
++		udelay(500);
++		ca->slot_state = MODULE_INSERTED;
++	}
++	udelay(100);
++}
++
++/*
++ * If Slot state is already UN_PLUG event and we are called
++ * again, definitely it is jitter alone
++ */
++void mantis_event_cam_unplug(struct mantis_ca *ca)
++{
++	struct mantis_pci *mantis = ca->ca_priv;
++
++	u32 gpif_irqcfg;
++
++	if (ca->slot_state == MODULE_INSERTED) {
++		dprintk(mantis->verbose, MANTIS_DEBUG, 1, "Event: CAM Unplugged: Adapter(%d) Slot(0)", mantis->num);
++		udelay(50);
++		mmwrite(0x00da0000, MANTIS_CARD_RESET);
++		gpif_irqcfg  = mmread(MANTIS_GPIF_IRQCFG);
++		gpif_irqcfg |= MANTIS_MASK_PLUGIN;
++		gpif_irqcfg &= ~MANTIS_MASK_PLUGOUT;
++		mmwrite(gpif_irqcfg, MANTIS_GPIF_IRQCFG);
++		udelay(500);
++		ca->slot_state = MODULE_XTRACTED;
++	}
++	udelay(100);
++}
+ 
+ int mantis_pcmcia_init(struct mantis_ca *ca)
+ {
+ 	struct mantis_pci *mantis = ca->ca_priv;
+ 
++	u32 gpif_stat, card_stat;
++
++	gpif_stat = mmread(MANTIS_GPIF_STATUS);
++	card_stat = mmread(MANTIS_GPIF_IRQCFG);
++
++	if (gpif_stat & MANTIS_GPIF_DETSTAT) {
++		dprintk(mantis->verbose, MANTIS_DEBUG, 1, "CAM found on Adapter(%d) Slot(0)", mantis->num);
++		mmwrite(card_stat | MANTIS_MASK_PLUGOUT, MANTIS_GPIF_IRQCFG);
++		ca->slot_state = MODULE_INSERTED;
++	} else {
++		dprintk(mantis->verbose, MANTIS_DEBUG, 1, "Empty Slot on Adapter(%d) Slot(0)", mantis->num);
++		mmwrite(card_stat | MANTIS_MASK_PLUGIN, MANTIS_GPIF_IRQCFG);
++		ca->slot_state = MODULE_XTRACTED;
++	}
++
+ 	return 0;
+ }
+ 
+@@ -31,4 +95,6 @@ void mantis_pcmcia_exit(struct mantis_ca *ca)
+ {
+ 	struct mantis_pci *mantis = ca->ca_priv;
+ 
++	mmwrite(mmread(MANTIS_GPIF_STATUS) & (~MANTIS_CARD_PLUGOUT | ~MANTIS_CARD_PLUGIN), MANTIS_GPIF_STATUS);
++	mmwrite(mmread(MANTIS_INT_MASK) & ~MANTIS_INT_IRQ0, MANTIS_INT_MASK);
+ }
+-- 
+1.7.1
+

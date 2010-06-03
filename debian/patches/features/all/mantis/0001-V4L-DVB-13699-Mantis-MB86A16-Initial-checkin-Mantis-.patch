@@ -1,0 +1,3868 @@
+From e7cc9f1635f1d46992cb66e0aac472cbfc89f878 Mon Sep 17 00:00:00 2001
+From: Manu Abraham <abraham.manu@gmail.com>
+Date: Wed, 2 Dec 2009 21:57:10 -0300
+Subject: [PATCH 001/120] V4L/DVB (13699): [Mantis, MB86A16] Initial checkin: Mantis, MB86A16
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Manu Abraham <manu@linuxtv.org>
+Signed-off-by: Mauro Carvalho Chehab <mchehab@redhat.com>
+(cherry picked from commit 41e840b13e111ba18b138d055ddd250bd5ad5e39)
+
+Signed-off-by: Bjørn Mork <bjorn@mork.no>
+---
+ drivers/media/dvb/frontends/mb86a16.c      | 1772 ++++++++++++++++++++++++++++
+ drivers/media/dvb/frontends/mb86a16.h      |   38 +
+ drivers/media/dvb/frontends/mb86a16_priv.h |  151 +++
+ drivers/media/dvb/mantis/Kconfig           |   13 +
+ drivers/media/dvb/mantis/Makefile          |    7 +
+ drivers/media/dvb/mantis/mantis_common.h   |  135 +++
+ drivers/media/dvb/mantis/mantis_core.c     |  215 ++++
+ drivers/media/dvb/mantis/mantis_core.h     |   61 +
+ drivers/media/dvb/mantis/mantis_dma.c      |  238 ++++
+ drivers/media/dvb/mantis/mantis_dvb.c      |  304 +++++
+ drivers/media/dvb/mantis/mantis_i2c.c      |  189 +++
+ drivers/media/dvb/mantis/mantis_reg.h      |  109 ++
+ drivers/media/dvb/mantis/mantis_vp1033.c   |  151 +++
+ drivers/media/dvb/mantis/mantis_vp1033.h   |   35 +
+ drivers/media/dvb/mantis/mantis_vp1034.c   |   52 +
+ drivers/media/dvb/mantis/mantis_vp1034.h   |   30 +
+ drivers/media/dvb/mantis/mantis_vp2033.c   |   73 ++
+ drivers/media/dvb/mantis/mantis_vp2033.h   |   33 +
+ drivers/media/dvb/mantis/mantis_vp3030.c   |   53 +
+ drivers/media/dvb/mantis/mantis_vp3030.h   |   30 +
+ 20 files changed, 3689 insertions(+), 0 deletions(-)
+ create mode 100644 drivers/media/dvb/frontends/mb86a16.c
+ create mode 100644 drivers/media/dvb/frontends/mb86a16.h
+ create mode 100644 drivers/media/dvb/frontends/mb86a16_priv.h
+ create mode 100644 drivers/media/dvb/mantis/Kconfig
+ create mode 100644 drivers/media/dvb/mantis/Makefile
+ create mode 100644 drivers/media/dvb/mantis/mantis_common.h
+ create mode 100644 drivers/media/dvb/mantis/mantis_core.c
+ create mode 100644 drivers/media/dvb/mantis/mantis_core.h
+ create mode 100644 drivers/media/dvb/mantis/mantis_dma.c
+ create mode 100644 drivers/media/dvb/mantis/mantis_dvb.c
+ create mode 100644 drivers/media/dvb/mantis/mantis_i2c.c
+ create mode 100644 drivers/media/dvb/mantis/mantis_reg.h
+ create mode 100644 drivers/media/dvb/mantis/mantis_vp1033.c
+ create mode 100644 drivers/media/dvb/mantis/mantis_vp1033.h
+ create mode 100644 drivers/media/dvb/mantis/mantis_vp1034.c
+ create mode 100644 drivers/media/dvb/mantis/mantis_vp1034.h
+ create mode 100644 drivers/media/dvb/mantis/mantis_vp2033.c
+ create mode 100644 drivers/media/dvb/mantis/mantis_vp2033.h
+ create mode 100644 drivers/media/dvb/mantis/mantis_vp3030.c
+ create mode 100644 drivers/media/dvb/mantis/mantis_vp3030.h
+
+diff --git a/drivers/media/dvb/frontends/mb86a16.c b/drivers/media/dvb/frontends/mb86a16.c
+new file mode 100644
+index 0000000..6a78a0c
+--- /dev/null
++++ b/drivers/media/dvb/frontends/mb86a16.c
+@@ -0,0 +1,1772 @@
++/*
++	Fujitsu MB86A16 DVB-S/DSS DC Receiver driver
++
++	Copyright (C) 2005, 2006 Manu Abraham (abraham.manu@gmail.com)
++
++	This program is free software; you can redistribute it and/or modify
++	it under the terms of the GNU General Public License as published by
++	the Free Software Foundation; either version 2 of the License, or
++	(at your option) any later version.
++
++	This program is distributed in the hope that it will be useful,
++	but WITHOUT ANY WARRANTY; without even the implied warranty of
++	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++	GNU General Public License for more details.
++
++	You should have received a copy of the GNU General Public License
++	along with this program; if not, write to the Free Software
++	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++*/
++
++#include <linux/init.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/moduleparam.h>
++
++#include "dvb_frontend.h"
++#include "mb86a16.h"
++#include "mb86a16_priv.h"
++
++unsigned int verbose = 5;
++module_param(verbose, int, 0644);
++
++#define ABS(x)		((x) < 0 ? (-x) : (x))
++
++struct mb86a16_state {
++	struct i2c_adapter		*i2c_adap;
++	const struct mb86a16_config	*config;
++	struct dvb_frontend		frontend;
++	u8				signal;
++
++	// tuning parameters
++	int				frequency;
++	int				srate;
++
++	// Internal stuff
++	int				master_clk;
++	int				deci;
++	int				csel;
++	int				rsel;
++};
++
++#define MB86A16_ERROR		0
++#define MB86A16_NOTICE		1
++#define MB86A16_INFO		2
++#define MB86A16_DEBUG		3
++
++#define dprintk(x, y, z, format, arg...) do {						\
++	if (z) {									\
++		if	((x > MB86A16_ERROR) && (x > y))				\
++			printk(KERN_ERR "%s: " format "\n", __func__, ##arg);		\
++		else if ((x > MB86A16_NOTICE) && (x > y))				\
++			printk(KERN_NOTICE "%s: " format "\n", __func__, ##arg);	\
++		else if ((x > MB86A16_INFO) && (x > y))					\
++			printk(KERN_INFO "%s: " format "\n", __func__, ##arg);		\
++		else if ((x > MB86A16_DEBUG) && (x > y))				\
++			printk(KERN_DEBUG "%s: " format "\n", __func__, ##arg);		\
++	} else {									\
++		if (x > y)								\
++			printk(format, ##arg);						\
++	}										\
++} while (0)
++
++#define TRACE_IN	dprintk(verbose, MB86A16_DEBUG, 1, "-->()")
++#define TRACE_OUT	dprintk(verbose, MB86A16_DEBUG, 1, "()-->")
++
++static int mb86a16_write(struct mb86a16_state *state, u8 reg, u8 val)
++{
++	int ret;
++	u8 buf[] = { reg, val };
++
++	struct i2c_msg msg = {
++		.addr = state->config->demod_address,
++		.flags = 0,
++		.buf = buf,
++		.len = 2
++	};
++
++	dprintk(verbose, MB86A16_DEBUG, 1,
++		"writing to [0x%02x],Reg[0x%02x],Data[0x%02x]",
++		state->config->demod_address, buf[0], buf[1]);
++
++	ret = i2c_transfer(state->i2c_adap, &msg, 1);
++
++	return (ret != 1) ? -EREMOTEIO : 0;
++}
++
++static int mb86a16_read(struct mb86a16_state *state, u8 reg, u8 *val)
++{
++	int ret;
++	u8 b0[] = { reg };
++	u8 b1[] = { 0 };
++
++	struct i2c_msg msg[] = {
++		{
++			.addr = state->config->demod_address,
++			.flags = 0,
++			.buf = b0,
++			.len = 1
++		},{
++			.addr = state->config->demod_address,
++			.flags = I2C_M_RD,
++			.buf = b1,
++			.len = 1
++		}
++	};
++	ret = i2c_transfer(state->i2c_adap, msg, 2);
++	if (ret != 2) {
++		dprintk(verbose, MB86A16_ERROR, 1, "read error(reg=0x%02x, ret=0x%i)",
++			reg, ret);
++
++		return -EREMOTEIO;
++	}
++	*val = b1[0];
++
++	return ret;
++}
++
++static int CNTM_set(struct mb86a16_state *state,
++		    unsigned char timint1,
++		    unsigned char timint2,
++		    unsigned char cnext)
++{
++	unsigned char val;
++
++	val = (timint1 << 4) | (timint2 << 2) | cnext;
++	if (mb86a16_write(state, MB86A16_CNTMR, val) < 0)
++		goto err;
++
++	return 0;
++
++err:
++	dprintk(verbose, MB86A16_ERROR, 1, "I2C transfer error");
++	return -EREMOTEIO;
++}
++
++static int smrt_set(struct mb86a16_state *state, int rate)
++{
++	int tmp ;
++	int m ;
++	unsigned char STOFS0, STOFS1;
++
++	m = 1 << state->deci;
++	tmp = (8192 * state->master_clk - 2 * m * rate * 8192 + state->master_clk / 2) / state->master_clk;
++
++	STOFS0 = tmp & 0x0ff;
++	STOFS1 = (tmp & 0xf00) >> 8;
++
++	if (mb86a16_write(state, MB86A16_SRATE1, (state->deci << 2) |
++				       (state->csel << 1) |
++					state->rsel) < 0)
++		goto err;
++	if (mb86a16_write(state, MB86A16_SRATE2, STOFS0) < 0)
++		goto err;
++	if (mb86a16_write(state, MB86A16_SRATE3, STOFS1) < 0)
++		goto err;
++
++	return 0;
++err:
++	dprintk(verbose, MB86A16_ERROR, 1, "I2C transfer error");
++	return -1;
++}
++
++static int srst(struct mb86a16_state *state)
++{
++	if (mb86a16_write(state, MB86A16_RESET, 0x04) < 0)
++		goto err;
++
++	return 0;
++err:
++	dprintk(verbose, MB86A16_ERROR, 1, "I2C transfer error");
++	return -EREMOTEIO;
++
++}
++
++static int afcex_data_set(struct mb86a16_state *state,
++			  unsigned char AFCEX_L,
++			  unsigned char AFCEX_H)
++{
++	if (mb86a16_write(state, MB86A16_AFCEXL, AFCEX_L) < 0)
++		goto err;
++	if (mb86a16_write(state, MB86A16_AFCEXH, AFCEX_H) < 0)
++		goto err;
++
++	return 0;
++err:
++	dprintk(verbose, MB86A16_ERROR, 1, "I2C transfer error");
++
++	return -1;
++}
++
++static int afcofs_data_set(struct mb86a16_state *state,
++			   unsigned char AFCEX_L,
++			   unsigned char AFCEX_H)
++{
++	if (mb86a16_write(state, 0x58, AFCEX_L) < 0)
++		goto err;
++	if (mb86a16_write(state, 0x59, AFCEX_H) < 0)
++		goto err;
++
++	return 0;
++err:
++	dprintk(verbose, MB86A16_ERROR, 1, "I2C transfer error");
++	return -EREMOTEIO;
++}
++
++static int stlp_set(struct mb86a16_state *state,
++		    unsigned char STRAS,
++		    unsigned char STRBS)
++{
++	if (mb86a16_write(state, MB86A16_STRFILTCOEF1, (STRBS << 3) | (STRAS)) < 0)
++		goto err;
++
++	return 0;
++err:
++	dprintk(verbose, MB86A16_ERROR, 1, "I2C transfer error");
++	return -EREMOTEIO;
++}
++
++static int Vi_set(struct mb86a16_state *state, unsigned char ETH, unsigned char VIA)
++{
++	if (mb86a16_write(state, MB86A16_VISET2, 0x04) < 0)
++		goto err;
++	if (mb86a16_write(state, MB86A16_VISET3, 0xf5) < 0)
++		goto err;
++
++	return 0;
++err:
++	dprintk(verbose, MB86A16_ERROR, 1, "I2C transfer error");
++	return -EREMOTEIO;
++}
++
++static int initial_set(struct mb86a16_state *state)
++{
++	if (stlp_set(state, 5, 7))
++		goto err;
++	if (afcex_data_set(state, 0, 0))
++		goto err;
++	if (afcofs_data_set(state, 0, 0))
++		goto err;
++
++	if (mb86a16_write(state, MB86A16_CRLFILTCOEF1, 0x16) < 0)
++		goto err;
++	if (mb86a16_write(state, 0x2f, 0x21) < 0)
++		goto err;
++	if (mb86a16_write(state, MB86A16_VIMAG, 0x38) < 0)
++		goto err;
++	if (mb86a16_write(state, MB86A16_FAGCS1, 0x00) < 0)
++		goto err;
++	if (mb86a16_write(state, MB86A16_FAGCS2, 0x1c) < 0)
++		goto err;
++	if (mb86a16_write(state, MB86A16_FAGCS3, 0x20) < 0)
++		goto err;
++	if (mb86a16_write(state, MB86A16_FAGCS4, 0x1e) < 0)
++		goto err;
++	if (mb86a16_write(state, MB86A16_FAGCS5, 0x23) < 0)
++		goto err;
++	if (mb86a16_write(state, 0x54, 0xff) < 0)
++		goto err;
++	if (mb86a16_write(state, MB86A16_TSOUT, 0x00) < 0)
++		goto err;
++
++	return 0;
++
++err:
++	dprintk(verbose, MB86A16_ERROR, 1, "I2C transfer error");
++	return -EREMOTEIO;
++}
++
++static int S01T_set(struct mb86a16_state *state,
++		    unsigned char s1t,
++		    unsigned s0t)
++{
++	if (mb86a16_write(state, 0x33, (s1t << 3) | s0t) < 0)
++		goto err;
++
++	return 0;
++err:
++	dprintk(verbose, MB86A16_ERROR, 1, "I2C transfer error");
++	return -EREMOTEIO;
++}
++
++
++static int EN_set(struct mb86a16_state *state,
++		  int cren,
++		  int afcen)
++{
++	unsigned char val;
++
++	val = 0x7a | (cren << 7) | (afcen << 2);
++	if (mb86a16_write(state, 0x49, val) < 0)
++		goto err;
++
++	return 0;
++err:
++	dprintk(verbose, MB86A16_ERROR, 1, "I2C transfer error");
++	return -EREMOTEIO;
++}
++
++static int AFCEXEN_set(struct mb86a16_state *state,
++		       int afcexen,
++		       int smrt)
++{
++	unsigned char AFCA ;
++
++	if (smrt > 18875)
++		AFCA = 4;
++	else if (smrt > 9375)
++		AFCA = 3;
++	else if (smrt > 2250)
++		AFCA = 2;
++	else
++		AFCA = 1;
++
++	if (mb86a16_write(state, 0x2a, 0x02 | (afcexen << 5) | (AFCA << 2)) < 0)
++		goto err;
++
++	return 0;
++
++err:
++	dprintk(verbose, MB86A16_ERROR, 1, "I2C transfer error");
++	return -EREMOTEIO;
++}
++
++static int DAGC_data_set(struct mb86a16_state *state,
++			 unsigned char DAGCA,
++			 unsigned char DAGCW)
++{
++	if (mb86a16_write(state, 0x2d, (DAGCA << 3) | DAGCW) < 0)
++		goto err;
++
++	return 0;
++
++err:
++	dprintk(verbose, MB86A16_ERROR, 1, "I2C transfer error");
++	return -EREMOTEIO;
++}
++
++static void smrt_info_get(struct mb86a16_state *state, int rate)
++{
++	if (rate >= 37501) {
++		state->deci = 0; state->csel = 0; state->rsel = 0;
++	} else if (rate >= 30001) {
++		state->deci = 0; state->csel = 0; state->rsel = 1;
++	} else if (rate >= 26251) {
++		state->deci = 0; state->csel = 1; state->rsel = 0;
++	} else if (rate >= 22501) {
++		state->deci = 0; state->csel = 1; state->rsel = 1;
++	} else if (rate >= 18751) {
++		state->deci = 1; state->csel = 0; state->rsel = 0;
++	} else if (rate >= 15001) {
++		state->deci = 1; state->csel = 0; state->rsel = 1;
++	} else if (rate >= 13126) {
++		state->deci = 1; state->csel = 1; state->rsel = 0;
++	} else if (rate >= 11251) {
++		state->deci = 1; state->csel = 1; state->rsel = 1;
++	} else if (rate >= 9376) {
++		state->deci = 2; state->csel = 0; state->rsel = 0;
++	} else if (rate >= 7501) {
++		state->deci = 2; state->csel = 0; state->rsel = 1;
++	} else if (rate >= 6563) {
++		state->deci = 2; state->csel = 1; state->rsel = 0;
++	} else if (rate >= 5626) {
++		state->deci = 2; state->csel = 1; state->rsel = 1;
++	} else if (rate >= 4688) {
++		state->deci = 3; state->csel = 0; state->rsel = 0;
++	} else if (rate >= 3751) {
++		state->deci = 3; state->csel = 0; state->rsel = 1;
++	} else if (rate >= 3282) {
++		state->deci = 3; state->csel = 1; state->rsel = 0;
++	} else if (rate >= 2814) {
++		state->deci = 3; state->csel = 1; state->rsel = 1;
++	} else if (rate >= 2344) {
++		state->deci = 4; state->csel = 0; state->rsel = 0;
++	} else if (rate >= 1876) {
++		state->deci = 4; state->csel = 0; state->rsel = 1;
++	} else if (rate >= 1641) {
++		state->deci = 4; state->csel = 1; state->rsel = 0;
++	} else if (rate >= 1407) {
++		state->deci = 4; state->csel = 1; state->rsel = 1;
++	} else if (rate >= 1172) {
++		state->deci = 5; state->csel = 0; state->rsel = 0;
++	} else if (rate >=  939) {
++		state->deci = 5; state->csel = 0; state->rsel = 1;
++	} else if (rate >=  821) {
++		state->deci = 5; state->csel = 1; state->rsel = 0;
++	} else {
++		state->deci = 5; state->csel = 1; state->rsel = 1;
++	}
++
++	if (state->csel == 0)
++		state->master_clk = 92000;
++	else
++		state->master_clk = 61333;
++
++}
++
++static int signal_det(struct mb86a16_state *state,
++		      int smrt,
++		      unsigned char *SIG)
++{
++
++	int ret ;
++	int smrtd ;
++	int wait_sym ;
++	int wait_t ;
++	unsigned char S[3] ;
++	int i ;
++
++	if (*SIG > 45) {
++		if (CNTM_set(state, 2, 1, 2) < 0) {
++			dprintk(verbose, MB86A16_ERROR, 1, "CNTM set Error");
++			return -1;
++		}
++		wait_sym = 40000;
++	} else {
++		if (CNTM_set(state, 3, 1, 2) < 0) {
++			dprintk(verbose, MB86A16_ERROR, 1, "CNTM set Error");
++			return -1;
++		}
++		wait_sym = 80000;
++	}
++	for (i = 0; i < 3; i++) {
++		if (i == 0 )
++			smrtd = smrt * 98 / 100;
++		else if (i == 1)
++			smrtd = smrt;
++		else
++			smrtd = smrt * 102 / 100;
++		smrt_info_get(state, smrtd);
++		smrt_set(state, smrtd);
++		srst(state);
++		wait_t = (wait_sym + 99 * smrtd / 100) / smrtd;
++		if (wait_t == 0)
++			wait_t = 1;
++		msleep_interruptible(10);
++		if (mb86a16_read(state, 0x37, &(S[i])) != 2) {
++			dprintk(verbose, MB86A16_ERROR, 1, "I2C transfer error");
++			return -EREMOTEIO;
++		}
++	}
++	if ((S[1] > S[0] * 112 / 100) &&
++	    (S[1] > S[2] * 112 / 100)) {
++
++		ret = 1;
++	} else {
++		ret = 0;
++	}
++	*SIG = S[1];
++
++	if (CNTM_set(state, 0, 1, 2) < 0) {
++		dprintk(verbose, MB86A16_ERROR, 1, "CNTM set Error");
++		return -1;
++	}
++
++	return ret;
++}
++
++static int rf_val_set(struct mb86a16_state *state,
++		      int f,
++		      int smrt,
++		      unsigned char R)
++{
++	unsigned char C, F, B;
++	int M;
++	unsigned char rf_val[5];
++	int ack = -1;
++
++	if (smrt > 37750 )
++		C = 1;
++	else if (smrt > 18875)
++		C = 2;
++	else if (smrt > 5500 )
++		C = 3;
++	else
++		C = 4;
++
++	if (smrt > 30500)
++		F = 3;
++	else if (smrt > 9375)
++		F = 1;
++	else if (smrt > 4625)
++		F = 0;
++	else
++		F = 2;
++
++	if (f < 1060)
++		B = 0;
++	else if (f < 1175)
++		B = 1;
++	else if (f < 1305)
++		B = 2;
++	else if (f < 1435)
++		B = 3;
++	else if (f < 1570)
++		B = 4;
++	else if (f < 1715)
++		B = 5;
++	else if (f < 1845)
++		B = 6;
++	else if (f < 1980)
++		B = 7;
++	else if (f < 2080)
++		B = 8;
++	else
++		B = 9;
++
++	M = f * (1 << R) / 2;
++
++	rf_val[0] = 0x01 | (C << 3) | (F << 1);
++	rf_val[1] = (R << 5) | ((M & 0x1f000) >> 12);
++	rf_val[2] = (M & 0x00ff0) >> 4;
++	rf_val[3] = ((M & 0x0000f) << 4) | B;
++
++	// Frequency Set
++	if (mb86a16_write(state, 0x21, rf_val[0]) < 0)
++		ack = 0;
++	if (mb86a16_write(state, 0x22, rf_val[1]) < 0)
++		ack = 0;
++	if (mb86a16_write(state, 0x23, rf_val[2]) < 0)
++		ack = 0;
++	if (mb86a16_write(state, 0x24, rf_val[3]) < 0)
++		ack = 0;
++	if (mb86a16_write(state, 0x25, 0x01) < 0)
++		ack = 0;
++	if (ack == 0) {
++		dprintk(verbose, MB86A16_ERROR, 1, "RF Setup - I2C transfer error");
++		return -EREMOTEIO;
++	}
++
++	return 0;
++}
++
++static int afcerr_chk(struct mb86a16_state *state)
++{
++	unsigned char AFCM_L, AFCM_H ;
++	int AFCM ;
++	int afcm, afcerr ;
++
++	if (mb86a16_read(state, 0x0e, &AFCM_L) != 2)
++		goto err;
++	if (mb86a16_read(state, 0x0f, &AFCM_H) != 2)
++		goto err;
++
++	AFCM = (AFCM_H << 8) + AFCM_L;
++
++	if (AFCM > 2048)
++		afcm = AFCM - 4096;
++	else
++		afcm = AFCM;
++	afcerr = afcm * state->master_clk / 8192;
++
++	return afcerr;
++
++err:
++	dprintk(verbose, MB86A16_ERROR, 1, "I2C transfer error");
++	return -EREMOTEIO;
++}
++
++static int dagcm_val_get(struct mb86a16_state *state)
++{
++	int DAGCM;
++	unsigned char DAGCM_H, DAGCM_L;
++
++	if (mb86a16_read(state, 0x45, &DAGCM_L) != 2)
++		goto err;
++	if (mb86a16_read(state, 0x46, &DAGCM_H) != 2)
++		goto err;
++
++	DAGCM = (DAGCM_H << 8) + DAGCM_L;
++
++	return DAGCM;
++
++err:
++	dprintk(verbose, MB86A16_ERROR, 1, "I2C transfer error");
++	return -EREMOTEIO;
++}
++
++static int mb86a16_read_status(struct dvb_frontend *fe, fe_status_t *status)
++{
++	struct mb86a16_state *state = fe->demodulator_priv;
++
++	if (state->signal & 0x02)
++		*status |= FE_HAS_VITERBI;
++	if (state->signal & 0x01)
++		*status |= FE_HAS_SYNC;
++	if (state->signal & 0x03)
++		*status |= FE_HAS_LOCK;
++
++	return 0;
++}
++
++static int sync_chk(struct mb86a16_state *state,
++		    unsigned char *VIRM)
++{
++	unsigned char val;
++	int sync;
++
++	if (mb86a16_read(state, 0x0d, &val) != 2)
++		goto err;
++
++	dprintk(verbose, MB86A16_INFO, 1, "Status = %02x,", val);
++	sync = val & 0x01;
++	*VIRM = (val & 0x1c) >> 2;
++
++	return sync;
++err:
++	dprintk(verbose, MB86A16_ERROR, 1, "I2C transfer error");
++	return -EREMOTEIO;
++
++}
++
++static int freqerr_chk(struct mb86a16_state *state,
++		       int fTP,
++		       int smrt,
++		       int unit)
++{
++	unsigned char CRM, AFCML, AFCMH;
++	unsigned char temp1, temp2, temp3;
++	int crm, afcm, AFCM;
++	int crrerr, afcerr;		// [kHz]
++	int frqerr;			// [MHz]
++	int afcen, afcexen = 0;
++	int R, M, fOSC, fOSC_OFS;
++
++	if (mb86a16_read(state, 0x43, &CRM) != 2)
++		goto err;
++
++	if (CRM > 127)
++		crm = CRM - 256;
++	else
++		crm = CRM;
++
++	crrerr = smrt * crm / 256;
++	if (mb86a16_read(state, 0x49, &temp1) != 2)
++		goto err;
++
++	afcen = (temp1 & 0x04) >> 2;
++	if (afcen == 0) {
++		if (mb86a16_read(state, 0x2a, &temp1) != 2)
++			goto err;
++		afcexen = (temp1 & 0x20) >> 5;
++	}
++
++	if (afcen == 1) {
++		if (mb86a16_read(state, 0x0e, &AFCML) != 2)
++			goto err;
++		if (mb86a16_read(state, 0x0f, &AFCMH) != 2)
++			goto err;
++	} else if (afcexen == 1) {
++		if (mb86a16_read(state, 0x2b, &AFCML) != 2)
++			goto err;
++		if (mb86a16_read(state, 0x2c, &AFCMH) != 2)
++			goto err;
++	}
++	if ((afcen == 1) || (afcexen == 1)) {
++		smrt_info_get(state, smrt);
++		AFCM = ((AFCMH & 0x01) << 8) + AFCML;
++		if (AFCM > 255)
++			afcm = AFCM - 512;
++		else
++			afcm = AFCM;
++
++		afcerr = afcm * state->master_clk / 8192;
++	} else
++		afcerr = 0;
++
++	if (mb86a16_read(state, 0x22, &temp1) != 2)
++		goto err;
++	if (mb86a16_read(state, 0x23, &temp2) != 2)
++		goto err;
++	if (mb86a16_read(state, 0x24, &temp3) != 2)
++		goto err;
++
++	R = (temp1 & 0xe0) >> 5;
++	M = ((temp1 & 0x1f) << 12) + (temp2 << 4) + (temp3 >> 4);
++	if (R == 0)
++		fOSC = 2 * M;
++	else
++		fOSC = M;
++
++	fOSC_OFS = fOSC - fTP;
++
++	if (unit == 0) {	//[MHz]
++		if (crrerr + afcerr + fOSC_OFS * 1000 >= 0)
++			frqerr = (crrerr + afcerr + fOSC_OFS * 1000 + 500) / 1000;
++		else
++			frqerr = (crrerr + afcerr + fOSC_OFS * 1000 - 500) / 1000;
++	} else {	//[kHz]
++		frqerr = crrerr + afcerr + fOSC_OFS * 1000;
++	}
++
++	return frqerr;
++err:
++	dprintk(verbose, MB86A16_ERROR, 1, "I2C transfer error");
++	return -EREMOTEIO;
++}
++
++static unsigned char vco_dev_get(struct mb86a16_state *state, int smrt)
++{
++	unsigned char R;
++
++	if (smrt > 9375)
++		R = 0;
++	else
++		R = 1;
++
++	return R;
++}
++
++static void swp_info_get(struct mb86a16_state *state,
++			 int fOSC_start,
++			 int smrt,
++			 int v, int R,
++			 int swp_ofs,
++			 int *fOSC,
++			 int *afcex_freq,
++			 unsigned char *AFCEX_L,
++			 unsigned char *AFCEX_H)
++{
++	int AFCEX ;
++	int crnt_swp_freq ;
++
++	crnt_swp_freq = fOSC_start * 1000 + v * swp_ofs;
++
++	if (R == 0 )
++		*fOSC = (crnt_swp_freq + 1000) / 2000 * 2;
++	else
++		*fOSC = (crnt_swp_freq + 500) / 1000;
++
++	if (*fOSC >= crnt_swp_freq)
++		*afcex_freq = *fOSC *1000 - crnt_swp_freq;
++	else
++		*afcex_freq = crnt_swp_freq - *fOSC * 1000;
++
++	AFCEX = *afcex_freq * 8192 / state->master_clk;
++	*AFCEX_L =  AFCEX & 0x00ff;
++	*AFCEX_H = (AFCEX & 0x0f00) >> 8;
++}
++
++
++static int swp_freq_calcuation(struct mb86a16_state *state, int i, int v, int *V,  int vmax, int vmin,
++			       int SIGMIN, int fOSC, int afcex_freq, int swp_ofs, unsigned char *SIG1)
++{
++	int swp_freq ;
++
++	if ((i % 2 == 1) && (v <= vmax)) {
++		// positive v (case 1)
++		if ((v - 1 == vmin)				&&
++		    (*(V + 30 + v) >= 0)			&&
++		    (*(V + 30 + v - 1) >= 0)			&&
++		    (*(V + 30 + v - 1) > *(V + 30 + v))		&&
++		    (*(V + 30 + v - 1) > SIGMIN)) {
++
++			swp_freq = fOSC * 1000 + afcex_freq - swp_ofs;
++			*SIG1 = *(V + 30 + v - 1);
++		} else if ((v == vmax)				&&
++			   (*(V + 30 + v) >= 0)			&&
++			   (*(V + 30 + v - 1) >= 0)		&&
++			   (*(V + 30 + v) > *(V + 30 + v - 1))	&&
++			   (*(V + 30 + v) > SIGMIN)) {
++			// (case 2)
++			swp_freq = fOSC * 1000 + afcex_freq;
++			*SIG1 = *(V + 30 + v);
++		} else if ((*(V + 30 + v) > 0)			&&
++			   (*(V + 30 + v - 1) > 0)		&&
++			   (*(V + 30 + v - 2) > 0)		&&
++			   (*(V + 30 + v - 3) > 0)		&&
++			   (*(V + 30 + v - 1) > *(V + 30 + v))	&&
++			   (*(V + 30 + v - 2) > *(V + 30 + v - 3)) &&
++			   ((*(V + 30 + v - 1) > SIGMIN)	||
++			   (*(V + 30 + v - 2) > SIGMIN))) {
++			// (case 3)
++			if (*(V + 30 + v - 1) >= *(V + 30 + v - 2)) {
++				swp_freq = fOSC * 1000 + afcex_freq - swp_ofs;
++				*SIG1 = *(V + 30 + v - 1);
++			} else {
++				swp_freq = fOSC * 1000 + afcex_freq - swp_ofs * 2;
++				*SIG1 = *(V + 30 + v - 2);
++			}
++		} else if ((v == vmax)				&&
++			   (*(V + 30 + v) >= 0)			&&
++			   (*(V + 30 + v - 1) >= 0)		&&
++			   (*(V + 30 + v - 2) >= 0)		&&
++			   (*(V + 30 + v) > *(V + 30 + v - 2))	&&
++			   (*(V + 30 + v - 1) > *(V + 30 + v - 2)) &&
++			   ((*(V + 30 + v) > SIGMIN)		||
++			   (*(V + 30 + v - 1) > SIGMIN))) {
++			// (case 4)
++			if (*(V + 30 + v) >= *(V + 30 + v - 1)) {
++				swp_freq = fOSC * 1000 + afcex_freq;
++				*SIG1 = *(V + 30 + v);
++			} else {
++				swp_freq = fOSC * 1000 + afcex_freq - swp_ofs;
++				*SIG1 = *(V + 30 + v - 1);
++			}
++		} else  {
++			swp_freq = -1 ;
++		}
++	} else if ((i % 2 == 0) && (v >= vmin)) {
++		// Negative v (case 1)
++		if ((*(V + 30 + v) > 0)				&&
++		    (*(V + 30 + v + 1) > 0)			&&
++		    (*(V + 30 + v + 2) > 0)			&&
++		    (*(V + 30 + v + 1) > *(V + 30 + v))		&&
++		    (*(V + 30 + v + 1) > *(V + 30 + v + 2))	&&
++		    (*(V + 30 + v + 1) > SIGMIN)) {
++
++			swp_freq = fOSC * 1000 + afcex_freq + swp_ofs;
++			*SIG1 = *(V + 30 + v + 1);
++		} else if ((v + 1 == vmax)			&&
++			   (*(V + 30 + v) >= 0)			&&
++			   (*(V + 30 + v + 1) >= 0)		&&
++			   (*(V + 30 + v + 1) > *(V + 30 + v))	&&
++			   (*(V + 30 + v + 1) > SIGMIN)) {
++			// (case 2)
++			swp_freq = fOSC * 1000 + afcex_freq + swp_ofs;
++			*SIG1 = *(V + 30 + v);
++		} else if ((v == vmin)				&&
++			   (*(V + 30 + v) > 0)			&&
++			   (*(V + 30 + v + 1) > 0)		&&
++			   (*(V + 30 + v + 2) > 0)		&&
++			   (*(V + 30 + v) > *(V + 30 + v + 1))	&&
++			   (*(V + 30 + v) > *(V + 30 + v + 2))	&&
++			   (*(V + 30 + v) > SIGMIN)) {
++			// (case 3)
++			swp_freq = fOSC * 1000 + afcex_freq;
++			*SIG1 = *(V + 30 + v);
++		} else if ((*(V + 30 + v) >= 0)			&&
++			   (*(V + 30 + v + 1) >= 0)		&&
++			   (*(V + 30 + v + 2) >= 0)		&&
++			   (*(V +30 + v + 3) >= 0)		&&
++			   (*(V + 30 + v + 1) > *(V + 30 + v))	&&
++			   (*(V + 30 + v + 2) > *(V + 30 + v + 3)) &&
++			   ((*(V + 30 + v + 1) > SIGMIN)	||
++			    (*(V + 30 + v + 2) > SIGMIN))) {
++			// (case 4)
++			if (*(V + 30 + v + 1) >= *(V + 30 + v + 2)) {
++				swp_freq = fOSC * 1000 + afcex_freq + swp_ofs;
++				*SIG1 = *(V + 30 + v + 1);
++			} else {
++				swp_freq = fOSC * 1000 + afcex_freq + swp_ofs * 2;
++				*SIG1 = *(V + 30 + v + 2);
++			}
++		} else if ((*(V + 30 + v) >= 0)			&&
++			   (*(V + 30 + v + 1) >= 0)		&&
++			   (*(V + 30 + v + 2) >= 0)		&&
++			   (*(V + 30 + v + 3) >= 0)		&&
++			   (*(V + 30 + v) > *(V + 30 + v + 2))	&&
++			   (*(V + 30 + v + 1) > *(V + 30 + v + 2)) &&
++			   (*(V + 30 + v) > *(V + 30 + v + 3))	&&
++			   (*(V + 30 + v + 1) > *(V + 30 + v + 3)) &&
++			   ((*(V + 30 + v) > SIGMIN)		||
++			    (*(V + 30 + v + 1) > SIGMIN))) {
++			// (case 5)
++			if (*(V + 30 + v) >= *(V + 30 + v + 1)) {
++				swp_freq = fOSC * 1000 + afcex_freq;
++				*SIG1 = *(V + 30 + v);
++			} else {
++				swp_freq = fOSC * 1000 + afcex_freq + swp_ofs;
++				*SIG1 = *(V + 30 + v + 1);
++			}
++		} else if ((v + 2 == vmin)			&&
++			   (*(V + 30 + v) >= 0)			&&
++			   (*(V + 30 + v + 1) >= 0)		&&
++			   (*(V + 30 + v + 2) >= 0)		&&
++			   (*(V + 30 + v + 1) > *(V + 30 + v))	&&
++			   (*(V + 30 + v + 2) > *(V + 30 + v))	&&
++			   ((*(V + 30 + v + 1) > SIGMIN)	||
++			    (*(V + 30 + v + 2) > SIGMIN))) {
++			// (case 6)
++			if (*(V + 30 + v + 1) >= *(V + 30 + v + 2)) {
++				swp_freq = fOSC * 1000 + afcex_freq + swp_ofs;
++				*SIG1 = *(V + 30 + v + 1);
++			} else {
++				swp_freq = fOSC * 1000 + afcex_freq + swp_ofs * 2;
++				*SIG1 = *(V + 30 + v + 2);
++			}
++		} else if ((vmax == 0) && (vmin == 0) && (*(V + 30 + v) > SIGMIN)) {
++			swp_freq = fOSC * 1000;
++			*SIG1 = *(V + 30 + v);
++		} else swp_freq = -1;
++	} else swp_freq = -1;
++
++	return swp_freq;
++}
++
++static void swp_info_get2(struct mb86a16_state *state,
++			  int smrt,
++			  int R,
++			  int swp_freq,
++			  int *afcex_freq,
++			  int *fOSC,
++			  unsigned char *AFCEX_L,
++			  unsigned char *AFCEX_H)
++{
++	int AFCEX ;
++
++	if (R == 0)
++		*fOSC = (swp_freq + 1000) / 2000 * 2;
++	else
++		*fOSC = (swp_freq + 500) / 1000;
++
++	if (*fOSC >= swp_freq)
++		*afcex_freq = *fOSC * 1000 - swp_freq;
++	else
++		*afcex_freq = swp_freq - *fOSC * 1000;
++
++	AFCEX = *afcex_freq * 8192 / state->master_clk;
++	*AFCEX_L =  AFCEX & 0x00ff;
++	*AFCEX_H = (AFCEX & 0x0f00) >> 8;
++}
++
++static void afcex_info_get(struct mb86a16_state *state,
++			   int afcex_freq,
++			   unsigned char *AFCEX_L,
++			   unsigned char *AFCEX_H)
++{
++	int AFCEX ;
++
++	AFCEX = afcex_freq * 8192 / state->master_clk;
++	*AFCEX_L =  AFCEX & 0x00ff;
++	*AFCEX_H = (AFCEX & 0x0f00) >> 8;
++}
++
++static int SEQ_set(struct mb86a16_state *state, unsigned char loop)
++{
++	// SLOCK0 = 0
++	if (mb86a16_write(state, 0x32, 0x02 | (loop << 2)) < 0) {
++		dprintk(verbose, MB86A16_ERROR, 1, "I2C transfer error");
++		return -EREMOTEIO;
++	}
++
++	return 0;
++}
++
++static int iq_vt_set(struct mb86a16_state *state, unsigned char IQINV)
++{
++	// Viterbi Rate, IQ Settings
++	if (mb86a16_write(state, 0x06, 0xdf | (IQINV << 5)) < 0) {
++		dprintk(verbose, MB86A16_ERROR, 1, "I2C transfer error");
++		return -EREMOTEIO;
++	}
++
++	return 0;
++}
++
++static int FEC_srst(struct mb86a16_state *state)
++{
++	if (mb86a16_write(state, MB86A16_RESET, 0x02) < 0) {
++		dprintk(verbose, MB86A16_ERROR, 1, "I2C transfer error");
++		return -EREMOTEIO;
++	}
++
++	return 0;
++}
++
++static int S2T_set(struct mb86a16_state *state, unsigned char S2T)
++{
++	if (mb86a16_write(state, 0x34, 0x70 | S2T) < 0) {
++		dprintk(verbose, MB86A16_ERROR, 1, "I2C transfer error");
++		return -EREMOTEIO;
++	}
++
++	return 0;
++}
++
++static int S45T_set(struct mb86a16_state *state, unsigned char S4T, unsigned char S5T)
++{
++	if (mb86a16_write(state, 0x35, 0x00 | (S5T << 4) | S4T) < 0) {
++		dprintk(verbose, MB86A16_ERROR, 1, "I2C transfer error");
++		return -EREMOTEIO;
++	}
++
++	return 0;
++}
++
++
++static int mb86a16_set_fe(struct mb86a16_state *state)
++{
++	u8 agcval, cnmval;
++
++	int i, j;
++	int fOSC = 0;
++	int fOSC_start = 0;
++	int wait_t;
++	int fcp;
++	int swp_ofs;
++	int V[60];
++	u8 SIG1MIN;
++
++	unsigned char CREN, AFCEN, AFCEXEN;
++	unsigned char SIG1;
++	unsigned char TIMINT1, TIMINT2, TIMEXT;
++	unsigned char S0T, S1T;
++	unsigned char S2T;
++//	unsigned char S2T, S3T;
++	unsigned char S4T, S5T;
++	unsigned char AFCEX_L, AFCEX_H;
++	unsigned char R;
++	unsigned char VIRM;
++	unsigned char ETH, VIA;
++	unsigned char junk;
++
++	int loop;
++	int ftemp;
++	int v, vmax, vmin;
++	int vmax_his, vmin_his;
++	int swp_freq, prev_swp_freq[20];
++	int prev_freq_num;
++	int signal_dupl;
++	int afcex_freq;
++	int signal;
++	int afcerr;
++	int temp_freq, delta_freq;
++	int dagcm[4];
++	int smrt_d;
++//	int freq_err;
++	int n;
++	int ret = -1;
++	int sync;
++
++	dprintk(verbose, MB86A16_INFO, 1, "freq=%d Mhz, symbrt=%d Ksps", state->frequency, state->srate);
++
++	fcp = 5000;	// (carrier recovery [kHz])
++//	fcp = 3000;
++	swp_ofs = state->srate / 4;
++
++	for (i = 0; i < 60; i++)
++		V[i] = -1;
++
++	for (i = 0; i < 20; i++)
++		prev_swp_freq[i] = 0;
++
++	SIG1MIN = 25;
++
++	for (n = 0; ((n < 3) && (ret == -1)); n++) {
++		SEQ_set(state, 0);
++		iq_vt_set(state, 0);
++
++		CREN = 0;
++		AFCEN = 0;
++		AFCEXEN = 1;
++		TIMINT1 = 0;
++		TIMINT2 = 1;
++		TIMEXT = 2;
++		S1T = 0;
++		S0T = 0;
++
++		if (initial_set(state) < 0) {
++			dprintk(verbose, MB86A16_ERROR, 1, "initial set failed");
++			return -1;
++		}
++		if (DAGC_data_set(state, 3, 2) < 0) {
++			dprintk(verbose, MB86A16_ERROR, 1, "DAGC data set error");
++			return -1;
++		}
++		if (EN_set(state, CREN, AFCEN) < 0) {
++			dprintk(verbose, MB86A16_ERROR, 1, "EN set error");
++			return -1; // (0, 0)
++		}
++		if (AFCEXEN_set(state, AFCEXEN, state->srate) < 0) {
++			dprintk(verbose, MB86A16_ERROR, 1, "AFCEXEN set error");
++			return -1; // (1, smrt) = (1, symbolrate)
++		}
++		if (CNTM_set(state, TIMINT1, TIMINT2, TIMEXT) < 0) {
++			dprintk(verbose, MB86A16_ERROR, 1, "CNTM set error");
++			return -1; // (0, 1, 2)
++		}
++		if (S01T_set(state, S1T, S0T) < 0) {
++			dprintk(verbose, MB86A16_ERROR, 1, "S01T set error");
++			return -1; // (0, 0)
++		}
++		smrt_info_get(state, state->srate);
++		if (smrt_set(state, state->srate) < 0) {
++			dprintk(verbose, MB86A16_ERROR, 1, "smrt info get error");
++			return -1;
++		}
++
++		R = vco_dev_get(state, state->srate);
++		if (R == 1)
++			fOSC_start = state->frequency;
++
++		else if (R == 0) {
++			if (state->frequency % 2 == 0) {
++				fOSC_start = state->frequency;
++			} else {
++				fOSC_start = state->frequency + 1;
++				if (fOSC_start > 2150)
++					fOSC_start = state->frequency - 1;
++			}
++		}
++		loop = 1;
++		ftemp = fOSC_start * 1000;
++		vmax = 0 ;
++		while (loop == 1) {
++			ftemp = ftemp + swp_ofs;
++			vmax++;
++
++			// Upper bound
++			if (ftemp > 2150000) {
++				loop = 0;
++				vmax--;
++			}
++			else if ((ftemp == 2150000) || (ftemp - state->frequency * 1000 >= fcp + state->srate / 4))
++				loop = 0;
++		}
++
++		loop = 1;
++		ftemp = fOSC_start * 1000;
++		vmin = 0 ;
++		while (loop == 1) {
++			ftemp = ftemp - swp_ofs;
++			vmin--;
++
++			// Lower bound
++			if (ftemp < 950000) {
++				loop = 0;
++				vmin++;
++			}
++			else if ((ftemp == 950000) || (state->frequency * 1000 - ftemp >= fcp + state->srate / 4))
++				loop = 0;
++		}
++
++		wait_t = (8000 + state->srate / 2) / state->srate;
++		if (wait_t == 0)
++			wait_t = 1;
++
++		i = 0;
++		j = 0;
++		prev_freq_num = 0;
++		loop = 1;
++		signal = 0;
++		vmax_his = 0;
++		vmin_his = 0;
++		v = 0;
++
++		while (loop == 1) {
++			swp_info_get(state, fOSC_start, state->srate,
++				     v, R, swp_ofs, &fOSC,
++				     &afcex_freq, &AFCEX_L, &AFCEX_H);
++
++			if (rf_val_set(state, fOSC, state->srate, R) < 0) {
++				dprintk(verbose, MB86A16_ERROR, 1, "rf val set error");
++				return -1;
++			}
++
++			if (afcex_data_set(state, AFCEX_L, AFCEX_H) < 0) {
++				dprintk(verbose, MB86A16_ERROR, 1, "afcex data set error");
++				return -1;
++			}
++			if (srst(state) < 0) {
++				dprintk(verbose, MB86A16_ERROR, 1, "srst error");
++				return -1;
++			}
++			msleep_interruptible(wait_t);
++
++			if (mb86a16_read(state, 0x37, &SIG1) != 2) {
++				dprintk(verbose, MB86A16_ERROR, 1, "I2C transfer error");
++				return -1;
++			}
++			V[30 + v] = SIG1 ;
++			swp_freq = swp_freq_calcuation(state, i, v, V, vmax, vmin,
++						      SIG1MIN, fOSC, afcex_freq,
++						      swp_ofs, &SIG1);	//changed
++
++			signal_dupl = 0;
++			for (j = 0; j < prev_freq_num; j++) {
++				if ((ABS(prev_swp_freq[j] - swp_freq)) < (swp_ofs * 3 / 2)) {
++					signal_dupl = 1;
++					dprintk(verbose, MB86A16_INFO, 1, "Probably Duplicate Signal, j = %d", j);
++				}
++			}
++			if ((signal_dupl == 0) && (swp_freq > 0) && (ABS(swp_freq - state->frequency * 1000) < fcp + state->srate / 6)) {
++				dprintk(verbose, MB86A16_DEBUG, 1, "------ Signal detect ------ [swp_freq=[%07d, srate=%05d]]", swp_freq, state->srate);
++				prev_swp_freq[prev_freq_num] = swp_freq;
++				prev_freq_num++;
++				swp_info_get2(state, state->srate, R, swp_freq,
++					      &afcex_freq, &fOSC,
++					      &AFCEX_L, &AFCEX_H);
++
++				if (rf_val_set(state, fOSC, state->srate, R) < 0) {
++					dprintk(verbose, MB86A16_ERROR, 1, "rf val set error");
++					return -1;
++				}
++				if (afcex_data_set(state, AFCEX_L, AFCEX_H) < 0) {
++					dprintk(verbose, MB86A16_ERROR, 1, "afcex data set error");
++					return -1;
++				}
++				signal = signal_det(state, state->srate, &SIG1);
++				if (signal == 1) {
++					dprintk(verbose, MB86A16_ERROR, 1, "***** Signal Found *****");
++					loop = 0;
++				} else {
++					dprintk(verbose, MB86A16_ERROR, 1, "!!!!! No signal !!!!!, try again...");
++					smrt_info_get(state, state->srate);
++					if (smrt_set(state, state->srate) < 0) {
++						dprintk(verbose, MB86A16_ERROR, 1, "smrt set error");
++						return -1;
++					}
++				}
++			}
++			if (v > vmax)
++				vmax_his = 1 ;
++			if (v < vmin)
++				vmin_his = 1 ;
++			i++;
++
++			if ((i % 2 == 1) && (vmax_his == 1))
++				i++;
++			if ((i % 2 == 0) && (vmin_his == 1))
++				i++;
++
++			if (i % 2 == 1)
++				v = (i + 1) / 2;
++			else
++				v = -i / 2;
++
++			if ((vmax_his == 1) && (vmin_his == 1))
++				loop = 0 ;
++		}
++
++		if (signal == 1) {
++			dprintk(verbose, MB86A16_INFO, 1, " Start Freq Error Check");
++			S1T = 7 ;
++			S0T = 1 ;
++			CREN = 0 ;
++			AFCEN = 1 ;
++			AFCEXEN = 0 ;
++
++			if (S01T_set(state, S1T, S0T) < 0) {
++				dprintk(verbose, MB86A16_ERROR, 1, "S01T set error");
++				return -1;
++			}
++			smrt_info_get(state, state->srate);
++			if (smrt_set(state, state->srate) < 0) {
++				dprintk(verbose, MB86A16_ERROR, 1, "smrt set error");
++				return -1;
++			}
++			if (EN_set(state, CREN, AFCEN) < 0) {
++				dprintk(verbose, MB86A16_ERROR, 1, "EN set error");
++				return -1;
++			}
++			if (AFCEXEN_set(state, AFCEXEN, state->srate) < 0) {
++				dprintk(verbose, MB86A16_ERROR, 1, "AFCEXEN set error");
++				return -1;
++			}
++			afcex_info_get(state, afcex_freq, &AFCEX_L, &AFCEX_H);
++			if (afcofs_data_set(state, AFCEX_L, AFCEX_H) < 0) {
++				dprintk(verbose, MB86A16_ERROR, 1, "AFCOFS data set error");
++				return -1;
++			}
++			if (srst(state) < 0) {
++				dprintk(verbose, MB86A16_ERROR, 1, "srst error");
++				return -1;
++			}
++			// delay 4~200
++			wait_t = 200000 / state->master_clk + 200000 / state->srate;
++			msleep(wait_t);
++			afcerr = afcerr_chk(state);
++			if (afcerr == -1)
++				return -1;
++
++			swp_freq = fOSC * 1000 + afcerr ;
++			AFCEXEN = 1 ;
++			if (state->srate >= 1500)
++				smrt_d = state->srate / 3;
++			else
++				smrt_d = state->srate / 2;
++			smrt_info_get(state, smrt_d);
++			if (smrt_set(state, smrt_d) < 0) {
++				dprintk(verbose, MB86A16_ERROR, 1, "smrt set error");
++				return -1;
++			}
++			if (AFCEXEN_set(state, AFCEXEN, smrt_d) < 0) {
++				dprintk(verbose, MB86A16_ERROR, 1, "AFCEXEN set error");
++				return -1;
++			}
++			R = vco_dev_get(state, smrt_d);
++			if (DAGC_data_set(state, 2, 0) < 0) {
++				dprintk(verbose, MB86A16_ERROR, 1, "DAGC data set error");
++				return -1;
++			}
++			for (i = 0; i < 3; i++) {
++				temp_freq = swp_freq + (i - 1) * state->srate / 8;
++				swp_info_get2(state, smrt_d, R, temp_freq, &afcex_freq, &fOSC, &AFCEX_L, &AFCEX_H);
++				if (rf_val_set(state, fOSC, smrt_d, R) < 0) {
++					dprintk(verbose, MB86A16_ERROR, 1, "rf val set error");
++					return -1;
++				}
++				if (afcex_data_set(state, AFCEX_L, AFCEX_H) < 0) {
++					dprintk(verbose, MB86A16_ERROR, 1, "afcex data set error");
++					return -1;
++				}
++				wait_t = 200000 / state->master_clk + 40000 / smrt_d;
++				msleep(wait_t);
++				dagcm[i] = dagcm_val_get(state);
++			}
++			if ((dagcm[0] > dagcm[1]) &&
++			    (dagcm[0] > dagcm[2]) &&
++			    (dagcm[0] - dagcm[1] > 2 * (dagcm[2] - dagcm[1]))) {
++
++				temp_freq = swp_freq - 2 * state->srate / 8;
++				swp_info_get2(state, smrt_d, R, temp_freq, &afcex_freq, &fOSC, &AFCEX_L, &AFCEX_H);
++				if (rf_val_set(state, fOSC, smrt_d, R) < 0) {
++					dprintk(verbose, MB86A16_ERROR, 1, "rf val set error");
++					return -1;
++				}
++				if (afcex_data_set(state, AFCEX_L, AFCEX_H) < 0) {
++					dprintk(verbose, MB86A16_ERROR, 1, "afcex data set");
++					return -1;
++				}
++				wait_t = 200000 / state->master_clk + 40000 / smrt_d;
++				msleep(wait_t);
++				dagcm[3] = dagcm_val_get(state);
++				if (dagcm[3] > dagcm[1])
++					delta_freq = (dagcm[2] - dagcm[0] + dagcm[1] - dagcm[3]) * state->srate / 300;
++				else
++					delta_freq = 0;
++			} else if ((dagcm[2] > dagcm[1]) &&
++				   (dagcm[2] > dagcm[0]) &&
++				   (dagcm[2] - dagcm[1] > 2 * (dagcm[0] - dagcm[1]))) {
++
++				temp_freq = swp_freq + 2 * state->srate / 8;
++				swp_info_get2(state, smrt_d, R, temp_freq, &afcex_freq, &fOSC, &AFCEX_L, &AFCEX_H);
++				if (rf_val_set(state, fOSC, smrt_d, R) < 0) {
++					dprintk(verbose, MB86A16_ERROR, 1, "rf val set");
++					return -1;
++				}
++				if (afcex_data_set(state, AFCEX_L, AFCEX_H) < 0) {
++					dprintk(verbose, MB86A16_ERROR, 1, "afcex data set");
++					return -1;
++				}
++				wait_t = 200000 / state->master_clk + 40000 / smrt_d;
++				msleep(wait_t);
++				dagcm[3] = dagcm_val_get(state);
++				if (dagcm[3] > dagcm[1])
++					delta_freq = (dagcm[2] - dagcm[0] + dagcm[3] - dagcm[1]) * state->srate / 300;
++				else
++					delta_freq = 0 ;
++
++			} else {
++				delta_freq = 0 ;
++			}
++			dprintk(verbose, MB86A16_INFO, 1, "SWEEP Frequency = %d", swp_freq);
++			swp_freq += delta_freq;
++			dprintk(verbose, MB86A16_INFO, 1, "Adjusting .., DELTA Freq = %d, SWEEP Freq=%d", delta_freq, swp_freq);
++			if (ABS(state->frequency * 1000 - swp_freq) > 3800) {
++				dprintk(verbose, MB86A16_INFO, 1, "NO  --  SIGNAL !");
++			} else {
++
++				S1T = 0;
++				S0T = 3;
++				CREN = 1;
++				AFCEN = 0;
++				AFCEXEN = 1;
++
++				if (S01T_set(state, S1T, S0T) < 0) {
++					dprintk(verbose, MB86A16_ERROR, 1, "S01T set error");
++					return -1;
++				}
++				if (DAGC_data_set(state, 0, 0) < 0) {
++					dprintk(verbose, MB86A16_ERROR, 1, "DAGC data set error");
++					return -1;
++				}
++				R = vco_dev_get(state, state->srate);
++				smrt_info_get(state, state->srate);
++				if (smrt_set(state, state->srate) < 0) {
++					dprintk(verbose, MB86A16_ERROR, 1, "smrt set error");
++					return -1;
++				}
++				if (EN_set(state, CREN, AFCEN) < 0) {
++					dprintk(verbose, MB86A16_ERROR, 1, "EN set error");
++					return -1;
++				}
++				if (AFCEXEN_set(state, AFCEXEN, state->srate) < 0) {
++					dprintk(verbose, MB86A16_ERROR, 1, "AFCEXEN set error");
++					return -1;
++				}
++				swp_info_get2(state, state->srate, R, swp_freq, &afcex_freq, &fOSC, &AFCEX_L, &AFCEX_H);
++				if (rf_val_set(state, fOSC, state->srate, R) < 0) {
++					dprintk(verbose, MB86A16_ERROR, 1, "rf val set error");
++					return -1;
++				}
++				if (afcex_data_set(state, AFCEX_L, AFCEX_H) < 0) {
++					dprintk(verbose, MB86A16_ERROR, 1, "afcex data set error");
++					return -1;
++				}
++				if (srst(state) < 0) {
++					dprintk(verbose, MB86A16_ERROR, 1, "srst error");
++					return -1;
++				}
++				wait_t = 7 + (10000 + state->srate / 2) / state->srate;
++				if (wait_t == 0)
++					wait_t = 1;
++				msleep_interruptible(wait_t);
++				if (mb86a16_read(state, 0x37, &SIG1) != 2) {
++					dprintk(verbose, MB86A16_ERROR, 1, "I2C transfer error");
++					return -EREMOTEIO;
++				}
++
++				if (SIG1 > 110) {
++					S2T = 4; S4T = 1; S5T = 6; ETH = 4; VIA = 6;
++					wait_t = 7 + (917504 + state->srate / 2) / state->srate;
++				} else if (SIG1 > 105) {
++					S2T = 4; S4T = 2; S5T = 8; ETH = 7; VIA = 2;
++					wait_t = 7 + (1048576 + state->srate / 2) / state->srate;
++				} else if (SIG1 > 85) {
++					S2T = 5; S4T = 2; S5T = 8; ETH = 7; VIA = 2;
++					wait_t = 7 + (1310720 + state->srate / 2) / state->srate;
++				} else if (SIG1 > 65) {
++					S2T = 6; S4T = 2; S5T = 8; ETH = 7; VIA = 2;
++					wait_t = 7 + (1572864 + state->srate / 2) / state->srate;
++				} else {
++					S2T = 7; S4T = 2; S5T = 8; ETH = 7; VIA = 2;
++					wait_t = 7 + (2097152 + state->srate / 2) / state->srate;
++				}
++				S2T_set(state, S2T);
++				S45T_set(state, S4T, S5T);
++				Vi_set(state, ETH, VIA);
++				srst(state);
++				msleep_interruptible(wait_t);
++				sync = sync_chk(state, &VIRM);
++				dprintk(verbose, MB86A16_INFO, 1, "-------- Viterbi=[%d] SYNC=[%d] ---------", VIRM, sync);
++				if (mb86a16_read(state, 0x0d, &state->signal) != 2) {
++					dprintk(verbose, MB86A16_ERROR, 1, "I2C transfer error");
++					return -EREMOTEIO;
++				}
++				if (VIRM) {
++					if (VIRM == 4) { // 5/6
++						if (SIG1 > 110)
++							wait_t = ( 786432 + state->srate / 2) / state->srate;
++						else
++							wait_t = (1572864 + state->srate / 2) / state->srate;
++						if (state->srate < 5000)
++							// FIXME ! , should be a long wait !
++							msleep_interruptible(wait_t);
++						else
++							msleep_interruptible(wait_t);
++
++						if (sync_chk(state, &junk) == 0) {
++							iq_vt_set(state, 1);
++							FEC_srst(state);
++						}
++						if (SIG1 > 110)
++							wait_t = ( 786432 + state->srate / 2) / state->srate;
++						else
++							wait_t = (1572864 + state->srate / 2) / state->srate;
++
++						msleep_interruptible(wait_t);
++						SEQ_set(state, 1);
++					} else { // 1/2, 2/3, 3/4, 7/8
++						if (SIG1 > 110)
++							wait_t = ( 786432 + state->srate / 2) / state->srate;
++						else
++							wait_t = (1572864 + state->srate / 2) / state->srate;
++
++						msleep_interruptible(wait_t);
++						SEQ_set(state, 1);
++					}
++				} else {
++					dprintk(verbose, MB86A16_INFO, 1, "NO  -- SIGNAL");
++					SEQ_set(state, 1);
++				}
++			}
++		} else {
++			dprintk (verbose, MB86A16_INFO, 1, "NO  -- SIGNAL");
++		}
++
++		sync = sync_chk(state, &junk);
++		if (sync) {
++			dprintk(verbose, MB86A16_INFO, 1, "******* SYNC *******");
++			freqerr_chk(state, state->frequency, state->srate, 1);
++		}
++	}
++
++	mb86a16_read(state, 0x15, &agcval);
++	mb86a16_read(state, 0x26, &cnmval);
++	dprintk(verbose, MB86A16_INFO, 1, "AGC = %02x CNM = %02x", agcval, cnmval);
++
++	return ret;
++}
++
++static int mb86a16_send_diseqc_msg(struct dvb_frontend *fe,
++				   struct dvb_diseqc_master_cmd *cmd)
++{
++	struct mb86a16_state *state = fe->demodulator_priv;
++	int i;
++	u8 regs;
++
++	if (mb86a16_write(state, MB86A16_DCC1, MB86A16_DCC1_DISTA) < 0)
++		goto err;
++	if (mb86a16_write(state, MB86A16_DCCOUT, 0x00) < 0)
++		goto err;
++	if (mb86a16_write(state, MB86A16_TONEOUT2, 0x04) < 0)
++		goto err;
++
++	regs = 0x18;
++
++	if (cmd->msg_len > 5 || cmd->msg_len < 4)
++		return -EINVAL;
++
++	for (i = 0; i < cmd->msg_len; i++) {
++		if (mb86a16_write(state, regs, cmd->msg[i]) < 0)
++			goto err;
++
++		regs++;
++	}
++	i += 0x90;
++
++	msleep_interruptible(10);
++
++	if (mb86a16_write(state, MB86A16_DCC1, i) < 0)
++		goto err;
++	if (mb86a16_write(state, MB86A16_DCCOUT, MB86A16_DCCOUT_DISEN) < 0)
++		goto err;
++
++	return 0;
++
++err:
++	dprintk(verbose, MB86A16_ERROR, 1, "I2C transfer error");
++	return -EREMOTEIO;
++}
++
++static int mb86a16_send_diseqc_burst(struct dvb_frontend *fe, fe_sec_mini_cmd_t burst)
++{
++	struct mb86a16_state *state = fe->demodulator_priv;
++
++	switch (burst) {
++	case SEC_MINI_A:
++		if (mb86a16_write(state, MB86A16_DCC1, MB86A16_DCC1_DISTA |
++						       MB86A16_DCC1_TBEN  |
++						       MB86A16_DCC1_TBO) < 0)
++			goto err;
++		if (mb86a16_write(state, MB86A16_DCCOUT, MB86A16_DCCOUT_DISEN) < 0)
++			goto err;
++		break;
++	case SEC_MINI_B:
++		if (mb86a16_write(state, MB86A16_DCC1, MB86A16_DCC1_DISTA |
++						       MB86A16_DCC1_TBEN) < 0)
++			goto err;
++		if (mb86a16_write(state, MB86A16_DCCOUT, MB86A16_DCCOUT_DISEN) < 0)
++			goto err;
++		break;
++	}
++
++	return 0;
++err:
++	dprintk(verbose, MB86A16_ERROR, 1, "I2C transfer error");
++	return -EREMOTEIO;
++}
++
++static int mb86a16_set_tone(struct dvb_frontend *fe, fe_sec_tone_mode_t tone)
++{
++	struct mb86a16_state *state = fe->demodulator_priv;
++
++	switch (tone) {
++	case SEC_TONE_ON:
++		if (mb86a16_write(state, MB86A16_TONEOUT2, 0x00) < 0)
++			goto err;
++		if (mb86a16_write(state, MB86A16_DCC1, MB86A16_DCC1_DISTA |
++						       MB86A16_DCC1_CTOE) < 0)
++
++			goto err;
++		if (mb86a16_write(state, MB86A16_DCCOUT, MB86A16_DCCOUT_DISEN) < 0)
++			goto err;
++		break;
++	case SEC_TONE_OFF:
++		if (mb86a16_write(state, MB86A16_TONEOUT2, 0x04) < 0)
++			goto err;
++		if (mb86a16_write(state, MB86A16_DCC1, MB86A16_DCC1_DISTA) < 0)
++			goto err;
++		if (mb86a16_write(state, MB86A16_DCCOUT, 0x00) < 0)
++			goto err;
++		break;
++	default:
++		return -EINVAL;
++	}
++	return 0;
++
++err:
++	dprintk(verbose, MB86A16_ERROR, 1, "I2C transfer error");
++	return -EREMOTEIO;
++}
++
++#define MB86A16_FE_ALGO		1
++
++static int mb86a16_frontend_algo(struct dvb_frontend *fe)
++{
++	return MB86A16_FE_ALGO;
++}
++
++static int mb86a16_set_frontend(struct dvb_frontend *fe,
++				struct dvb_frontend_parameters *p,
++				unsigned int mode_flags,
++				int *delay,
++				fe_status_t *status)
++{
++	int ret = 0;
++	struct mb86a16_state *state = fe->demodulator_priv;
++
++	if (p != NULL) {
++		state->frequency = p->frequency / 1000;
++		state->srate = p->u.qpsk.symbol_rate / 1000;
++		ret = mb86a16_set_fe(state);
++	}
++	if (!(mode_flags & FE_TUNE_MODE_ONESHOT))
++		mb86a16_read_status(fe, status);
++
++	*delay = HZ/3000;
++
++	return ret;
++}
++
++static void mb86a16_release(struct dvb_frontend *fe)
++{
++	struct mb86a16_state *state = fe->demodulator_priv;
++	kfree(state);
++}
++
++static int mb86a16_init(struct dvb_frontend *fe)
++{
++	return 0;
++}
++
++static int mb86a16_sleep(struct dvb_frontend *fe)
++{
++	return 0;
++}
++
++static int mb86a16_read_ber(struct dvb_frontend *fe, u32 *ber)
++{
++	return 0;
++}
++
++static int mb86a16_read_signal_strength(struct dvb_frontend *fe, u16 *strength)
++{
++	*strength = 0;
++
++	return 0;
++}
++
++struct cnr {
++	u8 cn_reg;
++	u8 cn_val;
++};
++
++static const struct cnr cnr_tab[] = {
++	{  35,  2 },
++	{  40,  3 },
++	{  50,  4 },
++	{  60,  5 },
++	{  70,  6 },
++	{  80,  7 },
++	{  92,  8 },
++	{ 103,  9 },
++	{ 115, 10 },
++	{ 138, 12 },
++	{ 162, 15 },
++	{ 180, 18 },
++	{ 185, 19 },
++	{ 189, 20 },
++	{ 195, 22 },
++	{ 199, 24 },
++	{ 201, 25 },
++	{ 202, 26 },
++	{ 203, 27 },
++	{ 205, 28 },
++	{ 208, 30 }
++};
++
++static int mb86a16_read_snr(struct dvb_frontend *fe, u16 *snr)
++{
++	struct mb86a16_state *state = fe->demodulator_priv;
++	int i = 0;
++	int low_tide = 2, high_tide = 30, q_level;
++	u8  cn;
++
++	if (mb86a16_read(state, 0x26, &cn) != 2) {
++		dprintk(verbose, MB86A16_ERROR, 1, "I2C transfer error");
++		return -EREMOTEIO;
++	}
++
++	for (i = 0; i < ARRAY_SIZE(cnr_tab); i++) {
++		if (cn < cnr_tab[i].cn_reg) {
++			*snr = cnr_tab[i].cn_val;
++			break;
++		}
++	}
++	q_level = (*snr * 100) / (high_tide - low_tide);
++	dprintk(verbose, MB86A16_ERROR, 1, "SNR (Quality) = [%d dB], Level=%d %%", *snr, q_level);
++
++	return 0;
++}
++
++static int mb86a16_read_ucblocks(struct dvb_frontend *fe, u32 *ucblocks)
++{
++	return 0;
++}
++
++static struct dvb_frontend_ops mb86a16_ops = {
++	.info = {
++		.name			= "Fujitsu MB86A16 DVB-S",
++		.type			= FE_QPSK,
++		.frequency_min		= 950000,
++		.frequency_max		= 2150000,
++		.frequency_stepsize	= 125,
++		.frequency_tolerance	= 0,
++		.symbol_rate_min	= 1000000,
++		.symbol_rate_max	= 45000000,
++		.symbol_rate_tolerance	= 500,
++		.caps			= FE_CAN_FEC_1_2 | FE_CAN_FEC_2_3 |
++					  FE_CAN_FEC_3_4 | FE_CAN_FEC_5_6 |
++					  FE_CAN_FEC_7_8 | FE_CAN_QPSK    |
++					  FE_CAN_FEC_AUTO
++	},
++	.release			= mb86a16_release,
++	.tune				= mb86a16_set_frontend,
++	.read_status			= mb86a16_read_status,
++	.get_frontend_algo		= mb86a16_frontend_algo,
++	.init				= mb86a16_init,
++	.sleep				= mb86a16_sleep,
++	.read_status			= mb86a16_read_status,
++
++	.read_ber			= mb86a16_read_ber,
++	.read_signal_strength		= mb86a16_read_signal_strength,
++	.read_snr			= mb86a16_read_snr,
++	.read_ucblocks			= mb86a16_read_ucblocks,
++
++	.diseqc_send_master_cmd		= mb86a16_send_diseqc_msg,
++	.diseqc_send_burst		= mb86a16_send_diseqc_burst,
++	.set_tone			= mb86a16_set_tone,
++};
++
++struct dvb_frontend *mb86a16_attach(const struct mb86a16_config *config,
++				    struct i2c_adapter *i2c_adap)
++{
++	u8 dev_id = 0;
++	struct mb86a16_state *state = NULL;
++
++	state = kmalloc(sizeof (struct mb86a16_state), GFP_KERNEL);
++	if (state == NULL)
++		goto error;
++
++	state->config = config;
++	state->i2c_adap = i2c_adap;
++
++	mb86a16_read(state, 0x7f, &dev_id);
++	if (dev_id != 0xfe)
++		goto error;
++
++	memcpy(&state->frontend.ops, &mb86a16_ops, sizeof (struct dvb_frontend_ops));
++	state->frontend.demodulator_priv = state;
++	state->frontend.ops.set_voltage = state->config->set_voltage;
++
++	return &state->frontend;
++error:
++	kfree(state);
++	return NULL;
++}
++EXPORT_SYMBOL(mb86a16_attach);
++MODULE_LICENSE("GPL");
++MODULE_AUTHOR("Manu Abraham");
+diff --git a/drivers/media/dvb/frontends/mb86a16.h b/drivers/media/dvb/frontends/mb86a16.h
+new file mode 100644
+index 0000000..b7545d0
+--- /dev/null
++++ b/drivers/media/dvb/frontends/mb86a16.h
+@@ -0,0 +1,38 @@
++/*
++	Fujitsu MB86A16 DVB-S/DSS DC Receiver driver
++
++	Copyright (C) 2005, 2006 Manu Abraham (abraham.manu@gmail.com)
++
++	This program is free software; you can redistribute it and/or modify
++	it under the terms of the GNU General Public License as published by
++	the Free Software Foundation; either version 2 of the License, or
++	(at your option) any later version.
++
++	This program is distributed in the hope that it will be useful,
++	but WITHOUT ANY WARRANTY; without even the implied warranty of
++	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++	GNU General Public License for more details.
++
++	You should have received a copy of the GNU General Public License
++	along with this program; if not, write to the Free Software
++	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++*/
++
++#ifndef __MB86A16_H
++#define __MB86A16_H
++
++#include <linux/dvb/frontend.h>
++#include "dvb_frontend.h"
++
++
++struct mb86a16_config {
++	u8 demod_address;
++
++	int (*set_voltage)(struct dvb_frontend *fe, fe_sec_voltage_t voltage);
++};
++
++extern struct dvb_frontend *mb86a16_attach(const struct mb86a16_config *config,
++					   struct i2c_adapter *i2c_adap);
++
++
++#endif //__MB86A16_H
+diff --git a/drivers/media/dvb/frontends/mb86a16_priv.h b/drivers/media/dvb/frontends/mb86a16_priv.h
+new file mode 100644
+index 0000000..5de5700
+--- /dev/null
++++ b/drivers/media/dvb/frontends/mb86a16_priv.h
+@@ -0,0 +1,151 @@
++/*
++	Fujitsu MB86A16 DVB-S/DSS DC Receiver driver
++
++	Copyright (C) 2005, 2006 Manu Abraham (abraham.manu@gmail.com)
++
++	This program is free software; you can redistribute it and/or modify
++	it under the terms of the GNU General Public License as published by
++	the Free Software Foundation; either version 2 of the License, or
++	(at your option) any later version.
++
++	This program is distributed in the hope that it will be useful,
++	but WITHOUT ANY WARRANTY; without even the implied warranty of
++	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++	GNU General Public License for more details.
++
++	You should have received a copy of the GNU General Public License
++	along with this program; if not, write to the Free Software
++	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++*/
++
++#ifndef __MB86A16_PRIV_H
++#define __MB86A16_PRIV_H
++
++#define MB86A16_TSOUT		0x00
++#define MB86A16_TSOUT_HIZSEL	(0x01 << 5)
++#define MB86A16_TSOUT_HIZCNTI	(0x01 << 4)
++#define MB86A16_TSOUT_MODE	(0x01 << 3)
++#define MB86A16_TSOUT_ORDER	(0x01 << 2)
++#define MB86A16_TSOUT_ERROR	(0x01 << 1)
++#define Mb86A16_TSOUT_EDGE	(0x01 << 0)
++
++#define MB86A16_FEC		0x01
++#define MB86A16_FEC_FSYNC	(0x01 << 5)
++#define MB86A16_FEC_PCKB8	(0x01 << 4)
++#define MB86A16_FEC_DVDS	(0x01 << 3)
++#define MB86A16_FEC_EREN	(0x01 << 2)
++#define Mb86A16_FEC_RSEN	(0x01 << 1)
++#define MB86A16_FEC_DIEN	(0x01 << 0)
++
++#define MB86A16_AGC		0x02
++#define MB86A16_AGC_AGMD	(0x01 << 6)
++#define MB86A16_AGC_AGCW	(0x0f << 2)
++#define MB86A16_AGC_AGCP	(0x01 << 1)
++#define MB86A16_AGC_AGCR	(0x01 << 0)
++
++#define MB86A16_SRATE1		0x03
++#define MB86A16_SRATE1_DECI	(0x07 << 2)
++#define MB86A16_SRATE1_CSEL	(0x01 << 1)
++#define MB86A16_SRATE1_RSEL	(0x01 << 0)
++
++#define MB86A16_SRATE2		0x04
++#define MB86A16_SRATE2_STOFSL	(0xff << 0)
++
++#define MB86A16_SRATE3		0x05
++#define MB86A16_SRATE2_STOFSH	(0xff << 0)
++
++#define MB86A16_VITERBI		0x06
++#define MB86A16_FRAMESYNC	0x07
++#define MB86A16_CRLFILTCOEF1	0x08
++#define MB86A16_CRLFILTCOEF2	0x09
++#define MB86A16_STRFILTCOEF1	0x0a
++#define MB86A16_STRFILTCOEF2	0x0b
++#define MB86A16_RESET		0x0c
++#define MB86A16_STATUS		0x0d
++#define MB86A16_AFCML		0x0e
++#define MB86A16_AFCMH		0x0f
++#define MB86A16_BERMON		0x10
++#define MB86A16_BERTAB		0x11
++#define MB86A16_BERLSB		0x12
++#define MB86A16_BERMID		0x13
++#define MB86A16_BERMSB		0x14
++#define MB86A16_AGCM		0x15
++
++#define MB86A16_DCC1		0x16
++#define MB86A16_DCC1_DISTA	(0x01 << 7)
++#define MB86A16_DCC1_PRTY	(0x01 << 6)
++#define MB86A16_DCC1_CTOE	(0x01 << 5)
++#define MB86A16_DCC1_TBEN	(0x01 << 4)
++#define MB86A16_DCC1_TBO	(0x01 << 3)
++#define MB86A16_DCC1_NUM	(0x07 << 0)
++
++#define MB86A16_DCC2		0x17
++#define MB86A16_DCC2_DCBST	(0x01 << 0)
++
++#define MB86A16_DCC3		0x18
++#define MB86A16_DCC3_CODE0	(0xff << 0)
++
++#define MB86A16_DCC4		0x19
++#define MB86A16_DCC4_CODE1	(0xff << 0)
++
++#define MB86A16_DCC5		0x1a
++#define MB86A16_DCC5_CODE2	(0xff << 0)
++
++#define MB86A16_DCC6		0x1b
++#define MB86A16_DCC6_CODE3	(0xff << 0)
++
++#define MB86A16_DCC7		0x1c
++#define MB86A16_DCC7_CODE4	(0xff << 0)
++
++#define MB86A16_DCC8		0x1d
++#define MB86A16_DCC8_CODE5	(0xff << 0)
++
++#define MB86A16_DCCOUT		0x1e
++#define MB86A16_DCCOUT_DISEN	(0x01 << 0)
++
++#define MB86A16_TONEOUT1	0x1f
++#define MB86A16_TONE_TDIVL	(0xff << 0)
++
++#define MB86A16_TONEOUT2	0x20
++#define MB86A16_TONE_TMD	(0x03 << 2)
++#define MB86A16_TONE_TDIVH	(0x03 << 0)
++
++#define MB86A16_FREQ1		0x21
++#define MB86A16_FREQ2		0x22
++#define MB86A16_FREQ3		0x23
++#define MB86A16_FREQ4		0x24
++#define MB86A16_FREQSET		0x25
++#define MB86A16_CNM		0x26
++#define MB86A16_PORT0		0x27
++#define MB86A16_PORT1		0x28
++#define MB86A16_DRCFILT		0x29
++#define MB86A16_AFC		0x2a
++#define MB86A16_AFCEXL		0x2b
++#define MB86A16_AFCEXH		0x2c
++#define MB86A16_DAGC		0x2d
++#define MB86A16_SEQMODE		0x32
++#define MB86A16_S0S1T		0x33
++#define MB86A16_S2S3T		0x34
++#define MB86A16_S4S5T		0x35
++#define MB86A16_CNTMR		0x36
++#define MB86A16_SIG1		0x37
++#define MB86A16_SIG2		0x38
++#define MB86A16_VIMAG		0x39
++#define MB86A16_VISET1		0x3a
++#define MB86A16_VISET2		0x3b
++#define MB86A16_VISET3		0x3c
++#define MB86A16_FAGCS1		0x3d
++#define MB86A16_FAGCS2		0x3e
++#define MB86A16_FAGCS3		0x3f
++#define MB86A16_FAGCS4		0x40
++#define MB86A16_FAGCS5		0x41
++#define MB86A16_FAGCS6		0x42
++#define MB86A16_CRM		0x43
++#define MB86A16_STRM		0x44
++#define MB86A16_DAGCML		0x45
++#define MB86A16_DAGCMH		0x46
++#define MB86A16_QPSKTST		0x49
++#define MB86A16_DISTMON		0x52
++#define MB86A16_VERSION		0x7f
++
++#endif //__MB86A16_PRIV_H
+diff --git a/drivers/media/dvb/mantis/Kconfig b/drivers/media/dvb/mantis/Kconfig
+new file mode 100644
+index 0000000..4ba16d0
+--- /dev/null
++++ b/drivers/media/dvb/mantis/Kconfig
+@@ -0,0 +1,13 @@
++config DVB_MANTIS
++	tristate "MANTIS based cards"
++	depends on DVB_CORE && PCI && I2C
++	select DVB_MB86A16
++	select DVB_CU1216
++	select DVB_ZL10353
++	select DVB_STV0299
++	select DVB_PLL
++	help
++	  Support for PCI cards based on the Mantis PCI bridge.
++	  Say Y when you have a Mantis based DVB card and want to use it.
++
++	  If unsure say N.
+diff --git a/drivers/media/dvb/mantis/Makefile b/drivers/media/dvb/mantis/Makefile
+new file mode 100644
+index 0000000..a980ff2
+--- /dev/null
++++ b/drivers/media/dvb/mantis/Makefile
+@@ -0,0 +1,7 @@
++mantis-objs = mantis_core.o mantis_dma.o mantis_pci.o mantis_i2c.o	\
++	mantis_dvb.o mantis_vp1033.o mantis_vp1034.o mantis_vp2033.o	\
++	mantis_vp3030.o
++
++obj-$(CONFIG_DVB_MANTIS) += mantis.o
++
++EXTRA_CFLAGS = -Idrivers/media/dvb/dvb-core/ -Idrivers/media/dvb/frontends/
+diff --git a/drivers/media/dvb/mantis/mantis_common.h b/drivers/media/dvb/mantis/mantis_common.h
+new file mode 100644
+index 0000000..ba360f8
+--- /dev/null
++++ b/drivers/media/dvb/mantis/mantis_common.h
+@@ -0,0 +1,135 @@
++/*
++	Mantis PCI bridge driver
++
++	Copyright (C) 2005, 2006 Manu Abraham (abraham.manu@gmail.com)
++
++	This program is free software; you can redistribute it and/or modify
++	it under the terms of the GNU General Public License as published by
++	the Free Software Foundation; either version 2 of the License, or
++	(at your option) any later version.
++
++	This program is distributed in the hope that it will be useful,
++	but WITHOUT ANY WARRANTY; without even the implied warranty of
++	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++	GNU General Public License for more details.
++
++	You should have received a copy of the GNU General Public License
++	along with this program; if not, write to the Free Software
++	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++*/
++
++#ifndef __MANTIS_COMMON_H
++#define __MANTIS_COMMON_H
++
++#include <linux/module.h>
++#include <linux/moduleparam.h>
++#include <linux/kernel.h>
++#include <linux/pci.h>
++
++#include "dvbdev.h"
++#include "dvb_demux.h"
++#include "dmxdev.h"
++#include "dvb_frontend.h"
++#include "dvb_net.h"
++#include <linux/i2c.h>
++#include "mantis_reg.h"
++
++#define MANTIS_ERROR		0
++#define MANTIS_NOTICE		1
++#define MANTIS_INFO		2
++#define MANTIS_DEBUG		3
++
++#define dprintk(x, y, z, format, arg...) do {								\
++	if (z) {											\
++		if	((x > MANTIS_ERROR) && (x > y))							\
++			printk(KERN_ERR "%s (%d): " format "\n" , __func__ , mantis->num , ##arg);	\
++		else if	((x > MANTIS_NOTICE) && (x > y))						\
++			printk(KERN_NOTICE "%s (%d): " format "\n" , __func__ , mantis->num , ##arg);	\
++		else if ((x > MANTIS_INFO) && (x > y))							\
++			printk(KERN_INFO "%s (%d): " format "\n" , __func__ , mantis->num , ##arg);	\
++		else if ((x > MANTIS_DEBUG) && (x > y))							\
++			printk(KERN_DEBUG "%s (%d): " format "\n" , __func__ , mantis->num , ##arg);	\
++	} else {											\
++		if (x > y)										\
++			printk(format , ##arg);								\
++	}												\
++} while(0)
++
++#define mwrite(dat, addr)	writel((dat), addr)
++#define mread(addr)		readl(addr)
++
++#define mmwrite(dat, addr)	mwrite((dat), (mantis->mantis_mmio + (addr)))
++#define mmread(addr)		mread(mantis->mantis_mmio + (addr))
++#define mmand(dat, addr)	mmwrite((dat) & mmread(addr), addr)
++#define mmor(dat, addr)		mmwrite((dat) | mmread(addr), addr)
++#define mmaor(dat, addr)	mmwrite((dat) | ((mask) & mmread(addr)), addr)
++
++
++struct mantis_pci {
++	/*	PCI stuff		*/
++	u16			vendor_id;
++	u16			device_id;
++	u8			latency;
++
++	struct			pci_dev *pdev;
++
++	unsigned long		mantis_addr;
++	volatile void __iomem 	*mantis_mmio;
++
++	u8			irq;
++	u8			revision;
++
++	unsigned int		num;
++	u16			ts_size;
++
++	/*	RISC Core		*/
++	u32			finished_block;
++	u32			last_block;
++	u32			line_bytes;
++	u32			line_count;
++	u32			risc_pos;
++	u8			*buf_cpu;
++	dma_addr_t		buf_dma;
++	u32			*risc_cpu;
++	dma_addr_t		risc_dma;
++
++	struct tasklet_struct	tasklet;
++
++	struct i2c_adapter	adapter;
++	int			i2c_rc;
++	wait_queue_head_t	i2c_wq;
++
++	/*	DVB stuff		*/
++	struct dvb_adapter	dvb_adapter;
++	struct dvb_frontend	*fe;
++	struct dvb_demux	demux;
++	struct dmxdev		dmxdev;
++	struct dmx_frontend	fe_hw;
++	struct dmx_frontend	fe_mem;
++	struct dvb_net		dvbnet;
++
++	u8			feeds;
++
++	struct mantis_config	*config;
++
++	u32 			mantis_int_stat;
++	u32 			mantis_int_mask;
++
++	/*	board specific		*/
++	u8			mac_address[8];
++	u32			sub_vendor_id;
++	u32			sub_device_id;
++
++	 /*	A12 A13 A14		*/
++	int			gpio_status;};
++
++extern unsigned int verbose;
++extern unsigned int devs;
++extern unsigned int i2c;
++extern int mantis_dvb_init(struct mantis_pci *mantis);
++extern int mantis_frontend_init(struct mantis_pci *mantis);
++extern int mantis_dvb_exit(struct mantis_pci *mantis);
++extern void mantis_dma_xfer(unsigned long data);
++extern void gpio_set_bits(struct mantis_pci *mantis, u32 bitpos, u8 value);
++
++#endif //__MANTIS_COMMON_H
+diff --git a/drivers/media/dvb/mantis/mantis_core.c b/drivers/media/dvb/mantis/mantis_core.c
+new file mode 100644
+index 0000000..1112277
+--- /dev/null
++++ b/drivers/media/dvb/mantis/mantis_core.c
+@@ -0,0 +1,215 @@
++/*
++	Mantis PCI bridge driver
++
++	Copyright (C) 2005, 2006 Manu Abraham (abraham.manu@gmail.com)
++
++	This program is free software; you can redistribute it and/or modify
++	it under the terms of the GNU General Public License as published by
++	the Free Software Foundation; either version 2 of the License, or
++	(at your option) any later version.
++
++	This program is distributed in the hope that it will be useful,
++	but WITHOUT ANY WARRANTY; without even the implied warranty of
++	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++	GNU General Public License for more details.
++
++	You should have received a copy of the GNU General Public License
++	along with this program; if not, write to the Free Software
++	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++*/
++
++#include "mantis_common.h"
++#include "mantis_core.h"
++
++
++static int read_eeprom_byte(struct mantis_pci *mantis, u8 *data, u8 length)
++{
++	int err;
++	struct i2c_msg msg[] = {
++		{
++			.addr = 0x50,
++			.flags = 0,
++			.buf = data,
++			.len = 1
++		},{
++			.addr = 0x50,
++			.flags = I2C_M_RD,
++			.buf = data,
++			.len = length
++		},
++	};
++	if ((err = i2c_transfer(&mantis->adapter, msg, 2)) < 0) {
++		dprintk(verbose, MANTIS_ERROR, 1,
++			"ERROR: i2c read: < err=%i d0=0x%02x d1=0x%02x >",
++			err, data[0], data[1]);
++
++		return err;
++	}
++	msleep_interruptible(2);
++
++	return 0;
++}
++
++static int write_eeprom_byte(struct mantis_pci *mantis, u8 *data, u8 length)
++{
++	int err;
++
++	struct i2c_msg msg = {
++		.addr = 0x50,
++		.flags = 0,
++		.buf = data,
++		.len = length
++	};
++
++	if ((err = i2c_transfer(&mantis->adapter, &msg, 1)) < 0) {
++		dprintk(verbose, MANTIS_ERROR, 1,
++			"ERROR: i2c write: < err=%i length=0x%02x d0=0x%02x, d1=0x%02x >",
++			err, length, data[0], data[1]);
++
++		return err;
++	}
++
++	return 0;
++}
++
++static int get_subdevice_id(struct mantis_pci *mantis)
++{
++	int err;
++	static u8 sub_device_id[2];
++
++	mantis->sub_device_id = 0;
++	sub_device_id[0] = 0xfc;
++	if ((err = read_eeprom_byte(mantis, &sub_device_id[0], 2)) < 0) {
++		dprintk(verbose, MANTIS_ERROR, 1, "Mantis EEPROM read error");
++		return err;
++	}
++	mantis->sub_device_id = (sub_device_id[0] << 8) | sub_device_id[1];
++	dprintk(verbose, MANTIS_ERROR, 1, "Sub Device ID=[0x%04x]",
++		mantis->sub_device_id);
++
++	return 0;
++}
++
++static int get_subvendor_id(struct mantis_pci *mantis)
++{
++	int err;
++	static u8 sub_vendor_id[2];
++
++	mantis->sub_vendor_id = 0;
++	sub_vendor_id[0] = 0xfe;
++	if ((err = read_eeprom_byte(mantis, &sub_vendor_id[0], 2)) < 0) {
++		dprintk(verbose, MANTIS_ERROR, 1, "Mantis EEPROM read error");
++		return err;
++	}
++	mantis->sub_vendor_id = (sub_vendor_id[0] << 8) | sub_vendor_id[1];
++	dprintk(verbose, MANTIS_ERROR, 1, "Sub Vendor ID=[0x%04x]",
++		mantis->sub_vendor_id);
++
++	return 0;
++}
++
++static int get_mac_address(struct mantis_pci *mantis)
++{
++	int err;
++
++	mantis->mac_address[0] = 0x08;
++	if ((err = read_eeprom_byte(mantis, &mantis->mac_address[0], 6)) < 0) {
++		dprintk(verbose, MANTIS_ERROR, 1, "Mantis EEPROM read error");
++
++		return err;
++	}
++	dprintk(verbose, MANTIS_ERROR, 1,
++		"MAC Address=[%02x:%02x:%02x:%02x:%02x:%02x]",
++		mantis->mac_address[0], mantis->mac_address[1],
++		mantis->mac_address[2],	mantis->mac_address[3],
++		mantis->mac_address[4], mantis->mac_address[5]);
++
++	return 0;
++}
++
++
++int mantis_core_init(struct mantis_pci *mantis)
++{
++	int err = 0;
++
++	if ((err = mantis_i2c_init(mantis)) < 0) {
++		dprintk(verbose, MANTIS_ERROR, 1, "Mantis I2C init failed");
++		return err;
++	}
++	if ((err = get_mac_address(mantis)) < 0) {
++		dprintk(verbose, MANTIS_ERROR, 1, "get MAC address failed");
++		return err;
++	}
++	if ((err = get_subvendor_id(mantis)) < 0) {
++		dprintk(verbose, MANTIS_ERROR, 1, "get Sub vendor ID failed");
++		return err;
++	}
++	if ((err = get_subdevice_id(mantis)) < 0) {
++		dprintk(verbose, MANTIS_ERROR, 1, "get Sub device ID failed");
++		return err;
++	}
++	if ((err = mantis_dma_init(mantis)) < 0) {
++		dprintk(verbose, MANTIS_ERROR, 1, "Mantis DMA init failed");
++		return err;
++	}
++	if ((err = mantis_dvb_init(mantis)) < 0) {
++		dprintk(verbose, MANTIS_DEBUG, 1, "Mantis DVB init failed");
++		return err;
++	}
++
++	return 0;
++}
++
++int mantis_core_exit(struct mantis_pci *mantis)
++{
++
++	mantis_dma_stop(mantis);
++	dprintk(verbose, MANTIS_ERROR, 1, "DMA engine stopping");
++	if (mantis_dma_exit(mantis) < 0)
++		dprintk(verbose, MANTIS_ERROR, 1, "DMA exit failed");
++	if (mantis_dvb_exit(mantis) < 0)
++		dprintk(verbose, MANTIS_ERROR, 1, "DVB exit failed");
++	if (mantis_i2c_exit(mantis) < 0)
++		dprintk(verbose, MANTIS_ERROR, 1, "I2C adapter delete.. failed");
++
++	return 0;
++}
++
++void gpio_set_bits(struct mantis_pci *mantis, u32 bitpos, u8 value)
++{
++	u32 reg;
++
++	if (value)
++		reg = 0x0000;
++	else
++		reg = 0xffff;
++
++	reg = (value << bitpos);
++
++	mmwrite(mmread(MANTIS_GPIF_ADDR) | reg, MANTIS_GPIF_ADDR);
++	mmwrite(0x00, MANTIS_GPIF_DOUT);
++	udelay(100);
++	mmwrite(mmread(MANTIS_GPIF_ADDR) | reg, MANTIS_GPIF_ADDR);
++	mmwrite(0x00, MANTIS_GPIF_DOUT);
++}
++
++
++//direction = 0 , no CI passthrough ; 1 , CI passthrough
++void mantis_set_direction(struct mantis_pci *mantis, int direction)
++{
++	u32 reg;
++
++	reg = mmread(0x28);
++	dprintk(verbose, MANTIS_DEBUG, 1, "TS direction setup");
++	if (direction == 0x01) { //to CI
++		reg |= 0x04;
++		mmwrite(reg, 0x28);
++		reg &= 0xff - 0x04;
++		mmwrite(reg, 0x28);
++	} else {
++		reg &= 0xff - 0x04;
++		mmwrite(reg, 0x28);
++		reg |= 0x04;
++		mmwrite(reg, 0x28);
++	}
++}
+diff --git a/drivers/media/dvb/mantis/mantis_core.h b/drivers/media/dvb/mantis/mantis_core.h
+new file mode 100644
+index 0000000..31b2a75
+--- /dev/null
++++ b/drivers/media/dvb/mantis/mantis_core.h
+@@ -0,0 +1,61 @@
++/*
++	Mantis PCI bridge driver
++
++	Copyright (C) 2005, 2006 Manu Abraham (abraham.manu@gmail.com)
++
++	This program is free software; you can redistribute it and/or modify
++	it under the terms of the GNU General Public License as published by
++	the Free Software Foundation; either version 2 of the License, or
++	(at your option) any later version.
++
++	This program is distributed in the hope that it will be useful,
++	but WITHOUT ANY WARRANTY; without even the implied warranty of
++	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++	GNU General Public License for more details.
++
++	You should have received a copy of the GNU General Public License
++	along with this program; if not, write to the Free Software
++	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++*/
++
++#ifndef __MANTIS_CORE_H
++#define __MANTIS_CORE_H
++
++#include "mantis_common.h"
++
++
++#define FE_TYPE_SAT	0
++#define FE_TYPE_CAB	1
++#define FE_TYPE_TER	2
++
++#define FE_TYPE_TS204	0
++#define FE_TYPE_TS188	1
++
++
++struct vendorname {
++	__u8  *sub_vendor_name;
++	__u32 sub_vendor_id;
++};
++
++struct devicetype {
++	__u8  *sub_device_name;
++	__u32 sub_device_id;
++	__u8  device_type;
++	__u32 type_flags;
++};
++
++
++extern int mantis_dma_init(struct mantis_pci *mantis);
++extern int mantis_dma_exit(struct mantis_pci *mantis);
++extern void mantis_dma_start(struct mantis_pci *mantis);
++extern void mantis_dma_stop(struct mantis_pci *mantis);
++extern int mantis_i2c_init(struct mantis_pci *mantis);
++extern int mantis_i2c_exit(struct mantis_pci *mantis);
++extern int mantis_core_init(struct mantis_pci *mantis);
++extern int mantis_core_exit(struct mantis_pci *mantis);
++//extern void mantis_fe_powerup(struct mantis_pci *mantis);
++//extern void mantis_fe_powerdown(struct mantis_pci *mantis);
++//extern void mantis_fe_reset(struct dvb_frontend *fe);
++extern void mantis_set_direction(struct mantis_pci *mantis, int direction);
++
++#endif //__MANTIS_CORE_H
+diff --git a/drivers/media/dvb/mantis/mantis_dma.c b/drivers/media/dvb/mantis/mantis_dma.c
+new file mode 100644
+index 0000000..9e3aa5e
+--- /dev/null
++++ b/drivers/media/dvb/mantis/mantis_dma.c
+@@ -0,0 +1,238 @@
++/*
++	Mantis PCI bridge driver
++
++	Copyright (C) 2005, 2006 Manu Abraham (abraham.manu@gmail.com)
++
++	This program is free software; you can redistribute it and/or modify
++	it under the terms of the GNU General Public License as published by
++	the Free Software Foundation; either version 2 of the License, or
++	(at your option) any later version.
++
++	This program is distributed in the hope that it will be useful,
++	but WITHOUT ANY WARRANTY; without even the implied warranty of
++	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++	GNU General Public License for more details.
++
++	You should have received a copy of the GNU General Public License
++	along with this program; if not, write to the Free Software
++	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++*/
++
++#include <asm/page.h>
++#include <linux/vmalloc.h>
++#include "mantis_common.h"
++
++#define RISC_WRITE		(0x01 << 28)
++#define RISC_JUMP		(0x07 << 28)
++#define RISC_IRQ		(0x01 << 24)
++
++#define RISC_STATUS(status)	((((~status) & 0x0f) << 20) | ((status & 0x0f) << 16))
++#define RISC_FLUSH()		mantis->risc_pos = 0
++#define RISC_INSTR(opcode)	mantis->risc_cpu[mantis->risc_pos++] = cpu_to_le32(opcode)
++
++#define MANTIS_BUF_SIZE		64 * 1024
++#define MANTIS_BLOCK_BYTES	(MANTIS_BUF_SIZE >> 4)
++#define MANTIS_BLOCK_COUNT	(1 << 4)
++#define MANTIS_RISC_SIZE	PAGE_SIZE
++
++int mantis_dma_exit(struct mantis_pci *mantis)
++{
++	if (mantis->buf_cpu) {
++		dprintk(verbose, MANTIS_ERROR, 1,
++			"DMA=0x%lx cpu=0x%p size=%d",
++			(unsigned long) mantis->buf_dma,
++			 mantis->buf_cpu,
++			 MANTIS_BUF_SIZE);
++
++		pci_free_consistent(mantis->pdev, MANTIS_BUF_SIZE,
++				    mantis->buf_cpu, mantis->buf_dma);
++
++		mantis->buf_cpu = NULL;
++	}
++	if (mantis->risc_cpu) {
++		dprintk(verbose, MANTIS_ERROR, 1,
++			"RISC=0x%lx cpu=0x%p size=%lx",
++			(unsigned long) mantis->risc_dma,
++			mantis->risc_cpu,
++			MANTIS_RISC_SIZE);
++
++		pci_free_consistent(mantis->pdev, MANTIS_RISC_SIZE,
++				    mantis->risc_cpu, mantis->risc_dma);
++
++		mantis->risc_cpu = NULL;
++	}
++
++	return 0;
++}
++
++static inline int mantis_alloc_buffers(struct mantis_pci *mantis)
++{
++	if (!mantis->buf_cpu) {
++		mantis->buf_cpu = pci_alloc_consistent(mantis->pdev,
++						       MANTIS_BUF_SIZE,
++						       &mantis->buf_dma);
++		if (!mantis->buf_cpu) {
++			dprintk(verbose, MANTIS_ERROR, 1,
++				"DMA buffer allocation failed");
++
++			goto err;
++		}
++		dprintk(verbose, MANTIS_ERROR, 1,
++			"DMA=0x%lx cpu=0x%p size=%d",
++			(unsigned long) mantis->buf_dma,
++			mantis->buf_cpu, MANTIS_BUF_SIZE);
++	}
++	if (!mantis->risc_cpu) {
++		mantis->risc_cpu = pci_alloc_consistent(mantis->pdev,
++							MANTIS_RISC_SIZE,
++							&mantis->risc_dma);
++
++		if (!mantis->risc_cpu) {
++			dprintk(verbose, MANTIS_ERROR, 1,
++				"RISC program allocation failed");
++
++			mantis_dma_exit(mantis);
++
++			goto err;
++		}
++		dprintk(verbose, MANTIS_ERROR, 1,
++			"RISC=0x%lx cpu=0x%p size=%lx",
++			(unsigned long) mantis->risc_dma,
++			mantis->risc_cpu, MANTIS_RISC_SIZE);
++	}
++
++	return 0;
++err:
++	dprintk(verbose, MANTIS_ERROR, 1, "Out of memory (?) .....");
++	return -ENOMEM;
++}
++
++static inline int mantis_calc_lines(struct mantis_pci *mantis)
++{
++	mantis->line_bytes = MANTIS_BLOCK_BYTES;
++	mantis->line_count = MANTIS_BLOCK_COUNT;
++
++	while (mantis->line_bytes > 4095) {
++		mantis->line_bytes >>= 1;
++		mantis->line_count <<= 1;
++	}
++
++	dprintk(verbose, MANTIS_DEBUG, 1,
++		"Mantis RISC block bytes=[%d], line bytes=[%d], line count=[%d]",
++		MANTIS_BLOCK_BYTES, mantis->line_bytes, mantis->line_count);
++
++	if (mantis->line_count > 255) {
++		dprintk(verbose, MANTIS_ERROR, 1, "Buffer size error");
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
++int mantis_dma_init(struct mantis_pci *mantis)
++{
++	int err = 0;
++
++	dprintk(verbose, MANTIS_DEBUG, 1, "Mantis DMA init");
++	if (mantis_alloc_buffers(mantis) < 0) {
++		dprintk(verbose, MANTIS_ERROR, 1, "Error allocating DMA buffer");
++
++		// Stop RISC Engine
++//		mmwrite(mmread(MANTIS_DMA_CTL) & ~MANTIS_RISC_EN, MANTIS_DMA_CTL);
++		mmwrite(0, MANTIS_DMA_CTL);
++
++		goto err;
++	}
++	if ((err = mantis_calc_lines(mantis)) < 0) {
++		dprintk(verbose, MANTIS_ERROR, 1, "Mantis calc lines failed");
++
++		goto err;
++	}
++
++	return 0;
++err:
++	return err;
++}
++
++
++
++static inline void mantis_risc_program(struct mantis_pci *mantis)
++{
++	u32 buf_pos = 0;
++	u32 line;
++
++	dprintk(verbose, MANTIS_DEBUG, 1, "Mantis create RISC program");
++	RISC_FLUSH();
++
++	dprintk(verbose, MANTIS_DEBUG, 1, "risc len lines %u, bytes per line %u",
++		mantis->line_count, mantis->line_bytes);
++
++	for (line = 0; line < mantis->line_count; line++) {
++		dprintk(verbose, MANTIS_DEBUG, 1, "RISC PROG line=[%d]", line);
++		if (!(buf_pos % MANTIS_BLOCK_BYTES)) {
++			RISC_INSTR(RISC_WRITE	|
++				   RISC_IRQ	|
++				   RISC_STATUS(((buf_pos / MANTIS_BLOCK_BYTES) +
++				   (MANTIS_BLOCK_COUNT - 1)) %
++				    MANTIS_BLOCK_COUNT) |
++				    mantis->line_bytes);
++		} else {
++			RISC_INSTR(RISC_WRITE	| mantis->line_bytes);
++		}
++		RISC_INSTR(mantis->buf_dma + buf_pos);
++		buf_pos += mantis->line_bytes;
++	}
++	RISC_INSTR(RISC_JUMP);
++	RISC_INSTR(mantis->risc_dma);
++}
++
++void mantis_dma_start(struct mantis_pci *mantis)
++{
++	dprintk(verbose, MANTIS_DEBUG, 1, "Mantis Start DMA engine");
++
++	mantis_risc_program(mantis);
++	mmwrite(cpu_to_le32(mantis->risc_dma), MANTIS_RISC_START);
++	mmwrite(MANTIS_GPIF_RDWRN, MANTIS_GPIF_ADDR);
++
++	mmwrite(0, MANTIS_DMA_CTL);
++	mantis->last_block = mantis->finished_block = 0;
++
++	mmwrite(mmread(MANTIS_INT_MASK) | MANTIS_INT_RISCI, MANTIS_INT_MASK);
++
++	mmwrite(MANTIS_FIFO_EN | MANTIS_DCAP_EN
++			       | MANTIS_RISC_EN, MANTIS_DMA_CTL);
++
++}
++
++void mantis_dma_stop(struct mantis_pci *mantis)
++{
++	u32 stat = 0, mask = 0;
++
++	stat = mmread(MANTIS_INT_STAT);
++	mask = mmread(MANTIS_INT_MASK);
++	dprintk(verbose, MANTIS_DEBUG, 1, "Mantis Stop DMA engine");
++
++	mmwrite((mmread(MANTIS_DMA_CTL) & ~(MANTIS_FIFO_EN |
++					    MANTIS_DCAP_EN |
++					    MANTIS_RISC_EN)), MANTIS_DMA_CTL);
++
++	mmwrite(mmread(MANTIS_INT_STAT), MANTIS_INT_STAT);
++
++	mmwrite(mmread(MANTIS_INT_MASK) & ~(MANTIS_INT_RISCI |
++					    MANTIS_INT_RISCEN), MANTIS_INT_MASK);
++}
++
++
++void mantis_dma_xfer(unsigned long data)
++{
++	struct mantis_pci *mantis = (struct mantis_pci *) data;
++
++	while (mantis->last_block != mantis->finished_block) {
++		dprintk(verbose, MANTIS_DEBUG, 1, "last block=[%d] finished block=[%d]",
++			mantis->last_block, mantis->finished_block);
++
++		(mantis->ts_size ? dvb_dmx_swfilter_204: dvb_dmx_swfilter)
++		(&mantis->demux, &mantis->buf_cpu[mantis->last_block * MANTIS_BLOCK_BYTES], MANTIS_BLOCK_BYTES);
++		mantis->last_block = (mantis->last_block + 1) % MANTIS_BLOCK_COUNT;
++	}
++}
+diff --git a/drivers/media/dvb/mantis/mantis_dvb.c b/drivers/media/dvb/mantis/mantis_dvb.c
+new file mode 100644
+index 0000000..5830d4a
+--- /dev/null
++++ b/drivers/media/dvb/mantis/mantis_dvb.c
+@@ -0,0 +1,304 @@
++/*
++	Mantis PCI bridge driver
++	Copyright (C) 2005, 2006 Manu Abraham (abraham.manu@gmail.com)
++
++	This program is free software; you can redistribute it and/or modify
++	it under the terms of the GNU General Public License as published by
++	the Free Software Foundation; either version 2 of the License, or
++	(at your option) any later version.
++
++	This program is distributed in the hope that it will be useful,
++	but WITHOUT ANY WARRANTY; without even the implied warranty of
++	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++	GNU General Public License for more details.
++
++	You should have received a copy of the GNU General Public License
++	along with this program; if not, write to the Free Software
++	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++*/
++
++#include <linux/bitops.h>
++#include "mantis_common.h"
++#include "mantis_core.h"
++
++#include "dmxdev.h"
++#include "dvbdev.h"
++#include "dvb_demux.h"
++#include "dvb_frontend.h"
++#include "mantis_vp1033.h"
++#include "mantis_vp1034.h"
++#include "mantis_vp2033.h"
++#include "mantis_vp3030.h"
++
++/*	Tuner power supply control	*/
++void mantis_fe_powerup(struct mantis_pci *mantis)
++{
++	dprintk(verbose, MANTIS_DEBUG, 1, "Frontend Power ON");
++	gpio_set_bits(mantis, 0x0c, 1);
++	msleep_interruptible(100);
++	gpio_set_bits(mantis, 0x0c, 1);
++	msleep_interruptible(100);
++}
++
++void mantis_fe_powerdown(struct mantis_pci *mantis)
++{
++	dprintk(verbose, MANTIS_DEBUG, 1, "Frontend Power OFF");
++	gpio_set_bits(mantis, 0x0c, 0);
++}
++
++static int mantis_fe_reset(struct dvb_frontend *fe)
++{
++	struct mantis_pci *mantis = fe->dvb->priv;
++
++	dprintk(verbose, MANTIS_DEBUG, 1, "Frontend Reset");
++	gpio_set_bits(mantis, 13, 0);
++	msleep_interruptible(100);
++	gpio_set_bits(mantis, 13, 0);
++	msleep_interruptible(100);
++	gpio_set_bits(mantis, 13, 1);
++	msleep_interruptible(100);
++	gpio_set_bits(mantis, 13, 1);
++
++	return 0;
++}
++
++static int mantis_frontend_reset(struct mantis_pci *mantis)
++{
++	dprintk(verbose, MANTIS_DEBUG, 1, "Frontend Reset");
++	gpio_set_bits(mantis, 13, 0);
++	msleep_interruptible(100);
++	gpio_set_bits(mantis, 13, 0);
++	msleep_interruptible(100);
++	gpio_set_bits(mantis, 13, 1);
++	msleep_interruptible(100);
++	gpio_set_bits(mantis, 13, 1);
++
++	return 0;
++}
++
++static int mantis_dvb_start_feed(struct dvb_demux_feed *dvbdmxfeed)
++{
++	struct dvb_demux *dvbdmx = dvbdmxfeed->demux;
++	struct mantis_pci *mantis = dvbdmx->priv;
++
++	dprintk(verbose, MANTIS_DEBUG, 1, "Mantis DVB Start feed");
++	if (!dvbdmx->dmx.frontend) {
++		dprintk(verbose, MANTIS_DEBUG, 1, "no frontend ?");
++		return -EINVAL;
++	}
++	mantis->feeds++;
++	dprintk(verbose, MANTIS_DEBUG, 1,
++		"mantis start feed, feeds=%d",
++		mantis->feeds);
++
++	if (mantis->feeds == 1)	 {
++		dprintk(verbose, MANTIS_DEBUG, 1, "mantis start feed & dma");
++		printk("mantis start feed & dma\n");
++		mantis_dma_start(mantis);
++	}
++
++	return mantis->feeds;
++}
++
++static int mantis_dvb_stop_feed(struct dvb_demux_feed *dvbdmxfeed)
++{
++	struct dvb_demux *dvbdmx = dvbdmxfeed->demux;
++	struct mantis_pci *mantis = dvbdmx->priv;
++
++	dprintk(verbose, MANTIS_DEBUG, 1, "Mantis DVB Stop feed");
++	if (!dvbdmx->dmx.frontend) {
++		dprintk(verbose, MANTIS_DEBUG, 1, "no frontend ?");
++		return -EINVAL;
++	}
++	mantis->feeds--;
++	if (mantis->feeds == 0) {
++		dprintk(verbose, MANTIS_DEBUG, 1, "mantis stop feed and dma");
++		printk("mantis stop feed and dma\n");
++		mantis_dma_stop(mantis);
++	}
++	return 0;
++}
++
++int __devinit mantis_dvb_init(struct mantis_pci *mantis)
++{
++	int result;
++
++	dprintk(verbose, MANTIS_DEBUG, 1, "dvb_register_adapter");
++	if (dvb_register_adapter(&mantis->dvb_adapter,
++				 "Mantis dvb adapter", THIS_MODULE,
++				 &mantis->pdev->dev) < 0) {
++
++		dprintk(verbose, MANTIS_ERROR, 1, "Error registering adapter");
++		return -ENODEV;
++	}
++	mantis->dvb_adapter.priv = mantis;
++	mantis->demux.dmx.capabilities = DMX_TS_FILTERING	|
++					 DMX_SECTION_FILTERING	|
++					 DMX_MEMORY_BASED_FILTERING;
++
++	mantis->demux.priv = mantis;
++	mantis->demux.filternum = 256;
++	mantis->demux.feednum = 256;
++	mantis->demux.start_feed = mantis_dvb_start_feed;
++	mantis->demux.stop_feed = mantis_dvb_stop_feed;
++	mantis->demux.write_to_decoder = NULL;
++	mantis->ts_size = 1; //188
++	dprintk(verbose, MANTIS_DEBUG, 1, "dvb_dmx_init");
++	if ((result = dvb_dmx_init(&mantis->demux)) < 0) {
++		dprintk(verbose, MANTIS_ERROR, 1,
++			"dvb_dmx_init failed, ERROR=%d", result);
++
++		goto err0;
++	}
++	mantis->dmxdev.filternum = 256;
++	mantis->dmxdev.demux = &mantis->demux.dmx;
++	mantis->dmxdev.capabilities = 0;
++	dprintk(verbose, MANTIS_DEBUG, 1, "dvb_dmxdev_init");
++	if ((result = dvb_dmxdev_init(&mantis->dmxdev,
++				      &mantis->dvb_adapter)) < 0) {
++
++		dprintk(verbose, MANTIS_ERROR, 1,
++			"dvb_dmxdev_init failed, ERROR=%d", result);
++		goto err1;
++	}
++	mantis->fe_hw.source = DMX_FRONTEND_0;
++	if ((result = mantis->demux.dmx.add_frontend(&mantis->demux.dmx,
++						     &mantis->fe_hw)) < 0) {
++
++		dprintk(verbose, MANTIS_ERROR, 1,
++			"dvb_dmx_init failed, ERROR=%d", result);
++
++		goto err2;
++	}
++	mantis->fe_mem.source = DMX_MEMORY_FE;
++	if ((result = mantis->demux.dmx.add_frontend(&mantis->demux.dmx,
++						     &mantis->fe_mem)) < 0) {
++		dprintk(verbose, MANTIS_ERROR, 1,
++			"dvb_dmx_init failed, ERROR=%d", result);
++
++		goto err3;
++	}
++	if ((result = mantis->demux.dmx.connect_frontend(&mantis->demux.dmx,
++							 &mantis->fe_hw)) < 0) {
++
++		dprintk(verbose, MANTIS_ERROR, 1,
++			"dvb_dmx_init failed, ERROR=%d", result);
++
++		goto err4;
++	}
++	dvb_net_init(&mantis->dvb_adapter, &mantis->dvbnet, &mantis->demux.dmx);
++	tasklet_init(&mantis->tasklet, mantis_dma_xfer, (unsigned long) mantis);
++	mantis_frontend_init(mantis);
++	return 0;
++
++	/*	Error conditions ..	*/
++err4:
++	mantis->demux.dmx.remove_frontend(&mantis->demux.dmx, &mantis->fe_mem);
++err3:
++	mantis->demux.dmx.remove_frontend(&mantis->demux.dmx, &mantis->fe_hw);
++err2:
++	dvb_dmxdev_release(&mantis->dmxdev);
++err1:
++	dvb_dmx_release(&mantis->demux);
++err0:
++	dvb_unregister_adapter(&mantis->dvb_adapter);
++
++	return result;
++}
++
++#define MANTIS_VP_1027_DVB_S	0x0013
++#define MANTIS_VP_1033_DVB_S	0x0016
++#define MANTIS_VP_1034_DVB_S	0x0014
++#define MANTIS_VP_1040_DVB_S2
++#define MANTIS_VP_1041_DVB_S2
++#define MANTIS_VP_2033_DVB_C	0x0008
++#define MANTIS_VP_3024_DVB_T	0x0009
++#define MANTIS_VP_3030_DVB_T	0x0024
++
++int __devinit mantis_frontend_init(struct mantis_pci *mantis)
++{
++	dprintk(verbose, MANTIS_DEBUG, 1, "Mantis frontend Init");
++	mantis_fe_powerup(mantis);
++	mantis_frontend_reset(mantis);
++	dprintk(verbose, MANTIS_DEBUG, 1, "Device ID=%02x", mantis->sub_device_id);
++	switch (mantis->sub_device_id) {
++	case MANTIS_VP_1033_DVB_S:	// VP-1033
++		dprintk(verbose, MANTIS_ERROR, 1, "Probing for STV0299 (DVB-S)");
++		mantis->fe = stv0299_attach(&lgtdqcs001f_config,
++					    &mantis->adapter);
++
++		if (mantis->fe) {
++			mantis->fe->ops.tuner_ops.set_params = lgtdqcs001f_tuner_set;
++			dprintk(verbose, MANTIS_ERROR, 1,
++				"found STV0299 DVB-S frontend @ 0x%02x",
++				lgtdqcs001f_config.demod_address);
++
++			dprintk(verbose, MANTIS_ERROR, 1,
++				"Mantis DVB-S STV0299 frontend attach success");
++		}
++		break;
++	case MANTIS_VP_1034_DVB_S:	// VP-1034
++		dprintk(verbose, MANTIS_ERROR, 1, "Probing for MB86A16 (DVB-S/DSS)");
++		mantis->fe = mb86a16_attach(&vp1034_config, &mantis->adapter);
++		if (mantis->fe) {
++			dprintk(verbose, MANTIS_ERROR, 1,
++			"found MB86A16 DVB-S/DSS frontend @0x%02x",
++			vp1034_config.demod_address);
++
++		}
++		break;
++	case MANTIS_VP_2033_DVB_C:	// VP-2033
++		dprintk(verbose, MANTIS_ERROR, 1, "Probing for CU1216 (DVB-C)");
++		mantis->fe = cu1216_attach(&philips_cu1216_config, &mantis->adapter);
++		if (mantis->fe) {
++			mantis->fe->ops.tuner_ops.set_params = philips_cu1216_tuner_set;
++			dprintk(verbose, MANTIS_ERROR, 1,
++				"found Philips CU1216 DVB-C frontend @ 0x%02x",
++				philips_cu1216_config.demod_address);
++
++			dprintk(verbose, MANTIS_ERROR, 1,
++				"Mantis DVB-C Philips CU1216 frontend attach success");
++
++		}
++		break;
++	default:
++		dprintk(verbose, MANTIS_DEBUG, 1, "Unknown frontend:[0x%02x]",
++			mantis->sub_device_id);
++
++		return -ENODEV;
++	}
++	if (mantis->fe == NULL) {
++		dprintk(verbose, MANTIS_ERROR, 1, "!!! NO Frontends found !!!");
++		return -ENODEV;
++	} else {
++		if (dvb_register_frontend(&mantis->dvb_adapter, mantis->fe)) {
++			dprintk(verbose, MANTIS_ERROR, 1,
++				"ERROR: Frontend registration failed");
++
++			if (mantis->fe->ops.release)
++				mantis->fe->ops.release(mantis->fe);
++
++			mantis->fe = NULL;
++			return -ENODEV;
++		}
++	}
++
++	return 0;
++}
++
++int __devexit mantis_dvb_exit(struct mantis_pci *mantis)
++{
++	tasklet_kill(&mantis->tasklet);
++	dvb_net_release(&mantis->dvbnet);
++	mantis->demux.dmx.remove_frontend(&mantis->demux.dmx, &mantis->fe_mem);
++	mantis->demux.dmx.remove_frontend(&mantis->demux.dmx, &mantis->fe_hw);
++	dvb_dmxdev_release(&mantis->dmxdev);
++	dvb_dmx_release(&mantis->demux);
++
++	if (mantis->fe)
++		dvb_unregister_frontend(mantis->fe);
++	dprintk(verbose, MANTIS_DEBUG, 1, "dvb_unregister_adapter");
++	dvb_unregister_adapter(&mantis->dvb_adapter);
++
++	return 0;
++}
+diff --git a/drivers/media/dvb/mantis/mantis_i2c.c b/drivers/media/dvb/mantis/mantis_i2c.c
+new file mode 100644
+index 0000000..cfecb34
+--- /dev/null
++++ b/drivers/media/dvb/mantis/mantis_i2c.c
+@@ -0,0 +1,189 @@
++/*
++	Mantis PCI bridge driver
++
++	Copyright (C) 2005, 2006 Manu Abraham (abraham.manu@gmail.com)
++
++	This program is free software; you can redistribute it and/or modify
++	it under the terms of the GNU General Public License as published by
++	the Free Software Foundation; either version 2 of the License, or
++	(at your option) any later version.
++
++	This program is distributed in the hope that it will be useful,
++	but WITHOUT ANY WARRANTY; without even the implied warranty of
++	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++	GNU General Public License for more details.
++
++	You should have received a copy of the GNU General Public License
++	along with this program; if not, write to the Free Software
++	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++*/
++
++#include <linux/module.h>
++#include <linux/moduleparam.h>
++#include <linux/init.h>
++#include <linux/delay.h>
++#include <asm/io.h>
++#include <linux/ioport.h>
++#include <asm/pgtable.h>
++#include <asm/page.h>
++#include "mantis_common.h"
++
++#define I2C_HW_B_MANTIS		0x1c
++
++static int mantis_ack_wait(struct mantis_pci *mantis)
++{
++	int rc = 0;
++
++	if (wait_event_interruptible_timeout(mantis->i2c_wq,
++					     mantis->mantis_int_stat & MANTIS_INT_I2CRACK,
++					     msecs_to_jiffies(50)) == -ERESTARTSYS)
++
++		rc = -EREMOTEIO;
++/*
++	// Wait till we are done
++	while (mantis->mantis_int_stat & MANTIS_INT_I2CRACK){
++		if (mantis->mantis_int_stat & MANTIS_INT_I2CDONE) {
++			mantis->mantis_int_stat &= ~MANTIS_INT_I2CRACK;
++//			dprintk(verbose, MANTIS_DEBUG, 1, "SLAVE RACK 'ed .. Waiting for I2CDONE");
++			break;
++		}
++	}
++
++	if (mantis->mantis_int_stat & MANTIS_INT_I2CDONE) {
++//		dprintk(verbose, MANTIS_DEBUG, 1, "Mantis Int I2CDONE");
++		rc = 1;
++	}
++
++	mantis->mantis_int_stat &= ~MANTIS_INT_I2CDONE;
++*/
++	// ..
++	if (mantis->mantis_int_stat & MANTIS_INT_I2CRACK)
++		msleep_interruptible(10);
++
++	return rc;
++}
++
++static int mantis_i2c_read(struct mantis_pci *mantis, const struct i2c_msg *msg)
++{
++	u32 rxd, i;
++
++	dprintk(verbose, MANTIS_DEBUG, 1, "Address=[0x%02x]", msg->addr);
++	for (i = 0; i < msg->len; i++) {
++		rxd = (msg->addr << 25) | (1 << 24)
++					| MANTIS_I2C_RATE_3
++					| MANTIS_I2C_STOP
++					| MANTIS_I2C_PGMODE;
++
++		if (i == (msg->len - 1))
++			rxd &= ~MANTIS_I2C_STOP;
++
++		mmwrite(rxd, MANTIS_I2CDATA_CTL);
++		if (mantis_ack_wait(mantis) < 0) {
++			dprintk(verbose, MANTIS_DEBUG, 1, "ACK failed<R>");
++			return -EIO;
++		}
++		rxd = mmread(MANTIS_I2CDATA_CTL);
++		msg->buf[i] = (u8)((rxd >> 8) & 0xFF);
++		dprintk(verbose, MANTIS_DEBUG, 1,
++			"Data<R[%d]>=[0x%02x]", i, msg->buf[i]);
++
++		msleep_interruptible(2);
++	}
++
++	return 0;
++}
++
++static int mantis_i2c_write(struct mantis_pci *mantis, const struct i2c_msg *msg)
++{
++	int i;
++	u32 txd = 0;
++
++	dprintk(verbose, MANTIS_DEBUG, 1, "Address=[0x%02x]", msg->addr);
++	for (i = 0; i < msg->len; i++) {
++		dprintk(verbose, MANTIS_DEBUG, 1, "Data<W[%d]>=[0x%02x]", i, msg->buf[i]);
++		txd = (msg->addr << 25) | (msg->buf[i] << 8)
++					| MANTIS_I2C_RATE_3
++					| MANTIS_I2C_STOP
++					| MANTIS_I2C_PGMODE;
++
++		if (i == (msg->len - 1))
++			txd &= ~MANTIS_I2C_STOP;
++
++		mmwrite(txd, MANTIS_I2CDATA_CTL);
++		if (mantis_ack_wait(mantis) < 0) {
++			dprintk(verbose, MANTIS_DEBUG, 1, "ACK failed<W>");
++			return -1;
++		}
++		udelay(500);
++	}
++
++	return 0;
++}
++
++static int mantis_i2c_xfer(struct i2c_adapter *adapter, struct i2c_msg *msgs, int num)
++{
++	int ret = 0, i;
++	struct mantis_pci *mantis;
++
++	mantis = i2c_get_adapdata(adapter);
++	for (i = 0; i < num; i++) {
++		if (msgs[i].flags & I2C_M_RD)
++			ret = mantis_i2c_read(mantis, &msgs[i]);
++		else
++			ret = mantis_i2c_write(mantis, &msgs[i]);
++
++		if (ret < 0)
++			return ret;
++	}
++
++	return num;
++}
++
++static u32 mantis_i2c_func(struct i2c_adapter *adapter)
++{
++	return I2C_FUNC_SMBUS_EMUL;
++}
++
++static struct i2c_algorithm mantis_algo = {
++	.master_xfer		= mantis_i2c_xfer,
++	.functionality		= mantis_i2c_func,
++};
++
++static struct i2c_adapter mantis_i2c_adapter = {
++	.owner			= THIS_MODULE,
++	.name			= "Mantis I2C",
++	.id			= I2C_HW_B_MANTIS,
++	.class			= I2C_CLASS_TV_DIGITAL,
++	.algo			= &mantis_algo,
++};
++
++int __devinit mantis_i2c_init(struct mantis_pci *mantis)
++{
++	u32 intstat;
++
++	memcpy(&mantis->adapter, &mantis_i2c_adapter, sizeof (mantis_i2c_adapter));
++	i2c_set_adapdata(&mantis->adapter, mantis);
++	mantis->i2c_rc = i2c_add_adapter(&mantis->adapter);
++	if (mantis->i2c_rc < 0)
++		return mantis->i2c_rc;
++
++	dprintk(verbose, MANTIS_DEBUG, 1, "Initializing I2C ..");
++
++	// Clear all interrupts
++	intstat = mmread(MANTIS_INT_STAT);
++	mmwrite(intstat, MANTIS_INT_STAT);
++
++	mmwrite(mmread(MANTIS_INT_MASK) | MANTIS_INT_I2CDONE,
++					  MANTIS_INT_MASK);
++
++	dprintk(verbose, MANTIS_DEBUG, 1, "[0x%08x/%08x]",
++		mmread(MANTIS_INT_STAT), mmread(MANTIS_INT_MASK));
++
++	return 0;
++}
++
++int __devexit mantis_i2c_exit(struct mantis_pci *mantis)
++{
++	dprintk(verbose, MANTIS_DEBUG, 1, "Removing I2C adapter");
++	return i2c_del_adapter(&mantis->adapter);
++}
+diff --git a/drivers/media/dvb/mantis/mantis_reg.h b/drivers/media/dvb/mantis/mantis_reg.h
+new file mode 100644
+index 0000000..1b54e09
+--- /dev/null
++++ b/drivers/media/dvb/mantis/mantis_reg.h
+@@ -0,0 +1,109 @@
++/*
++	Mantis PCI bridge driver
++
++	Copyright (C) 2005, 2006 Manu Abraham (abraham.manu@gmail.com)
++
++	This program is free software; you can redistribute it and/or modify
++	it under the terms of the GNU General Public License as published by
++	the Free Software Foundation; either version 2 of the License, or
++	(at your option) any later version.
++
++	This program is distributed in the hope that it will be useful,
++	but WITHOUT ANY WARRANTY; without even the implied warranty of
++	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++	GNU General Public License for more details.
++
++	You should have received a copy of the GNU General Public License
++	along with this program; if not, write to the Free Software
++	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++*/
++
++#ifndef __MANTIS_REG_H
++#define __MANTIS_REG_H
++
++// Interrupts
++#define MANTIS_INT_STAT			0x00
++#define MANTIS_INT_MASK			0x04
++
++#define MANTIS_INT_RISCSTAT		(0x0f << 28)
++#define MANTIS_INT_RISCEN		(0x01 << 27)
++#define MANTIS_INT_I2CRACK		(0x01 << 26)
++
++//#define MANTIS_INT_GPIF			(0xff << 12)
++
++#define MANTIS_INT_PCMCIA7		(0x01 << 19)
++#define MANTIS_INT_PCMCIA6		(0x01 << 18)
++#define MANTIS_INT_PCMCIA5		(0x01 << 17)
++#define MANTIS_INT_PCMCIA4		(0x01 << 16)
++#define MANTIS_INT_PCMCIA3		(0x01 << 15)
++#define MANTIS_INT_PCMCIA2		(0x01 << 14)
++#define MANTIS_INT_PCMCIA1		(0x01 << 13)
++#define MANTIS_INT_PCMCIA0		(0x01 << 12)
++#define MANTIS_INT_IRQ1			(0x01 << 11)
++#define MANTIS_INT_IRQ0			(0x01 << 10)
++#define MANTIS_INT_OCERR		(0x01 <<  8)
++#define MANTIS_INT_PABORT		(0x01 <<  7)
++#define MANTIS_INT_RIPERR		(0x01 <<  6)
++#define MANTIS_INT_PPERR		(0x01 <<  5)
++#define MANTIS_INT_FTRGT		(0x01 <<  3)
++#define MANTIS_INT_RISCI		(0x01 <<  1)
++#define MANTIS_INT_I2CDONE		(0x01 <<  0)
++
++// DMA
++#define MANTIS_DMA_CTL			0x08
++#define	MANTIS_I2C_RD			(0x01 <<  7)
++#define MANTIS_I2C_WR			(0x01 <<  6)
++#define MANTIS_DCAP_MODE		(0x01 <<  5)
++#define MANTIS_FIFO_TP_4		(0x00 <<  3)
++#define MANTIS_FIFO_TP_8		(0x01 <<  3)
++#define MANTIS_FIFO_TP_16		(0x02 <<  3)
++#define MANTIS_FIFO_EN			(0x01 <<  2)
++#define MANTIS_DCAP_EN			(0x01 <<  1)
++#define MANTIS_RISC_EN			(0x01 <<  0)
++
++#define MANTIS_RISC_START		0x10
++#define MANTIS_RISC_PC			0x14
++
++// I2C
++#define MANTIS_I2CDATA_CTL		0x18
++#define MANTIS_I2C_RATE_1		(0x00 <<  6)
++#define MANTIS_I2C_RATE_2		(0x01 <<  6)
++#define MANTIS_I2C_RATE_3		(0x02 <<  6)
++#define MANTIS_I2C_RATE_4		(0x03 <<  6)
++#define MANTIS_I2C_STOP			(0x01 <<  5)
++#define MANTIS_I2C_PGMODE		(0x01 <<  3)
++
++#define MANTIS_GPIF_IRQCFG		0x98
++#define MANTIS_GPIF_IRQPOL		(0x01 <<  8)
++#define MANTIS_MASK_WRACK		(0x01 <<  7)
++#define MANTIS_MASK_BRRDY		(0x01 <<  6)
++#define MANTIS_MASK_OVFLW		(0x01 <<  5)
++#define MANTIS_MASK_OTHERR		(0x01 <<  4)
++#define MANTIS_MASK_WSTO		(0x01 <<  3)
++#define MANTIS_MASK_EXTIRQ		(0x01 <<  2)
++#define MANTIS_MASK_PLUGIN		(0x01 <<  1)
++#define MANTIS_MASK_PLUGOUT		(0x01 <<  0)
++
++#define MANTIS_GPIF_STATUS		0x9c
++#define MANTIS_SBUF_KILLOP		(0x01 << 15)
++#define MANTIS_SBUF_OPDONE		(0x01 << 14)
++#define MANTIS_SBUF_EMPTY		(0x01 << 13)
++#define MANTIS_GPIF_DETSTAT		(0x01 <<  9)
++#define MANTIS_GPIF_INTSTAT		(0x01 <<  8)
++#define MANTIS_GPIF_WRACK		(0x01 <<  7)
++#define MANTIS_GPIF_BRRDY		(0x01 <<  6)
++#define MANTIS_SBUF_OVFLW		(0x01 <<  5)
++#define MANTIS_GPIF_OTHERR		(0x01 <<  4)
++#define MANTIS_SBUF_WSTO		(0x01 <<  3)
++#define MANTIS_GPIF_EXTIRQ		(0x01 <<  2)
++#define MANTIS_CARD_PLUGIN		(0x01 <<  1)
++#define MANTIS_CARD_PLUGOUT		(0x01 <<  0)
++
++#define MANTIS_GPIF_ADDR		0xb0
++#define MANTIS_GPIF_RDWRN		(0x01 << 31)
++
++#define MANTIS_GPIF_DOUT		0xb4
++#define MANTIS_GPIF_DIN			0xb8
++
++
++#endif //__MANTIS_REG_H
+diff --git a/drivers/media/dvb/mantis/mantis_vp1033.c b/drivers/media/dvb/mantis/mantis_vp1033.c
+new file mode 100644
+index 0000000..720f4fb
+--- /dev/null
++++ b/drivers/media/dvb/mantis/mantis_vp1033.c
+@@ -0,0 +1,151 @@
++/*
++	Mantis VP-1033 driver
++
++	Copyright (C) 2005, 2006 Manu Abraham (abraham.manu@gmail.com)
++
++	This program is free software; you can redistribute it and/or modify
++	it under the terms of the GNU General Public License as published by
++	the Free Software Foundation; either version 2 of the License, or
++	(at your option) any later version.
++
++	This program is distributed in the hope that it will be useful,
++	but WITHOUT ANY WARRANTY; without even the implied warranty of
++	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++	GNU General Public License for more details.
++
++	You should have received a copy of the GNU General Public License
++	along with this program; if not, write to the Free Software
++	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++*/
++
++#include "mantis_common.h"
++#include "mantis_vp1033.h"
++
++u8 lgtdqcs001f_inittab[] = {
++	0x01, 0x15,
++	0x02, 0x00,
++	0x03, 0x00,
++	0x04, 0x2a,
++	0x05, 0x85,
++	0x06, 0x02,
++	0x07, 0x00,
++	0x08, 0x00,
++	0x0c, 0x01,
++	0x0d, 0x81,
++	0x0e, 0x44,
++	0x0f, 0x94,
++	0x10, 0x3c,
++	0x11, 0x84,
++	0x12, 0xb9,
++	0x13, 0xb5,
++	0x14, 0x4f,
++	0x15, 0xc9,
++	0x16, 0x80,
++	0x17, 0x36,
++	0x18, 0xfb,
++	0x19, 0xcf,
++	0x1a, 0xbc,
++	0x1c, 0x2b,
++	0x1d, 0x27,
++	0x1e, 0x00,
++	0x1f, 0x0b,
++	0x20, 0xa1,
++	0x21, 0x60,
++	0x22, 0x00,
++	0x23, 0x00,
++	0x28, 0x00,
++	0x29, 0x28,
++	0x2a, 0x14,
++	0x2b, 0x0f,
++	0x2c, 0x09,
++	0x2d, 0x05,
++	0x31, 0x1f,
++	0x32, 0x19,
++	0x33, 0xfc,
++	0x34, 0x13,
++	0xff, 0xff,
++};
++
++struct stv0299_config lgtdqcs001f_config = {
++	.demod_address		= 0x68,
++	.inittab		= lgtdqcs001f_inittab,
++	.mclk			= 88000000UL,
++//	.invert = 0,
++	.invert			= 1,
++//	.enhanced_tuning = 0,
++	.skip_reinit		= 0,
++	.lock_output		= STV0229_LOCKOUTPUT_0,
++	.volt13_op0_op1		= STV0299_VOLT13_OP0,
++	.min_delay_ms		= 100,
++	.set_symbol_rate	= lgtdqcs001f_set_symbol_rate,
++//	.pll_set		= lgtdqcs001f_pll_set,
++};
++
++int lgtdqcs001f_tuner_set(struct dvb_frontend *fe,
++			  struct dvb_frontend_parameters *params)
++{
++	u8 buf[4];
++	u32 div;
++
++	struct mantis_pci *mantis = fe->dvb->priv;
++
++	struct i2c_msg msg = {
++		.addr = 0x61,
++		.flags = 0,
++		.buf = buf,
++		.len = sizeof (buf)
++	};
++	div = params->frequency / 250;
++
++	buf[0] = (div >> 8) & 0x7f;
++	buf[1] =  div & 0xff;
++	buf[2] =  0x83;
++	buf[3] =  0xc0;
++
++	if (params->frequency < 1531000)
++		buf[3] |= 0x04;
++	else
++		buf[3] &= ~0x04;
++	if (i2c_transfer(&mantis->adapter, &msg, 1) < 0) {
++		dprintk(verbose, MANTIS_ERROR, 1, "Write: I2C Transfer failed");
++		return -EIO;
++	}
++	msleep_interruptible(100);
++
++	return 0;
++}
++
++int lgtdqcs001f_set_symbol_rate(struct dvb_frontend *fe,
++				u32 srate, u32 ratio)
++{
++	u8 aclk = 0;
++	u8 bclk = 0;
++
++	if (srate < 1500000) {
++		aclk = 0xb7;
++		bclk = 0x47;
++	} else if (srate < 3000000) {
++		aclk = 0xb7;
++		bclk = 0x4b;
++	} else if (srate < 7000000) {
++		aclk = 0xb7;
++		bclk = 0x4f;
++	} else if (srate < 14000000) {
++		aclk = 0xb7;
++		bclk = 0x53;
++	} else if (srate < 30000000) {
++		aclk = 0xb6;
++		bclk = 0x53;
++	} else if (srate < 45000000) {
++		aclk = 0xb4;
++		bclk = 0x51;
++	}
++	stv0299_writereg (fe, 0x13, aclk);
++	stv0299_writereg (fe, 0x14, bclk);
++
++	stv0299_writereg (fe, 0x1f, (ratio >> 16) & 0xff);
++	stv0299_writereg (fe, 0x20, (ratio >>  8) & 0xff);
++	stv0299_writereg (fe, 0x21, (ratio      ) & 0xf0);
++
++	return 0;
++}
+diff --git a/drivers/media/dvb/mantis/mantis_vp1033.h b/drivers/media/dvb/mantis/mantis_vp1033.h
+new file mode 100644
+index 0000000..d50f092
+--- /dev/null
++++ b/drivers/media/dvb/mantis/mantis_vp1033.h
+@@ -0,0 +1,35 @@
++/*
++	Mantis VP-1033 driver
++
++	Copyright (C) 2005, 2006 Manu Abraham (abraham.manu@gmail.com)
++
++	This program is free software; you can redistribute it and/or modify
++	it under the terms of the GNU General Public License as published by
++	the Free Software Foundation; either version 2 of the License, or
++	(at your option) any later version.
++
++	This program is distributed in the hope that it will be useful,
++	but WITHOUT ANY WARRANTY; without even the implied warranty of
++	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++	GNU General Public License for more details.
++
++	You should have received a copy of the GNU General Public License
++	along with this program; if not, write to the Free Software
++	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++*/
++
++#ifndef __MANTIS_VP1033_H
++#define __MANTIS_VP1033_H
++
++#include "stv0299.h"
++#include "dvb_frontend.h"
++
++extern struct stv0299_config lgtdqcs001f_config;
++
++extern int lgtdqcs001f_tuner_set(struct dvb_frontend *fe,
++				 struct dvb_frontend_parameters *params);
++
++extern int lgtdqcs001f_set_symbol_rate(struct dvb_frontend *fe, u32 srate, u32 ratio);
++
++
++#endif // __MANTIS_VP1033_H
+diff --git a/drivers/media/dvb/mantis/mantis_vp1034.c b/drivers/media/dvb/mantis/mantis_vp1034.c
+new file mode 100644
+index 0000000..b85ac29
+--- /dev/null
++++ b/drivers/media/dvb/mantis/mantis_vp1034.c
+@@ -0,0 +1,52 @@
++/*
++	Mantis VP-1034 driver
++
++	Copyright (C) 2005, 2006 Manu Abraham (abraham.manu@gmail.com)
++
++	This program is free software; you can redistribute it and/or modify
++	it under the terms of the GNU General Public License as published by
++	the Free Software Foundation; either version 2 of the License, or
++	(at your option) any later version.
++
++	This program is distributed in the hope that it will be useful,
++	but WITHOUT ANY WARRANTY; without even the implied warranty of
++	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++	GNU General Public License for more details.
++
++	You should have received a copy of the GNU General Public License
++	along with this program; if not, write to the Free Software
++	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++*/
++
++#include "mantis_common.h"
++#include "mantis_vp1034.h"
++
++struct mb86a16_config vp1034_config = {
++	.demod_address	= 0x08,
++	.set_voltage	= vp1034_set_voltage,
++};
++
++int vp1034_set_voltage(struct dvb_frontend *fe, fe_sec_voltage_t voltage)
++{
++	struct mantis_pci *mantis = fe->dvb->priv;
++
++	switch (voltage) {
++	case SEC_VOLTAGE_13:
++		mmwrite((mmread(MANTIS_GPIF_ADDR)) | voltage, MANTIS_GPIF_ADDR);
++		dprintk(verbose, MANTIS_ERROR, 1, "Polarization=[13V]");
++		break;
++	case SEC_VOLTAGE_18:
++		mmwrite((mmread(MANTIS_GPIF_ADDR)) & voltage, MANTIS_GPIF_ADDR);
++		dprintk(verbose, MANTIS_ERROR, 1, "Polarization=[18V]");
++		break;
++	case SEC_VOLTAGE_OFF:
++		dprintk(verbose, MANTIS_ERROR, 1, "Frontend (dummy) POWERDOWN");
++		break;
++	default:
++		dprintk(verbose, MANTIS_ERROR, 1, "Invalid = (%d)", (u32 ) voltage);
++		return -EINVAL;
++	}
++	mmwrite(0x00, MANTIS_GPIF_DOUT);
++
++	return 0;
++}
+diff --git a/drivers/media/dvb/mantis/mantis_vp1034.h b/drivers/media/dvb/mantis/mantis_vp1034.h
+new file mode 100644
+index 0000000..2324dad
+--- /dev/null
++++ b/drivers/media/dvb/mantis/mantis_vp1034.h
+@@ -0,0 +1,30 @@
++/*
++	Mantis VP-1034 driver
++
++	Copyright (C) 2005, 2006 Manu Abraham (abraham.manu@gmail.com)
++
++	This program is free software; you can redistribute it and/or modify
++	it under the terms of the GNU General Public License as published by
++	the Free Software Foundation; either version 2 of the License, or
++	(at your option) any later version.
++
++	This program is distributed in the hope that it will be useful,
++	but WITHOUT ANY WARRANTY; without even the implied warranty of
++	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++	GNU General Public License for more details.
++
++	You should have received a copy of the GNU General Public License
++	along with this program; if not, write to the Free Software
++	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++*/
++
++#ifndef __MANTIS_VP1034_H
++#define __MANTIS_VP1034_H
++
++#include "mb86a16.h"
++#include "dvb_frontend.h"
++
++extern struct mb86a16_config vp1034_config;
++extern int vp1034_set_voltage(struct dvb_frontend *fe, fe_sec_voltage_t voltage);
++
++#endif // __MANTIS_VP1034_H
+diff --git a/drivers/media/dvb/mantis/mantis_vp2033.c b/drivers/media/dvb/mantis/mantis_vp2033.c
+new file mode 100644
+index 0000000..bca9eba
+--- /dev/null
++++ b/drivers/media/dvb/mantis/mantis_vp2033.c
+@@ -0,0 +1,73 @@
++/*
++	Mantis VP-2033 driver
++
++	Copyright (C) 2005, 2006 Manu Abraham (abraham.manu@gmail.com)
++
++	This program is free software; you can redistribute it and/or modify
++	it under the terms of the GNU General Public License as published by
++	the Free Software Foundation; either version 2 of the License, or
++	(at your option) any later version.
++
++	This program is distributed in the hope that it will be useful,
++	but WITHOUT ANY WARRANTY; without even the implied warranty of
++	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++	GNU General Public License for more details.
++
++	You should have received a copy of the GNU General Public License
++	along with this program; if not, write to the Free Software
++	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++*/
++
++#include "mantis_common.h"
++#include "mantis_vp2033.h"
++
++struct tda10021_state {
++	struct i2c_adapter *i2c;
++	struct dvb_frontend_ops ops;
++	/* configuration settings */
++	const struct tda10021_config *config;
++	struct dvb_frontend frontend;
++
++	u8 pwm;
++	u8 reg0;
++};
++
++struct cu1216_config philips_cu1216_config = {
++	.demod_address = 0x18 >> 1,
++	.pll_set = philips_cu1216_tuner_set,
++//	.fe_reset = mantis_fe_reset,
++};
++
++int philips_cu1216_tuner_set(struct dvb_frontend *fe,
++			     struct dvb_frontend_parameters *params)
++{
++//	struct tda10021_state *state = fe->demodulator_priv;
++	struct mantis_pci *mantis = fe->dvb->priv;
++
++	u8 buf[4];
++
++	struct i2c_msg msg = {
++		.addr = 0xc0 >> 1,
++		.flags = 0,
++		.buf = buf,
++		.len = sizeof (buf)
++	};
++
++#define TUNER_MUL 62500
++
++	u32 div = (params->frequency + 36125000 + TUNER_MUL / 2) / TUNER_MUL;
++
++	buf[0] = (div >> 8) & 0x7f;
++	buf[1] = div & 0xff;
++	buf[2] = 0x86;
++	buf[3] = (params->frequency < 150000000 ? 0xA1 :
++		  params->frequency < 445000000 ? 0x92 : 0x34);
++
++//	if (i2c_transfer(state->i2c, &msg, 1) < 0) {
++	if (i2c_transfer(&mantis->adapter, &msg, 1) < 0) {
++		printk("%s tuner not ack!\n", __FUNCTION__);
++		return -EIO;
++	}
++	msleep(100);
++	return 0;
++}
+diff --git a/drivers/media/dvb/mantis/mantis_vp2033.h b/drivers/media/dvb/mantis/mantis_vp2033.h
+new file mode 100644
+index 0000000..29baba1
+--- /dev/null
++++ b/drivers/media/dvb/mantis/mantis_vp2033.h
+@@ -0,0 +1,33 @@
++/*
++	Mantis VP-2033 driver
++
++	Copyright (C) 2005, 2006 Manu Abraham (abraham.manu@gmail.com)
++
++	This program is free software; you can redistribute it and/or modify
++	it under the terms of the GNU General Public License as published by
++	the Free Software Foundation; either version 2 of the License, or
++	(at your option) any later version.
++
++	This program is distributed in the hope that it will be useful,
++	but WITHOUT ANY WARRANTY; without even the implied warranty of
++	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++	GNU General Public License for more details.
++
++	You should have received a copy of the GNU General Public License
++	along with this program; if not, write to the Free Software
++	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++*/
++
++#ifndef __MANTIS_VP2033_H
++#define __MANTIS_VP2033_H
++
++#include "cu1216.h"
++#include "dvb_frontend.h"
++
++extern struct cu1216_config philips_cu1216_config;
++
++extern int philips_cu1216_tuner_set(struct dvb_frontend *fe,
++				    struct dvb_frontend_parameters *params);
++
++
++#endif // __MANTIS_VP2033_H
+diff --git a/drivers/media/dvb/mantis/mantis_vp3030.c b/drivers/media/dvb/mantis/mantis_vp3030.c
+new file mode 100644
+index 0000000..f44f226
+--- /dev/null
++++ b/drivers/media/dvb/mantis/mantis_vp3030.c
+@@ -0,0 +1,53 @@
++/*
++	Mantis VP-3030 driver
++
++	Copyright (C) 2005, 2006 Manu Abraham (abraham.manu@gmail.com)
++
++	This program is free software; you can redistribute it and/or modify
++	it under the terms of the GNU General Public License as published by
++	the Free Software Foundation; either version 2 of the License, or
++	(at your option) any later version.
++
++	This program is distributed in the hope that it will be useful,
++	but WITHOUT ANY WARRANTY; without even the implied warranty of
++	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++	GNU General Public License for more details.
++
++	You should have received a copy of the GNU General Public License
++	along with this program; if not, write to the Free Software
++	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++*/
++
++#include "mantis_common.h"
++#include "mantis_vp3030.h"
++
++struct zl10353_config mantis_vp3030_config = {
++	.demod_address = 0x0f,
++};
++
++int panasonic_en57h12d5_set_params(struct dvb_frontend *fe,
++				   struct dvb_frontend_parameters *params)
++{
++	u8 buf[4];
++	int rc;
++	struct mantis_pci *mantis = fe->dvb->priv;
++
++	struct i2c_msg tuner_msg = {
++		.addr = 0x60,
++		.flags = 0,
++		.buf = buf,
++		.len = sizeof (buf)
++	};
++
++	if ((params->frequency < 950000) || (params->frequency > 2150000))
++		return -EINVAL;
++	rc = i2c_transfer(&mantis->adapter, &tuner_msg, 1);
++	if (rc != 1) {
++		printk("%s: I2C Transfer returned [%d]\n", __func__, rc);
++		return -EIO;
++	}
++	msleep_interruptible(1);
++	printk("%s: Send params to tuner ok!!!\n", __func__);
++
++	return 0;
++}
+diff --git a/drivers/media/dvb/mantis/mantis_vp3030.h b/drivers/media/dvb/mantis/mantis_vp3030.h
+new file mode 100644
+index 0000000..f8e72cc
+--- /dev/null
++++ b/drivers/media/dvb/mantis/mantis_vp3030.h
+@@ -0,0 +1,30 @@
++/*
++	Mantis VP-3030 driver
++
++	Copyright (C) 2005, 2006 Manu Abraham (abraham.manu@gmail.com)
++
++	This program is free software; you can redistribute it and/or modify
++	it under the terms of the GNU General Public License as published by
++	the Free Software Foundation; either version 2 of the License, or
++	(at your option) any later version.
++
++	This program is distributed in the hope that it will be useful,
++	but WITHOUT ANY WARRANTY; without even the implied warranty of
++	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++	GNU General Public License for more details.
++
++	You should have received a copy of the GNU General Public License
++	along with this program; if not, write to the Free Software
++	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++*/
++
++#ifndef __MANTIS_VP3030_H
++#define __MANTIS_VP3030_H
++
++#include "zl10353.h"
++#include "dvb-pll.h"
++#include "dvb_frontend.h"
++
++extern struct zl10353_config mantis_vp3030_config;
++
++#endif // __MANTIS_VP3030_H
+-- 
+1.7.1
+

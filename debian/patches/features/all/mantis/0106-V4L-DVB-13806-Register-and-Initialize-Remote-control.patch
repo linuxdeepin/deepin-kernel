@@ -1,0 +1,366 @@
+From d39695d4641b444297e375989ffb2e07f0b810bb Mon Sep 17 00:00:00 2001
+From: Manu Abraham <abraham.manu@gmail.com>
+Date: Fri, 11 Dec 2009 20:41:07 -0300
+Subject: [PATCH 106/120] V4L/DVB (13806): Register and Initialize Remote control
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Manu Abraham <manu@linuxtv.org>
+Signed-off-by: Mauro Carvalho Chehab <mchehab@redhat.com>
+(cherry picked from commit a1497357dce240880d984f4b657b54245f739dbc)
+
+Signed-off-by: Bjørn Mork <bjorn@mork.no>
+---
+ drivers/media/dvb/mantis/Makefile        |    3 +-
+ drivers/media/dvb/mantis/mantis_cards.c  |   14 +++
+ drivers/media/dvb/mantis/mantis_common.h |    2 +
+ drivers/media/dvb/mantis/mantis_input.c  |  147 ++++++++++++++++++++++++++++++
+ drivers/media/dvb/mantis/mantis_uart.c   |   55 +++++++++---
+ drivers/media/dvb/mantis/mantis_uart.h   |    3 +-
+ 6 files changed, 209 insertions(+), 15 deletions(-)
+ create mode 100644 drivers/media/dvb/mantis/mantis_input.c
+
+diff --git a/drivers/media/dvb/mantis/Makefile b/drivers/media/dvb/mantis/Makefile
+index 399c901..98dc5cd 100644
+--- a/drivers/media/dvb/mantis/Makefile
++++ b/drivers/media/dvb/mantis/Makefile
+@@ -7,7 +7,8 @@ mantis_core-objs :=	mantis_ioc.o	\
+ 			mantis_evm.o	\
+ 			mantis_hif.o	\
+ 			mantis_ca.o	\
+-			mantis_pcmcia.o
++			mantis_pcmcia.o	\
++			mantis_input.o
+ 
+ mantis-objs	:=	mantis_cards.o	\
+ 			mantis_vp1033.o	\
+diff --git a/drivers/media/dvb/mantis/mantis_cards.c b/drivers/media/dvb/mantis/mantis_cards.c
+index 0b52f99..f3fefbb 100644
+--- a/drivers/media/dvb/mantis/mantis_cards.c
++++ b/drivers/media/dvb/mantis/mantis_cards.c
+@@ -194,9 +194,21 @@ static int __devinit mantis_pci_probe(struct pci_dev *pdev, const struct pci_dev
+ 		dprintk(MANTIS_ERROR, 1, "ERROR: Mantis DVB initialization failed <%d>", err);
+ 		goto fail4;
+ 	}
++	err = mantis_uart_init(mantis);
++	if (err < 0) {
++		dprintk(MANTIS_ERROR, 1, "ERROR: Mantis UART initialization failed <%d>", err);
++		goto fail6;
++	}
++
+ 	devs++;
+ 
+ 	return err;
++
++
++	dprintk(MANTIS_ERROR, 1, "ERROR: Mantis UART exit! <%d>", err);
++	mantis_uart_exit(mantis);
++
++fail6:
+ fail4:
+ 	dprintk(MANTIS_ERROR, 1, "ERROR: Mantis DMA exit! <%d>", err);
+ 	mantis_dma_exit(mantis);
+@@ -222,6 +234,8 @@ static void __devexit mantis_pci_remove(struct pci_dev *pdev)
+ 	struct mantis_pci *mantis = pci_get_drvdata(pdev);
+ 
+ 	if (mantis) {
++
++		mantis_uart_exit(mantis);
+ 		mantis_dvb_exit(mantis);
+ 		mantis_dma_exit(mantis);
+ 		mantis_i2c_exit(mantis);
+diff --git a/drivers/media/dvb/mantis/mantis_common.h b/drivers/media/dvb/mantis/mantis_common.h
+index 6ae3aab..c2d0854 100644
+--- a/drivers/media/dvb/mantis/mantis_common.h
++++ b/drivers/media/dvb/mantis/mantis_common.h
+@@ -170,6 +170,8 @@ struct mantis_pci {
+ 	wait_queue_head_t	uart_wq;
+ 	struct work_struct	uart_work;
+ 	spinlock_t		uart_lock;
++
++	struct input_dev	*rc;
+ };
+ 
+ #define MANTIS_HIF_STATUS	(mantis->gpio_status)
+diff --git a/drivers/media/dvb/mantis/mantis_input.c b/drivers/media/dvb/mantis/mantis_input.c
+new file mode 100644
+index 0000000..9395fcf
+--- /dev/null
++++ b/drivers/media/dvb/mantis/mantis_input.c
+@@ -0,0 +1,147 @@
++/*
++	Mantis PCI bridge driver
++
++	Copyright (C) Manu Abraham (abraham.manu@gmail.com)
++
++	This program is free software; you can redistribute it and/or modify
++	it under the terms of the GNU General Public License as published by
++	the Free Software Foundation; either version 2 of the License, or
++	(at your option) any later version.
++
++	This program is distributed in the hope that it will be useful,
++	but WITHOUT ANY WARRANTY; without even the implied warranty of
++	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++	GNU General Public License for more details.
++
++	You should have received a copy of the GNU General Public License
++	along with this program; if not, write to the Free Software
++	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++*/
++
++#include <linux/input.h>
++#include <media/ir-common.h>
++#include <linux/pci.h>
++
++#include "dmxdev.h"
++#include "dvbdev.h"
++#include "dvb_demux.h"
++#include "dvb_frontend.h"
++#include "dvb_net.h"
++
++#include "mantis_common.h"
++#include "mantis_reg.h"
++#include "mantis_uart.h"
++
++static struct ir_scancode mantis_ir_table[] = {
++	{ 0x29, KEY_POWER	},
++	{ 0x28, KEY_FAVORITES	},
++	{ 0x30, KEY_TEXT	},
++	{ 0x17, KEY_INFO	}, // Preview
++	{ 0x23, KEY_EPG		},
++	{ 0x3b, KEY_F22		},// Record List
++	{ 0x3c, KEY_1		},
++	{ 0x3e, KEY_2		},
++	{ 0x39, KEY_3		},
++	{ 0x36, KEY_4		},
++	{ 0x22, KEY_5		},
++	{ 0x20, KEY_6		},
++	{ 0x32, KEY_7		},
++	{ 0x26, KEY_8		},
++	{ 0x24, KEY_9		},
++	{ 0x2a, KEY_0		},
++
++	{ 0x33, KEY_CANCEL	},
++	{ 0x2c, KEY_BACK	},
++	{ 0x15, KEY_CLEAR	},
++	{ 0x3f, KEY_TAB		},
++	{ 0x10, KEY_ENTER	},
++	{ 0x14, KEY_UP		},
++	{ 0x0d, KEY_RIGHT	},
++	{ 0x0e, KEY_DOWN	},
++	{ 0x11, KEY_LEFT	},
++
++	{ 0x21, KEY_VOLUMEUP	},
++	{ 0x35, KEY_VOLUMEDOWN	},
++	{ 0x3d, KEY_CHANNELDOWN	},
++	{ 0x3a, KEY_CHANNELUP	},
++	{ 0x2e, KEY_RECORD	},
++	{ 0x2b, KEY_PLAY	},
++	{ 0x13, KEY_PAUSE	},
++	{ 0x25, KEY_STOP	},
++
++	{ 0x1f, KEY_REWIND	},
++	{ 0x2d, KEY_FASTFORWARD	},
++	{ 0x1e, KEY_PREVIOUS	}, // Replay |<
++	{ 0x1d, KEY_NEXT	}, // Skip   >|
++
++	{ 0x0b, KEY_CAMERA	}, // Capture
++	{ 0x0f, KEY_LANGUAGE	}, // SAP
++	{ 0x18, KEY_MODE	}, // PIP
++	{ 0x12, KEY_ZOOM	}, // Full screen,
++	{ 0x1c, KEY_SUBTITLE	},
++	{ 0x2f, KEY_MUTE	},
++	{ 0x16, KEY_F20		}, // L/R,
++	{ 0x38, KEY_F21		}, // Hibernate,
++
++	{ 0x37, KEY_SWITCHVIDEOMODE }, // A/V
++	{ 0x31, KEY_AGAIN	}, // Recall,
++	{ 0x1a, KEY_KPPLUS	}, // Zoom+,
++	{ 0x19, KEY_KPMINUS	}, // Zoom-,
++	{ 0x27, KEY_RED		},
++	{ 0x0C, KEY_GREEN	},
++	{ 0x01, KEY_YELLOW	},
++	{ 0x00, KEY_BLUE	},
++};
++
++struct ir_scancode_table ir_mantis = {
++	.scan = mantis_ir_table,
++	.size = ARRAY_SIZE(mantis_ir_table),
++};
++EXPORT_SYMBOL_GPL(ir_mantis);
++
++int mantis_input_init(struct mantis_pci *mantis)
++{
++	struct input_dev *rc;
++	struct ir_input_state rc_state;
++	char name[80], dev[80];
++	int err;
++
++	rc = input_allocate_device();
++	if (!rc) {
++		dprintk(MANTIS_ERROR, 1, "Input device allocate failed");
++		return -ENOMEM;
++	}
++
++	sprintf(name, "Mantis %s IR receiver", mantis->hwconfig->model_name);
++	sprintf(dev, "pci-%s/ir0", pci_name(mantis->pdev));
++
++	rc->name = name;
++	rc->phys = dev;
++
++	ir_input_init(rc, &rc_state, IR_TYPE_OTHER, &ir_mantis);
++
++	rc->id.bustype	= BUS_PCI;
++	rc->id.vendor	= mantis->vendor_id;
++	rc->id.product	= mantis->device_id;
++	rc->id.version	= 1;
++	rc->dev		= mantis->pdev->dev;
++
++	err = input_register_device(rc);
++	if (err) {
++		dprintk(MANTIS_ERROR, 1, "IR device registration failed, ret = %d", err);
++		return -ENODEV;
++	}
++
++	mantis->rc = rc;
++
++	return 0;
++}
++
++int mantis_exit(struct mantis_pci *mantis)
++{
++	struct input_dev *rc = mantis->rc;
++
++	input_unregister_device(rc);
++
++	return 0;
++}
+diff --git a/drivers/media/dvb/mantis/mantis_uart.c b/drivers/media/dvb/mantis/mantis_uart.c
+index 03b47cf..7d2f239 100644
+--- a/drivers/media/dvb/mantis/mantis_uart.c
++++ b/drivers/media/dvb/mantis/mantis_uart.c
+@@ -1,7 +1,26 @@
++/*
++	Mantis PCI bridge driver
++
++	Copyright (C) Manu Abraham (abraham.manu@gmail.com)
++
++	This program is free software; you can redistribute it and/or modify
++	it under the terms of the GNU General Public License as published by
++	the Free Software Foundation; either version 2 of the License, or
++	(at your option) any later version.
++
++	This program is distributed in the hope that it will be useful,
++	but WITHOUT ANY WARRANTY; without even the implied warranty of
++	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++	GNU General Public License for more details.
++
++	You should have received a copy of the GNU General Public License
++	along with this program; if not, write to the Free Software
++	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++*/
++
+ #include <linux/kernel.h>
+ #include <linux/spinlock.h>
+ 
+-#include <asm/irq.h>
+ #include <linux/signal.h>
+ #include <linux/sched.h>
+ #include <linux/interrupt.h>
+@@ -21,6 +40,24 @@ struct mantis_uart_params {
+ 	enum mantis_parity	parity;
+ };
+ 
++static struct {
++	char string[7];
++} rates[5] = {
++	{ "9600" },
++	{ "19200" },
++	{ "38400" },
++	{ "57600" },
++	{ "115200" }
++};
++
++static struct {
++	char string[5];
++} parity[3] = {
++	{ "NONE" },
++	{ "ODD" },
++	{ "EVEN" }
++};
++
+ #define UART_MAX_BUF			16
+ 
+ int mantis_uart_read(struct mantis_pci *mantis, u8 *data)
+@@ -60,12 +97,10 @@ static void mantis_uart_work(struct work_struct *work)
+ 	u8 buf[16];
+ 	int i;
+ 
+-	dprintk(MANTIS_DEBUG, 1, "UART read");
+ 	mantis_uart_read(mantis, buf);
+ 
+-	dprintk(MANTIS_DEBUG, 1, "UART: ");
+ 	for (i = 0; i < (config->bytes + 1); i++)
+-		dprintk(MANTIS_DEBUG, 0, "<%02x> ", buf[i]);
++		dprintk(MANTIS_INFO, 1, "UART BUF:%d <%02x> ", i, buf[i]);
+ 
+ 	dprintk(MANTIS_DEBUG, 0, "\n");
+ }
+@@ -73,15 +108,8 @@ static void mantis_uart_work(struct work_struct *work)
+ static int mantis_uart_setup(struct mantis_pci *mantis,
+ 			     struct mantis_uart_params *params)
+ {
+-	char* rates[] = { "B_9600", "B_19200", "B_38400", "B_57600", "B_115200" };
+-	char* parity[] = { "NONE", "ODD", "EVEN" };
+-
+ 	u32 reg;
+ 
+-	dprintk(MANTIS_DEBUG, 1, "Set Parity <%s> Baud Rate <%s>",
+-		parity[params->parity],
+-		rates[params->baud_rate]);
+-
+ 	mmwrite((mmread(MANTIS_UART_CTL) | (params->parity & 0x3)), MANTIS_UART_CTL);
+ 
+ 	reg = mmread(MANTIS_UART_BAUD);
+@@ -116,10 +144,12 @@ int mantis_uart_init(struct mantis_pci *mantis)
+ 	struct mantis_hwconfig *config = mantis->hwconfig;
+ 	struct mantis_uart_params params;
+ 
+-	dprintk(MANTIS_DEBUG, 1, "Initializing UART ..");
+ 	/* default parity: */
+ 	params.baud_rate = config->baud_rate;
+ 	params.parity = config->parity;
++	dprintk(MANTIS_INFO, 1, "Initializing UART @ %sbps parity:%s",
++		rates[params.baud_rate].string,
++		parity[params.parity].string);
+ 
+ 	init_waitqueue_head(&mantis->uart_wq);
+ 	spin_lock_init(&mantis->uart_lock);
+@@ -142,6 +172,7 @@ int mantis_uart_init(struct mantis_pci *mantis)
+ 	mmwrite(mmread(MANTIS_UART_CTL) | MANTIS_UART_RXINT, MANTIS_UART_CTL);
+ 
+ 	schedule_work(&mantis->uart_work);
++	dprintk(MANTIS_DEBUG, 1, "UART succesfully initialized");
+ 
+ 	return 0;
+ }
+diff --git a/drivers/media/dvb/mantis/mantis_uart.h b/drivers/media/dvb/mantis/mantis_uart.h
+index 0a42cd0..62ab66e 100644
+--- a/drivers/media/dvb/mantis/mantis_uart.h
++++ b/drivers/media/dvb/mantis/mantis_uart.h
+@@ -45,10 +45,9 @@ enum mantis_baud {
+ };
+ 
+ enum mantis_parity {
+-	MANTIS_PARITY_UNDEFINED	= 0,
++	MANTIS_PARITY_NONE	= 0,
+ 	MANTIS_PARITY_EVEN,
+ 	MANTIS_PARITY_ODD,
+-	MANTIS_PARITY_NONE
+ };
+ 
+ struct mantis_pci;
+-- 
+1.7.1
+

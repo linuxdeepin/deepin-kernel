@@ -1,0 +1,283 @@
+From 158ceffb222e98f0547309d0722fd69e2a5ed4a8 Mon Sep 17 00:00:00 2001
+From: Manu Abraham <abraham.manu@gmail.com>
+Date: Fri, 4 Dec 2009 05:09:47 -0300
+Subject: [PATCH 043/120] V4L/DVB (13741): [Mantis] Implement HIF Mem Read/Write operations
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Manu Abraham <manu@linuxtv.org>
+Signed-off-by: Mauro Carvalho Chehab <mchehab@redhat.com>
+(cherry picked from commit d8b14f8a76d71c84622a211f57baf15f61cc9703)
+
+Signed-off-by: Bjørn Mork <bjorn@mork.no>
+---
+ drivers/media/dvb/mantis/Makefile      |    1 +
+ drivers/media/dvb/mantis/mantis_dma.c  |    4 +-
+ drivers/media/dvb/mantis/mantis_evm.c  |    3 +-
+ drivers/media/dvb/mantis/mantis_hif.c  |  139 ++++++++++++++++++++++++++++++++
+ drivers/media/dvb/mantis/mantis_link.h |   10 ++-
+ drivers/media/dvb/mantis/mantis_reg.h  |    8 +-
+ 6 files changed, 157 insertions(+), 8 deletions(-)
+ create mode 100644 drivers/media/dvb/mantis/mantis_hif.c
+
+diff --git a/drivers/media/dvb/mantis/Makefile b/drivers/media/dvb/mantis/Makefile
+index c4da0d8..d002ef9 100644
+--- a/drivers/media/dvb/mantis/Makefile
++++ b/drivers/media/dvb/mantis/Makefile
+@@ -4,6 +4,7 @@ mantis-objs = 	mantis_core.o	\
+ 		mantis_i2c.o	\
+ 		mantis_dvb.o	\
+ 		mantis_evm.o	\
++		mantis_hif.o	\
+ 		mantis_ca.o	\
+ 		mantis_pcmcia.o	\
+ 		mantis_vp1033.o	\
+diff --git a/drivers/media/dvb/mantis/mantis_dma.c b/drivers/media/dvb/mantis/mantis_dma.c
+index f685992..250f49a 100644
+--- a/drivers/media/dvb/mantis/mantis_dma.c
++++ b/drivers/media/dvb/mantis/mantis_dma.c
+@@ -190,7 +190,7 @@ void mantis_dma_start(struct mantis_pci *mantis)
+ 
+ 	mantis_risc_program(mantis);
+ 	mmwrite(mantis->risc_dma, MANTIS_RISC_START);
+-	mmwrite(mmread(MANTIS_GPIF_ADDR) | MANTIS_GPIF_RDWRN, MANTIS_GPIF_ADDR);
++	mmwrite(mmread(MANTIS_GPIF_HIFADDR) | MANTIS_GPIF_HIFRDWRN, MANTIS_GPIF_HIFADDR);
+ 
+ 	mmwrite(0, MANTIS_DMA_CTL);
+ 	mantis->last_block = mantis->finished_block = 0;
+@@ -210,7 +210,7 @@ void mantis_dma_stop(struct mantis_pci *mantis)
+ 	mask = mmread(MANTIS_INT_MASK);
+ 	dprintk(verbose, MANTIS_DEBUG, 1, "Mantis Stop DMA engine");
+ 
+-	mmwrite((mmread(MANTIS_GPIF_ADDR) & (~(MANTIS_GPIF_RDWRN))), MANTIS_GPIF_ADDR);
++	mmwrite((mmread(MANTIS_GPIF_HIFADDR) & (~(MANTIS_GPIF_HIFRDWRN))), MANTIS_GPIF_HIFADDR);
+ 
+ 	mmwrite((mmread(MANTIS_DMA_CTL) & ~(MANTIS_FIFO_EN |
+ 					    MANTIS_DCAP_EN |
+diff --git a/drivers/media/dvb/mantis/mantis_evm.c b/drivers/media/dvb/mantis/mantis_evm.c
+index 7451483..dbcdca3 100644
+--- a/drivers/media/dvb/mantis/mantis_evm.c
++++ b/drivers/media/dvb/mantis/mantis_evm.c
+@@ -92,7 +92,7 @@ int mantis_evmgr_init(struct mantis_ca *ca)
+ 	INIT_WORK(&ca->hif_evm_work, mantis_hifevm_work);
+ 	mantis_pcmcia_init(ca);
+ 	schedule_work(&ca->hif_evm_work);
+-
++	mantis_hif_init(ca);
+ 	return 0;
+ }
+ 
+@@ -102,5 +102,6 @@ void mantis_evmgr_exit(struct mantis_ca *ca)
+ 
+ 	dprintk(verbose, MANTIS_DEBUG, 1, "Mantis Host I/F Event manager exiting");
+ 	flush_scheduled_work();
++	mantis_hif_exit(ca);
+ 	mantis_pcmcia_exit(ca);
+ }
+diff --git a/drivers/media/dvb/mantis/mantis_hif.c b/drivers/media/dvb/mantis/mantis_hif.c
+new file mode 100644
+index 0000000..1472008
+--- /dev/null
++++ b/drivers/media/dvb/mantis/mantis_hif.c
+@@ -0,0 +1,139 @@
++/*
++	Mantis PCI bridge driver
++
++	Copyright (C) 2005, 2006 Manu Abraham (abraham.manu@gmail.com)
++
++	This program is free software; you can redistribute it and/or modify
++	it under the terms of the GNU General Public License as published by
++	the Free Software Foundation; either version 2 of the License, or
++	(at your option) any later version.
++
++	This program is distributed in the hope that it will be useful,
++	but WITHOUT ANY WARRANTY; without even the implied warranty of
++	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++	GNU General Public License for more details.
++
++	You should have received a copy of the GNU General Public License
++	along with this program; if not, write to the Free Software
++	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++*/
++
++#include "mantis_common.h"
++#include "mantis_hif.h"
++#include "mantis_link.h" /* temporary due to physical layer stuff */
++
++static int mantis_hif_data_available(struct mantis_ca *ca)
++{
++	struct mantis_pci *mantis = ca->ca_priv;
++	int rc = 0;
++
++	if (wait_event_interruptible_timeout(ca->hif_data_wq,
++					     ca->sbuf_status & MANTIS_SBUF_DATA_AVAIL,
++					     msecs_to_jiffies(500)) == -ERESTARTSYS) {
++
++		dprintk(verbose, MANTIS_ERROR, 1, "Adapter(%d) Slot(0): HIF Read wait event timeout !", mantis->num);
++		rc = -EREMOTEIO;
++	}
++	ca->sbuf_status &= ~MANTIS_SBUF_DATA_AVAIL;
++	udelay(2);
++	return rc;
++}
++
++static int mantis_hif_sbuf_opdone_wait(struct mantis_ca *ca)
++{
++	struct mantis_pci *mantis = ca->ca_priv;
++	int rc = 0;
++
++	if (wait_event_interruptible_timeout(ca->hif_opdone_wq,
++					     ca->hif_event & MANTIS_SBUF_OPDONE,
++					     msecs_to_jiffies(500)) == -ERESTARTSYS) {
++
++		dprintk(verbose, MANTIS_ERROR, 1, "Adapter(%d) Slot(0): Smart buffer operation timeout !", mantis->num);
++		rc = -EREMOTEIO;
++	}
++	ca->hif_event &= ~MANTIS_SBUF_OPDONE;
++	udelay(5);
++	return rc;
++}
++
++int mantis_hif_read_mem(struct mantis_ca *ca, u32 addr)
++{
++	struct mantis_pci *mantis = ca->ca_priv;
++	u32 hif_addr = 0, data, count = 4;
++
++	hif_addr |=  MANTIS_GPIF_HIFRDWRN;
++	hif_addr &= ~MANTIS_GPIF_PCMCIAREG;
++	hif_addr &= ~MANTIS_GPIF_PCMCIAIOM;
++	hif_addr |=  addr;
++
++	mmwrite(hif_addr, MANTIS_GPIF_BRADDR);
++	mmwrite(count, MANTIS_GPIF_BRBYTES);
++
++	udelay(20);
++
++	mmwrite(hif_addr, MANTIS_GPIF_HIFADDR);
++	if (mantis_hif_data_available(ca) != 0) {
++		dprintk(verbose, MANTIS_ERROR, 1, "Adapter(%d) Slot(0): GPIF Smart Buffer burst read failed", mantis->num);
++		return -EREMOTEIO;
++	}
++	if (mantis_hif_sbuf_opdone_wait(ca) != 0) {
++		dprintk(verbose, MANTIS_ERROR, 1, "Adapter(%d) Slot(0): GPIF Smart Buffer operation failed", mantis->num);
++		return -EREMOTEIO;
++	}
++	data = mmread(MANTIS_GPIF_HIFDIN);
++
++	return (data >> 24) & 0xff;
++}
++
++int mantis_hif_write_mem(struct mantis_ca *ca, u32 addr, u8 data)
++{
++	struct mantis_slot *slot = ca->slot;
++	struct mantis_pci *mantis = ca->ca_priv;
++	u32 hif_addr = 0;
++
++	hif_addr &= ~MANTIS_GPIF_HIFRDWRN;
++	hif_addr &= ~MANTIS_GPIF_PCMCIAREG;
++	hif_addr &= ~MANTIS_GPIF_PCMCIAIOM;
++	hif_addr |= addr;
++
++	mmwrite(slot->slave_cfg, MANTIS_GPIF_CFGSLA); /* Slot0 alone for now */
++
++	mmwrite(hif_addr, MANTIS_GPIF_HIFADDR);
++	mmwrite(data, MANTIS_GPIF_HIFDOUT);
++	ca->hif_job_queue = MANTIS_HIF_MEMWR;
++
++	if (mantis_hif_sbuf_opdone_wait(ca) != 0) {
++		ca->hif_job_queue &= ~MANTIS_HIF_MEMWR;
++		dprintk(verbose, MANTIS_ERROR, 1, "Adapter(%d) Slot(0): HIF Smart Buffer operation failed", mantis->num);
++		return -EREMOTEIO;
++	}
++	ca->hif_job_queue &= ~MANTIS_HIF_MEMWR;
++	return 0;
++}
++
++int mantis_hif_init(struct mantis_ca *ca)
++{
++	struct mantis_pci *mantis = ca->ca_priv;
++	u32 irqcfg;
++
++	dprintk(verbose, MANTIS_ERROR, 1, "Adapter(%d) Initializing Mantis Host Interface", mantis->num);
++	init_waitqueue_head(&ca->hif_data_wq);
++	init_waitqueue_head(&ca->hif_opdone_wq);
++
++	irqcfg  = mmread(MANTIS_GPIF_IRQCFG);
++	irqcfg |= MANTIS_MASK_BRRDY;
++	mmwrite(irqcfg, MANTIS_GPIF_IRQCFG);
++
++	return 0;
++}
++
++void mantis_hif_exit(struct mantis_ca *ca)
++{
++	struct mantis_pci *mantis = ca->ca_priv;
++	u32 irqcfg;
++
++	dprintk(verbose, MANTIS_ERROR, 1, "Adapter(%d) Exiting Mantis Host Interface", mantis->num);
++	irqcfg = mmread(MANTIS_GPIF_IRQCFG);
++	irqcfg &= ~MANTIS_MASK_BRRDY;
++	mmwrite(irqcfg, MANTIS_GPIF_IRQCFG);
++}
+diff --git a/drivers/media/dvb/mantis/mantis_link.h b/drivers/media/dvb/mantis/mantis_link.h
+index 33b39b7..8862502 100644
+--- a/drivers/media/dvb/mantis/mantis_link.h
++++ b/drivers/media/dvb/mantis/mantis_link.h
+@@ -31,6 +31,8 @@ enum mantis_sbuf_status {
+ 
+ struct mantis_slot {
+ 	u32				timeout;
++	u32				slave_cfg;
++	u32				bar;
+ };
+ 
+ /* Physical layer */
+@@ -40,7 +42,7 @@ enum mantis_slot_state {
+ };
+ 
+ struct mantis_ca {
+-	struct mantis_slot		slot;
++	struct mantis_slot		slot[4];
+ 
+ 	struct work_struct		hif_evm_work;
+ 
+@@ -66,4 +68,10 @@ extern void mantis_pcmcia_exit(struct mantis_ca *ca);
+ extern int mantis_evmgr_init(struct mantis_ca *ca);
+ extern void mantis_evmgr_exit(struct mantis_ca *ca);
+ 
++/* HIF */
++extern int mantis_hif_init(struct mantis_ca *ca);
++extern void mantis_hif_exit(struct mantis_ca *ca);
++extern int mantis_hif_read_mem(struct mantis_ca *ca, u32 addr);
++extern int mantis_hif_write_mem(struct mantis_ca *ca, u32 addr, u8 data);
++
+ #endif // __MANTIS_LINK_H
+diff --git a/drivers/media/dvb/mantis/mantis_reg.h b/drivers/media/dvb/mantis/mantis_reg.h
+index d9862b7..6f5cd49 100644
+--- a/drivers/media/dvb/mantis/mantis_reg.h
++++ b/drivers/media/dvb/mantis/mantis_reg.h
+@@ -147,16 +147,16 @@
+ #define MANTIS_CARD_RESET		0xac
+ 
+ #define MANTIS_GPIF_ADDR		0xb0
+-#define MANTIS_GPIF_RDWRN		(0x01		<< 31)
++#define MANTIS_GPIF_HIFRDWRN		(0x01		<< 31)
+ #define MANTIS_GPIF_PCMCIAREG		(0x01		<< 27)
+ #define MANTIS_GPIF_PCMCIAIOM		(0x01		<< 26)
+-#define MANTIS_GPIF_HIF_ADDR		(0xfffffff	<<  0)
++#define MANTIS_GPIF_HIFADDR		(0xfffffff	<<  0)
+ 
+ #define MANTIS_GPIF_DOUT		0xb4
+-#define MANTIS_GPIF_HIF_DOUT		(0xfffffff	<<  0)
++#define MANTIS_GPIF_HIFDOUT		(0xfffffff	<<  0)
+ 
+ #define MANTIS_GPIF_DIN			0xb8
+-#define MANTIS_GPIF_HIF_DIN		(0xfffffff	<<  0)
++#define MANTIS_GPIF_HIFDIN		(0xfffffff	<<  0)
+ 
+ #define MANTIS_GPIF_SPARE		0xbc
+ #define MANTIS_GPIF_LOGICRD		(0xffff		<< 16)
+-- 
+1.7.1
+

@@ -1,0 +1,902 @@
+From 5cda8f1fd8c3f76a70ce98448e17fa738e15a63c Mon Sep 17 00:00:00 2001
+From: Manu Abraham <abraham.manu@gmail.com>
+Date: Fri, 4 Dec 2009 05:56:35 -0300
+Subject: [PATCH 097/120] V4L/DVB (13797): [Mantis/Hopper/TDA665x] Large overhaul,
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+* Initial go at VP-3028, VP-3030 devices.
+* I2C communication improvements,
+* Add TDA665x support
+
+Signed-off-by: Manu Abraham <manu@linuxtv.org>
+Signed-off-by: Mauro Carvalho Chehab <mchehab@redhat.com>
+(cherry picked with minor conflict from commit 3e978a8284080d801d20cda377d9cf7c12fe68b9)
+
+Signed-off-by: Bjørn Mork <bjorn@mork.no>
+---
+ drivers/media/dvb/frontends/Kconfig      |   11 ++
+ drivers/media/dvb/frontends/Makefile     |    1 +
+ drivers/media/dvb/frontends/tda665x.c    |  257 ++++++++++++++++++++++++++++++
+ drivers/media/dvb/frontends/tda665x.h    |   52 ++++++
+ drivers/media/dvb/mantis/hopper_cards.c  |    1 -
+ drivers/media/dvb/mantis/mantis_cards.c  |   11 +-
+ drivers/media/dvb/mantis/mantis_dma.c    |    3 +-
+ drivers/media/dvb/mantis/mantis_dvb.c    |   22 ++-
+ drivers/media/dvb/mantis/mantis_i2c.c    |  141 +++++++++++------
+ drivers/media/dvb/mantis/mantis_i2c.h    |    3 +
+ drivers/media/dvb/mantis/mantis_ioc.c    |   42 ++----
+ drivers/media/dvb/mantis/mantis_vp3030.c |   52 +++---
+ 12 files changed, 479 insertions(+), 117 deletions(-)
+ create mode 100644 drivers/media/dvb/frontends/tda665x.c
+ create mode 100644 drivers/media/dvb/frontends/tda665x.h
+
+diff --git a/drivers/media/dvb/frontends/Kconfig b/drivers/media/dvb/frontends/Kconfig
+index d7c4837..5a1d66c 100644
+--- a/drivers/media/dvb/frontends/Kconfig
++++ b/drivers/media/dvb/frontends/Kconfig
+@@ -557,6 +557,17 @@ config DVB_LGS8GXX
+ 	help
+ 	  A DMB-TH tuner module. Say Y when you want to support this frontend.
+ 
++config DVB_TDA665x
++	tristate "TDA665x tuner"
++	depends on DVB_CORE && I2C
++	default m if DVB_FE_CUSTOMISE
++	help
++	  Support for tuner modules based on Philips TDA6650/TDA6651 chips.
++	  Say Y when you want to support this chip.
++
++	  Currently supported tuners:
++	  * Panasonic ENV57H12D5 (ET-50DT)
++
+ comment "Tools to develop new frontends"
+ 
+ config DVB_DUMMY_FE
+diff --git a/drivers/media/dvb/frontends/Makefile b/drivers/media/dvb/frontends/Makefile
+index 3523767..af944a8 100644
+--- a/drivers/media/dvb/frontends/Makefile
++++ b/drivers/media/dvb/frontends/Makefile
+@@ -63,6 +63,7 @@ obj-$(CONFIG_DVB_TDA10048) += tda10048.o
+ obj-$(CONFIG_DVB_TUNER_CX24113) += cx24113.o
+ obj-$(CONFIG_DVB_S5H1411) += s5h1411.o
+ obj-$(CONFIG_DVB_LGS8GL5) += lgs8gl5.o
++obj-$(CONFIG_DVB_TDA665x) += tda665x.o
+ obj-$(CONFIG_DVB_LGS8GXX) += lgs8gxx.o
+ obj-$(CONFIG_DVB_DUMMY_FE) += dvb_dummy_fe.o
+ obj-$(CONFIG_DVB_AF9013) += af9013.o
+diff --git a/drivers/media/dvb/frontends/tda665x.c b/drivers/media/dvb/frontends/tda665x.c
+new file mode 100644
+index 0000000..0732a2d
+--- /dev/null
++++ b/drivers/media/dvb/frontends/tda665x.c
+@@ -0,0 +1,257 @@
++/*
++	TDA665x tuner driver
++	Copyright (C) Manu Abraham (abraham.manu@gmail.com)
++
++	This program is free software; you can redistribute it and/or modify
++	it under the terms of the GNU General Public License as published by
++	the Free Software Foundation; either version 2 of the License, or
++	(at your option) any later version.
++
++	This program is distributed in the hope that it will be useful,
++	but WITHOUT ANY WARRANTY; without even the implied warranty of
++	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++	GNU General Public License for more details.
++
++	You should have received a copy of the GNU General Public License
++	along with this program; if not, write to the Free Software
++	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++*/
++
++#include <linux/init.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++
++#include "dvb_frontend.h"
++#include "tda665x.h"
++
++struct tda665x_state {
++	struct dvb_frontend		*fe;
++	struct i2c_adapter		*i2c;
++	const struct tda665x_config	*config;
++
++	u32 frequency;
++	u32 bandwidth;
++};
++
++static int tda665x_read(struct tda665x_state *state, u8 *buf)
++{
++	const struct tda665x_config *config = state->config;
++	int err = 0;
++	struct i2c_msg msg = { .addr = config->addr, .flags = I2C_M_RD, .buf = buf, .len = 2 };
++
++	err = i2c_transfer(state->i2c, &msg, 1);
++	if (err != 1)
++		goto exit;
++
++	return err;
++exit:
++	printk("%s: I/O Error err=<%d>\n", __func__, err);
++	return err;
++}
++
++static int tda665x_write(struct tda665x_state *state, u8 *buf, u8 length)
++{
++	const struct tda665x_config *config = state->config;
++	int err = 0;
++	struct i2c_msg msg = { .addr = config->addr, .flags = 0, .buf = buf, .len = length };
++
++	err = i2c_transfer(state->i2c, &msg, 1);
++	if (err != 1)
++		goto exit;
++
++	return err;
++exit:
++	printk("%s: I/O Error err=<%d>\n", __func__, err);
++	return err;
++}
++
++static int tda665x_get_state(struct dvb_frontend *fe,
++			     enum tuner_param param,
++			     struct tuner_state *tstate)
++{
++	struct tda665x_state *state = fe->tuner_priv;
++	int err = 0;
++
++	switch (param) {
++	case DVBFE_TUNER_FREQUENCY:
++		tstate->frequency = state->frequency;
++		break;
++	case DVBFE_TUNER_BANDWIDTH:
++		break;
++	default:
++		printk("%s: Unknown parameter (param=%d)\n", __func__, param);
++		err = -EINVAL;
++		break;
++	}
++
++	return err;
++}
++
++static int tda665x_get_status(struct dvb_frontend *fe, u32 *status)
++{
++	struct tda665x_state *state = fe->tuner_priv;
++	u8 result = 0;
++	int err = 0;
++
++	*status = 0;
++
++	err = tda665x_read(state, &result);
++	if (err < 0)
++		goto exit;
++
++	if ((result >> 6) & 0x01) {
++		printk("%s: Tuner Phase Locked\n", __func__);
++		*status = 1;
++	}
++
++	return err;
++exit:
++	printk("%s: I/O Error\n", __func__);
++	return err;
++}
++
++static int tda665x_set_state(struct dvb_frontend *fe,
++			     enum tuner_param param,
++			     struct tuner_state *tstate)
++{
++	struct tda665x_state *state = fe->tuner_priv;
++	const struct tda665x_config *config = state->config;
++	u32 frequency, status = 0;
++	u8 buf[4];
++	int err = 0;
++
++	if (param & DVBFE_TUNER_FREQUENCY) {
++
++		frequency = tstate->frequency;
++		if ((frequency < config->frequency_max) || (frequency > config->frequency_min)) {
++			printk("%s: Frequency beyond limits, frequency=%d\n", __func__, frequency);
++			return -EINVAL;
++		}
++
++		frequency += config->frequency_offst;
++		frequency *= config->ref_multiplier;
++		frequency += config->ref_divider >> 1;
++		frequency /= config->ref_divider;
++
++		buf[0] = (u8 ) (frequency & 0x7f00) >> 8;
++		buf[1] = (u8 ) (frequency & 0x00ff) >> 0;
++		buf[2] = 0x80 | 0x40 | 0x02;
++		buf[3] = 0x00;
++
++		/* restore frequency */
++		frequency = tstate->frequency;
++
++		if (frequency < 153000000) {
++			/* VHF-L */
++			buf[3] |= 0x01; /* fc, Low Band, 47 - 153 MHz */
++			if (frequency < 68000000)
++				buf[3] |= 0x40; /* 83uA */
++			if (frequency < 1040000000)
++				buf[3] |= 0x60; /* 122uA */
++			if (frequency < 1250000000)
++				buf[3] |= 0x80; /* 163uA */
++			else
++				buf[3] |= 0xa0; /* 254uA */
++		} else if (frequency < 438000000) {
++			/* VHF-H */
++			buf[3] |= 0x02; /* fc, Mid Band, 153 - 438 MHz */
++			if (frequency < 230000000)
++				buf[3] |= 0x40;
++			if (frequency < 300000000)
++				buf[3] |= 0x60;
++			else
++				buf[3] |= 0x80;
++		} else {
++			/* UHF */
++			buf[3] |= 0x04; /* fc, High Band, 438 - 862 MHz */
++			if (frequency < 470000000)
++				buf[3] |= 0x60;
++			if (frequency < 526000000)
++				buf[3] |= 0x80;
++			else
++				buf[3] |= 0xa0;
++		}
++
++		/* Set params */
++		err = tda665x_write(state, buf, 5);
++		if (err < 0)
++			goto exit;
++
++		/* sleep for some time */
++		printk("%s: Waiting to Phase LOCK\n", __func__);
++		msleep(20);
++		/* check status */
++		err = tda665x_get_status(fe, &status);
++		if (err < 0)
++			goto exit;
++
++		if (status == 1) {
++			printk("%s: Tuner Phase locked: status=%d\n", __func__, status);
++			state->frequency = frequency; /* cache successful state */
++		} else {
++			printk("%s: No Phase lock: status=%d\n", __func__, status);
++		}
++	} else {
++		printk("%s: Unknown parameter (param=%d)\n", __func__, param);
++		return -EINVAL;
++	}
++
++	return 0;
++exit:
++	printk("%s: I/O Error\n", __func__);
++	return err;
++}
++
++static int tda665x_release(struct dvb_frontend *fe)
++{
++	struct tda665x_state *state = fe->tuner_priv;
++
++	fe->tuner_priv = NULL;
++	kfree(state);
++	return 0;
++}
++
++static struct dvb_tuner_ops tda665x_ops = {
++
++	.set_state	= tda665x_set_state,
++	.get_state	= tda665x_get_state,
++	.get_status	= tda665x_get_status,
++	.release	= tda665x_release
++};
++
++struct dvb_frontend *tda665x_attach(struct dvb_frontend *fe,
++				    const struct tda665x_config *config,
++				    struct i2c_adapter *i2c)
++{
++	struct tda665x_state *state = NULL;
++	struct dvb_tuner_info *info;
++
++	state = kzalloc(sizeof (struct tda665x_state), GFP_KERNEL);
++	if (state == NULL)
++		goto exit;
++
++	state->config		= config;
++	state->i2c		= i2c;
++	state->fe		= fe;
++	fe->tuner_priv		= state;
++	fe->ops.tuner_ops	= tda665x_ops;
++	info			 = &fe->ops.tuner_ops.info;
++
++	memcpy(info->name, config->name, sizeof (config->name));
++	info->frequency_min	= config->frequency_min;
++	info->frequency_max	= config->frequency_max;
++	info->frequency_step	= config->frequency_offst;
++
++	printk("%s: Attaching TDA665x (%s) tuner\n", __func__, info->name);
++
++	return fe;
++
++exit:
++	kfree(state);
++	return NULL;
++}
++EXPORT_SYMBOL(tda665x_attach);
++
++MODULE_DESCRIPTION("TDA665x driver");
++MODULE_AUTHOR("Manu Abraham");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/media/dvb/frontends/tda665x.h b/drivers/media/dvb/frontends/tda665x.h
+new file mode 100644
+index 0000000..c0b544d
+--- /dev/null
++++ b/drivers/media/dvb/frontends/tda665x.h
+@@ -0,0 +1,52 @@
++/*
++	TDA665x tuner driver
++	Copyright (C) Manu Abraham (abraham.manu@gmail.com)
++
++	This program is free software; you can redistribute it and/or modify
++	it under the terms of the GNU General Public License as published by
++	the Free Software Foundation; either version 2 of the License, or
++	(at your option) any later version.
++
++	This program is distributed in the hope that it will be useful,
++	but WITHOUT ANY WARRANTY; without even the implied warranty of
++	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++	GNU General Public License for more details.
++
++	You should have received a copy of the GNU General Public License
++	along with this program; if not, write to the Free Software
++	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++*/
++
++#ifndef __TDA665x_H
++#define __TDA665x_H
++
++struct tda665x_config {
++	char name[128];
++
++	u8	addr;
++	u32	frequency_min;
++	u32	frequency_max;
++	u32	frequency_offst;
++	u32	ref_multiplier;
++	u32	ref_divider;
++};
++
++#if defined(CONFIG_DVB_TDA665x) || (defined(CONFIG_DVB_TDA665x_MODULE) && defined(MODULE))
++
++extern struct dvb_frontend *tda665x_attach(struct dvb_frontend *fe,
++					   const struct tda665x_config *config,
++					   struct i2c_adapter *i2c);
++
++#else
++
++static inline struct dvb_frontend *tda665x_attach(struct dvb_frontend *fe,
++					   	  const struct tda665x_config *config,
++						  struct i2c_adapter *i2c)
++{
++	printk(KERN_WARNING "%s: Driver disabled by Kconfig\n", __func__);
++	return NULL;
++}
++
++#endif /* CONFIG_DVB_TDA665x */
++
++#endif /* __TDA665x_H */
+diff --git a/drivers/media/dvb/mantis/hopper_cards.c b/drivers/media/dvb/mantis/hopper_cards.c
+index 749e3f3..01a9ff0 100644
+--- a/drivers/media/dvb/mantis/hopper_cards.c
++++ b/drivers/media/dvb/mantis/hopper_cards.c
+@@ -219,7 +219,6 @@ static void __devexit hopper_pci_remove(struct pci_dev *pdev)
+ 	struct mantis_pci *mantis = pci_get_drvdata(pdev);
+ 
+ 	if (mantis) {
+-//		mantis_uart_exit(mantis);
+ 		mantis_dvb_exit(mantis);
+ 		mantis_dma_exit(mantis);
+ 		mantis_i2c_exit(mantis);
+diff --git a/drivers/media/dvb/mantis/mantis_cards.c b/drivers/media/dvb/mantis/mantis_cards.c
+index d486c7f..638177c 100644
+--- a/drivers/media/dvb/mantis/mantis_cards.c
++++ b/drivers/media/dvb/mantis/mantis_cards.c
+@@ -50,7 +50,6 @@ static char *label[10] = {
+ 	"RACK"
+ };
+ 
+-
+ static irqreturn_t mantis_irq_handler(int irq, void *dev_id)
+ {
+ 	u32 stat = 0, mask = 0, lstat = 0, mstat = 0;
+@@ -199,6 +198,14 @@ static int __devinit mantis_pci_probe(struct pci_dev *pdev, const struct pci_dev
+ 
+ 	return err;
+ 
++fail7:
++	dprintk(MANTIS_ERROR, 1, "ERROR: Mantis UART exit! <%d>", err);
++	mantis_uart_exit(mantis);
++
++fail6:
++	dprintk(MANTIS_ERROR, 1, "ERROR: Mantis CA exit! <%d>", err);
++	mantis_ca_exit(mantis);
++
+ fail5:
+ 	dprintk(MANTIS_ERROR, 1, "ERROR: Mantis DVB exit! <%d>", err);
+ 	mantis_dvb_exit(mantis);
+@@ -228,8 +235,6 @@ static void __devexit mantis_pci_remove(struct pci_dev *pdev)
+ 	struct mantis_pci *mantis = pci_get_drvdata(pdev);
+ 
+ 	if (mantis) {
+-		mantis_uart_exit(mantis);
+-//		mantis_ca_exit(mantis);
+ 		mantis_dvb_exit(mantis);
+ 		mantis_dma_exit(mantis);
+ 		mantis_i2c_exit(mantis);
+diff --git a/drivers/media/dvb/mantis/mantis_dma.c b/drivers/media/dvb/mantis/mantis_dma.c
+index 8ebcd96..eab3645 100644
+--- a/drivers/media/dvb/mantis/mantis_dma.c
++++ b/drivers/media/dvb/mantis/mantis_dma.c
+@@ -153,8 +153,7 @@ int mantis_dma_init(struct mantis_pci *mantis)
+ 	if (mantis_alloc_buffers(mantis) < 0) {
+ 		dprintk(MANTIS_ERROR, 1, "Error allocating DMA buffer");
+ 
+-		// Stop RISC Engine
+-//		mmwrite(mmread(MANTIS_DMA_CTL) & ~MANTIS_RISC_EN, MANTIS_DMA_CTL);
++		/* Stop RISC Engine */
+ 		mmwrite(0, MANTIS_DMA_CTL);
+ 
+ 		goto err;
+diff --git a/drivers/media/dvb/mantis/mantis_dvb.c b/drivers/media/dvb/mantis/mantis_dvb.c
+index be911d7..42f658b 100644
+--- a/drivers/media/dvb/mantis/mantis_dvb.c
++++ b/drivers/media/dvb/mantis/mantis_dvb.c
+@@ -252,14 +252,19 @@ int __devinit mantis_dvb_init(struct mantis_pci *mantis)
+ err5:
+ 	tasklet_kill(&mantis->tasklet);
+ 	dvb_net_release(&mantis->dvbnet);
++
+ err4:
+ 	mantis->demux.dmx.remove_frontend(&mantis->demux.dmx, &mantis->fe_mem);
++
+ err3:
+ 	mantis->demux.dmx.remove_frontend(&mantis->demux.dmx, &mantis->fe_hw);
++
+ err2:
+ 	dvb_dmxdev_release(&mantis->dmxdev);
++
+ err1:
+ 	dvb_dmx_release(&mantis->demux);
++
+ err0:
+ 	dvb_unregister_adapter(&mantis->dvb_adapter);
+ 
+@@ -271,21 +276,24 @@ int __devexit mantis_dvb_exit(struct mantis_pci *mantis)
+ {
+ 	int err;
+ 
+-	err = mantis_frontend_shutdown(mantis);
+-	if (err != 0)
+-		dprintk(MANTIS_ERROR, 1, "Frontend exit while POWER ON! <%d>", err);
++	if (mantis->fe) {
++//		mantis_ca_exit(mantis);
++		err = mantis_frontend_shutdown(mantis);
++		if (err != 0)
++			dprintk(MANTIS_ERROR, 1, "Frontend exit while POWER ON! <%d>", err);
++
++		dvb_unregister_frontend(mantis->fe);
++	}
+ 
+-//	mantis_ca_exit(mantis);
+ 	tasklet_kill(&mantis->tasklet);
+ 	dvb_net_release(&mantis->dvbnet);
++
+ 	mantis->demux.dmx.remove_frontend(&mantis->demux.dmx, &mantis->fe_mem);
+ 	mantis->demux.dmx.remove_frontend(&mantis->demux.dmx, &mantis->fe_hw);
++
+ 	dvb_dmxdev_release(&mantis->dmxdev);
+ 	dvb_dmx_release(&mantis->demux);
+ 
+-	if (mantis->fe)
+-		dvb_unregister_frontend(mantis->fe);
+-
+ 	dprintk(MANTIS_DEBUG, 1, "dvb_unregister_adapter");
+ 	dvb_unregister_adapter(&mantis->dvb_adapter);
+ 
+diff --git a/drivers/media/dvb/mantis/mantis_i2c.c b/drivers/media/dvb/mantis/mantis_i2c.c
+index ba55f0a..16b9e7e 100644
+--- a/drivers/media/dvb/mantis/mantis_i2c.c
++++ b/drivers/media/dvb/mantis/mantis_i2c.c
+@@ -35,38 +35,9 @@
+ 
+ #define I2C_HW_B_MANTIS		0x1c
+ 
+-static int mantis_ack_wait(struct mantis_pci *mantis)
+-{
+-	int rc = 0;
+-	u32 timeout = 0;
+-
+-	if (wait_event_timeout(mantis->i2c_wq,
+-			       mantis->mantis_int_stat & MANTIS_INT_I2CDONE,
+-			       msecs_to_jiffies(50)) == -ERESTARTSYS) {
+-
+-		dprintk(MANTIS_DEBUG, 1, "Master !I2CDONE");
+-		rc = -EREMOTEIO;
+-	}
+-
+-	while (!(mantis->mantis_int_stat & MANTIS_INT_I2CRACK)) {
+-		dprintk(MANTIS_DEBUG, 1, "Waiting for Slave RACK");
+-		mantis->mantis_int_stat = mmread(MANTIS_INT_STAT);
+-		msleep(5);
+-		timeout++;
+-		if (timeout > 500) {
+-			dprintk(MANTIS_ERROR, 1, "Slave RACK Fail !");
+-			rc = -EREMOTEIO;
+-			break;
+-		}
+-	}
+-	udelay(350);
+-
+-	return rc;
+-}
+-
+ static int mantis_i2c_read(struct mantis_pci *mantis, const struct i2c_msg *msg)
+ {
+-	u32 rxd, i;
++	u32 rxd, i, stat, trials;
+ 
+ 	dprintk(MANTIS_INFO, 0, "        %s:  Address=[0x%02x] <R>[ ",
+ 		__func__, msg->addr);
+@@ -82,10 +53,15 @@ static int mantis_i2c_read(struct mantis_pci *mantis, const struct i2c_msg *msg)
+ 
+ 		mmwrite(MANTIS_INT_I2CDONE, MANTIS_INT_STAT);
+ 		mmwrite(rxd, MANTIS_I2CDATA_CTL);
+-		if (mantis_ack_wait(mantis) != 0) {
+-			dprintk(MANTIS_DEBUG, 1, "ACK failed<R>");
+-			return -EREMOTEIO;
++
++		/* wait for xfer completion */
++		for (trials = 0; trials < 100; trials++) {
++			udelay(500);
++			stat = mmread(MANTIS_INT_STAT);
++			if (stat & MANTIS_INT_I2CDONE)
++				break;
+ 		}
++
+ 		rxd = mmread(MANTIS_I2CDATA_CTL);
+ 		msg->buf[i] = (u8)((rxd >> 8) & 0xFF);
+ 		dprintk(MANTIS_INFO, 0, "%02x ", msg->buf[i]);
+@@ -98,7 +74,7 @@ static int mantis_i2c_read(struct mantis_pci *mantis, const struct i2c_msg *msg)
+ static int mantis_i2c_write(struct mantis_pci *mantis, const struct i2c_msg *msg)
+ {
+ 	int i;
+-	u32 txd = 0;
++	u32 txd = 0, stat, trials;
+ 
+ 	dprintk(MANTIS_INFO, 0, "        %s: Address=[0x%02x] <W>[ ",
+ 		__func__, msg->addr);
+@@ -115,9 +91,13 @@ static int mantis_i2c_write(struct mantis_pci *mantis, const struct i2c_msg *msg
+ 
+ 		mmwrite(MANTIS_INT_I2CDONE, MANTIS_INT_STAT);
+ 		mmwrite(txd, MANTIS_I2CDATA_CTL);
+-		if (mantis_ack_wait(mantis) != 0) {
+-			dprintk(MANTIS_DEBUG, 1, "ACK failed<W>");
+-			return -EREMOTEIO;
++
++		/* wait for xfer completion */
++		for (trials = 0; trials < 100; trials++) {
++			udelay(500);
++			stat = mmread(MANTIS_INT_STAT);
++			if (stat & MANTIS_INT_I2CDONE)
++				break;
+ 		}
+ 	}
+ 	dprintk(MANTIS_INFO, 0, "]\n");
+@@ -127,20 +107,77 @@ static int mantis_i2c_write(struct mantis_pci *mantis, const struct i2c_msg *msg
+ 
+ static int mantis_i2c_xfer(struct i2c_adapter *adapter, struct i2c_msg *msgs, int num)
+ {
+-	int ret = 0, i;
++	int ret = 0, i = 0, trials;
++	u32 stat, data, txd;
+ 	struct mantis_pci *mantis;
++	struct mantis_hwconfig *config;
+ 
+ 	mantis = i2c_get_adapdata(adapter);
++	BUG_ON(!mantis);
++	config = mantis->hwconfig;
++	BUG_ON(!config);
++
++	dprintk(MANTIS_DEBUG, 1, "Messages:%d", num);
+ 	mutex_lock(&mantis->i2c_lock);
+-	for (i = 0; i < num; i++) {
+-		if (msgs[i].flags & I2C_M_RD)
+-			ret = mantis_i2c_read(mantis, &msgs[i]);
+-		else
+-			ret = mantis_i2c_write(mantis, &msgs[i]);
+-
+-		if (ret < 0)
+-			goto bail_out;
++
++	while (i < num) {
++		/* Byte MODE */
++		if (((i + 1) < num)		&&
++			(msgs[i].len < 2)	&&
++			(msgs[i + 1].len < 2)	&&
++			(msgs[i + 1].flags & I2C_M_RD)) {
++
++			dprintk(MANTIS_DEBUG, 0, "        Byte MODE:\n");
++
++			/* Read operation */
++			txd = msgs[i].addr << 25 | (0x1 << 24)
++						 | (msgs[i].buf[0] << 16)
++						 | MANTIS_I2C_RATE_3;
++
++			mmwrite(txd, MANTIS_I2CDATA_CTL);
++			/* wait for xfer completion */
++			for (trials = 0; trials < 100; trials++) {
++				udelay(500);
++				stat = mmread(MANTIS_INT_STAT);
++				if (stat & MANTIS_INT_I2CDONE)
++					break;
++			}
++
++			/* check for xfer completion */
++			if (stat & MANTIS_INT_I2CDONE) {
++				/* check xfer was acknowledged */
++				if (stat & MANTIS_INT_I2CRACK) {
++					data = mmread(MANTIS_I2CDATA_CTL);
++					msgs[i + 1].buf[0] = (data >> 8) & 0xff;
++					dprintk(MANTIS_DEBUG, 0, "        Byte <%d> RXD=0x%02x  [%02x]\n", 0x0, data, msgs[i + 1].buf[0]);
++				} else {
++					/* I/O error */
++					dprintk(MANTIS_ERROR, 1, "        I/O error, LINE:%d", __LINE__);
++					ret = -EIO;
++					break;
++				}
++			} else {
++				/* I/O error */
++				dprintk(MANTIS_ERROR, 1, "        I/O error, LINE:%d", __LINE__);
++				ret = -EIO;
++				break;
++			}
++			i += 2; /* Write/Read operation in one go */
++		}
++
++		if (i < num) {
++			if (msgs[i].flags & I2C_M_RD)
++				ret = mantis_i2c_read(mantis, &msgs[i]);
++			else
++				ret = mantis_i2c_write(mantis, &msgs[i]);
++
++			i++;
++			if (ret < 0)
++				goto bail_out;
++		}
++
+ 	}
++
+ 	mutex_unlock(&mantis->i2c_lock);
+ 
+ 	return num;
+@@ -189,9 +226,9 @@ int __devinit mantis_i2c_init(struct mantis_pci *mantis)
+ 	intstat = mmread(MANTIS_INT_STAT);
+ 	intmask = mmread(MANTIS_INT_MASK);
+ 	mmwrite(intstat, MANTIS_INT_STAT);
+-	mmwrite(intmask | MANTIS_INT_I2CDONE, MANTIS_INT_MASK);
+-
+-	dprintk(MANTIS_DEBUG, 1, "Status=<%02x> Mask=<%02x>", intstat, intmask);
++	dprintk(MANTIS_DEBUG, 1, "Disabling I2C interrupt");
++	intmask = mmread(MANTIS_INT_MASK);
++	mmwrite((intmask & ~MANTIS_INT_I2CDONE), MANTIS_INT_MASK);
+ 
+ 	return 0;
+ }
+@@ -199,6 +236,12 @@ EXPORT_SYMBOL_GPL(mantis_i2c_init);
+ 
+ int __devexit mantis_i2c_exit(struct mantis_pci *mantis)
+ {
++	u32 intmask;
++
++	dprintk(MANTIS_DEBUG, 1, "Disabling I2C interrupt");
++	intmask = mmread(MANTIS_INT_MASK);
++	mmwrite((intmask & ~MANTIS_INT_I2CDONE), MANTIS_INT_MASK);
++
+ 	dprintk(MANTIS_DEBUG, 1, "Removing I2C adapter");
+ 	return i2c_del_adapter(&mantis->adapter);
+ }
+diff --git a/drivers/media/dvb/mantis/mantis_i2c.h b/drivers/media/dvb/mantis/mantis_i2c.h
+index 1e49ecf..d40da4f 100644
+--- a/drivers/media/dvb/mantis/mantis_i2c.h
++++ b/drivers/media/dvb/mantis/mantis_i2c.h
+@@ -1,6 +1,9 @@
+ #ifndef __MANTIS_I2C_H
+ #define __MANTIS_I2C_H
+ 
++#define I2C_STOP		(1 <<  0)
++#define I2C_READ		(1 <<  1)
++
+ extern int mantis_i2c_init(struct mantis_pci *mantis);
+ extern int mantis_i2c_exit(struct mantis_pci *mantis);
+ 
+diff --git a/drivers/media/dvb/mantis/mantis_ioc.c b/drivers/media/dvb/mantis/mantis_ioc.c
+index 4700088..448e2c3 100644
+--- a/drivers/media/dvb/mantis/mantis_ioc.c
++++ b/drivers/media/dvb/mantis/mantis_ioc.c
+@@ -36,13 +36,14 @@
+ #include "mantis_reg.h"
+ #include "mantis_ioc.h"
+ 
+-static int read_eeprom_byte(struct mantis_pci *mantis, u8 *data, u8 length)
++static int read_eeprom_bytes(struct mantis_pci *mantis, u8 reg, u8 *data, u8 length)
+ {
+ 	struct i2c_adapter *adapter = &mantis->adapter;
+-
+ 	int err;
++	u8 buf = reg;
++
+ 	struct i2c_msg msg[] = {
+-		{ .addr = 0x50, .flags = 0, .buf = data, .len = 1 },
++		{ .addr = 0x50, .flags = 0, .buf = &buf, .len = 1 },
+ 		{ .addr = 0x50, .flags = I2C_M_RD, .buf = data, .len = length },
+ 	};
+ 
+@@ -56,32 +57,12 @@ static int read_eeprom_byte(struct mantis_pci *mantis, u8 *data, u8 length)
+ 
+ 	return 0;
+ }
+-
+-static int write_eeprom_byte(struct mantis_pci *mantis, u8 *data, u8 length)
+-{
+-	struct i2c_adapter *adapter = &mantis->adapter;
+-	int err;
+-
+-	struct i2c_msg msg = { .addr = 0x50, .flags = 0, .buf = data, .len = length };
+-
+-	err = i2c_transfer(adapter, &msg, 1);
+-	if (err < 0) {
+-		dprintk(MANTIS_ERROR, 1, "ERROR: i2c write: < err=%i length=0x%02x d0=0x%02x, d1=0x%02x >",
+-			err, length, data[0], data[1]);
+-
+-		return err;
+-	}
+-
+-	return 0;
+-}
+-
+ int mantis_get_mac(struct mantis_pci *mantis)
+ {
+ 	int err;
++	u8 mac_addr[6] = {0};
+ 
+-	mantis->mac_address[0] = 0x08;
+-
+-	err = read_eeprom_byte(mantis, &mantis->mac_address[0], 6);
++	err = read_eeprom_bytes(mantis, 0x08, mac_addr, 6);
+ 	if (err < 0) {
+ 		dprintk(MANTIS_ERROR, 1, "ERROR: Mantis EEPROM read error <%d>", err);
+ 
+@@ -90,9 +71,12 @@ int mantis_get_mac(struct mantis_pci *mantis)
+ 
+ 	dprintk(MANTIS_ERROR, 0,
+ 		"    MAC Address=[%02x:%02x:%02x:%02x:%02x:%02x]\n",
+-		mantis->mac_address[0], mantis->mac_address[1],
+-		mantis->mac_address[2],	mantis->mac_address[3],
+-		mantis->mac_address[4], mantis->mac_address[5]);
++		mac_addr[0],
++		mac_addr[1],
++		mac_addr[2],
++		mac_addr[3],
++		mac_addr[4],
++		mac_addr[5]);
+ 
+ 	return 0;
+ }
+@@ -103,12 +87,14 @@ void gpio_set_bits(struct mantis_pci *mantis, u32 bitpos, u8 value)
+ {
+ 	u32 cur;
+ 
++	dprintk(MANTIS_DEBUG, 1, "Set Bit <%d> to <%d>", bitpos, value);
+ 	cur = mmread(MANTIS_GPIF_ADDR);
+ 	if (value)
+ 		mantis->gpio_status = cur | (1 << bitpos);
+ 	else
+ 		mantis->gpio_status = cur & (~(1 << bitpos));
+ 
++	dprintk(MANTIS_DEBUG, 1, "GPIO Value <%02x>", mantis->gpio_status);
+ 	mmwrite(mantis->gpio_status, MANTIS_GPIF_ADDR);
+ 	mmwrite(0x00, MANTIS_GPIF_DOUT);
+ }
+diff --git a/drivers/media/dvb/mantis/mantis_vp3030.c b/drivers/media/dvb/mantis/mantis_vp3030.c
+index 4b974ee..9efcfa7 100644
+--- a/drivers/media/dvb/mantis/mantis_vp3030.c
++++ b/drivers/media/dvb/mantis/mantis_vp3030.c
+@@ -30,46 +30,41 @@
+ #include "dvb_net.h"
+ 
+ #include "zl10353.h"
++#include "tda665x.h"
+ #include "mantis_common.h"
++#include "mantis_ioc.h"
++#include "mantis_dvb.h"
+ #include "mantis_vp3030.h"
+ 
+ struct zl10353_config mantis_vp3030_config = {
+-	.demod_address	= 0x0f,
++	.demod_address		= 0x0f,
++};
++
++struct tda665x_config env57h12d5_config = {
++	.name			= "ENV57H12D5 (ET-50DT)",
++	.addr			= 0x60,
++	.frequency_min		=  47000000,
++	.frequency_max		= 862000000,
++	.frequency_offst	=   3616667,
++	.ref_multiplier		= 6, /* 1/6 MHz */
++	.ref_divider		= 100000, /* 1/6 MHz */
+ };
+ 
+ #define MANTIS_MODEL_NAME	"VP-3030"
+ #define MANTIS_DEV_TYPE		"DVB-T"
+ 
+-int panasonic_en57h12d5_set_params(struct dvb_frontend *fe,
+-				   struct dvb_frontend_parameters *params)
+-{
+-	u8 buf[4];
+-	int rc;
+-	struct mantis_pci *mantis = fe->dvb->priv;
+-
+-	struct i2c_msg tuner_msg = {
+-		.addr = 0x60,
+-		.flags = 0,
+-		.buf = buf,
+-		.len = sizeof (buf)
+-	};
+-
+-	if ((params->frequency < 950000) || (params->frequency > 2150000))
+-		return -EINVAL;
+-	rc = i2c_transfer(&mantis->adapter, &tuner_msg, 1);
+-	if (rc != 1) {
+-		printk("%s: I2C Transfer returned [%d]\n", __func__, rc);
+-		return -EIO;
+-	}
+-	msleep_interruptible(1);
+-	printk("%s: Send params to tuner ok!!!\n", __func__);
+-
+-	return 0;
+-}
+ 
+ static int vp3030_frontend_init(struct mantis_pci *mantis, struct dvb_frontend *fe)
+ {
+ 	struct i2c_adapter *adapter	= &mantis->adapter;
++	struct mantis_hwconfig *config	= mantis->hwconfig;
++	int err = 0;
++
++	gpio_set_bits(mantis, config->reset, 0);
++	msleep(100);
++	err = mantis_frontend_power(mantis, POWER_ON);
++	msleep(100);
++	gpio_set_bits(mantis, config->reset, 1);
+ 
+ 	dprintk(MANTIS_ERROR, 1, "Probing for 10353 (DVB-T)");
+ 	fe = zl10353_attach(&mantis_vp3030_config, adapter);
+@@ -77,6 +72,7 @@ static int vp3030_frontend_init(struct mantis_pci *mantis, struct dvb_frontend *
+ 	if (!fe)
+ 		return -1;
+ 
++	tda665x_attach(fe, &env57h12d5_config, adapter);
+ 	mantis->fe = fe;
+ 	dprintk(MANTIS_ERROR, 1, "Done!");
+ 
+@@ -93,4 +89,6 @@ struct mantis_hwconfig vp3030_config = {
+ 	.bytes		= 0,
+ 
+ 	.frontend_init	= vp3030_frontend_init,
++	.power		= GPIF_A12,
++	.reset		= GPIF_A13,
+ };
+-- 
+1.7.1
+

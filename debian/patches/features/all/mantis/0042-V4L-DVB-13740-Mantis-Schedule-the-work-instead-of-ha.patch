@@ -1,0 +1,126 @@
+From 287e7877d3f49afcee6587b36e0c854ef50319b1 Mon Sep 17 00:00:00 2001
+From: Manu Abraham <abraham.manu@gmail.com>
+Date: Fri, 4 Dec 2009 05:09:04 -0300
+Subject: [PATCH 042/120] V4L/DVB (13740): [Mantis] Schedule the work instead of handling the task directly
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Manu Abraham <manu@linuxtv.org>
+Signed-off-by: Mauro Carvalho Chehab <mchehab@redhat.com>
+(cherry picked from commit 12855cac87218d0c92ffdebb7270cec040cf5a6a)
+
+Signed-off-by: Bjørn Mork <bjorn@mork.no>
+---
+ drivers/media/dvb/mantis/mantis_common.h |    4 ++++
+ drivers/media/dvb/mantis/mantis_evm.c    |   17 +++++++----------
+ drivers/media/dvb/mantis/mantis_link.h   |    4 +++-
+ drivers/media/dvb/mantis/mantis_pci.c    |    2 +-
+ 4 files changed, 15 insertions(+), 12 deletions(-)
+
+diff --git a/drivers/media/dvb/mantis/mantis_common.h b/drivers/media/dvb/mantis/mantis_common.h
+index f9891eb..7f1cfad 100644
+--- a/drivers/media/dvb/mantis/mantis_common.h
++++ b/drivers/media/dvb/mantis/mantis_common.h
+@@ -151,4 +151,8 @@ extern int mantis_dvb_exit(struct mantis_pci *mantis);
+ extern void mantis_dma_xfer(unsigned long data);
+ extern void gpio_set_bits(struct mantis_pci *mantis, u32 bitpos, u8 value);
+ 
++extern struct dvb_device *mantis_ca_init(struct mantis_pci *mantis);
++extern void mantis_ca_exit(struct mantis_pci *mantis);
++
++
+ #endif //__MANTIS_COMMON_H
+diff --git a/drivers/media/dvb/mantis/mantis_evm.c b/drivers/media/dvb/mantis/mantis_evm.c
+index c35ddd8..7451483 100644
+--- a/drivers/media/dvb/mantis/mantis_evm.c
++++ b/drivers/media/dvb/mantis/mantis_evm.c
+@@ -22,9 +22,9 @@
+ #include "mantis_link.h"
+ #include "mantis_hif.h"
+ 
+-void mantis_hifevm_tasklet(unsigned long data)
++static void mantis_hifevm_work(struct work_struct *work)
+ {
+-	struct mantis_ca *ca = (struct mantis_ca *) data;
++	struct mantis_ca *ca = container_of(work, struct mantis_ca, hif_evm_work);
+ 	struct mantis_pci *mantis = ca->ca_priv;
+ 
+ 	u32 gpif_stat, gpif_mask;
+@@ -38,15 +38,13 @@ void mantis_hifevm_tasklet(unsigned long data)
+ 		if (gpif_stat & MANTIS_CARD_PLUGIN) {
+ 			dprintk(verbose, MANTIS_DEBUG, 1, "Event Mgr: Adapter(%d) Slot(0): CAM Plugin", mantis->num);
+ 			mmwrite(0xdada0000, MANTIS_CARD_RESET);
+-			// Plugin call here
+-			gpif_stat = 0; // crude !
++			mantis_event_cam_plugin(ca);
+ 		}
+ 	} else {
+ 		if (gpif_stat & MANTIS_CARD_PLUGOUT) {
+ 			dprintk(verbose, MANTIS_DEBUG, 1, "Event Mgr: Adapter(%d) Slot(0): CAM Unplug", mantis->num);
+ 			mmwrite(0xdada0000, MANTIS_CARD_RESET);
+-			// Unplug call here
+-			gpif_stat = 0; // crude !
++			mantis_event_cam_unplug(ca);
+ 		}
+ 	}
+ 
+@@ -91,9 +89,9 @@ int mantis_evmgr_init(struct mantis_ca *ca)
+ 	struct mantis_pci *mantis = ca->ca_priv;
+ 
+ 	dprintk(verbose, MANTIS_DEBUG, 1, "Initializing Mantis Host I/F Event manager");
+-	tasklet_init(&ca->hif_evm_tasklet, mantis_hifevm_tasklet, (unsigned long) ca);
+-
++	INIT_WORK(&ca->hif_evm_work, mantis_hifevm_work);
+ 	mantis_pcmcia_init(ca);
++	schedule_work(&ca->hif_evm_work);
+ 
+ 	return 0;
+ }
+@@ -103,7 +101,6 @@ void mantis_evmgr_exit(struct mantis_ca *ca)
+ 	struct mantis_pci *mantis = ca->ca_priv;
+ 
+ 	dprintk(verbose, MANTIS_DEBUG, 1, "Mantis Host I/F Event manager exiting");
+-	tasklet_kill(&ca->hif_evm_tasklet);
+-
++	flush_scheduled_work();
+ 	mantis_pcmcia_exit(ca);
+ }
+diff --git a/drivers/media/dvb/mantis/mantis_link.h b/drivers/media/dvb/mantis/mantis_link.h
+index a45dd71..33b39b7 100644
+--- a/drivers/media/dvb/mantis/mantis_link.h
++++ b/drivers/media/dvb/mantis/mantis_link.h
+@@ -21,6 +21,8 @@
+ #ifndef __MANTIS_LINK_H
+ #define __MANTIS_LINK_H
+ 
++#include <linux/workqueue.h>
++
+ enum mantis_sbuf_status {
+ 	MANTIS_SBUF_DATA_AVAIL		= 1,
+ 	MANTIS_SBUF_DATA_EMPTY		= 2,
+@@ -40,7 +42,7 @@ enum mantis_slot_state {
+ struct mantis_ca {
+ 	struct mantis_slot		slot;
+ 
+-	struct tasklet_struct		hif_evm_tasklet;
++	struct work_struct		hif_evm_work;
+ 
+ 	u32				hif_event;
+ 	wait_queue_head_t		hif_opdone_wq;
+diff --git a/drivers/media/dvb/mantis/mantis_pci.c b/drivers/media/dvb/mantis/mantis_pci.c
+index 814c6ac..6eecd54 100644
+--- a/drivers/media/dvb/mantis/mantis_pci.c
++++ b/drivers/media/dvb/mantis/mantis_pci.c
+@@ -77,7 +77,7 @@ static irqreturn_t mantis_pci_irq(int irq, void *dev_id)
+ 	}
+ 	if (stat & MANTIS_INT_IRQ0) {
+ 		dprintk(verbose, MANTIS_DEBUG, 0, "* INT IRQ-0 *");
+-		tasklet_schedule(&ca->hif_evm_tasklet);
++		schedule_work(&ca->hif_evm_work);
+ 	}
+ 	if (stat & MANTIS_INT_IRQ1) {
+ 		dprintk(verbose, MANTIS_DEBUG, 0, "* INT IRQ-1 *");
+-- 
+1.7.1
+

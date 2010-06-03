@@ -1,0 +1,478 @@
+From 3b3b57c4823e90f07e6fb6cf4df7e7c670aafdbc Mon Sep 17 00:00:00 2001
+From: Manu Abraham <abraham.manu@gmail.com>
+Date: Fri, 4 Dec 2009 05:39:57 -0300
+Subject: [PATCH 094/120] V4L/DVB (13794): [Mantis/VP-3028] Initial go at Serial interface implementation, add support for VP-3028
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Manu Abraham <manu@linuxtv.org>
+Signed-off-by: Mauro Carvalho Chehab <mchehab@redhat.com>
+(cherry picked from commit add206368462434ba97e8fe4de98e5d47ffdb0a0)
+
+Signed-off-by: Bjørn Mork <bjorn@mork.no>
+---
+ drivers/media/dvb/mantis/Makefile        |    2 +
+ drivers/media/dvb/mantis/mantis_common.h |   10 ++
+ drivers/media/dvb/mantis/mantis_core.c   |    8 ++
+ drivers/media/dvb/mantis/mantis_pci.c    |    2 +
+ drivers/media/dvb/mantis/mantis_uart.c   |  139 ++++++++++++++++++++++++++++++
+ drivers/media/dvb/mantis/mantis_uart.h   |   25 +++++-
+ drivers/media/dvb/mantis/mantis_vp1033.c |    3 +
+ drivers/media/dvb/mantis/mantis_vp1034.c |    3 +
+ drivers/media/dvb/mantis/mantis_vp1041.c |    3 +
+ drivers/media/dvb/mantis/mantis_vp2033.c |    3 +
+ drivers/media/dvb/mantis/mantis_vp2040.c |    3 +
+ drivers/media/dvb/mantis/mantis_vp3028.c |   38 ++++++++
+ drivers/media/dvb/mantis/mantis_vp3028.h |   13 +++
+ drivers/media/dvb/mantis/mantis_vp3030.c |    3 +
+ 14 files changed, 253 insertions(+), 2 deletions(-)
+ create mode 100644 drivers/media/dvb/mantis/mantis_uart.c
+ create mode 100644 drivers/media/dvb/mantis/mantis_vp3028.c
+ create mode 100644 drivers/media/dvb/mantis/mantis_vp3028.h
+
+diff --git a/drivers/media/dvb/mantis/Makefile b/drivers/media/dvb/mantis/Makefile
+index d002ef9..bb88cdc 100644
+--- a/drivers/media/dvb/mantis/Makefile
++++ b/drivers/media/dvb/mantis/Makefile
+@@ -1,4 +1,5 @@
+ mantis-objs = 	mantis_core.o	\
++		mantis_uart.o	\
+ 		mantis_dma.o	\
+ 		mantis_pci.o	\
+ 		mantis_i2c.o	\
+@@ -12,6 +13,7 @@ mantis-objs = 	mantis_core.o	\
+ 		mantis_vp1041.o	\
+ 		mantis_vp2033.o	\
+ 		mantis_vp2040.o	\
++		mantis_vp3028.o	\
+ 		mantis_vp3030.o
+ 
+ obj-$(CONFIG_DVB_MANTIS) += mantis.o
+diff --git a/drivers/media/dvb/mantis/mantis_common.h b/drivers/media/dvb/mantis/mantis_common.h
+index 6b9f92b..6a02adf 100644
+--- a/drivers/media/dvb/mantis/mantis_common.h
++++ b/drivers/media/dvb/mantis/mantis_common.h
+@@ -26,6 +26,7 @@
+ #include <linux/kernel.h>
+ #include <linux/pci.h>
+ #include <linux/mutex.h>
++#include <linux/workqueue.h>
+ 
+ #include "dvbdev.h"
+ #include "dvb_demux.h"
+@@ -34,6 +35,7 @@
+ #include "dvb_net.h"
+ #include <linux/i2c.h>
+ #include "mantis_reg.h"
++#include "mantis_uart.h"
+ 
+ #include "mantis_link.h"
+ 
+@@ -74,6 +76,10 @@ struct mantis_hwconfig {
+ 	char			*model_name;
+ 	char			*dev_type;
+ 	u32			ts_size;
++
++	enum mantis_baud	baud_rate;
++	enum mantis_parity	parity;
++	u32			bytes;
+ };
+ 
+ struct mantis_pci {
+@@ -142,6 +148,10 @@ struct mantis_pci {
+ 	u32			gpif_status;
+ 
+ 	struct mantis_ca	*mantis_ca;
++
++	wait_queue_head_t	uart_wq;
++	struct work_struct	uart_work;
++	spinlock_t		uart_lock;
+ };
+ 
+ #define MANTIS_HIF_STATUS	(mantis->gpio_status)
+diff --git a/drivers/media/dvb/mantis/mantis_core.c b/drivers/media/dvb/mantis/mantis_core.c
+index c3d0d53..52b3e9e 100644
+--- a/drivers/media/dvb/mantis/mantis_core.c
++++ b/drivers/media/dvb/mantis/mantis_core.c
+@@ -165,6 +165,10 @@ int mantis_core_init(struct mantis_pci *mantis)
+ 		dprintk(verbose, MANTIS_DEBUG, 1, "Mantis DVB init failed");
+ 		return err;
+ 	}
++	if ((err = mantis_uart_init(mantis)) < 0) {
++		dprintk(verbose, MANTIS_DEBUG, 1, "Mantis UART init failed");
++		return err;
++	}
+ 
+ 	return 0;
+ }
+@@ -173,6 +177,10 @@ int mantis_core_exit(struct mantis_pci *mantis)
+ {
+ 	mantis_dma_stop(mantis);
+ 	dprintk(verbose, MANTIS_ERROR, 1, "DMA engine stopping");
++
++	mantis_uart_exit(mantis);
++	dprintk(verbose, MANTIS_ERROR, 1, "UART exit failed");
++
+ 	if (mantis_dma_exit(mantis) < 0)
+ 		dprintk(verbose, MANTIS_ERROR, 1, "DMA exit failed");
+ 	if (mantis_dvb_exit(mantis) < 0)
+diff --git a/drivers/media/dvb/mantis/mantis_pci.c b/drivers/media/dvb/mantis/mantis_pci.c
+index 94abcee..d1eac40 100644
+--- a/drivers/media/dvb/mantis/mantis_pci.c
++++ b/drivers/media/dvb/mantis/mantis_pci.c
+@@ -27,6 +27,7 @@
+ #include <linux/device.h>
+ #include "mantis_common.h"
+ #include "mantis_core.h"
++#include "mantis_uart.h"
+ 
+ #include <asm/irq.h>
+ #include <linux/signal.h>
+@@ -94,6 +95,7 @@ static irqreturn_t mantis_pci_irq(int irq, void *dev_id)
+ 	}
+ 	if (stat & MANTIS_INT_IRQ1) {
+ 		dprintk(verbose, MANTIS_DEBUG, 0, "* INT IRQ-1 *");
++		schedule_work(&mantis->uart_work);
+ 	}
+ 	if (stat & MANTIS_INT_OCERR) {
+ 		dprintk(verbose, MANTIS_DEBUG, 0, "* INT OCERR *");
+diff --git a/drivers/media/dvb/mantis/mantis_uart.c b/drivers/media/dvb/mantis/mantis_uart.c
+new file mode 100644
+index 0000000..786fcc3
+--- /dev/null
++++ b/drivers/media/dvb/mantis/mantis_uart.c
+@@ -0,0 +1,139 @@
++#include <linux/spinlock.h>
++#include "mantis_common.h"
++
++struct mantis_uart_params {
++	enum mantis_baud	baud_rate;
++	enum mantis_parity	parity;
++};
++
++#define UART_MAX_BUF			16
++
++int mantis_uart_read(struct mantis_pci *mantis, u8 *data)
++{
++	struct mantis_hwconfig *config = mantis->hwconfig;
++	u32 stat, i;
++	unsigned long flags;
++
++	/* get data */
++	for (i = 0; i < (config->bytes + 1); i++) {
++
++		if (stat & MANTIS_UART_RXFIFO_FULL) {
++			dprintk(verbose, MANTIS_ERROR, 1, "RX Fifo FULL");
++		}
++		data[i] = mmread(MANTIS_UART_RXD) & 0x3f;
++
++		stat = mmread(MANTIS_UART_STAT);
++
++		dprintk(verbose, MANTIS_DEBUG, 1, "Reading ... <%02x>", data[i] & 0x3f);
++
++		if (data[i] & (1 << 7)) {
++			dprintk(verbose, MANTIS_ERROR, 1, "UART framing error");
++			return -EINVAL;
++		}
++		if (data[i] & (1 << 6)) {
++			dprintk(verbose, MANTIS_ERROR, 1, "UART parity error");
++			return -EINVAL;
++		}
++	}
++
++	return 0;
++}
++
++static void mantis_uart_work(struct work_struct *work)
++{
++	struct mantis_pci *mantis = container_of(work, struct mantis_pci, uart_work);
++	struct mantis_hwconfig *config = mantis->hwconfig;
++	u8 buf[16];
++	int i;
++
++	dprintk(verbose, MANTIS_DEBUG, 1, "UART read");
++	mantis_uart_read(mantis, buf);
++
++	dprintk(verbose, MANTIS_DEBUG, 1, "UART: ");
++	for (i = 0; i < (config->bytes + 1); i++)
++		dprintk(verbose, MANTIS_DEBUG, 0, "<%02x> ", buf[i]);
++
++	dprintk(verbose, MANTIS_DEBUG, 0, "\n");
++}
++
++static int mantis_uart_setup(struct mantis_pci *mantis,
++			     struct mantis_uart_params *params)
++{
++	char* rates[] = { "B_9600", "B_19200", "B_38400", "B_57600", "B_115200" };
++	char* parity[] = { "NONE", "ODD", "EVEN" };
++
++	u32 reg;
++
++	dprintk(verbose, MANTIS_DEBUG, 1, "Set Parity <%s> Baud Rate <%s>",
++		parity[params->parity],
++		rates[params->baud_rate]);
++
++	mmwrite((mmread(MANTIS_UART_CTL) | (params->parity & 0x3)), MANTIS_UART_CTL);
++
++	reg = mmread(MANTIS_UART_BAUD);
++
++	switch (params->baud_rate) {
++	case MANTIS_BAUD_9600:
++		reg |= 0xd8;
++		break;
++	case MANTIS_BAUD_19200:
++		reg |= 0x6c;
++		break;
++	case MANTIS_BAUD_38400:
++		reg |= 0x36;
++		break;
++	case MANTIS_BAUD_57600:
++		reg |= 0x23;
++		break;
++	case MANTIS_BAUD_115200:
++		reg |= 0x11;
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	mmwrite(reg, MANTIS_UART_BAUD);
++
++	return 0;
++}
++
++int mantis_uart_init(struct mantis_pci *mantis)
++{
++	struct mantis_hwconfig *config = mantis->hwconfig;
++	struct mantis_uart_params params;
++
++	dprintk(verbose, MANTIS_DEBUG, 1, "Initializing UART ..");
++	/* default parity: */
++	params.baud_rate = config->baud_rate;
++	params.parity = config->parity;
++
++	init_waitqueue_head(&mantis->uart_wq);
++	spin_lock_init(&mantis->uart_lock);
++
++	INIT_WORK(&mantis->uart_work, mantis_uart_work);
++
++	/* disable interrupt */
++	mmwrite(mmread(MANTIS_UART_CTL) & 0xffef, MANTIS_UART_CTL);
++
++	mantis_uart_setup(mantis, &params);
++
++	/* default 1 byte */
++	mmwrite((mmread(MANTIS_UART_BAUD) | (config->bytes << 8)), MANTIS_UART_BAUD);
++
++	/* flush buffer */
++	mmwrite((mmread(MANTIS_UART_CTL) | MANTIS_UART_RXFLUSH), MANTIS_UART_CTL);
++
++	/* enable interrupt */
++	mmwrite(mmread(MANTIS_INT_MASK) | 0x800, MANTIS_INT_MASK);
++	mmwrite(mmread(MANTIS_UART_CTL) | MANTIS_UART_RXINT, MANTIS_UART_CTL);
++
++	schedule_work(&mantis->uart_work);
++
++	return 0;
++}
++
++void mantis_uart_exit(struct mantis_pci *mantis)
++{
++	/* disable interrupt */
++	mmwrite(mmread(MANTIS_UART_CTL) & 0xffef, MANTIS_UART_CTL);
++}
+diff --git a/drivers/media/dvb/mantis/mantis_uart.h b/drivers/media/dvb/mantis/mantis_uart.h
+index 6113863..e9f938d 100644
+--- a/drivers/media/dvb/mantis/mantis_uart.h
++++ b/drivers/media/dvb/mantis/mantis_uart.h
+@@ -21,6 +21,21 @@
+ #ifndef __MANTIS_UART_H
+ #define __MANTIS_UART_H
+ 
++#define MANTIS_UART_CTL			0xe0
++#define MANTIS_UART_RXINT		(1 << 4)
++#define MANTIS_UART_RXFLUSH		(1 << 2)
++
++#define MANTIS_UART_RXD			0xe8
++#define MANTIS_UART_BAUD		0xec
++
++#define MANTIS_UART_STAT		0xf0
++#define MANTIS_UART_RXFIFO_DATA		(1 << 7)
++#define MANTIS_UART_RXFIFO_EMPTY	(1 << 6)
++#define MANTIS_UART_RXFIFO_FULL		(1 << 3)
++#define MANTIS_UART_FRAME_ERR		(1 << 2)
++#define MANTIS_UART_PARITY_ERR		(1 << 1)
++#define MANTIS_UART_RXTHRESH_INT	(1 << 0)
++
+ enum mantis_baud {
+ 	MANTIS_BAUD_9600	= 0,
+ 	MANTIS_BAUD_19200,
+@@ -30,9 +45,15 @@ enum mantis_baud {
+ };
+ 
+ enum mantis_parity {
+-	MANTIS_PARITY_NONE	= 0,
++	MANTIS_PARITY_UNDEFINED	= 0,
+ 	MANTIS_PARITY_EVEN,
+-	MANTIS_PARITY_ODD
++	MANTIS_PARITY_ODD,
++	MANTIS_PARITY_NONE
+ };
+ 
++struct mantis_pci;
++
++extern int mantis_uart_init(struct mantis_pci *mantis);
++extern void mantis_uart_exit(struct mantis_pci *mantis);
++
+ #endif // __MANTIS_UART_H
+diff --git a/drivers/media/dvb/mantis/mantis_vp1033.c b/drivers/media/dvb/mantis/mantis_vp1033.c
+index 797c4e0..64cdfb8 100644
+--- a/drivers/media/dvb/mantis/mantis_vp1033.c
++++ b/drivers/media/dvb/mantis/mantis_vp1033.c
+@@ -88,6 +88,9 @@ struct mantis_hwconfig vp1033_mantis_config = {
+ 	.model_name		= MANTIS_MODEL_NAME,
+ 	.dev_type		= MANTIS_DEV_TYPE,
+ 	.ts_size		= MANTIS_TS_204,
++	.baud_rate		= MANTIS_BAUD_9600,
++	.parity			= MANTIS_PARITY_NONE,
++	.bytes			= 0,
+ };
+ 
+ int lgtdqcs001f_tuner_set(struct dvb_frontend *fe,
+diff --git a/drivers/media/dvb/mantis/mantis_vp1034.c b/drivers/media/dvb/mantis/mantis_vp1034.c
+index a2fe9d4..28f3420 100644
+--- a/drivers/media/dvb/mantis/mantis_vp1034.c
++++ b/drivers/media/dvb/mantis/mantis_vp1034.c
+@@ -33,6 +33,9 @@ struct mantis_hwconfig vp1034_mantis_config = {
+ 	.model_name	= MANTIS_MODEL_NAME,
+ 	.dev_type	= MANTIS_DEV_TYPE,
+ 	.ts_size	= MANTIS_TS_204,
++	.baud_rate	= MANTIS_BAUD_9600,
++	.parity		= MANTIS_PARITY_NONE,
++	.bytes		= 0,
+ };
+ 
+ int vp1034_set_voltage(struct dvb_frontend *fe, fe_sec_voltage_t voltage)
+diff --git a/drivers/media/dvb/mantis/mantis_vp1041.c b/drivers/media/dvb/mantis/mantis_vp1041.c
+index 8eb1afd..90df80b 100644
+--- a/drivers/media/dvb/mantis/mantis_vp1041.c
++++ b/drivers/media/dvb/mantis/mantis_vp1041.c
+@@ -31,6 +31,9 @@ struct mantis_hwconfig vp1041_mantis_config = {
+ 	.model_name	= MANTIS_MODEL_NAME,
+ 	.dev_type	= MANTIS_DEV_TYPE,
+ 	.ts_size	= MANTIS_TS_188,
++	.baud_rate	= MANTIS_BAUD_9600,
++	.parity		= MANTIS_PARITY_NONE,
++	.bytes		= 0,
+ };
+ 
+ static const struct stb0899_s1_reg vp1041_stb0899_s1_init_1[] = {
+diff --git a/drivers/media/dvb/mantis/mantis_vp2033.c b/drivers/media/dvb/mantis/mantis_vp2033.c
+index 4664d29..1171e69 100644
+--- a/drivers/media/dvb/mantis/mantis_vp2033.c
++++ b/drivers/media/dvb/mantis/mantis_vp2033.c
+@@ -28,6 +28,9 @@ struct mantis_hwconfig vp2033_mantis_config = {
+ 	.model_name	= MANTIS_MODEL_NAME,
+ 	.dev_type	= MANTIS_DEV_TYPE,
+ 	.ts_size	= MANTIS_TS_204,
++	.baud_rate	= MANTIS_BAUD_9600,
++	.parity		= MANTIS_PARITY_NONE,
++	.bytes		= 0,
+ };
+ 
+ struct tda1002x_config philips_cu1216_config = {
+diff --git a/drivers/media/dvb/mantis/mantis_vp2040.c b/drivers/media/dvb/mantis/mantis_vp2040.c
+index f77be7b..ce73d6b 100644
+--- a/drivers/media/dvb/mantis/mantis_vp2040.c
++++ b/drivers/media/dvb/mantis/mantis_vp2040.c
+@@ -28,6 +28,9 @@ struct mantis_hwconfig vp2040_mantis_config = {
+ 	.model_name	= MANTIS_MODEL_NAME,
+ 	.dev_type	= MANTIS_DEV_TYPE,
+ 	.ts_size	= MANTIS_TS_204,
++	.baud_rate	= MANTIS_BAUD_9600,
++	.parity		= MANTIS_PARITY_NONE,
++	.bytes		= 0,
+ };
+ 
+ struct tda10023_config tda10023_cu1216_config = {
+diff --git a/drivers/media/dvb/mantis/mantis_vp3028.c b/drivers/media/dvb/mantis/mantis_vp3028.c
+new file mode 100644
+index 0000000..7f8918c
+--- /dev/null
++++ b/drivers/media/dvb/mantis/mantis_vp3028.c
+@@ -0,0 +1,38 @@
++/*
++	Mantis VP-3028 driver
++
++	Copyright (C) 2005, 2006 Manu Abraham (abraham.manu@gmail.com)
++
++	This program is free software; you can redistribute it and/or modify
++	it under the terms of the GNU General Public License as published by
++	the Free Software Foundation; either version 2 of the License, or
++	(at your option) any later version.
++
++	This program is distributed in the hope that it will be useful,
++	but WITHOUT ANY WARRANTY; without even the implied warranty of
++	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++	GNU General Public License for more details.
++
++	You should have received a copy of the GNU General Public License
++	along with this program; if not, write to the Free Software
++	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++*/
++
++#include "mantis_common.h"
++#include "mantis_vp3028.h"
++
++struct zl10353_config mantis_vp3028_config = {
++	.demod_address	= 0x0f,
++};
++
++#define MANTIS_MODEL_NAME	"VP-3028"
++#define MANTIS_DEV_TYPE		"DVB-T"
++
++struct mantis_hwconfig vp3028_mantis_config = {
++	.model_name	= MANTIS_MODEL_NAME,
++	.dev_type	= MANTIS_DEV_TYPE,
++	.ts_size	= MANTIS_TS_188,
++	.baud_rate	= MANTIS_BAUD_9600,
++	.parity		= MANTIS_PARITY_NONE,
++	.bytes		= 0,
++};
+diff --git a/drivers/media/dvb/mantis/mantis_vp3028.h b/drivers/media/dvb/mantis/mantis_vp3028.h
+new file mode 100644
+index 0000000..c51628d
+--- /dev/null
++++ b/drivers/media/dvb/mantis/mantis_vp3028.h
+@@ -0,0 +1,13 @@
++#ifndef __MANTIS_VP3028_H
++#define __MANTIS_VP3028_H
++
++#include "dvb_frontend.h"
++#include "mantis_common.h"
++#include "zl10353.h"
++
++#define MANTIS_VP_3028_DVB_T	0x0028
++
++extern struct zl10353_config mantis_vp3028_config;
++extern struct mantis_hwconfig vp3028_mantis_config;
++
++#endif /* __MANTIS_VP3028_H */
+diff --git a/drivers/media/dvb/mantis/mantis_vp3030.c b/drivers/media/dvb/mantis/mantis_vp3030.c
+index cab092c..9ca8040 100644
+--- a/drivers/media/dvb/mantis/mantis_vp3030.c
++++ b/drivers/media/dvb/mantis/mantis_vp3030.c
+@@ -32,6 +32,9 @@ struct mantis_hwconfig vp3030_mantis_config = {
+ 	.model_name	= MANTIS_MODEL_NAME,
+ 	.dev_type	= MANTIS_DEV_TYPE,
+ 	.ts_size	= MANTIS_TS_188,
++	.baud_rate	= MANTIS_BAUD_9600,
++	.parity		= MANTIS_PARITY_NONE,
++	.bytes		= 0,
+ };
+ 
+ int panasonic_en57h12d5_set_params(struct dvb_frontend *fe,
+-- 
+1.7.1
+
