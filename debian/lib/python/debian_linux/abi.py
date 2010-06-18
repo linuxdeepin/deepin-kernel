@@ -7,8 +7,10 @@ class Symbol(object):
         if not isinstance(other, Symbol):
             return NotImplemented
 
+        # Symbols are resolved to modules by depmod at installation/
+        # upgrade time, not compile time, so moving a symbol between
+        # modules is not an ABI change.  Compare everything else.
         if self.name != other.name: return False
-        if self.module != other.module: return False
         if self.version != other.version: return False
         if self.export != other.export: return False
 
