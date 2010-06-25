@@ -1,18 +1,16 @@
-From 5c77a7c0a0becd2ae306ee3ad813b4a3e766fcbc Mon Sep 17 00:00:00 2001
+From a56874099ffeadcbd57cffeb2fd1d5d55c25ee03 Mon Sep 17 00:00:00 2001
 From: Ben Hutchings <ben@decadent.org.uk>
 Date: Sun, 20 Jun 2010 21:29:04 +0100
-Subject: [PATCH 2/2] 3c59x: Use fine-grained locks for MII and windowed register access
+Subject: [PATCH] 3c59x: Use fine-grained locks for MII and windowed register access
 
 This means that IRQs will only be deferred for relatively short
 periods of time.
-
-Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
 ---
- drivers/net/3c59x.c |   67 +++++++++++++++++++++++++++++---------------------
- 1 files changed, 39 insertions(+), 28 deletions(-)
+ drivers/net/3c59x.c |   69 ++++++++++++++++++++++++++++++--------------------
+ 1 files changed, 41 insertions(+), 28 deletions(-)
 
 diff --git a/drivers/net/3c59x.c b/drivers/net/3c59x.c
-index 95f6919..c1b09bd 100644
+index 95f6919..3c85600 100644
 --- a/drivers/net/3c59x.c
 +++ b/drivers/net/3c59x.c
 @@ -644,9 +644,15 @@ struct vortex_private {
@@ -59,7 +57,16 @@ index 95f6919..c1b09bd 100644
  }
  DEFINE_WINDOW_IO(8)
  DEFINE_WINDOW_IO(16)
-@@ -1784,7 +1798,6 @@ vortex_timer(unsigned long data)
+@@ -1181,6 +1195,8 @@ static int __devinit vortex_probe1(struct device *gendev,
+ 	}
+ 
+ 	spin_lock_init(&vp->lock);
++	spin_lock_init(&vp->mii_lock);
++	spin_lock_init(&vp->window_lock);
+ 	vp->gendev = gendev;
+ 	vp->mii.dev = dev;
+ 	vp->mii.mdio_read = mdio_read;
+@@ -1784,7 +1800,6 @@ vortex_timer(unsigned long data)
  		pr_debug("dev->watchdog_timeo=%d\n", dev->watchdog_timeo);
  	}
  
@@ -67,7 +74,7 @@ index 95f6919..c1b09bd 100644
  	media_status = window_read16(vp, 4, Wn4_Media);
  	switch (dev->if_port) {
  	case XCVR_10baseT:  case XCVR_100baseTx:  case XCVR_100baseFx:
-@@ -1805,10 +1818,7 @@ vortex_timer(unsigned long data)
+@@ -1805,10 +1820,7 @@ vortex_timer(unsigned long data)
  	case XCVR_MII: case XCVR_NWAY:
  		{
  			ok = 1;
@@ -78,7 +85,7 @@ index 95f6919..c1b09bd 100644
  		}
  		break;
  	  default:					/* Other media types handled by Tx timeouts. */
-@@ -1827,6 +1837,8 @@ vortex_timer(unsigned long data)
+@@ -1827,6 +1839,8 @@ vortex_timer(unsigned long data)
  	if (!ok) {
  		unsigned int config;
  
@@ -87,7 +94,7 @@ index 95f6919..c1b09bd 100644
  		do {
  			dev->if_port = media_tbl[dev->if_port].next;
  		} while ( ! (vp->available_media & media_tbl[dev->if_port].mask));
-@@ -1855,6 +1867,8 @@ vortex_timer(unsigned long data)
+@@ -1855,6 +1869,8 @@ vortex_timer(unsigned long data)
  		if (vortex_debug > 1)
  			pr_debug("wrote 0x%08x to Wn3_Config\n", config);
  		/* AKPM: FIXME: Should reset Rx & Tx here.  P60 of 3c90xc.pdf */
@@ -96,7 +103,7 @@ index 95f6919..c1b09bd 100644
  	}
  
  leave_media_alone:
-@@ -1862,7 +1876,6 @@ leave_media_alone:
+@@ -1862,7 +1878,6 @@ leave_media_alone:
  	  pr_debug("%s: Media selection timer finished, %s.\n",
  			 dev->name, media_tbl[dev->if_port].name);
  
@@ -104,7 +111,7 @@ index 95f6919..c1b09bd 100644
  	mod_timer(&vp->timer, RUN_AT(next_tick));
  	if (vp->deferred)
  		iowrite16(FakeIntr, ioaddr + EL3_CMD);
-@@ -2052,9 +2065,11 @@ vortex_start_xmit(struct sk_buff *skb, struct net_device *dev)
+@@ -2052,9 +2067,11 @@ vortex_start_xmit(struct sk_buff *skb, struct net_device *dev)
  		int len = (skb->len + 3) & ~3;
  		vp->tx_skb_dma = pci_map_single(VORTEX_PCI(vp), skb->data, len,
  						PCI_DMA_TODEVICE);
@@ -116,7 +123,7 @@ index 95f6919..c1b09bd 100644
  		vp->tx_skb = skb;
  		iowrite16(StartDMADown, ioaddr + EL3_CMD);
  		/* netif_wake_queue() will be called at the DMADone interrupt. */
-@@ -2228,6 +2243,7 @@ vortex_interrupt(int irq, void *dev_id)
+@@ -2228,6 +2245,7 @@ vortex_interrupt(int irq, void *dev_id)
  		pr_debug("%s: interrupt, status %4.4x, latency %d ticks.\n",
  			   dev->name, status, ioread8(ioaddr + Timer));
  
@@ -124,7 +131,7 @@ index 95f6919..c1b09bd 100644
  	window_set(vp, 7);
  
  	do {
-@@ -2288,6 +2304,8 @@ vortex_interrupt(int irq, void *dev_id)
+@@ -2288,6 +2306,8 @@ vortex_interrupt(int irq, void *dev_id)
  		iowrite16(AckIntr | IntReq | IntLatch, ioaddr + EL3_CMD);
  	} while ((status = ioread16(ioaddr + EL3_STATUS)) & (IntLatch | RxComplete));
  
@@ -133,7 +140,7 @@ index 95f6919..c1b09bd 100644
  	if (vortex_debug > 4)
  		pr_debug("%s: exiting interrupt, status %4.4x.\n",
  			   dev->name, status);
-@@ -2810,37 +2828,22 @@ static void update_stats(void __iomem *ioaddr, struct net_device *dev)
+@@ -2810,37 +2830,22 @@ static void update_stats(void __iomem *ioaddr, struct net_device *dev)
  static int vortex_nway_reset(struct net_device *dev)
  {
  	struct vortex_private *vp = netdev_priv(dev);
@@ -174,7 +181,7 @@ index 95f6919..c1b09bd 100644
  }
  
  static u32 vortex_get_msglevel(struct net_device *dev)
-@@ -3063,6 +3066,8 @@ static int mdio_read(struct net_device *dev, int phy_id, int location)
+@@ -3063,6 +3068,8 @@ static int mdio_read(struct net_device *dev, int phy_id, int location)
  	int read_cmd = (0xf6 << 10) | (phy_id << 5) | location;
  	unsigned int retval = 0;
  
@@ -183,7 +190,7 @@ index 95f6919..c1b09bd 100644
  	if (mii_preamble_required)
  		mdio_sync(vp, 32);
  
-@@ -3086,6 +3091,9 @@ static int mdio_read(struct net_device *dev, int phy_id, int location)
+@@ -3086,6 +3093,9 @@ static int mdio_read(struct net_device *dev, int phy_id, int location)
  			       4, Wn4_PhysicalMgmt);
  		mdio_delay(vp);
  	}
@@ -193,7 +200,7 @@ index 95f6919..c1b09bd 100644
  	return retval & 0x20000 ? 0xffff : retval>>1 & 0xffff;
  }
  
-@@ -3095,6 +3103,8 @@ static void mdio_write(struct net_device *dev, int phy_id, int location, int val
+@@ -3095,6 +3105,8 @@ static void mdio_write(struct net_device *dev, int phy_id, int location, int val
  	int write_cmd = 0x50020000 | (phy_id << 23) | (location << 18) | value;
  	int i;
  
@@ -202,7 +209,7 @@ index 95f6919..c1b09bd 100644
  	if (mii_preamble_required)
  		mdio_sync(vp, 32);
  
-@@ -3115,7 +3125,8 @@ static void mdio_write(struct net_device *dev, int phy_id, int location, int val
+@@ -3115,7 +3127,8 @@ static void mdio_write(struct net_device *dev, int phy_id, int location, int val
  			       4, Wn4_PhysicalMgmt);
  		mdio_delay(vp);
  	}
