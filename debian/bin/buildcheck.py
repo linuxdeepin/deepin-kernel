@@ -17,6 +17,14 @@ class CheckAbi(object):
             self.symbol = symbol
             self.symbol_ref = symbol_ref or symbol
 
+        @property
+        def module(self):
+            return self.symbol.module
+
+        @property
+        def name(self):
+            return self.symbol.name
+
         def write(self, out, ignored):
             info = []
             if ignored:
@@ -116,6 +124,17 @@ class CheckAbi(object):
 
         return symbols, add, change, remove
 
+    def _ignore_pattern(self, pattern):
+        ret = []
+        for i in re.split(r'(\*\*?)', pattern):
+            if i == '*':
+                ret.append(r'[^!]+')
+            elif i == '**':
+                ret.append(r'.+')
+            elif i:
+                ret.append(re.escape(i))
+        return re.compile('^' + ''.join(ret) + '$')
+
     def _ignore(self, symbols):
         # TODO: let config merge this lists
         configs = []
@@ -132,18 +151,17 @@ class CheckAbi(object):
 
         filtered = set()
         for ignore in ignores:
-            type = 'symbolmatch'
+            type = 'name'
             if ':' in ignore:
                 type, ignore = ignore.split(':')
-            if type == 'symbolmatch':
-                filtered.update(fnmatch.filter(symbols.iterkeys(), ignore))
-            elif type == 'module':
+            if type in ('name', 'module'):
+                p = self._ignore_pattern(ignore)
                 for symbol in symbols.itervalues():
-                    symbol = symbol.symbol
-                    if symbol.module == ignore:
+                    if p.match(getattr(symbol, type)):
                         filtered.add(symbol.name)
             else:
                 raise NotImplementedError
+
         return filtered
  
 
