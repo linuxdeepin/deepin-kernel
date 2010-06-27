@@ -24,37 +24,9 @@ use FileHandle;
 use POSIX ();
 use UUID;
 
-# Since debconf clients get their standard input and output redirected
-# to the debconf front-end, we need to redirect them again before
-# running any other program.
-sub _system {
-    my $pid = fork();
-    die "$!" unless defined($pid);
-    if ($pid == 0) {
-       # </dev/null
-       POSIX::close(0);
-       POSIX::open('/dev/null', POSIX::O_RDONLY) or die "$!";
-       # >&2
-       POSIX::dup2(2, 1) or die "$!";
-       exec(@_);
-       exit(255); # usual exit code for failed exec
-    } else {
-       waitpid($pid, 0);
-       # The built-in system() function does this substitution
-       if (POSIX::WIFEXITED($?) && POSIX::WEXITSTATUS($?) == 255) {
-	   return -1;
-       } else {
-	   return $?;
-       }
-    }
-}
-
 package DebianKernel::DiskId;
 
 ### utility
-
-# Import _system() function
-*_system = \&main::_system;
 
 sub id_to_path {
     my ($id) = @_;
@@ -347,7 +319,7 @@ sub grub1_update {
 }
 
 sub grub1_post {
-    _system('update-grub');
+    system('update-grub');
 }
 
 ### GRUB 2 config
@@ -384,7 +356,7 @@ sub grub2_update {
 }
 
 sub grub2_post {
-    _system('grub-mkconfig', '-o', '/boot/grub/grub.cfg');
+    system('grub-mkconfig', '-o', '/boot/grub/grub.cfg');
 }
 
 ### LILO
@@ -553,13 +525,13 @@ sub lilo_update {
 }
 
 sub lilo_post {
-    _system('lilo');
+    system('lilo');
 }
 
 ### SILO
 
 sub silo_post {
-    _system('silo');
+    system('silo');
 }
 
 ### ELILO
@@ -576,7 +548,7 @@ sub elilo_update {
 }
 
 sub elilo_post {
-    _system('elilo');
+    system('elilo');
 }
 
 ### extlinux
@@ -639,7 +611,7 @@ sub extlinux_new_update {
 }
 
 sub extlinux_post {
-    _system('update-extlinux');
+    system('update-extlinux');
 }
 
 # udev persistent-cd
@@ -1038,40 +1010,40 @@ my @config_files = ({packages => 'mount',
 
 sub ext2_set_label {
     my ($bdev, $label) = @_;
-    _system('tune2fs', '-L', $label, $bdev) == 0 or die "tune2fs failed: $?";
+    system('tune2fs', '-L', $label, $bdev) == 0 or die "tune2fs failed: $?";
 }
 sub ext2_set_uuid {
     my ($bdev, $uuid) = @_;
-    _system('tune2fs', '-U', $uuid, $bdev) == 0 or die "tune2fs failed: $?";
+    system('tune2fs', '-U', $uuid, $bdev) == 0 or die "tune2fs failed: $?";
 }
 
 sub jfs_set_label {
     my ($bdev, $label) = @_;
-    _system('jfs_tune', '-L', $label, $bdev) == 0 or die "jfs_tune failed: $?";
+    system('jfs_tune', '-L', $label, $bdev) == 0 or die "jfs_tune failed: $?";
 }
 sub jfs_set_uuid {
     my ($bdev, $uuid) = @_;
-    _system('jfs_tune', '-U', $uuid, $bdev) == 0 or die "jfs_tune failed: $?";
+    system('jfs_tune', '-U', $uuid, $bdev) == 0 or die "jfs_tune failed: $?";
 }
 
 sub fat_set_label {
     my ($bdev, $label) = @_;
-    _system('dosfslabel', $bdev, $label) == 0 or die "dosfslabel failed: $?";
+    system('dosfslabel', $bdev, $label) == 0 or die "dosfslabel failed: $?";
 }
 
 sub ntfs_set_label {
     my ($bdev, $label) = @_;
-    _system('ntfslabel', $bdev, $label) == 0 or die "ntfslabel failed: $?";
+    system('ntfslabel', $bdev, $label) == 0 or die "ntfslabel failed: $?";
 }
 
 sub reiserfs_set_label {
     my ($bdev, $label) = @_;
-    _system('reiserfstune', '--label', $label, $bdev)
+    system('reiserfstune', '--label', $label, $bdev)
 	or die "reiserfstune failed: $?";
 }
 sub reiserfs_set_uuid {
     my ($bdev, $uuid) = @_;
-    _system('reiserfstune', '--uuid', $uuid, $bdev)
+    system('reiserfstune', '--uuid', $uuid, $bdev)
 	or die "reiserfstune failed: $?";
 }
 
@@ -1135,16 +1107,16 @@ sub swap_set_uuid {
 
 sub ufs_set_label {
     my ($bdev, $label) = @_;
-    _system('tunefs.ufs', '-L', $label, $bdev) or die "tunefs.ufs failed: $?";
+    system('tunefs.ufs', '-L', $label, $bdev) or die "tunefs.ufs failed: $?";
 }
 
 sub xfs_set_label {
     my ($bdev, $label) = @_;
-    _system('xfs_admin', '-L', $label, $bdev) or die "xfs_admin failed: $?";
+    system('xfs_admin', '-L', $label, $bdev) or die "xfs_admin failed: $?";
 }
 sub xfs_set_uuid {
     my ($bdev, $uuid) = @_;
-    _system('xfs_admin', '-U', $uuid, $bdev) or die "xfs_admin failed: $?";
+    system('xfs_admin', '-U', $uuid, $bdev) or die "xfs_admin failed: $?";
 }
 
 my %filesystem_types = (
@@ -1431,9 +1403,42 @@ sub update_config {
     }
 }
 
+sub update_all {
+    # The update process may be aborted if a command fails, but we now
+    # want to recover and ask the user what to do.  We can use 'do' to
+    # prevent 'die' from exiting the process, but we also need to
+    # capture and present error messages using debconf as they may
+    # otherwise be hidden.  Therefore, we fork and capture stdout and
+    # stderr from the update process in the main process.
+    my $pid = open(PIPE, '-|');
+    return (-1, '') unless defined $pid;
+
+    if ($pid == 0) {
+	# Complete redirection
+	# </dev/null
+	POSIX::close(0);
+	POSIX::open('/dev/null', POSIX::O_RDONLY) or die "$!";
+	# 2>&1
+	POSIX::dup2(1, 2) or die "$!";
+
+	# Do the update
+	set_new_ids();
+	update_config(@_);
+	exit;
+    } else {
+	my @output = ();
+	while (<PIPE>) {
+	    push @output, $_;
+	}
+	close(PIPE);
+	return ($?, join('', @output));
+    }
+}
+
 sub transition {
     use Debconf::Client::ConfModule ':all';
 
+retry:
     %bdev_map = ();
     %id_map = ();
 
@@ -1520,8 +1525,30 @@ sub transition {
 	die "Error retrieving answer for $question: $answer" if $ret;
     
 	if ($answer eq 'true') {
-	    set_new_ids();
-	    update_config(\%update_map, @auto_configs);
+	    my ($rc, $output) = update_all(\%update_map, @auto_configs);
+	    if ($rc != 0) {
+		# Display output of update commands
+		$question = 'linux-base/disk-id-update-failed';
+		$output =~ s/\n/\\n/g;
+		($ret, $seen) = subst($question, 'output', $output);
+		die "Error setting debconf substitutions in $question: $seen"
+		    if $ret;
+		($ret, $seen) = input('high', $question);
+		if ($ret && $ret != 30) {
+		    die "Error setting debconf question $question: $seen";
+		}
+		($ret, $seen) = go();
+		if ($ret && $ret != 30) {
+		    die "Error asking debconf question $question: $seen";
+		}
+
+		# Mark previous questions as unseen
+		fset('linux-base/disk-id-convert-auto', 'seen', 'false');
+		fset('linux-base/disk-id-convert-plan', 'seen', 'false');
+		fset('linux-base/disk-id-convert-plan-no-relabel', 'seen',
+		     'false');
+		goto retry;
+	    }
 	}
     }
 
