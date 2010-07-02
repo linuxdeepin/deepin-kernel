@@ -1,0 +1,160 @@
+--- a/drivers/gpu/drm/drm_edid.c
++++ b/drivers/gpu/drm/drm_edid.c
+@@ -334,7 +334,7 @@ static struct drm_display_mode drm_dmt_modes[] = {
+ 		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC) },
+ 	/* 1024x768@85Hz */
+ 	{ DRM_MODE("1024x768", DRM_MODE_TYPE_DRIVER, 94500, 1024, 1072,
+-		   1072, 1376, 0, 768, 769, 772, 808, 0,
++		   1168, 1376, 0, 768, 769, 772, 808, 0,
+ 		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC) },
+ 	/* 1152x864@75Hz */
+ 	{ DRM_MODE("1152x864", DRM_MODE_TYPE_DRIVER, 108000, 1152, 1216,
+--- a/drivers/gpu/drm/i915/i915_drv.c
++++ b/drivers/gpu/drm/i915/i915_drv.c
+@@ -68,7 +68,8 @@ const static struct intel_device_info intel_845g_info = {
+ };
+ 
+ const static struct intel_device_info intel_i85x_info = {
+-	.is_i8xx = 1, .is_mobile = 1, .cursor_needs_physical = 1,
++	.is_i8xx = 1, .is_i85x = 1, .is_mobile = 1,
++	.cursor_needs_physical = 1,
+ };
+ 
+ const static struct intel_device_info intel_i865g_info = {
+@@ -140,7 +141,7 @@ const static struct pci_device_id pciidlist[] = {
+ 	INTEL_VGA_DEVICE(0x3577, &intel_i830_info),
+ 	INTEL_VGA_DEVICE(0x2562, &intel_845g_info),
+ 	INTEL_VGA_DEVICE(0x3582, &intel_i85x_info),
+-	INTEL_VGA_DEVICE(0x35e8, &intel_i85x_info),
++	INTEL_VGA_DEVICE(0x358e, &intel_i85x_info),
+ 	INTEL_VGA_DEVICE(0x2572, &intel_i865g_info),
+ 	INTEL_VGA_DEVICE(0x2582, &intel_i915g_info),
+ 	INTEL_VGA_DEVICE(0x258a, &intel_i915g_info),
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -175,6 +175,7 @@ struct intel_overlay;
+ struct intel_device_info {
+ 	u8 is_mobile : 1;
+ 	u8 is_i8xx : 1;
++	u8 is_i85x : 1;
+ 	u8 is_i915g : 1;
+ 	u8 is_i9xx : 1;
+ 	u8 is_i945gm : 1;
+@@ -1027,7 +1028,7 @@ extern int i915_wait_ring(struct drm_device * dev, int n, const char *caller);
+ 
+ #define IS_I830(dev)		((dev)->pci_device == 0x3577)
+ #define IS_845G(dev)		((dev)->pci_device == 0x2562)
+-#define IS_I85X(dev)		((dev)->pci_device == 0x3582)
++#define IS_I85X(dev)		(INTEL_INFO(dev)->is_i85x)
+ #define IS_I865G(dev)		((dev)->pci_device == 0x2572)
+ #define IS_GEN2(dev)		(INTEL_INFO(dev)->is_i8xx)
+ #define IS_I915G(dev)		(INTEL_INFO(dev)->is_i915g)
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -2641,6 +2641,14 @@ i915_gem_object_bind_to_gtt(struct drm_gem_object *obj, unsigned alignment)
+ 		return -EINVAL;
+ 	}
+ 
++	/* If the object is bigger than the entire aperture, reject it early
++	 * before evicting everything in a vain attempt to find space.
++	 */
++	if (obj->size > dev->gtt_total) {
++		DRM_ERROR("Attempting to bind an object larger than the aperture\n");
++		return -E2BIG;
++	}
++
+  search_free:
+ 	free_space = drm_mm_search_free(&dev_priv->mm.gtt_space,
+ 					obj->size, alignment, 0);
+@@ -4175,6 +4183,17 @@ i915_gem_object_pin(struct drm_gem_object *obj, uint32_t alignment)
+ 	int ret;
+ 
+ 	i915_verify_inactive(dev, __FILE__, __LINE__);
++
++	if (obj_priv->gtt_space != NULL) {
++		if (alignment == 0)
++			alignment = i915_gem_get_gtt_alignment(obj);
++		if (obj_priv->gtt_offset & (alignment - 1)) {
++			ret = i915_gem_object_unbind(obj);
++			if (ret)
++				return ret;
++		}
++	}
++
+ 	if (obj_priv->gtt_space == NULL) {
+ 		ret = i915_gem_object_bind_to_gtt(obj, alignment);
+ 		if (ret)
+--- a/drivers/gpu/drm/radeon/radeon_atombios.c
++++ b/drivers/gpu/drm/radeon/radeon_atombios.c
+@@ -514,6 +514,8 @@ bool radeon_get_atom_connector_info_from_object_table(struct drm_device *dev)
+ 			}
+ 
+ 			/* look up gpio for ddc, hpd */
++			ddc_bus.valid = false;
++			hpd.hpd = RADEON_HPD_NONE;
+ 			if ((le16_to_cpu(path->usDeviceTag) &
+ 			     (ATOM_DEVICE_TV_SUPPORT | ATOM_DEVICE_CV_SUPPORT)) == 0) {
+ 				for (j = 0; j < con_obj->ucNumberOfObjects; j++) {
+@@ -569,9 +571,6 @@ bool radeon_get_atom_connector_info_from_object_table(struct drm_device *dev)
+ 						break;
+ 					}
+ 				}
+-			} else {
+-				hpd.hpd = RADEON_HPD_NONE;
+-				ddc_bus.valid = false;
+ 			}
+ 
+ 			conn_id = le16_to_cpu(path->usConnObjectId);
+@@ -1137,7 +1136,7 @@ struct radeon_encoder_atom_dig *radeon_atombios_get_lvds_info(struct
+ 		lvds->native_mode.vtotal = lvds->native_mode.vdisplay +
+ 			le16_to_cpu(lvds_info->info.sLCDTiming.usVBlanking_Time);
+ 		lvds->native_mode.vsync_start = lvds->native_mode.vdisplay +
+-			le16_to_cpu(lvds_info->info.sLCDTiming.usVSyncWidth);
++			le16_to_cpu(lvds_info->info.sLCDTiming.usVSyncOffset);
+ 		lvds->native_mode.vsync_end = lvds->native_mode.vsync_start +
+ 			le16_to_cpu(lvds_info->info.sLCDTiming.usVSyncWidth);
+ 		lvds->panel_pwr_delay =
+--- a/drivers/gpu/drm/radeon/radeon_cp.c
++++ b/drivers/gpu/drm/radeon/radeon_cp.c
+@@ -1646,6 +1646,7 @@ static int radeon_do_resume_cp(struct drm_device *dev, struct drm_file *file_pri
+ 	radeon_cp_load_microcode(dev_priv);
+ 	radeon_cp_init_ring_buffer(dev, dev_priv, file_priv);
+ 
++	dev_priv->have_z_offset = 0;
+ 	radeon_do_engine_reset(dev);
+ 	radeon_irq_set_state(dev, RADEON_SW_INT_ENABLE, 1);
+ 
+--- a/drivers/gpu/drm/radeon/radeon_drv.h
++++ b/drivers/gpu/drm/radeon/radeon_drv.h
+@@ -268,6 +268,8 @@ typedef struct drm_radeon_private {
+ 
+ 	u32 scratch_ages[5];
+ 
++	int have_z_offset;
++
+ 	/* starting from here on, data is preserved accross an open */
+ 	uint32_t flags;		/* see radeon_chip_flags */
+ 	resource_size_t fb_aper_offset;
+--- a/drivers/gpu/drm/radeon/radeon_state.c
++++ b/drivers/gpu/drm/radeon/radeon_state.c
+@@ -101,6 +101,7 @@ static __inline__ int radeon_check_and_fixup_packets(drm_radeon_private_t *
+ 			DRM_ERROR("Invalid depth buffer offset\n");
+ 			return -EINVAL;
+ 		}
++		dev_priv->have_z_offset = 1;
+ 		break;
+ 
+ 	case RADEON_EMIT_PP_CNTL:
+@@ -876,6 +877,12 @@ static void radeon_cp_dispatch_clear(struct drm_device * dev,
+ 		if (tmp & RADEON_BACK)
+ 			flags |= RADEON_FRONT;
+ 	}
++	if (flags & (RADEON_DEPTH|RADEON_STENCIL)) {
++		if (!dev_priv->have_z_offset) {
++			printk_once(KERN_ERR "radeon: illegal depth clear request. Buggy mesa detected - please update.\n");
++			flags &= ~(RADEON_DEPTH | RADEON_STENCIL);
++		}
++	}
+ 
+ 	if (flags & (RADEON_FRONT | RADEON_BACK)) {
+ 
