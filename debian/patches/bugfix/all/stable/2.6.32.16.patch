@@ -51,6 +51,8 @@ index 0643e3b..3c45d5d 100644
    
  
  (4a) Interpretation of error messages and common problems
+diff --git a/Makefile b/Makefile
+index 36fead3..9797439 100644
 diff --git a/arch/arm/common/sa1111.c b/arch/arm/common/sa1111.c
 index 8ba7044..b07bfee 100644
 --- a/arch/arm/common/sa1111.c
@@ -322,11 +324,114 @@ index ae06c62..c8fc4dc 100644
  		index = ENTRIES-1;
  
  	return initial_lfsr[index];
+diff --git a/arch/powerpc/platforms/pseries/hotplug-cpu.c b/arch/powerpc/platforms/pseries/hotplug-cpu.c
+index ebff6d9..c2c1720 100644
+--- a/arch/powerpc/platforms/pseries/hotplug-cpu.c
++++ b/arch/powerpc/platforms/pseries/hotplug-cpu.c
+@@ -66,30 +66,6 @@ static void pseries_mach_cpu_die(void)
+ 	for(;;);
+ }
+ 
+-static int qcss_tok;	/* query-cpu-stopped-state token */
+-
+-/* Get state of physical CPU.
+- * Return codes:
+- *	0	- The processor is in the RTAS stopped state
+- *	1	- stop-self is in progress
+- *	2	- The processor is not in the RTAS stopped state
+- *	-1	- Hardware Error
+- *	-2	- Hardware Busy, Try again later.
+- */
+-static int query_cpu_stopped(unsigned int pcpu)
+-{
+-	int cpu_status, status;
+-
+-	status = rtas_call(qcss_tok, 1, 2, &cpu_status, pcpu);
+-	if (status != 0) {
+-		printk(KERN_ERR
+-		       "RTAS query-cpu-stopped-state failed: %i\n", status);
+-		return status;
+-	}
+-
+-	return cpu_status;
+-}
+-
+ static int pseries_cpu_disable(void)
+ {
+ 	int cpu = smp_processor_id();
+@@ -113,8 +89,9 @@ static void pseries_cpu_die(unsigned int cpu)
+ 	unsigned int pcpu = get_hard_smp_processor_id(cpu);
+ 
+ 	for (tries = 0; tries < 25; tries++) {
+-		cpu_status = query_cpu_stopped(pcpu);
+-		if (cpu_status == 0 || cpu_status == -1)
++		cpu_status = smp_query_cpu_stopped(pcpu);
++		if (cpu_status == QCSS_STOPPED ||
++		    cpu_status == QCSS_HARDWARE_ERROR)
+ 			break;
+ 		cpu_relax();
+ 	}
+@@ -256,6 +233,7 @@ static int __init pseries_cpu_hotplug_init(void)
+ {
+ 	struct device_node *np;
+ 	const char *typep;
++	int qcss_tok;
+ 
+ 	for_each_node_by_name(np, "interrupt-controller") {
+ 		typep = of_get_property(np, "compatible", NULL);
+diff --git a/arch/powerpc/platforms/pseries/plpar_wrappers.h b/arch/powerpc/platforms/pseries/plpar_wrappers.h
+index a24a6b2..45f634c 100644
+--- a/arch/powerpc/platforms/pseries/plpar_wrappers.h
++++ b/arch/powerpc/platforms/pseries/plpar_wrappers.h
+@@ -4,6 +4,14 @@
+ #include <asm/hvcall.h>
+ #include <asm/page.h>
+ 
++/* Get state of physical CPU from query_cpu_stopped */
++int smp_query_cpu_stopped(unsigned int pcpu);
++#define QCSS_STOPPED 0
++#define QCSS_STOPPING 1
++#define QCSS_NOT_STOPPED 2
++#define QCSS_HARDWARE_ERROR -1
++#define QCSS_HARDWARE_BUSY -2
++
+ static inline long poll_pending(void)
+ {
+ 	return plpar_hcall_norets(H_POLL_PENDING);
 diff --git a/arch/powerpc/platforms/pseries/smp.c b/arch/powerpc/platforms/pseries/smp.c
-index 440000c..e4822fe 100644
+index 440000c..3afa079 100644
 --- a/arch/powerpc/platforms/pseries/smp.c
 +++ b/arch/powerpc/platforms/pseries/smp.c
-@@ -81,6 +81,12 @@ static inline int __devinit smp_startup_cpu(unsigned int lcpu)
+@@ -56,6 +56,28 @@
+  */
+ static cpumask_t of_spin_map;
+ 
++/* Query where a cpu is now.  Return codes #defined in plpar_wrappers.h */
++int smp_query_cpu_stopped(unsigned int pcpu)
++{
++	int cpu_status, status;
++	int qcss_tok = rtas_token("query-cpu-stopped-state");
++
++	if (qcss_tok == RTAS_UNKNOWN_SERVICE) {
++		printk(KERN_INFO "Firmware doesn't support "
++				"query-cpu-stopped-state\n");
++		return QCSS_HARDWARE_ERROR;
++	}
++
++	status = rtas_call(qcss_tok, 1, 2, &cpu_status, pcpu);
++	if (status != 0) {
++		printk(KERN_ERR
++		       "RTAS query-cpu-stopped-state failed: %i\n", status);
++		return status;
++	}
++
++	return cpu_status;
++}
++
+ /**
+  * smp_startup_cpu() - start the given cpu
+  *
+@@ -81,6 +103,12 @@ static inline int __devinit smp_startup_cpu(unsigned int lcpu)
  
  	pcpu = get_hard_smp_processor_id(lcpu);
  
@@ -1438,6 +1543,26 @@ index 302d2c7..cfd3f57 100644
  
  	u16 flags;		/* custom mode flags */
  	u8 ocr;			/* output control register */
+diff --git a/drivers/net/ixgbe/ixgbe_main.c b/drivers/net/ixgbe/ixgbe_main.c
+index 6339d65..a873c5d 100644
+--- a/drivers/net/ixgbe/ixgbe_main.c
++++ b/drivers/net/ixgbe/ixgbe_main.c
+@@ -5241,9 +5241,13 @@ static int ixgbe_maybe_stop_tx(struct net_device *netdev,
+ static u16 ixgbe_select_queue(struct net_device *dev, struct sk_buff *skb)
+ {
+ 	struct ixgbe_adapter *adapter = netdev_priv(dev);
++	int txq = smp_processor_id();
+ 
+-	if (adapter->flags & IXGBE_FLAG_FDIR_HASH_CAPABLE)
+-		return smp_processor_id();
++	if (adapter->flags & IXGBE_FLAG_FDIR_HASH_CAPABLE) {
++		while (unlikely(txq >= dev->real_num_tx_queues))
++			txq -= dev->real_num_tx_queues;
++		return txq;
++	}
+ 
+ 	if (adapter->flags & IXGBE_FLAG_DCB_ENABLED)
+ 		return (skb->vlan_tci & IXGBE_TX_FLAGS_VLAN_PRIO_MASK) >> 13;
 diff --git a/drivers/net/mlx4/icm.c b/drivers/net/mlx4/icm.c
 index 04b382f..83eef8e 100644
 --- a/drivers/net/mlx4/icm.c
@@ -3296,34 +3421,6 @@ index 4cfab1c..d91e9d8 100644
  	err = exofs_commit_chunk(page, 0, chunk_size);
  fail:
  	page_cache_release(page);
-diff --git a/fs/ext4/move_extent.c b/fs/ext4/move_extent.c
-index f5b03a1..d55b15c 100644
---- a/fs/ext4/move_extent.c
-+++ b/fs/ext4/move_extent.c
-@@ -964,6 +964,9 @@ mext_check_arguments(struct inode *orig_inode,
- 		return -EINVAL;
- 	}
- 
-+	if (IS_IMMUTABLE(donor_inode) || IS_APPEND(donor_inode))
-+		return -EPERM;
-+
- 	/* Ext4 move extent does not support swapfile */
- 	if (IS_SWAPFILE(orig_inode) || IS_SWAPFILE(donor_inode)) {
- 		ext4_debug("ext4 move extent: The argument files should "
-diff --git a/fs/ext4/resize.c b/fs/ext4/resize.c
-index 3b2c554..433ea27 100644
---- a/fs/ext4/resize.c
-+++ b/fs/ext4/resize.c
-@@ -930,7 +930,8 @@ int ext4_group_add(struct super_block *sb, struct ext4_new_group_data *input)
- 	percpu_counter_add(&sbi->s_freeinodes_counter,
- 			   EXT4_INODES_PER_GROUP(sb));
- 
--	if (EXT4_HAS_INCOMPAT_FEATURE(sb, EXT4_FEATURE_INCOMPAT_FLEX_BG)) {
-+	if (EXT4_HAS_INCOMPAT_FEATURE(sb, EXT4_FEATURE_INCOMPAT_FLEX_BG) &&
-+	    sbi->s_log_groups_per_flex) {
- 		ext4_group_t flex_group;
- 		flex_group = ext4_flex_group(sbi, input->group);
- 		atomic_add(input->free_blocks_count,
 diff --git a/fs/fs-writeback.c b/fs/fs-writeback.c
 index bff5f77..ef2acd2 100644
 --- a/fs/fs-writeback.c
