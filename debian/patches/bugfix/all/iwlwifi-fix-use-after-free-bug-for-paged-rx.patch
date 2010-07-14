@@ -1,0 +1,237 @@
+From 64dc06ae744f4fb0a99649461a2a02489b77c4b9 Mon Sep 17 00:00:00 2001
+From: Zhu Yi <yi.zhu@intel.com>
+Date: Fri, 23 Oct 2009 13:42:25 -0700
+Subject: [PATCH 2/3] iwlwifi: fix use after free bug for paged rx
+
+commit 29b1b2688fd71346f78f175d9669c006686b6dc3 upstream.
+
+In the paged rx patch (4854fde2), I introduced a bug that could possibly
+touch an already freed page. It is fixed by avoiding the access in this
+patch. I've also added some comments so that other people touching the
+code won't make the same mistake. In the future, if we cannot avoid
+access the page after being handled to the upper layer, we can use
+get_page/put_page to handle it. For now, it's just not necessary.
+
+It also fixed a debug message print bug reported by Stanislaw Gruszka
+<sgruszka@redhat.com>.
+
+Signed-off-by: Zhu Yi <yi.zhu@intel.com>
+Signed-off-by: Reinette Chatre <reinette.chatre@intel.com>
+Signed-off-by: John W. Linville <linville@tuxdriver.com>
+[bwh: Backport to 2.6.32]
+---
+ drivers/net/wireless/iwlwifi/iwl-3945.c     |   19 ++++++++++++-------
+ drivers/net/wireless/iwlwifi/iwl-agn.c      |   11 +++++++++--
+ drivers/net/wireless/iwlwifi/iwl-rx.c       |   21 ++++++++++++++-------
+ drivers/net/wireless/iwlwifi/iwl3945-base.c |   18 +++++++++++++-----
+ 4 files changed, 48 insertions(+), 21 deletions(-)
+
+diff --git a/drivers/net/wireless/iwlwifi/iwl-3945.c b/drivers/net/wireless/iwlwifi/iwl-3945.c
+index 4dde964..0dbfd49 100644
+--- a/drivers/net/wireless/iwlwifi/iwl-3945.c
++++ b/drivers/net/wireless/iwlwifi/iwl-3945.c
+@@ -552,6 +552,7 @@ static void iwl3945_pass_packet_to_mac80211(struct iwl_priv *priv,
+ 	u16 len = le16_to_cpu(rx_hdr->len);
+ 	struct sk_buff *skb;
+ 	int ret;
++	__le16 fc = hdr->frame_control;
+ 
+ 	/* We received data from the HW, so stop the watchdog */
+ 	if (unlikely(len + IWL39_RX_FRAME_SIZE >
+@@ -584,9 +585,9 @@ static void iwl3945_pass_packet_to_mac80211(struct iwl_priv *priv,
+ 	/* mac80211 currently doesn't support paged SKB. Convert it to
+ 	 * linear SKB for management frame and data frame requires
+ 	 * software decryption or software defragementation. */
+-	if (ieee80211_is_mgmt(hdr->frame_control) ||
+-	    ieee80211_has_protected(hdr->frame_control) ||
+-	    ieee80211_has_morefrags(hdr->frame_control) ||
++	if (ieee80211_is_mgmt(fc) ||
++	    ieee80211_has_protected(fc) ||
++	    ieee80211_has_morefrags(fc) ||
+ 	    le16_to_cpu(hdr->seq_ctrl) & IEEE80211_SCTL_FRAG)
+ 		ret = skb_linearize(skb);
+ 	else
+@@ -598,15 +599,19 @@ static void iwl3945_pass_packet_to_mac80211(struct iwl_priv *priv,
+ 		goto out;
+ 	}
+ 
++	/*
++	 * XXX: We cannot touch the page and its virtual memory (pkt) after
++	 * here. It might have already been freed by the above skb change.
++	 */
++
+ #ifdef CONFIG_IWLWIFI_LEDS
+-	if (ieee80211_is_data(hdr->frame_control))
++	if (ieee80211_is_data(fc))
+ 		priv->rxtxpackets += len;
+ #endif
+-	iwl_update_stats(priv, false, hdr->frame_control, len);
+-
++	iwl_update_stats(priv, false, fc, len);
+ 	memcpy(IEEE80211_SKB_RXCB(skb), stats, sizeof(*stats));
+-	ieee80211_rx(priv->hw, skb);
+ 
++	ieee80211_rx(priv->hw, skb);
+  out:
+ 	priv->alloc_rxb_page--;
+ 	rxb->page = NULL;
+diff --git a/drivers/net/wireless/iwlwifi/iwl-agn.c b/drivers/net/wireless/iwlwifi/iwl-agn.c
+index 3d90530..c56d355 100644
+--- a/drivers/net/wireless/iwlwifi/iwl-agn.c
++++ b/drivers/net/wireless/iwlwifi/iwl-agn.c
+@@ -812,8 +812,8 @@ void iwl_rx_handle(struct iwl_priv *priv)
+ 		if (priv->rx_handlers[pkt->hdr.cmd]) {
+ 			IWL_DEBUG_RX(priv, "r = %d, i = %d, %s, 0x%02x\n", r,
+ 				i, get_cmd_string(pkt->hdr.cmd), pkt->hdr.cmd);
+-			priv->rx_handlers[pkt->hdr.cmd] (priv, rxb);
+ 			priv->isr_stats.rx_handlers[pkt->hdr.cmd]++;
++			priv->rx_handlers[pkt->hdr.cmd] (priv, rxb);
+ 		} else {
+ 			/* No handling needed */
+ 			IWL_DEBUG_RX(priv,
+@@ -822,11 +822,18 @@ void iwl_rx_handle(struct iwl_priv *priv)
+ 				pkt->hdr.cmd);
+ 		}
+ 
++		/*
++		 * XXX: After here, we should always check rxb->page
++		 * against NULL before touching it or its virtual
++		 * memory (pkt). Because some rx_handler might have
++		 * already taken or freed the pages.
++		 */
++
+ 		if (reclaim) {
+ 			/* Invoke any callbacks, transfer the buffer to caller,
+ 			 * and fire off the (possibly) blocking iwl_send_cmd()
+ 			 * as we reclaim the driver command queue */
+-			if (rxb && rxb->page)
++			if (rxb->page)
+ 				iwl_tx_cmd_complete(priv, rxb);
+ 			else
+ 				IWL_WARN(priv, "Claim null rxb?\n");
+diff --git a/drivers/net/wireless/iwlwifi/iwl-rx.c b/drivers/net/wireless/iwlwifi/iwl-rx.c
+index 5d10953..c6e6ce0 100644
+--- a/drivers/net/wireless/iwlwifi/iwl-rx.c
++++ b/drivers/net/wireless/iwlwifi/iwl-rx.c
+@@ -241,6 +241,7 @@ void iwl_rx_allocate(struct iwl_priv *priv, gfp_t priority)
+ 	struct iwl_rx_mem_buffer *rxb;
+ 	struct page *page;
+ 	unsigned long flags;
++	gfp_t gfp_mask = priority;
+ 
+ 	while (1) {
+ 		spin_lock_irqsave(&rxq->lock, flags);
+@@ -251,13 +252,13 @@ void iwl_rx_allocate(struct iwl_priv *priv, gfp_t priority)
+ 		spin_unlock_irqrestore(&rxq->lock, flags);
+ 
+ 		if (rxq->free_count > RX_LOW_WATERMARK)
+-			priority |= __GFP_NOWARN;
++			gfp_mask |= __GFP_NOWARN;
+ 
+ 		if (priv->hw_params.rx_page_order > 0)
+-			priority |= __GFP_COMP;
++			gfp_mask |= __GFP_COMP;
+ 
+ 		/* Alloc a new receive buffer */
+-		page = alloc_pages(priority, priv->hw_params.rx_page_order);
++		page = alloc_pages(gfp_mask, priv->hw_params.rx_page_order);
+ 		if (!page) {
+ 			if (net_ratelimit())
+ 				IWL_DEBUG_INFO(priv, "alloc_pages failed, "
+@@ -885,6 +886,7 @@ static void iwl_pass_packet_to_mac80211(struct iwl_priv *priv,
+ {
+ 	struct sk_buff *skb;
+ 	int ret = 0;
++	__le16 fc = hdr->frame_control;
+ 
+ 	/* We only process data packets if the interface is open */
+ 	if (unlikely(!priv->is_open)) {
+@@ -909,9 +911,9 @@ static void iwl_pass_packet_to_mac80211(struct iwl_priv *priv,
+ 	/* mac80211 currently doesn't support paged SKB. Convert it to
+ 	 * linear SKB for management frame and data frame requires
+ 	 * software decryption or software defragementation. */
+-	if (ieee80211_is_mgmt(hdr->frame_control) ||
+-	    ieee80211_has_protected(hdr->frame_control) ||
+-	    ieee80211_has_morefrags(hdr->frame_control) ||
++	if (ieee80211_is_mgmt(fc) ||
++	    ieee80211_has_protected(fc) ||
++	    ieee80211_has_morefrags(fc) ||
+ 	    le16_to_cpu(hdr->seq_ctrl) & IEEE80211_SCTL_FRAG)
+ 		ret = skb_linearize(skb);
+ 	else
+@@ -923,7 +925,12 @@ static void iwl_pass_packet_to_mac80211(struct iwl_priv *priv,
+ 		goto out;
+ 	}
+ 
+-	iwl_update_stats(priv, false, hdr->frame_control, len);
++	/*
++	 * XXX: We cannot touch the page and its virtual memory (hdr) after
++	 * here. It might have already been freed by the above skb change.
++	 */
++
++	iwl_update_stats(priv, false, fc, len);
+ 	memcpy(IEEE80211_SKB_RXCB(skb), stats, sizeof(*stats));
+ 
+ 	ieee80211_rx(priv->hw, skb);
+diff --git a/drivers/net/wireless/iwlwifi/iwl3945-base.c b/drivers/net/wireless/iwlwifi/iwl3945-base.c
+index 340e1c7..9030585 100644
+--- a/drivers/net/wireless/iwlwifi/iwl3945-base.c
++++ b/drivers/net/wireless/iwlwifi/iwl3945-base.c
+@@ -1140,6 +1140,7 @@ static void iwl3945_rx_allocate(struct iwl_priv *priv, gfp_t priority)
+ 	struct iwl_rx_mem_buffer *rxb;
+ 	struct page *page;
+ 	unsigned long flags;
++	gfp_t gfp_mask = priority;
+ 
+ 	while (1) {
+ 		spin_lock_irqsave(&rxq->lock, flags);
+@@ -1151,13 +1152,13 @@ static void iwl3945_rx_allocate(struct iwl_priv *priv, gfp_t priority)
+ 		spin_unlock_irqrestore(&rxq->lock, flags);
+ 
+ 		if (rxq->free_count > RX_LOW_WATERMARK)
+-			priority |= __GFP_NOWARN;
++			gfp_mask |= __GFP_NOWARN;
+ 
+ 		if (priv->hw_params.rx_page_order > 0)
+-			priority |= __GFP_COMP;
++			gfp_mask |= __GFP_COMP;
+ 
+ 		/* Alloc a new receive buffer */
+-		page = alloc_pages(priority, priv->hw_params.rx_page_order);
++		page = alloc_pages(gfp_mask, priv->hw_params.rx_page_order);
+ 		if (!page) {
+ 			if (net_ratelimit())
+ 				IWL_DEBUG_INFO(priv, "Failed to allocate SKB buffer.\n");
+@@ -1423,8 +1424,8 @@ static void iwl3945_rx_handle(struct iwl_priv *priv)
+ 		if (priv->rx_handlers[pkt->hdr.cmd]) {
+ 			IWL_DEBUG_RX(priv, "r = %d, i = %d, %s, 0x%02x\n", r, i,
+ 				get_cmd_string(pkt->hdr.cmd), pkt->hdr.cmd);
+-			priv->rx_handlers[pkt->hdr.cmd] (priv, rxb);
+ 			priv->isr_stats.rx_handlers[pkt->hdr.cmd]++;
++			priv->rx_handlers[pkt->hdr.cmd] (priv, rxb);
+ 		} else {
+ 			/* No handling needed */
+ 			IWL_DEBUG_RX(priv,
+@@ -1433,11 +1434,18 @@ static void iwl3945_rx_handle(struct iwl_priv *priv)
+ 				pkt->hdr.cmd);
+ 		}
+ 
++		/*
++		 * XXX: After here, we should always check rxb->page
++		 * against NULL before touching it or its virtual
++		 * memory (pkt). Because some rx_handler might have
++		 * already taken or freed the pages.
++		 */
++
+ 		if (reclaim) {
+ 			/* Invoke any callbacks, transfer the buffer to caller,
+ 			 * and fire off the (possibly) blocking iwl_send_cmd()
+ 			 * as we reclaim the driver command queue */
+-			if (rxb && rxb->page)
++			if (rxb->page)
+ 				iwl_tx_cmd_complete(priv, rxb);
+ 			else
+ 				IWL_WARN(priv, "Claim null rxb?\n");
+-- 
+1.7.1
+
