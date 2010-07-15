@@ -1,0 +1,179 @@
+From: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+Date: Sat, 22 May 2010 10:54:55 +0000 (+1000)
+Subject: leds: leds-gpio: Change blink_set callback to be able to turn off blinking
+X-Git-Tag: v2.6.35-rc1~32^2~5
+X-Git-Url: http://git.kernel.org/?p=linux%2Fkernel%2Fgit%2Ftorvalds%2Flinux-2.6.git;a=commitdiff_plain;h=2146325df2c2640059a9e064890c30c6e259b458
+
+leds: leds-gpio: Change blink_set callback to be able to turn off blinking
+
+The leds-gpio blink_set() callback follows the same prototype as the
+main leds subsystem blink_set() one.
+
+The problem is that to stop blink, normally, a leds driver does it
+in the brightness_set() callback when asked to set a new fixed value.
+
+However, with leds-gpio, the platform has no hook to do so, as this
+later callback results in a standard GPIO manipulation.
+
+This changes the leds-gpio specific callback to take a new argument
+that indicates whether the LED should be blinking or not and in what
+state it should be set if not. We also update the dns323 platform
+which seems to be the only user of this so far.
+
+Signed-off-by: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+Signed-off-by: Richard Purdie <rpurdie@linux.intel.com>
+---
+
+diff --git a/arch/arm/mach-orion5x/dns323-setup.c b/arch/arm/mach-orion5x/dns323-setup.c
+index 685f34a..fe0de16 100644
+--- a/arch/arm/mach-orion5x/dns323-setup.c
++++ b/arch/arm/mach-orion5x/dns323-setup.c
+@@ -240,22 +240,23 @@ error_fail:
+ 
+ #define ORION_BLINK_HALF_PERIOD 100 /* ms */
+ 
+-static int dns323_gpio_blink_set(unsigned gpio,
++static int dns323_gpio_blink_set(unsigned gpio, int state,
+ 	unsigned long *delay_on, unsigned long *delay_off)
+ {
+-	static int value = 0;
+ 
+-	if (!*delay_on && !*delay_off)
++	if (delay_on && delay_off && !*delay_on && !*delay_off)
+ 		*delay_on = *delay_off = ORION_BLINK_HALF_PERIOD;
+ 
+-	if (ORION_BLINK_HALF_PERIOD == *delay_on
+-	    && ORION_BLINK_HALF_PERIOD == *delay_off) {
+-		value = !value;
+-		orion_gpio_set_blink(gpio, value);
+-		return 0;
++	switch(state) {
++	case GPIO_LED_NO_BLINK_LOW:
++	case GPIO_LED_NO_BLINK_HIGH:
++		orion_gpio_set_blink(gpio, 0);
++		gpio_set_value(gpio, state);
++		break;
++	case GPIO_LED_BLINK:
++		orion_gpio_set_blink(gpio, 1);
+ 	}
+-
+-	return -EINVAL;
++	return 0;
+ }
+ 
+ static struct gpio_led dns323_leds[] = {
+diff --git a/drivers/leds/leds-gpio.c b/drivers/leds/leds-gpio.c
+index 6d94b0b..26843dd 100644
+--- a/drivers/leds/leds-gpio.c
++++ b/drivers/leds/leds-gpio.c
+@@ -26,7 +26,8 @@ struct gpio_led_data {
+ 	u8 new_level;
+ 	u8 can_sleep;
+ 	u8 active_low;
+-	int (*platform_gpio_blink_set)(unsigned gpio,
++	u8 blinking;
++	int (*platform_gpio_blink_set)(unsigned gpio, int state,
+ 			unsigned long *delay_on, unsigned long *delay_off);
+ };
+ 
+@@ -35,7 +36,13 @@ static void gpio_led_work(struct work_struct *work)
+ 	struct gpio_led_data	*led_dat =
+ 		container_of(work, struct gpio_led_data, work);
+ 
+-	gpio_set_value_cansleep(led_dat->gpio, led_dat->new_level);
++	if (led_dat->blinking) {
++		led_dat->platform_gpio_blink_set(led_dat->gpio,
++						 led_dat->new_level,
++						 NULL, NULL);
++		led_dat->blinking = 0;
++	} else
++		gpio_set_value_cansleep(led_dat->gpio, led_dat->new_level);
+ }
+ 
+ static void gpio_led_set(struct led_classdev *led_cdev,
+@@ -60,8 +67,14 @@ static void gpio_led_set(struct led_classdev *led_cdev,
+ 	if (led_dat->can_sleep) {
+ 		led_dat->new_level = level;
+ 		schedule_work(&led_dat->work);
+-	} else
+-		gpio_set_value(led_dat->gpio, level);
++	} else {
++		if (led_dat->blinking) {
++			led_dat->platform_gpio_blink_set(led_dat->gpio, level,
++							 NULL, NULL);
++			led_dat->blinking = 0;
++		} else
++			gpio_set_value(led_dat->gpio, level);
++	}
+ }
+ 
+ static int gpio_blink_set(struct led_classdev *led_cdev,
+@@ -70,12 +83,14 @@ static int gpio_blink_set(struct led_classdev *led_cdev,
+ 	struct gpio_led_data *led_dat =
+ 		container_of(led_cdev, struct gpio_led_data, cdev);
+ 
+-	return led_dat->platform_gpio_blink_set(led_dat->gpio, delay_on, delay_off);
++	led_dat->blinking = 1;
++	return led_dat->platform_gpio_blink_set(led_dat->gpio, GPIO_LED_BLINK,
++						delay_on, delay_off);
+ }
+ 
+ static int __devinit create_gpio_led(const struct gpio_led *template,
+ 	struct gpio_led_data *led_dat, struct device *parent,
+-	int (*blink_set)(unsigned, unsigned long *, unsigned long *))
++	int (*blink_set)(unsigned, int, unsigned long *, unsigned long *))
+ {
+ 	int ret, state;
+ 
+@@ -97,6 +112,7 @@ static int __devinit create_gpio_led(const struct gpio_led *template,
+ 	led_dat->gpio = template->gpio;
+ 	led_dat->can_sleep = gpio_cansleep(template->gpio);
+ 	led_dat->active_low = template->active_low;
++	led_dat->blinking = 0;
+ 	if (blink_set) {
+ 		led_dat->platform_gpio_blink_set = blink_set;
+ 		led_dat->cdev.blink_set = gpio_blink_set;
+@@ -113,7 +129,7 @@ static int __devinit create_gpio_led(const struct gpio_led *template,
+ 	ret = gpio_direction_output(led_dat->gpio, led_dat->active_low ^ state);
+ 	if (ret < 0)
+ 		goto err;
+-
++		
+ 	INIT_WORK(&led_dat->work, gpio_led_work);
+ 
+ 	ret = led_classdev_register(parent, &led_dat->cdev);
+@@ -234,6 +250,7 @@ static int __devinit of_gpio_leds_probe(struct of_device *ofdev,
+ 		led.gpio = of_get_gpio_flags(child, 0, &flags);
+ 		led.active_low = flags & OF_GPIO_ACTIVE_LOW;
+ 		led.name = of_get_property(child, "label", NULL) ? : child->name;
++		led.blinking = 0;
+ 		led.default_trigger =
+ 			of_get_property(child, "linux,default-trigger", NULL);
+ 		state = of_get_property(child, "default-state", NULL);
+diff --git a/include/linux/leds.h b/include/linux/leds.h
+index d8bf966..ba6986a 100644
+--- a/include/linux/leds.h
++++ b/include/linux/leds.h
+@@ -149,14 +149,18 @@ struct gpio_led {
+ 	unsigned	default_state : 2;
+ 	/* default_state should be one of LEDS_GPIO_DEFSTATE_(ON|OFF|KEEP) */
+ };
+-#define LEDS_GPIO_DEFSTATE_OFF	0
+-#define LEDS_GPIO_DEFSTATE_ON	1
+-#define LEDS_GPIO_DEFSTATE_KEEP	2
++#define LEDS_GPIO_DEFSTATE_OFF		0
++#define LEDS_GPIO_DEFSTATE_ON		1
++#define LEDS_GPIO_DEFSTATE_KEEP		2
+ 
+ struct gpio_led_platform_data {
+ 	int 		num_leds;
+ 	struct gpio_led *leds;
+-	int		(*gpio_blink_set)(unsigned gpio,
++
++#define GPIO_LED_NO_BLINK_LOW	0	/* No blink GPIO state low */
++#define GPIO_LED_NO_BLINK_HIGH	1	/* No blink GPIO state high */
++#define GPIO_LED_BLINK		2	/* Plase, blink */
++	int		(*gpio_blink_set)(unsigned gpio, int state,
+ 					unsigned long *delay_on,
+ 					unsigned long *delay_off);
+ };
