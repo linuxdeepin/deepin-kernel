@@ -1,0 +1,3191 @@
+From 28cb0d836a8f034fd97351538ccf15d1d40ba0f6 Mon Sep 17 00:00:00 2001
+From: Bartlomiej Zolnierkiewicz <bzolnier@gmail.com>
+Date: Tue, 22 Sep 2009 20:44:24 +0200
+Subject: [PATCH 03/42] Staging: rt2860: add RT3090 chipset support
+
+commit e44fd1cfded0e42c681ad5419b1ceea600ead29d upstream.
+
+Add support for RT3090 chipset
+(based on 2009_0612_RT3090_Linux_STA_V2.1.0.0_DPO).
+
+Tested with RT2860.
+
+Signed-off-by: Bartlomiej Zolnierkiewicz <bzolnier@gmail.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+[bwh: Strip firmware; adjust for Debian's 2.6.32]
+---
+ drivers/staging/rt2860/Kconfig               |    5 +-
+ drivers/staging/rt2860/Makefile              |    7 +-
+ drivers/staging/rt2860/chip/mac_pci.h        |   12 +
+ drivers/staging/rt2860/chip/rt3090.h         |   72 +++++
+ drivers/staging/rt2860/chip/rtmp_phy.h       |  183 ++++++++++++-
+ drivers/staging/rt2860/chips/rt3090.c        |  123 ++++++++
+ drivers/staging/rt2860/chips/rt30xx.c        |   12 +
+ drivers/staging/rt2860/common/cmm_asic.c     |   29 ++
+ drivers/staging/rt2860/common/cmm_data_pci.c |    6 -
+ drivers/staging/rt2860/common/cmm_mac_pci.c  |  255 ++++++++++++++----
+ drivers/staging/rt2860/common/cmm_profile.c  |   43 +++
+ drivers/staging/rt2860/common/cmm_sync.c     |   13 -
+ drivers/staging/rt2860/common/mlme.c         |  112 ++++++--
+ drivers/staging/rt2860/common/rt_rf.c        |    8 +
+ drivers/staging/rt2860/common/rtmp_init.c    |   73 +++++-
+ drivers/staging/rt2860/common/rtmp_mcu.c     |   98 ++++++-
+ drivers/staging/rt2860/common/rtmp_timer.c   |    4 +-
+ drivers/staging/rt2860/iface/rtmp_pci.h      |    2 -
+ drivers/staging/rt2860/pci_main_dev.c        |  384 +++++++++++++++++++++++---
+ drivers/staging/rt2860/rt_linux.c            |    3 +
+ drivers/staging/rt2860/rt_linux.h            |   13 +-
+ drivers/staging/rt2860/rt_main_dev.c         |   17 +-
+ drivers/staging/rt2860/rt_pci_rbus.c         |    4 +-
+ drivers/staging/rt2860/rtmp.h                |   49 +++-
+ drivers/staging/rt2860/rtmp_chip.h           |    3 +
+ drivers/staging/rt2860/rtmp_def.h            |    5 +
+ drivers/staging/rt2860/sta/assoc.c           |   12 -
+ drivers/staging/rt2860/sta/auth_rsp.c        |    4 -
+ drivers/staging/rt2860/sta/connect.c         |  190 +++-----------
+ drivers/staging/rt2860/sta/rtmp_data.c       |    1 -
+ drivers/staging/rt2860/sta/sync.c            |   26 +-
+ drivers/staging/rt2860/sta/wpa.c             |   48 ----
+ drivers/staging/rt2860/sta_ioctl.c           |    7 +
+ drivers/staging/rt2860/wpa.h                 |    7 -
+ drivers/staging/rt3090/common/rtmp_mcu.c     |    8 +-
+ 35 files changed, 1415 insertions(+), 423 deletions(-)
+ create mode 100644 drivers/staging/rt2860/chip/rt3090.h
+ create mode 100644 drivers/staging/rt2860/chips/rt3090.c
+
+diff --git a/drivers/staging/rt2860/Kconfig b/drivers/staging/rt2860/Kconfig
+index 6dff527..40200d2 100644
+--- a/drivers/staging/rt2860/Kconfig
++++ b/drivers/staging/rt2860/Kconfig
+@@ -1,6 +1,7 @@
+ config RT2860
+-	tristate "Ralink 2860 wireless support"
++	tristate "Ralink 2860/3090 wireless support"
+ 	depends on BROKEN
+ 	depends on PCI && X86 && WLAN
+ 	---help---
+-	  This is an experimental driver for the Ralink 2860 wireless chip.
++	  This is an experimental driver for the Ralink 2860 and 3090
++	  wireless chips.
+diff --git a/drivers/staging/rt2860/Makefile b/drivers/staging/rt2860/Makefile
+index 4404ddb..ba17142 100644
+--- a/drivers/staging/rt2860/Makefile
++++ b/drivers/staging/rt2860/Makefile
+@@ -3,6 +3,7 @@ obj-$(CONFIG_RT2860)	+= rt2860sta.o
+ # TODO: all of these should be removed
+ EXTRA_CFLAGS += -DLINUX -DAGGREGATION_SUPPORT -DPIGGYBACK_SUPPORT -DWMM_SUPPORT
+ EXTRA_CFLAGS += -DRTMP_MAC_PCI -DRTMP_PCI_SUPPORT -DRT2860
++EXTRA_CFLAGS += -DRTMP_RF_RW_SUPPORT -DRTMP_EFUSE_SUPPORT -DRT30xx -DRT3090
+ EXTRA_CFLAGS += -DDBG
+ 
+ rt2860sta-objs :=	\
+@@ -46,4 +47,8 @@ rt2860sta-objs :=	\
+ 	common/cmm_mac_pci.o	\
+ 	common/cmm_data_pci.o	\
+ 	common/ee_prom.o	\
+-	common/rtmp_mcu.o
++	common/rtmp_mcu.o	\
++	common/ee_efuse.o	\
++	chips/rt30xx.o		\
++	common/rt_rf.o		\
++	chips/rt3090.o
+diff --git a/drivers/staging/rt2860/chip/mac_pci.h b/drivers/staging/rt2860/chip/mac_pci.h
+index 9ca9c36..61b3f82 100644
+--- a/drivers/staging/rt2860/chip/mac_pci.h
++++ b/drivers/staging/rt2860/chip/mac_pci.h
+@@ -133,6 +133,18 @@ typedef	struct	PACKED _RXD_STRUC{
+ 	UINT32		Rsv1:13;
+ }	RXD_STRUC, *PRXD_STRUC, RT28XX_RXD_STRUC, *PRT28XX_RXD_STRUC;
+ 
++typedef union _TX_ATTENUATION_CTRL_STRUC {
++	struct
++	{
++		ULONG	RF_ISOLATION_ENABLE:1;
++		ULONG	Reserve2:7;
++		ULONG	PCIE_PHY_TX_ATTEN_VALUE:3;
++		ULONG	PCIE_PHY_TX_ATTEN_EN:1;
++		ULONG	Reserve1:20;
++	} field;
++
++	ULONG	word;
++} TX_ATTENUATION_CTRL_STRUC, *PTX_ATTENUATION_CTRL_STRUC;
+ 
+ /* ----------------- EEPROM Related MACRO ----------------- */
+ 
+diff --git a/drivers/staging/rt2860/chip/rt3090.h b/drivers/staging/rt2860/chip/rt3090.h
+new file mode 100644
+index 0000000..c2249a4
+--- /dev/null
++++ b/drivers/staging/rt2860/chip/rt3090.h
+@@ -0,0 +1,72 @@
++/*
++ *************************************************************************
++ * Ralink Tech Inc.
++ * 5F., No.36, Taiyuan St., Jhubei City,
++ * Hsinchu County 302,
++ * Taiwan, R.O.C.
++ *
++ * (c) Copyright 2002-2007, Ralink Technology, Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify  *
++ * it under the terms of the GNU General Public License as published by  *
++ * the Free Software Foundation; either version 2 of the License, or     *
++ * (at your option) any later version.                                   *
++ *                                                                       *
++ * This program is distributed in the hope that it will be useful,       *
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of        *
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the         *
++ * GNU General Public License for more details.                          *
++ *                                                                       *
++ * You should have received a copy of the GNU General Public License     *
++ * along with this program; if not, write to the                         *
++ * Free Software Foundation, Inc.,                                       *
++ * 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.             *
++ *                                                                       *
++ *************************************************************************
++
++    Module Name:
++	rt3090.h
++
++    Abstract:
++
++    Revision History:
++    Who          When          What
++    ---------    ----------    ----------------------------------------------
++ */
++
++#ifndef __RT3090_H__
++#define __RT3090_H__
++
++#ifdef RT3090
++
++#ifndef RTMP_PCI_SUPPORT
++#error "For RT3090, you should define the compile flag -DRTMP_PCI_SUPPORT"
++#endif
++
++#ifndef RTMP_MAC_PCI
++#error "For RT3090, you should define the compile flag -DRTMP_MAC_PCI"
++#endif
++
++#ifndef RTMP_RF_RW_SUPPORT
++#error "For RT3090, you should define the compile flag -DRTMP_RF_RW_SUPPORT"
++#endif
++
++#ifndef RT30xx
++#error "For RT3090, you should define the compile flag -DRT30xx"
++#endif
++
++#define PCIE_PS_SUPPORT
++
++#include "mac_pci.h"
++#include "rt30xx.h"
++
++//
++// Device ID & Vendor ID, these values should match EEPROM value
++//
++#define NIC3090_PCIe_DEVICE_ID  0x3090		// 1T/1R miniCard
++#define NIC3091_PCIe_DEVICE_ID  0x3091		// 1T/2R miniCard
++#define NIC3092_PCIe_DEVICE_ID  0x3092		// 2T/2R miniCard
++
++#endif // RT3090 //
++
++#endif //__RT3090_H__ //
+diff --git a/drivers/staging/rt2860/chip/rtmp_phy.h b/drivers/staging/rt2860/chip/rtmp_phy.h
+index b3326c6..87516f3 100644
+--- a/drivers/staging/rt2860/chip/rtmp_phy.h
++++ b/drivers/staging/rt2860/chip/rtmp_phy.h
+@@ -278,6 +278,7 @@
+ 	But for some chipset which didn't have mcu (e.g., RBUS based chipset), we
+ 	will use this function too and didn't access the bbp register via the MCU.
+ */
++#if 0
+ #define RTMP_BBP_IO_READ8_BY_REG_ID(_A, _I, _pV)			\
+ 	do{														\
+ 		if ((_A)->bPCIclkOff == FALSE)							\
+@@ -288,7 +289,99 @@
+ 				RTMP_BBP_IO_READ8((_A), (_I), (_pV), TRUE);	\
+ 		}													\
+ 	}while(0)
+-
++#else
++// Read BBP register by register's ID. Generate PER to test BA
++#define RTMP_BBP_IO_READ8_BY_REG_ID(_A, _I, _pV)						\
++{																		\
++	BBP_CSR_CFG_STRUC	BbpCsr;											\
++	int					i, k;			\
++	BOOLEAN					brc;			\
++	BbpCsr.field.Busy = IDLE;			\
++	if ((IS_RT3090((_A)) || IS_RT3572((_A)) || IS_RT3390((_A))) && ((_A)->StaCfg.PSControl.field.rt30xxPowerMode == 3)	\
++		&& ((_A)->StaCfg.PSControl.field.EnableNewPS == TRUE)	\
++		&& ((_A)->bPCIclkOff == FALSE)	\
++		&& ((_A)->brt30xxBanMcuCmd == FALSE))	\
++	{																	\
++		for (i=0; i<MAX_BUSY_COUNT; i++)									\
++		{																	\
++			RTMP_IO_READ32(_A, H2M_BBP_AGENT, &BbpCsr.word);				\
++			if (BbpCsr.field.Busy == BUSY)									\
++			{																\
++				continue;													\
++			}																\
++			BbpCsr.word = 0;												\
++			BbpCsr.field.fRead = 1;											\
++			BbpCsr.field.BBP_RW_MODE = 1;									\
++			BbpCsr.field.Busy = 1;											\
++			BbpCsr.field.RegNum = _I;										\
++			RTMP_IO_WRITE32(_A, H2M_BBP_AGENT, BbpCsr.word);				\
++			brc = AsicSendCommandToMcu(_A, 0x80, 0xff, 0x0, 0x0);					\
++			if (brc == TRUE)																\
++			{																\
++				for (k=0; k<MAX_BUSY_COUNT; k++)								\
++				{																\
++					RTMP_IO_READ32(_A, H2M_BBP_AGENT, &BbpCsr.word);			\
++					if (BbpCsr.field.Busy == IDLE)								\
++						break;													\
++				}																\
++				if ((BbpCsr.field.Busy == IDLE) &&								\
++					(BbpCsr.field.RegNum == _I))								\
++				{																\
++					*(_pV) = (UCHAR)BbpCsr.field.Value;							\
++					break;														\
++				}																\
++			}																\
++			else																\
++			{																\
++				BbpCsr.field.Busy = 0;											\
++				RTMP_IO_WRITE32(_A, H2M_BBP_AGENT, BbpCsr.word);				\
++			}																\
++		}																	\
++	}	\
++	else if (!((IS_RT3090((_A)) || IS_RT3572((_A)) || IS_RT3390((_A))) && ((_A)->StaCfg.PSControl.field.rt30xxPowerMode == 3)	\
++		&& ((_A)->StaCfg.PSControl.field.EnableNewPS == TRUE))	\
++		&& ((_A)->bPCIclkOff == FALSE))	\
++	{																	\
++		for (i=0; i<MAX_BUSY_COUNT; i++)									\
++		{																	\
++			RTMP_IO_READ32(_A, H2M_BBP_AGENT, &BbpCsr.word);				\
++			if (BbpCsr.field.Busy == BUSY)									\
++			{																\
++				continue;													\
++			}																\
++			BbpCsr.word = 0;												\
++			BbpCsr.field.fRead = 1;											\
++			BbpCsr.field.BBP_RW_MODE = 1;									\
++			BbpCsr.field.Busy = 1;											\
++			BbpCsr.field.RegNum = _I;										\
++			RTMP_IO_WRITE32(_A, H2M_BBP_AGENT, BbpCsr.word);				\
++			AsicSendCommandToMcu(_A, 0x80, 0xff, 0x0, 0x0);					\
++			for (k=0; k<MAX_BUSY_COUNT; k++)								\
++			{																\
++				RTMP_IO_READ32(_A, H2M_BBP_AGENT, &BbpCsr.word);			\
++				if (BbpCsr.field.Busy == IDLE)								\
++					break;													\
++			}																\
++			if ((BbpCsr.field.Busy == IDLE) &&								\
++				(BbpCsr.field.RegNum == _I))								\
++			{																\
++				*(_pV) = (UCHAR)BbpCsr.field.Value;							\
++				break;														\
++			}																\
++		}																	\
++	}																	\
++	else										\
++	{																	\
++		DBGPRINT_ERR((" , brt30xxBanMcuCmd = %d, Read BBP %d \n", (_A)->brt30xxBanMcuCmd, (_I)));	\
++		*(_pV) = (_A)->BbpWriteLatch[_I];								\
++	}																	\
++	if ((BbpCsr.field.Busy == BUSY) || ((_A)->bPCIclkOff == TRUE))										\
++	{																	\
++		DBGPRINT_ERR(("BBP read R%d=0x%x fail\n", _I, BbpCsr.word));	\
++		*(_pV) = (_A)->BbpWriteLatch[_I];								\
++	}																	\
++}
++#endif // 0 //
+ 
+ /*
+ 	basic marco for BBP write operation.
+@@ -348,6 +441,7 @@
+ 	But for some chipset which didn't have mcu (e.g., RBUS based chipset), we
+ 	will use this function too and didn't access the bbp register via the MCU.
+ */
++#if 0
+ #define RTMP_BBP_IO_WRITE8_BY_REG_ID(_A, _I, _pV)			\
+ 	do{														\
+ 		if ((_A)->bPCIclkOff == FALSE)							\
+@@ -358,6 +452,93 @@
+ 				RTMP_BBP_IO_WRITE8((_A), (_I), (_pV), TRUE);	\
+ 		}													\
+ 	}while(0)
++#else
++// Write BBP register by register's ID & value
++#define RTMP_BBP_IO_WRITE8_BY_REG_ID(_A, _I, _V)						\
++{																		\
++	BBP_CSR_CFG_STRUC	BbpCsr;											\
++	INT					BusyCnt = 0;										\
++	BOOLEAN					brc;			\
++	if (_I < MAX_NUM_OF_BBP_LATCH)										\
++	{																	\
++		if ((IS_RT3090((_A)) || IS_RT3572((_A)) || IS_RT3390((_A))) && ((_A)->StaCfg.PSControl.field.rt30xxPowerMode == 3)	\
++			&& ((_A)->StaCfg.PSControl.field.EnableNewPS == TRUE)	\
++			&& ((_A)->bPCIclkOff == FALSE)	\
++			&& ((_A)->brt30xxBanMcuCmd == FALSE))	\
++		{																	\
++			if (_A->AccessBBPFailCount > 20)									\
++			{																	\
++				AsicResetBBPAgent(_A);				\
++				_A->AccessBBPFailCount = 0;											\
++			}																	\
++			for (BusyCnt=0; BusyCnt<MAX_BUSY_COUNT; BusyCnt++)					\
++			{																	\
++				RTMP_IO_READ32(_A, H2M_BBP_AGENT, &BbpCsr.word);				\
++				if (BbpCsr.field.Busy == BUSY)									\
++					continue;													\
++				BbpCsr.word = 0;												\
++				BbpCsr.field.fRead = 0;											\
++				BbpCsr.field.BBP_RW_MODE = 1;									\
++				BbpCsr.field.Busy = 1;											\
++				BbpCsr.field.Value = _V;										\
++				BbpCsr.field.RegNum = _I;										\
++				RTMP_IO_WRITE32(_A, H2M_BBP_AGENT, BbpCsr.word);				\
++				brc = AsicSendCommandToMcu(_A, 0x80, 0xff, 0x0, 0x0);					\
++				if (brc == TRUE)																\
++				{																\
++					(_A)->BbpWriteLatch[_I] = _V;									\
++				}																\
++				else																\
++				{																\
++					BbpCsr.field.Busy = 0;											\
++					RTMP_IO_WRITE32(_A, H2M_BBP_AGENT, BbpCsr.word);				\
++				}																\
++				break;															\
++			}																	\
++		}																	\
++		else if (!((IS_RT3090((_A)) || IS_RT3572((_A)) || IS_RT3390((_A))) && ((_A)->StaCfg.PSControl.field.rt30xxPowerMode == 3)	\
++			&& ((_A)->StaCfg.PSControl.field.EnableNewPS == TRUE))	\
++			&& ((_A)->bPCIclkOff == FALSE))	\
++		{																	\
++			if (_A->AccessBBPFailCount > 20)									\
++			{																	\
++				AsicResetBBPAgent(_A);				\
++				_A->AccessBBPFailCount = 0;											\
++			}																	\
++			for (BusyCnt=0; BusyCnt<MAX_BUSY_COUNT; BusyCnt++)					\
++			{																	\
++				RTMP_IO_READ32(_A, H2M_BBP_AGENT, &BbpCsr.word);				\
++				if (BbpCsr.field.Busy == BUSY)									\
++					continue;													\
++				BbpCsr.word = 0;												\
++				BbpCsr.field.fRead = 0;											\
++				BbpCsr.field.BBP_RW_MODE = 1;									\
++				BbpCsr.field.Busy = 1;											\
++				BbpCsr.field.Value = _V;										\
++				BbpCsr.field.RegNum = _I;										\
++				RTMP_IO_WRITE32(_A, H2M_BBP_AGENT, BbpCsr.word);				\
++				AsicSendCommandToMcu(_A, 0x80, 0xff, 0x0, 0x0);					\
++				(_A)->BbpWriteLatch[_I] = _V;									\
++				break;															\
++			}																	\
++		}																	\
++		else										\
++		{																	\
++			DBGPRINT_ERR(("  brt30xxBanMcuCmd = %d. Write BBP %d \n",  (_A)->brt30xxBanMcuCmd, (_I)));	\
++		}																	\
++		if ((BusyCnt == MAX_BUSY_COUNT) || ((_A)->bPCIclkOff == TRUE))			\
++		{																	\
++			if (BusyCnt == MAX_BUSY_COUNT)					\
++				(_A)->AccessBBPFailCount++;					\
++			DBGPRINT_ERR(("BBP write R%d=0x%x fail. BusyCnt= %d.bPCIclkOff = %d. \n", _I, BbpCsr.word, BusyCnt, (_A)->bPCIclkOff ));	\
++		}																	\
++	}																		\
++	else																		\
++	{																		\
++		DBGPRINT_ERR(("****** BBP_Write_Latch Buffer exceeds max boundry ****** \n"));	\
++	}																		\
++}
++#endif // 0 //
+ 
+ #endif // RTMP_MAC_PCI //
+ #ifdef RTMP_MAC_USB
+diff --git a/drivers/staging/rt2860/chips/rt3090.c b/drivers/staging/rt2860/chips/rt3090.c
+new file mode 100644
+index 0000000..35c549d
+--- /dev/null
++++ b/drivers/staging/rt2860/chips/rt3090.c
+@@ -0,0 +1,123 @@
++/*
++ *************************************************************************
++ * Ralink Tech Inc.
++ * 5F., No.36, Taiyuan St., Jhubei City,
++ * Hsinchu County 302,
++ * Taiwan, R.O.C.
++ *
++ * (c) Copyright 2002-2007, Ralink Technology, Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify  *
++ * it under the terms of the GNU General Public License as published by  *
++ * the Free Software Foundation; either version 2 of the License, or     *
++ * (at your option) any later version.                                   *
++ *                                                                       *
++ * This program is distributed in the hope that it will be useful,       *
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of        *
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the         *
++ * GNU General Public License for more details.                          *
++ *                                                                       *
++ * You should have received a copy of the GNU General Public License     *
++ * along with this program; if not, write to the                         *
++ * Free Software Foundation, Inc.,                                       *
++ * 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.             *
++ *                                                                       *
++ *************************************************************************
++
++	Module Name:
++	rt3090.c
++
++	Abstract:
++	Specific funcitons and variables for RT3070
++
++	Revision History:
++	Who         When          What
++	--------    ----------    ----------------------------------------------
++*/
++
++#ifdef RT3090
++
++#include "../rt_config.h"
++
++
++#ifndef RTMP_RF_RW_SUPPORT
++#error "You Should Enable compile flag RTMP_RF_RW_SUPPORT for this chip"
++#endif // RTMP_RF_RW_SUPPORT //
++
++
++VOID NICInitRT3090RFRegisters(IN PRTMP_ADAPTER pAd)
++{
++		INT i;
++	// Driver must read EEPROM to get RfIcType before initial RF registers
++	// Initialize RF register to default value
++	if (IS_RT3090(pAd))
++	{
++		// Init RF calibration
++		// Driver should toggle RF R30 bit7 before init RF registers
++		UINT32 RfReg = 0, data;
++
++		RT30xxReadRFRegister(pAd, RF_R30, (PUCHAR)&RfReg);
++		RfReg |= 0x80;
++		RT30xxWriteRFRegister(pAd, RF_R30, (UCHAR)RfReg);
++		RTMPusecDelay(1000);
++		RfReg &= 0x7F;
++		RT30xxWriteRFRegister(pAd, RF_R30, (UCHAR)RfReg);
++
++		// init R24, R31
++		RT30xxWriteRFRegister(pAd, RF_R24, 0x0F);
++		RT30xxWriteRFRegister(pAd, RF_R31, 0x0F);
++
++		// RT309x version E has fixed this issue
++		if ((pAd->NicConfig2.field.DACTestBit == 1) && ((pAd->MACVersion & 0xffff) < 0x0211))
++		{
++			// patch tx EVM issue temporarily
++			RTMP_IO_READ32(pAd, LDO_CFG0, &data);
++			data = ((data & 0xE0FFFFFF) | 0x0D000000);
++			RTMP_IO_WRITE32(pAd, LDO_CFG0, data);
++		}
++		else
++		{
++			RTMP_IO_READ32(pAd, LDO_CFG0, &data);
++			data = ((data & 0xE0FFFFFF) | 0x01000000);
++			RTMP_IO_WRITE32(pAd, LDO_CFG0, data);
++		}
++
++		// patch LNA_PE_G1 failed issue
++		RTMP_IO_READ32(pAd, GPIO_SWITCH, &data);
++		data &= ~(0x20);
++		RTMP_IO_WRITE32(pAd, GPIO_SWITCH, data);
++
++		// Initialize RF register to default value
++		for (i = 0; i < NUM_RF_REG_PARMS; i++)
++		{
++			RT30xxWriteRFRegister(pAd, RT30xx_RFRegTable[i].Register, RT30xx_RFRegTable[i].Value);
++		}
++
++		// Driver should set RF R6 bit6 on before calibration
++		RT30xxReadRFRegister(pAd, RF_R06, (PUCHAR)&RfReg);
++		RfReg |= 0x40;
++		RT30xxWriteRFRegister(pAd, RF_R06, (UCHAR)RfReg);
++
++		//For RF filter Calibration
++		RTMPFilterCalibration(pAd);
++
++		// Initialize RF R27 register, set RF R27 must be behind RTMPFilterCalibration()
++		if ((pAd->MACVersion & 0xffff) < 0x0211)
++			RT30xxWriteRFRegister(pAd, RF_R27, 0x3);
++
++		// set led open drain enable
++		RTMP_IO_READ32(pAd, OPT_14, &data);
++		data |= 0x01;
++		RTMP_IO_WRITE32(pAd, OPT_14, data);
++
++		// set default antenna as main
++		if (pAd->RfIcType == RFIC_3020)
++			AsicSetRxAnt(pAd, pAd->RxAnt.Pair1PrimaryRxAnt);
++
++		// add by johnli, RF power sequence setup, load RF normal operation-mode setup
++		RT30xxLoadRFNormalModeSetup(pAd);
++	}
++
++}
++
++#endif // RT3090 //
+diff --git a/drivers/staging/rt2860/chips/rt30xx.c b/drivers/staging/rt2860/chips/rt30xx.c
+index fe7d8ec..f29d11d 100644
+--- a/drivers/staging/rt2860/chips/rt30xx.c
++++ b/drivers/staging/rt2860/chips/rt30xx.c
+@@ -101,7 +101,13 @@ VOID RT30xxSetRxAnt(
+ 	if (Ant == 0)
+ 	{
+ 		// Main antenna
++#ifdef RTMP_MAC_PCI
++		RTMP_IO_READ32(pAd, E2PROM_CSR, &x);
++		x |= (EESK);
++		RTMP_IO_WRITE32(pAd, E2PROM_CSR, x);
++#else
+ 		AsicSendCommandToMcu(pAd, 0x73, 0xFF, 0x1, 0x0);
++#endif // RTMP_MAC_PCI //
+ 
+ 		RTMP_IO_READ32(pAd, GPIO_CTRL_CFG, &Value);
+ 		Value &= ~(0x0808);
+@@ -111,7 +117,13 @@ VOID RT30xxSetRxAnt(
+ 	else
+ 	{
+ 		// Aux antenna
++#ifdef RTMP_MAC_PCI
++		RTMP_IO_READ32(pAd, E2PROM_CSR, &x);
++		x &= ~(EESK);
++		RTMP_IO_WRITE32(pAd, E2PROM_CSR, x);
++#else
+ 		AsicSendCommandToMcu(pAd, 0x73, 0xFF, 0x0, 0x0);
++#endif // RTMP_MAC_PCI //
+ 		RTMP_IO_READ32(pAd, GPIO_CTRL_CFG, &Value);
+ 		Value &= ~(0x0808);
+ 		Value |= 0x08;
+diff --git a/drivers/staging/rt2860/common/cmm_asic.c b/drivers/staging/rt2860/common/cmm_asic.c
+index 83ed07b..5d3a387 100644
+--- a/drivers/staging/rt2860/common/cmm_asic.c
++++ b/drivers/staging/rt2860/common/cmm_asic.c
+@@ -808,6 +808,28 @@ VOID AsicSwitchChannel(
+ 
+ 		RTMP_IO_WRITE32(pAd, TX_PIN_CFG, TxPinCfg);
+ 
++#if defined(RT3090) || defined(RT3390)
++		// PCIe PHY Transmit attenuation adjustment
++		if (IS_RT3090A(pAd) || IS_RT3390(pAd))
++		{
++			TX_ATTENUATION_CTRL_STRUC TxAttenuationCtrl = {0};
++
++			RTMP_IO_READ32(pAd, PCIE_PHY_TX_ATTENUATION_CTRL, &TxAttenuationCtrl.word);
++
++			if (Channel == 14) // Channel #14
++			{
++				TxAttenuationCtrl.field.PCIE_PHY_TX_ATTEN_EN = 1; // Enable PCIe PHY Tx attenuation
++				TxAttenuationCtrl.field.PCIE_PHY_TX_ATTEN_VALUE = 4; // 9/16 full drive level
++			}
++			else // Channel #1~#13
++			{
++				TxAttenuationCtrl.field.PCIE_PHY_TX_ATTEN_EN = 0; // Disable PCIe PHY Tx attenuation
++				TxAttenuationCtrl.field.PCIE_PHY_TX_ATTEN_VALUE = 0; // n/a
++			}
++
++			RTMP_IO_WRITE32(pAd, PCIE_PHY_TX_ATTENUATION_CTRL, TxAttenuationCtrl.word);
++		}
++#endif
+ 	}
+ 	else
+ 	{
+@@ -2477,6 +2499,13 @@ VOID AsicTurnOnRFClk(
+ 	UCHAR			index;
+ 	RTMP_RF_REGS	*RFRegTable;
+ 
++#ifdef PCIE_PS_SUPPORT
++	// The RF programming sequence is difference between 3xxx and 2xxx
++	if ((IS_RT3090(pAd) || IS_RT3572(pAd) || IS_RT3390(pAd)))
++	{
++		return;
++	}
++#endif // PCIE_PS_SUPPORT //
+ 
+ 	RFRegTable = RF2850RegTable;
+ 
+diff --git a/drivers/staging/rt2860/common/cmm_data_pci.c b/drivers/staging/rt2860/common/cmm_data_pci.c
+index d808e7d..e9739b4 100644
+--- a/drivers/staging/rt2860/common/cmm_data_pci.c
++++ b/drivers/staging/rt2860/common/cmm_data_pci.c
+@@ -638,9 +638,6 @@ BOOLEAN	RTMPHandleTxRingDmaDoneInterrupt(
+ 	if (TxRingBitmap.field.Ac0DmaDone)
+ 		bReschedule = RTMPFreeTXDUponTxDmaDone(pAd, QID_AC_BE);
+ 
+-	if (TxRingBitmap.field.HccaDmaDone)
+-		bReschedule |= RTMPFreeTXDUponTxDmaDone(pAd, QID_HCCA);
+-
+ 	if (TxRingBitmap.field.Ac3DmaDone)
+ 		bReschedule |= RTMPFreeTXDUponTxDmaDone(pAd, QID_AC_VO);
+ 
+@@ -791,7 +788,6 @@ VOID	RTMPHandleRxCoherentInterrupt(
+ 	RTMPRingCleanUp(pAd, QID_AC_BK);
+ 	RTMPRingCleanUp(pAd, QID_AC_VI);
+ 	RTMPRingCleanUp(pAd, QID_AC_VO);
+-	RTMPRingCleanUp(pAd, QID_HCCA);
+ 	RTMPRingCleanUp(pAd, QID_MGMT);
+ 	RTMPRingCleanUp(pAd, QID_RX);
+ 
+@@ -1147,7 +1143,5 @@ VOID RTMPWriteTxDescriptor(
+ 	pTxD->QSEL= (QueueSEL);
+ 	//RT2860c??  fixed using EDCA queue for test...  We doubt Queue1 has problem.  2006-09-26 Jan
+ 	//pTxD->QSEL= FIFO_EDCA;
+-	if (pAd->bGenOneHCCA == TRUE)
+-		pTxD->QSEL= FIFO_HCCA;
+ 	pTxD->DMADONE = 0;
+ }
+diff --git a/drivers/staging/rt2860/common/cmm_mac_pci.c b/drivers/staging/rt2860/common/cmm_mac_pci.c
+index 5aa6944..73992cb 100644
+--- a/drivers/staging/rt2860/common/cmm_mac_pci.c
++++ b/drivers/staging/rt2860/common/cmm_mac_pci.c
+@@ -414,7 +414,6 @@ VOID	RTMPRingCleanUp(
+ 		case QID_AC_BE:
+ 		case QID_AC_VI:
+ 		case QID_AC_VO:
+-		case QID_HCCA:
+ 
+ 			pTxRing = &pAd->TxRing[RingType];
+ 
+@@ -860,11 +859,14 @@ VOID RT28xxPciStaAsicForceWakeup(
+ 
+     OPSTATUS_SET_FLAG(pAd, fOP_STATUS_WAKEUP_NOW);
+ 
+-#ifdef RTMP_PCI_SUPPORT
+-    if (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_ADVANCE_POWER_SAVE_PCIE_DEVICE))
++    RTMP_CLEAR_PSFLAG(pAd, fRTMP_PS_GO_TO_SLEEP_NOW);
++
++    if (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_PCIE_DEVICE)
++		&&pAd->StaCfg.PSControl.field.EnableNewPS == TRUE)
+     {
+         // Support PCIe Advance Power Save
+-	if (bFromTx == TRUE)
++	if (bFromTx == TRUE
++			&&(pAd->Mlme.bPsPollTimerRunning == TRUE))
+ 	{
+             pAd->Mlme.bPsPollTimerRunning = FALSE;
+ 		RTMPPCIeLinkCtrlValueRestore(pAd, RESTORE_WAKEUP);
+@@ -877,6 +879,17 @@ VOID RT28xxPciStaAsicForceWakeup(
+ 
+         if (RT28xxPciAsicRadioOn(pAd, DOT11POWERSAVE))
+         {
++#ifdef PCIE_PS_SUPPORT
++			// add by johnli, RF power sequence setup, load RF normal operation-mode setup
++			if ((IS_RT3090(pAd) || IS_RT3572(pAd) || IS_RT3390(pAd)) && IS_VERSION_AFTER_F(pAd))
++			{
++				RTMP_CHIP_OP *pChipOps = &pAd->chipOps;
++
++				if (pChipOps->AsicReverseRfFromSleepMode)
++					pChipOps->AsicReverseRfFromSleepMode(pAd);
++			}
++			else
++#endif // PCIE_PS_SUPPORT //
+ 			{
+ 			// end johnli
+ 				// In Radio Off, we turn off RF clk, So now need to call ASICSwitchChannel again.
+@@ -895,11 +908,24 @@ VOID RT28xxPciStaAsicForceWakeup(
+ 				}
+ 			}
+         }
++#ifdef PCIE_PS_SUPPORT
++		// 3090 MCU Wakeup command needs more time to be stable.
++		// Before stable, don't issue other MCU command to prevent from firmware error.
++		if (((IS_RT3090(pAd) || IS_RT3572(pAd) || IS_RT3390(pAd)) && IS_VERSION_AFTER_F(pAd)) && IS_VERSION_AFTER_F(pAd)
++			&& (pAd->StaCfg.PSControl.field.rt30xxPowerMode == 3)
++			&& (pAd->StaCfg.PSControl.field.EnableNewPS == TRUE))
++			{
++			DBGPRINT(RT_DEBUG_TRACE, ("<==RT28xxPciStaAsicForceWakeup::Release the MCU Lock(3090)\n"));
++			RTMP_SEM_LOCK(&pAd->McuCmdLock);
++			pAd->brt30xxBanMcuCmd = FALSE;
++			RTMP_SEM_UNLOCK(&pAd->McuCmdLock);
++			}
++#endif // PCIE_PS_SUPPORT //
+     }
+     else
+-#endif // RTMP_PCI_SUPPORT //
+     {
+         // PCI, 2860-PCIe
++         DBGPRINT(RT_DEBUG_TRACE, ("<==RT28xxPciStaAsicForceWakeup::Original PCI Power Saving\n"));
+         AsicSendCommandToMcu(pAd, 0x31, 0xff, 0x00, 0x02);
+         AutoWakeupCfg.word = 0;
+ 	    RTMP_IO_WRITE32(pAd, AUTO_WAKEUP_CFG, AutoWakeupCfg.word);
+@@ -922,7 +948,8 @@ VOID RT28xxPciStaAsicSleepThenAutoWakeup(
+ 		OPSTATUS_CLEAR_FLAG(pAd, fOP_STATUS_DOZE);
+ 		return;
+ 	}
+-	if (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_ADVANCE_POWER_SAVE_PCIE_DEVICE))
++	if (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_PCIE_DEVICE)
++		&&pAd->StaCfg.PSControl.field.EnableNewPS == TRUE)
+ 	{
+ 		ULONG	Now = 0;
+ 		if (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_WAKEUP_NOW))
+@@ -972,7 +999,6 @@ VOID RT28xxPciStaAsicSleepThenAutoWakeup(
+ 
+ }
+ 
+-#ifdef RTMP_PCI_SUPPORT
+ VOID PsPollWakeExec(
+ 	IN PVOID SystemSpecific1,
+ 	IN PVOID FunctionContext,
+@@ -990,6 +1016,17 @@ VOID PsPollWakeExec(
+     }
+     pAd->Mlme.bPsPollTimerRunning = FALSE;
+ 	RTMP_INT_UNLOCK(&pAd->irq_lock, flags);
++#ifdef PCIE_PS_SUPPORT
++	// For rt30xx power solution 3, Use software timer to wake up in psm. So call
++	// AsicForceWakeup here instead of handling twakeup interrupt.
++	if (((IS_RT3090(pAd) || IS_RT3572(pAd) || IS_RT3390(pAd)) && IS_VERSION_AFTER_F(pAd))
++	&& (pAd->StaCfg.PSControl.field.rt30xxPowerMode == 3)
++	&& (pAd->StaCfg.PSControl.field.EnableNewPS == TRUE))
++	{
++		DBGPRINT(RT_DEBUG_TRACE,("<--PsPollWakeExec::3090 calls AsicForceWakeup(pAd, DOT11POWERSAVE) in advance \n"));
++		AsicForceWakeup(pAd, DOT11POWERSAVE);
++	}
++#endif // PCIE_PS_SUPPORT //
+ }
+ 
+ VOID  RadioOnExec(
+@@ -1006,18 +1043,34 @@ VOID  RadioOnExec(
+ 	if (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_DOZE))
+ 	{
+ 		DBGPRINT(RT_DEBUG_TRACE,("-->RadioOnExec() return on fOP_STATUS_DOZE == TRUE; \n"));
++//KH Debug: Add the compile flag "RT2860 and condition
++#ifdef RTMP_PCI_SUPPORT
++		if (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_PCIE_DEVICE)
++			&&pAd->StaCfg.PSControl.field.EnableNewPS == TRUE)
+ 		RTMPSetTimer(&pAd->Mlme.RadioOnOffTimer, 10);
++#endif // RTMP_PCI_SUPPORT //
+ 		return;
+ 	}
+ 
+ 	if (RTMP_TEST_FLAG(pAd, fRTMP_ADAPTER_BSS_SCAN_IN_PROGRESS))
+ 	{
+ 		DBGPRINT(RT_DEBUG_TRACE,("-->RadioOnExec() return on SCAN_IN_PROGRESS; \n"));
++#ifdef RTMP_PCI_SUPPORT
++if (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_PCIE_DEVICE)
++	&&pAd->StaCfg.PSControl.field.EnableNewPS == TRUE)
+ 		RTMPSetTimer(&pAd->Mlme.RadioOnOffTimer, 10);
++#endif // RTMP_PCI_SUPPORT //
+ 		return;
+ 	}
++//KH Debug: need to check. I add the compile flag "CONFIG_STA_SUPPORT" to enclose the following codes.
++#ifdef RTMP_PCI_SUPPORT
++if (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_PCIE_DEVICE)
++	&&pAd->StaCfg.PSControl.field.EnableNewPS == TRUE)
++	{
+ 	pAd->Mlme.bPsPollTimerRunning = FALSE;
+ 	RTMPCancelTimer(&pAd->Mlme.PsPollTimer,	&Cancelled);
++	}
++#endif // RTMP_PCI_SUPPORT //
+ 	if (pAd->StaCfg.bRadio == TRUE)
+ 	{
+ 		pAd->bPCIclkOff = FALSE;
+@@ -1025,7 +1078,6 @@ VOID  RadioOnExec(
+ 		RTMPRingCleanUp(pAd, QID_AC_BE);
+ 		RTMPRingCleanUp(pAd, QID_AC_VI);
+ 		RTMPRingCleanUp(pAd, QID_AC_VO);
+-		RTMPRingCleanUp(pAd, QID_HCCA);
+ 		RTMPRingCleanUp(pAd, QID_MGMT);
+ 		RTMPRingCleanUp(pAd, QID_RX);
+ 
+@@ -1058,9 +1110,23 @@ VOID  RadioOnExec(
+ 			AsicLockChannel(pAd, pAd->CommonCfg.Channel);
+ 		}
+ 
++//KH Debug:The following codes should be enclosed by RT3090 compile flag
+ 		if (pChipOps->AsicReverseRfFromSleepMode)
+ 			pChipOps->AsicReverseRfFromSleepMode(pAd);
+ 
++#ifdef PCIE_PS_SUPPORT
++// 3090 MCU Wakeup command needs more time to be stable.
++// Before stable, don't issue other MCU command to prevent from firmware error.
++if ((IS_RT3090(pAd) || IS_RT3572(pAd) || IS_RT3390(pAd)) && IS_VERSION_AFTER_F(pAd)
++	&& (pAd->StaCfg.PSControl.field.rt30xxPowerMode == 3)
++	&& (pAd->StaCfg.PSControl.field.EnableNewPS == TRUE))
++	{
++	RTMP_SEM_LOCK(&pAd->McuCmdLock);
++	pAd->brt30xxBanMcuCmd = FALSE;
++	RTMP_SEM_UNLOCK(&pAd->McuCmdLock);
++	}
++#endif // PCIE_PS_SUPPORT //
++
+ 		// Clear Radio off flag
+ 		RTMP_CLEAR_FLAG(pAd, fRTMP_ADAPTER_RADIO_OFF);
+ 
+@@ -1077,8 +1143,6 @@ VOID  RadioOnExec(
+ 		RT28xxPciAsicRadioOff(pAd, GUIRADIO_OFF, 0);
+ 	}
+ }
+-#endif // RTMP_PCI_SUPPORT //
+-
+ 
+ /*
+ 	==========================================================================
+@@ -1102,12 +1166,24 @@ BOOLEAN RT28xxPciAsicRadioOn(
+ 	if (pAd->OpMode == OPMODE_AP && Level==DOT11POWERSAVE)
+ 		return FALSE;
+ 
+-#ifdef RTMP_PCI_SUPPORT
+-	if (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_ADVANCE_POWER_SAVE_PCIE_DEVICE))
++	if (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_PCIE_DEVICE))
++	{
++		if (pAd->StaCfg.PSControl.field.EnableNewPS == TRUE)
+ 	{
+ 	    pAd->Mlme.bPsPollTimerRunning = FALSE;
+ 		RTMPCancelTimer(&pAd->Mlme.PsPollTimer,	&Cancelled);
+-		if ((Level == GUIRADIO_OFF) || (Level == GUI_IDLE_POWER_SAVE))
++		}
++		if ((pAd->StaCfg.PSControl.field.EnableNewPS == TRUE)&&
++		((Level == GUIRADIO_OFF) || (Level == GUI_IDLE_POWER_SAVE))
++		||(RTMP_TEST_PSFLAG(pAd, fRTMP_PS_SET_PCI_CLK_OFF_COMMAND)))
++		{
++			// Some chips don't need to delay 6ms, so copy RTMPPCIePowerLinkCtrlRestore
++			// return condition here.
++			/*
++			if (((pAd->MACVersion&0xffff0000) != 0x28600000)
++				&& ((pAd->DeviceID == NIC2860_PCIe_DEVICE_ID)
++				||(pAd->DeviceID == NIC2790_PCIe_DEVICE_ID)))
++			*/
+ 		{
+ 			DBGPRINT(RT_DEBUG_TRACE, ("RT28xxPciAsicRadioOn ()\n"));
+ 			// 1. Set PCI Link Control in Configuration Space.
+@@ -1115,9 +1191,17 @@ BOOLEAN RT28xxPciAsicRadioOn(
+ 			RTMPusecDelay(6000);
+ 		}
+ 	}
+-#endif // RTMP_PCI_SUPPORT //
++	}
+ 
++#ifdef PCIE_PS_SUPPORT
++if (!(((IS_RT3090(pAd) || IS_RT3572(pAd) || IS_RT3390(pAd)) && IS_VERSION_AFTER_F(pAd)
++	&& (pAd->StaCfg.PSControl.field.rt30xxPowerMode == 3)
++	&& (pAd->StaCfg.PSControl.field.EnableNewPS == TRUE))))
++#endif // PCIE_PS_SUPPORT //
++	{
+     pAd->bPCIclkOff = FALSE;
++		DBGPRINT(RT_DEBUG_TRACE, ("PSM :309xbPCIclkOff == %d\n", pAd->bPCIclkOff));
++	}
+ 	// 2. Send wake up command.
+ 	AsicSendCommandToMcu(pAd, 0x31, PowerWakeCID, 0x00, 0x02);
+     pAd->bPCIclkOff = FALSE;
+@@ -1125,10 +1209,32 @@ BOOLEAN RT28xxPciAsicRadioOn(
+ 	AsicCheckCommanOk(pAd, PowerWakeCID);
+ 	RTMP_ASIC_INTERRUPT_ENABLE(pAd);
+ 
+-
+ 	RTMP_CLEAR_FLAG(pAd, fRTMP_ADAPTER_IDLE_RADIO_OFF);
+ 	if (Level == GUI_IDLE_POWER_SAVE)
+ 	{
++#ifdef  PCIE_PS_SUPPORT
++
++			// add by johnli, RF power sequence setup, load RF normal operation-mode setup
++			if ((IS_RT3090(pAd) || IS_RT3572(pAd) || IS_RT3390(pAd)))
++			{
++				RTMP_CHIP_OP *pChipOps = &pAd->chipOps;
++
++				if (pChipOps->AsicReverseRfFromSleepMode)
++					pChipOps->AsicReverseRfFromSleepMode(pAd);
++				// 3090 MCU Wakeup command needs more time to be stable.
++				// Before stable, don't issue other MCU command to prevent from firmware error.
++				if ((IS_RT3090(pAd) || IS_RT3572(pAd) || IS_RT3390(pAd)) && IS_VERSION_AFTER_F(pAd)
++					&& (pAd->StaCfg.PSControl.field.rt30xxPowerMode == 3)
++					&& (pAd->StaCfg.PSControl.field.EnableNewPS == TRUE))
++					{
++						RTMP_SEM_LOCK(&pAd->McuCmdLock);
++						pAd->brt30xxBanMcuCmd = FALSE;
++						RTMP_SEM_UNLOCK(&pAd->McuCmdLock);
++					}
++			}
++			else
++			// end johnli
++#endif // PCIE_PS_SUPPORT //
+ 			{
+ 			// In Radio Off, we turn off RF clk, So now need to call ASICSwitchChannel again.
+ 				{
+@@ -1198,11 +1304,13 @@ BOOLEAN RT28xxPciAsicRadioOff(
+ 	}
+ 
+     // Once go into this function, disable tx because don't want too many packets in queue to prevent HW stops.
+-	pAd->bPCIclkOffDisableTx = TRUE;
+-
+-	if (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_ADVANCE_POWER_SAVE_PCIE_DEVICE) && pAd->OpMode == OPMODE_STA)
++	//pAd->bPCIclkOffDisableTx = TRUE;
++	RTMP_SET_PSFLAG(pAd, fRTMP_PS_DISABLE_TX);
++	if (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_PCIE_DEVICE)
++		&& pAd->OpMode == OPMODE_STA
++		&&pAd->StaCfg.PSControl.field.EnableNewPS == TRUE
++		)
+ 	{
+-		printk("==>fOP_STATUS_ADVANCE_POWER_SAVE_PCIE_DEVICE\n");
+ 	    RTMPCancelTimer(&pAd->Mlme.RadioOnOffTimer,	&Cancelled);
+ 	    RTMPCancelTimer(&pAd->Mlme.PsPollTimer,	&Cancelled);
+ 
+@@ -1216,12 +1324,22 @@ BOOLEAN RT28xxPciAsicRadioOff(
+ 			{
+ 				DBGPRINT(RT_DEBUG_TRACE, ("TbTTTime = 0x%x , give up this sleep. \n", TbTTTime));
+ 	            OPSTATUS_CLEAR_FLAG(pAd, fOP_STATUS_DOZE);
+-	            pAd->bPCIclkOffDisableTx = FALSE;
++	            //pAd->bPCIclkOffDisableTx = FALSE;
++	            RTMP_CLEAR_PSFLAG(pAd, fRTMP_PS_DISABLE_TX);
+ 				return FALSE;
+ 			}
+ 			else
+ 			{
+ 				PsPollTime = (64*TbTTTime- LEAD_TIME*1024)/1000;
++#ifdef PCIE_PS_SUPPORT
++				if ((IS_RT3090(pAd) || IS_RT3572(pAd) || IS_RT3390(pAd)) && IS_VERSION_AFTER_F(pAd)
++				&& (pAd->StaCfg.PSControl.field.rt30xxPowerMode == 3)
++				&& (pAd->StaCfg.PSControl.field.EnableNewPS == TRUE))
++				{
++							PsPollTime -= 5;
++				}
++				else
++#endif // PCIE_PS_SUPPORT //
+ 				PsPollTime -= 3;
+ 
+ 	            BeaconPeriodTime = pAd->CommonCfg.BeaconPeriod*102/100;
+@@ -1233,6 +1351,12 @@ BOOLEAN RT28xxPciAsicRadioOff(
+ 			}
+ 		}
+ 	}
++	else
++	{
++		DBGPRINT(RT_DEBUG_TRACE, ("RT28xxPciAsicRadioOff::Level!=DOT11POWERSAVE \n"));
++	}
++
++	pAd->bPCIclkOffDisableTx = FALSE;
+ 
+     RTMP_SET_FLAG(pAd, fRTMP_ADAPTER_IDLE_RADIO_OFF);
+ 
+@@ -1315,6 +1439,23 @@ BOOLEAN RT28xxPciAsicRadioOff(
+ 		pAd->CheckDmaBusyCount = 0;
+ 	}
+ 	*/
++//KH Debug:My original codes have the follwoing codes, but currecnt codes do not have it.
++// Disable for stability. If PCIE Link Control is modified for advance power save, re-covery this code segment.
++RTMP_IO_WRITE32(pAd, PBF_SYS_CTRL, 0x1280);
++//OPSTATUS_SET_FLAG(pAd, fOP_STATUS_CLKSELECT_40MHZ);
++
++#ifdef PCIE_PS_SUPPORT
++if ((IS_RT3090(pAd) || IS_RT3572(pAd) || IS_RT3390(pAd)) && IS_VERSION_AFTER_F(pAd)
++	&& (pAd->StaCfg.PSControl.field.rt30xxPowerMode == 3)
++	&& (pAd->StaCfg.PSControl.field.EnableNewPS == TRUE))
++	{
++	DBGPRINT(RT_DEBUG_TRACE, ("RT28xxPciAsicRadioOff::3090 return to skip the following TbttNumToNextWakeUp setting for 279x\n"));
++	pAd->bPCIclkOff = TRUE;
++	RTMP_CLEAR_PSFLAG(pAd, fRTMP_PS_DISABLE_TX);
++	// For this case, doesn't need to below actions, so return here.
++	return brc;
++	}
++#endif // PCIE_PS_SUPPORT //
+ 
+ 	if (Level == DOT11POWERSAVE)
+ 	{
+@@ -1335,7 +1476,6 @@ BOOLEAN RT28xxPciAsicRadioOff(
+ 		RTMP_IO_WRITE32(pAd, AUTO_WAKEUP_CFG, AutoWakeupCfg.word);
+ 	}
+ 
+-#ifdef RTMP_PCI_SUPPORT
+ 	//  4-1. If it's to disable our device. Need to restore PCI Configuration Space to its original value.
+ 	if (Level == RTMP_HALT && pAd->OpMode == OPMODE_STA)
+ 	{
+@@ -1348,9 +1488,9 @@ BOOLEAN RT28xxPciAsicRadioOff(
+ 		if ((brc == TRUE) && (i < 50))
+ 			RTMPPCIeLinkCtrlSetting(pAd, 3);
+ 	}
+-#endif // RTMP_PCI_SUPPORT //
+ 
+-    pAd->bPCIclkOffDisableTx = FALSE;
++	//pAd->bPCIclkOffDisableTx = FALSE;
++	RTMP_CLEAR_PSFLAG(pAd, fRTMP_PS_DISABLE_TX);
+ 	return TRUE;
+ }
+ 
+@@ -1365,41 +1505,37 @@ VOID RT28xxPciMlmeRadioOn(
+ 
+     DBGPRINT(RT_DEBUG_TRACE,("%s===>\n", __func__));
+ 
+-    if ((pAd->OpMode == OPMODE_AP) ||
+-        ((pAd->OpMode == OPMODE_STA) && (!OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_ADVANCE_POWER_SAVE_PCIE_DEVICE))))
++     if ((pAd->OpMode == OPMODE_AP) ||
++        ((pAd->OpMode == OPMODE_STA)
++        && (!OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_PCIE_DEVICE)
++        ||pAd->StaCfg.PSControl.field.EnableNewPS == FALSE
++        )))
+     {
+-	if (pAd->OpMode == OPMODE_AP)
+ 			RT28xxPciAsicRadioOn(pAd, GUI_IDLE_POWER_SAVE);
+-
+ 		//NICResetFromError(pAd);
+ 
+ 	RTMPRingCleanUp(pAd, QID_AC_BK);
+ 	RTMPRingCleanUp(pAd, QID_AC_BE);
+ 	RTMPRingCleanUp(pAd, QID_AC_VI);
+ 	RTMPRingCleanUp(pAd, QID_AC_VO);
+-	RTMPRingCleanUp(pAd, QID_HCCA);
+ 	RTMPRingCleanUp(pAd, QID_MGMT);
+ 	RTMPRingCleanUp(pAd, QID_RX);
+ 
+-		if (pAd->OpMode == OPMODE_STA)
+-		{
+-			AsicSendCommandToMcu(pAd, 0x31, 0xff, 0x00, 0x02);
+-			RTMPusecDelay(10000);
+-		}
+-
+ 	// Enable Tx/Rx
+ 	RTMPEnableRxTx(pAd);
+ 
+ 	// Clear Radio off flag
+ 	RTMP_CLEAR_FLAG(pAd, fRTMP_ADAPTER_RADIO_OFF);
+ 
++	RTMP_CLEAR_FLAG(pAd, fRTMP_ADAPTER_IDLE_RADIO_OFF);
++
+ 	    // Set LED
+ 	    RTMPSetLED(pAd, LED_RADIO_ON);
+     }
+ 
+-#ifdef RTMP_PCI_SUPPORT
+     if ((pAd->OpMode == OPMODE_STA) &&
+-        (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_ADVANCE_POWER_SAVE_PCIE_DEVICE)))
++        (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_PCIE_DEVICE))
++        &&(pAd->StaCfg.PSControl.field.EnableNewPS == TRUE))
+     {
+         BOOLEAN		Cancelled;
+ 
+@@ -1408,9 +1544,8 @@ VOID RT28xxPciMlmeRadioOn(
+         pAd->Mlme.bPsPollTimerRunning = FALSE;
+ 	RTMPCancelTimer(&pAd->Mlme.PsPollTimer,	&Cancelled);
+ 	RTMPCancelTimer(&pAd->Mlme.RadioOnOffTimer,	&Cancelled);
+-	RTMPSetTimer(&pAd->Mlme.RadioOnOffTimer, 10);
++	RTMPSetTimer(&pAd->Mlme.RadioOnOffTimer, 40);
+     }
+-#endif // RTMP_PCI_SUPPORT //
+ }
+ 
+ 
+@@ -1455,19 +1590,33 @@ VOID RT28xxPciMlmeRadioOFF(
+ 
+     {
+ 	BOOLEAN		Cancelled;
++	if (pAd->StaCfg.PSControl.field.EnableNewPS == TRUE)
++		{
+ 	if (RTMP_TEST_FLAG(pAd, fRTMP_ADAPTER_BSS_SCAN_IN_PROGRESS))
+ 	{
+ 			RTMPCancelTimer(&pAd->MlmeAux.ScanTimer, &Cancelled);
+ 			RTMP_CLEAR_FLAG(pAd, fRTMP_ADAPTER_BSS_SCAN_IN_PROGRESS);
+ 	}
+-
+-		if (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_ADVANCE_POWER_SAVE_PCIE_DEVICE))
++			// If during power safe mode.
++			if (pAd->StaCfg.bRadio == TRUE)
++			{
++				DBGPRINT(RT_DEBUG_TRACE,("-->MlmeRadioOff() return on bRadio == TRUE; \n"));
++				return;
++			}
++			// Always radio on since the NIC needs to set the MCU command (LED_RADIO_OFF).
++			if (IDLE_ON(pAd) &&
++				(RTMP_TEST_FLAG(pAd, fRTMP_ADAPTER_IDLE_RADIO_OFF)))
++			{
++				RT28xxPciAsicRadioOn(pAd, GUI_IDLE_POWER_SAVE);
++			}
++		if (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_PCIE_DEVICE))
+         {
+             BOOLEAN Cancelled;
+             pAd->Mlme.bPsPollTimerRunning = FALSE;
+             RTMPCancelTimer(&pAd->Mlme.PsPollTimer,	&Cancelled);
+ 	        RTMPCancelTimer(&pAd->Mlme.RadioOnOffTimer,	&Cancelled);
+         }
++		}
+ 
+         // Link down first if any association exists
+         if (INFRA_ON(pAd) || ADHOC_ON(pAd))
+@@ -1477,28 +1626,38 @@ VOID RT28xxPciMlmeRadioOFF(
+         // Clean up old bss table
+         BssTableInit(&pAd->ScanTab);
+ 
+-        if (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_ADVANCE_POWER_SAVE_PCIE_DEVICE))
++	/*
++        if (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_PCIE_DEVICE))
+         {
+             RTMPSetTimer(&pAd->Mlme.RadioOnOffTimer, 10);
+             return;
+         }
++	*/
+     }
+ 
+-	// Set LED
++	// Set LED.Move to here for fixing LED bug. This flag must be called after LinkDown
+ 	RTMPSetLED(pAd, LED_RADIO_OFF);
+ 
+-	if (pAd->OpMode == OPMODE_AP)
++//KH Debug:All PCIe devices need to use timer to execute radio off function, or the PCIe&&EnableNewPS needs.
++//KH Ans:It is right, because only when the PCIe and EnableNewPs is true, we need to delay the RadioOffTimer
++//to avoid the deadlock with PCIe Power saving function.
++if (pAd->OpMode == OPMODE_STA&&
++	OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_PCIE_DEVICE)&&
++	pAd->StaCfg.PSControl.field.EnableNewPS == TRUE)
++	{
++	RTMPSetTimer(&pAd->Mlme.RadioOnOffTimer, 10);
++	}
++else
++{
+ 		brc=RT28xxPciAsicRadioOff(pAd, GUIRADIO_OFF, 0);
+ 
+ 	if (brc==FALSE)
+ 	{
+ 		DBGPRINT(RT_DEBUG_ERROR,("%s call RT28xxPciAsicRadioOff fail !!\n", __func__));
+ 	}
+-
+-
+-	if (!OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_ADVANCE_POWER_SAVE_PCIE_DEVICE) &&
+-		(pAd->OpMode == OPMODE_STA))
+-		AsicSendCommandToMcu(pAd, 0x30, 0xff, 0xff, 0x02);
++}
++/*
++*/
+ }
+ 
+ #endif // RTMP_MAC_PCI //
+diff --git a/drivers/staging/rt2860/common/cmm_profile.c b/drivers/staging/rt2860/common/cmm_profile.c
+index 2d28524..056cffd 100644
+--- a/drivers/staging/rt2860/common/cmm_profile.c
++++ b/drivers/staging/rt2860/common/cmm_profile.c
+@@ -1266,6 +1266,49 @@ NDIS_STATUS	RTMPSetProfileParameters(
+ 				DBGPRINT(RT_DEBUG_TRACE, ("%s::(NetworkType=%d)\n", __func__, pAd->StaCfg.BssType));
+ 			}
+ 		}
++#ifdef RTMP_MAC_PCI
++		//NewPCIePS
++		if(RTMPGetKeyParameter("NewPCIePS", tmpbuf, 10, pBuffer, TRUE))
++		{
++			UCHAR temp_buffer = (UCHAR) simple_strtol(tmpbuf, 0, 10);
++			if(temp_buffer>0)
++				pAd->StaCfg.PSControl.field.EnableNewPS=TRUE;
++				else
++					pAd->StaCfg.PSControl.field.EnableNewPS=FALSE;
++			DBGPRINT(RT_DEBUG_TRACE, ("NewPCIePS=%d\n", pAd->StaCfg.PSControl.field.EnableNewPS));
++		}
++#endif // RTMP_MAC_PCI //
++#ifdef RT3090
++		//PCIePowerLevel
++
++		if(RTMPGetKeyParameter("PCIePowerLevel", tmpbuf, 10, pBuffer, TRUE))
++		{
++			pAd->StaCfg.PSControl.field.rt30xxPowerMode = (UCHAR) simple_strtol(tmpbuf, 0, 10);
++			DBGPRINT(RT_DEBUG_TRACE, ("PCIePowerLevel=%d\n", pAd->StaCfg.PSControl.field.rt30xxPowerMode));
++		}
++		//FollowHostASPM
++		if(RTMPGetKeyParameter("FollowHostASPM", tmpbuf, 10, pBuffer, TRUE))
++		{
++			UCHAR temp_buffer = (UCHAR) simple_strtol(tmpbuf, 0, 10);
++
++			if(temp_buffer>0)
++				pAd->StaCfg.PSControl.field.rt30xxFollowHostASPM=TRUE;
++				else
++					pAd->StaCfg.PSControl.field.rt30xxFollowHostASPM=FALSE;
++			DBGPRINT(RT_DEBUG_TRACE, ("rt30xxFollowHostASPM=%d\n", pAd->StaCfg.PSControl.field.rt30xxFollowHostASPM));
++		}
++		//ForceTestASPM
++		if(RTMPGetKeyParameter("ForceTestASPM", tmpbuf, 10, pBuffer, TRUE))
++		{
++			UCHAR temp_buffer = (UCHAR) simple_strtol(tmpbuf, 0, 10);
++
++			if(temp_buffer>0)
++				pAd->StaCfg.PSControl.field.rt30xxForceASPMTest=TRUE;
++				else
++					pAd->StaCfg.PSControl.field.rt30xxForceASPMTest=FALSE;
++			DBGPRINT(RT_DEBUG_TRACE, ("rt30xxForceASPM=%d\n", pAd->StaCfg.PSControl.field.rt30xxForceASPMTest));
++		}
++#endif // RT3090 //
+ 		//Channel
+ 		if(RTMPGetKeyParameter("Channel", tmpbuf, 10, pBuffer, TRUE))
+ 		{
+diff --git a/drivers/staging/rt2860/common/cmm_sync.c b/drivers/staging/rt2860/common/cmm_sync.c
+index 4cb507d..9be4d50 100644
+--- a/drivers/staging/rt2860/common/cmm_sync.c
++++ b/drivers/staging/rt2860/common/cmm_sync.c
+@@ -432,19 +432,6 @@ VOID ScanNextChannel(
+ 		}
+ 
+ 		{
+-#ifdef RT2860
+-			/*
+-				If all peer Ad-hoc clients leave, driver would do LinkDown and LinkUp.
+-				In LinkUp, CommonCfg.Ssid would copy SSID from MlmeAux.
+-				To prevent SSID is zero or wrong in Beacon, need to recover MlmeAux.SSID here.
+-			*/
+-			if (ADHOC_ON(pAd))
+-			{
+-				NdisZeroMemory(pAd->MlmeAux.Ssid, MAX_LEN_OF_SSID);
+-				pAd->MlmeAux.SsidLen = pAd->CommonCfg.SsidLen;
+-				NdisMoveMemory(pAd->MlmeAux.Ssid, pAd->CommonCfg.Ssid, pAd->CommonCfg.SsidLen);
+-			}
+-#endif // RT2860 //
+ 			//
+ 			// To prevent data lost.
+ 			// Send an NULL data with turned PSM bit on to current associated AP before SCAN progress.
+diff --git a/drivers/staging/rt2860/common/mlme.c b/drivers/staging/rt2860/common/mlme.c
+index 02627c7..7647c09 100644
+--- a/drivers/staging/rt2860/common/mlme.c
++++ b/drivers/staging/rt2860/common/mlme.c
+@@ -397,7 +397,7 @@ NDIS_STATUS MlmeInit(
+ 
+ 		{
+ #ifdef RTMP_PCI_SUPPORT
+-	        if (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_ADVANCE_POWER_SAVE_PCIE_DEVICE))
++	        if (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_PCIE_DEVICE))
+ 	        {
+ 	            // only PCIe cards need these two timers
+ 	    		RTMPInitTimer(pAd, &pAd->Mlme.PsPollTimer, GET_TIMER_FUNCTION(PsPollWakeExec), pAd, FALSE);
+@@ -569,7 +569,8 @@ VOID MlmeHalt(
+ 
+ 
+ #ifdef RTMP_MAC_PCI
+-	    if (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_ADVANCE_POWER_SAVE_PCIE_DEVICE))
++	    if (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_PCIE_DEVICE)
++			&&(pAd->StaCfg.PSControl.field.EnableNewPS == TRUE))
+ 	    {
+ 	   	    RTMPCancelTimer(&pAd->Mlme.PsPollTimer,		&Cancelled);
+ 		    RTMPCancelTimer(&pAd->Mlme.RadioOnOffTimer,		&Cancelled);
+@@ -678,6 +679,7 @@ VOID MlmePeriodicExec(
+ {
+ 	ULONG			TxTotalCnt;
+ 	PRTMP_ADAPTER	pAd = (RTMP_ADAPTER *)FunctionContext;
++	SHORT	realavgrssi;
+ 
+ #ifdef RTMP_MAC_PCI
+ 	{
+@@ -691,7 +693,27 @@ VOID MlmePeriodicExec(
+ 			UINT32				data = 0;
+ 
+ 			// Read GPIO pin2 as Hardware controlled radio state
++#ifndef RT3090
+ 			RTMP_IO_READ32(pAd, GPIO_CTRL_CFG, &data);
++#endif // RT3090 //
++//KH(PCIE PS):Added based on Jane<--
++#ifdef RT3090
++// Read GPIO pin2 as Hardware controlled radio state
++// We need to Read GPIO if HW said so no mater what advance power saving
++if ((pAd->OpMode == OPMODE_STA) && (IDLE_ON(pAd))
++	&& (RTMP_TEST_FLAG(pAd, fRTMP_ADAPTER_IDLE_RADIO_OFF))
++	&& (pAd->StaCfg.PSControl.field.EnablePSinIdle == TRUE))
++	{
++	// Want to make sure device goes to L0 state before reading register.
++	RTMPPCIeLinkCtrlValueRestore(pAd, 0);
++	RTMP_IO_FORCE_READ32(pAd, GPIO_CTRL_CFG, &data);
++	RTMPPCIeLinkCtrlSetting(pAd, 3);
++	}
++else
++	RTMP_IO_FORCE_READ32(pAd, GPIO_CTRL_CFG, &data);
++#endif // RT3090 //
++//KH(PCIE PS):Added based on Jane-->
++
+ 			if (data & 0x04)
+ 			{
+ 				pAd->StaCfg.bHwRadio = TRUE;
+@@ -1187,6 +1209,60 @@ VOID STAMlmePeriodicExec(
+ 		 }
+ 	}
+ #endif
++#ifdef PCIE_PS_SUPPORT
++// don't perform idle-power-save mechanism within 3 min after driver initialization.
++// This can make rebooter test more robust
++if (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_PCIE_DEVICE))
++	{
++	if ((pAd->OpMode == OPMODE_STA) && (IDLE_ON(pAd))
++		&& (pAd->Mlme.SyncMachine.CurrState == SYNC_IDLE)
++		&& (pAd->Mlme.CntlMachine.CurrState == CNTL_IDLE)
++		&& (!RTMP_TEST_FLAG(pAd, fRTMP_ADAPTER_IDLE_RADIO_OFF)))
++		{
++		if (IS_RT3090(pAd)|| IS_RT3572(pAd) || IS_RT3390(pAd))
++			{
++			if (pAd->StaCfg.PSControl.field.EnableNewPS == TRUE)
++	{
++				DBGPRINT(RT_DEBUG_TRACE, ("%s::%d\n",__FUNCTION__,__LINE__));
++
++				RT28xxPciAsicRadioOff(pAd, GUI_IDLE_POWER_SAVE, 0);
++				}
++			else
++				{
++				DBGPRINT(RT_DEBUG_TRACE, ("%s::%d\n",__FUNCTION__,__LINE__));
++				AsicSendCommandToMcu(pAd, 0x30, PowerSafeCID, 0xff, 0x2);
++				// Wait command success
++				AsicCheckCommanOk(pAd, PowerSafeCID);
++				RTMP_SET_FLAG(pAd, fRTMP_ADAPTER_IDLE_RADIO_OFF);
++				DBGPRINT(RT_DEBUG_TRACE, ("PSM - rt30xx Issue Sleep command)\n"));
++				}
++			}
++		else if (pAd->Mlme.OneSecPeriodicRound > 180)
++                {
++			if (pAd->StaCfg.PSControl.field.EnableNewPS == TRUE)
++				{
++				DBGPRINT(RT_DEBUG_TRACE, ("%s::%d\n",__FUNCTION__,__LINE__));
++				RT28xxPciAsicRadioOff(pAd, GUI_IDLE_POWER_SAVE, 0);
++				 }
++				else
++				{
++				DBGPRINT(RT_DEBUG_TRACE, ("%s::%d\n",__FUNCTION__,__LINE__));
++				AsicSendCommandToMcu(pAd, 0x30, PowerSafeCID, 0xff, 0x02);
++				// Wait command success
++				AsicCheckCommanOk(pAd, PowerSafeCID);
++				RTMP_SET_FLAG(pAd, fRTMP_ADAPTER_IDLE_RADIO_OFF);
++				DBGPRINT(RT_DEBUG_TRACE, ("PSM -  rt28xx Issue Sleep command)\n"));
++				}
++		 }
++	}
++	else
++		{
++		DBGPRINT(RT_DEBUG_TRACE,("STAMlmePeriodicExec MMCHK - CommonCfg.Ssid[%d]=%c%c%c%c... MlmeAux.Ssid[%d]=%c%c%c%c...\n",
++			pAd->CommonCfg.SsidLen, pAd->CommonCfg.Ssid[0], pAd->CommonCfg.Ssid[1], pAd->CommonCfg.Ssid[2], pAd->CommonCfg.Ssid[3],
++			pAd->MlmeAux.SsidLen, pAd->MlmeAux.Ssid[0], pAd->MlmeAux.Ssid[1], pAd->MlmeAux.Ssid[2], pAd->MlmeAux.Ssid[3]));
++		}
++	}
++#endif // PCIE_PS_SUPPORT //
+ 
+     if (pAd->StaCfg.WpaSupplicantUP == WPA_SUPPLICANT_DISABLE)
+     {
+@@ -1275,10 +1351,6 @@ VOID STAMlmePeriodicExec(
+ 			{
+ 			DBGPRINT(RT_DEBUG_TRACE, ("MMCHK - No BEACON. Dead CQI. Auto Recovery attempt #%ld\n", pAd->RalinkCounters.BadCQIAutoRecoveryCount));
+ 
+-			if ((pAd->StaCfg.WpaSupplicantUP != WPA_SUPPLICANT_DISABLE) &&
+-				(pAd->StaCfg.AuthMode == Ndis802_11AuthModeWPA2))
+-				pAd->StaCfg.bLostAp = TRUE;
+-
+ 			// Lost AP, send disconnect & link down event
+ 			LinkDown(pAd, FALSE);
+ 
+@@ -2240,10 +2312,6 @@ VOID MlmeDynamicTxRateSwitching(
+ 		}
+ 
+ 		pEntry->LastTxOkCount = TxSuccess;
+-#ifdef RT2860
+-		pNextTxRate = (PRTMP_TX_RATE_SWITCH) &pTable[(pEntry->CurrTxRateIndex+1)*5];
+-#endif // RT2860 //
+-#if defined(RT2870) || defined(RT3070)
+ 		{
+ 			UCHAR tmpTxRate;
+ 
+@@ -2261,7 +2329,6 @@ VOID MlmeDynamicTxRateSwitching(
+ 
+ 			pNextTxRate = (PRTMP_TX_RATE_SWITCH) &pTable[(tmpTxRate+1)*5];
+ 		}
+-#endif // RT2870 //
+ 		if (bTxRateChanged && pNextTxRate)
+ 		{
+ 			MlmeSetTxRate(pAd, pEntry, pNextTxRate);
+@@ -3805,14 +3872,6 @@ VOID BssTableSsidSort(
+ 				DBGPRINT(RT_DEBUG_TRACE,("STA is in N-only Mode, this AP don't have Ht capability in Beacon.\n"));
+ 				continue;
+ 	}
+-#ifdef RT2860
+-			if ((pAd->CommonCfg.PhyMode == PHY_11GN_MIXED) &&
+-				((pInBss->SupRateLen + pInBss->ExtRateLen) < 12))
+-	{
+-				DBGPRINT(RT_DEBUG_TRACE,("STA is in GN-only Mode, this AP is in B mode.\n"));
+-				continue;
+-	}
+-#endif // RT2860 //
+ 			// New for WPA2
+ 			// Check the Authmode first
+ 			if (pAd->StaCfg.AuthMode >= Ndis802_11AuthModeWPA)
+@@ -3921,14 +3980,7 @@ VOID BssTableSsidSort(
+ 				DBGPRINT(RT_DEBUG_TRACE,("STA is in N-only Mode, this AP don't have Ht capability in Beacon.\n"));
+ 				continue;
+ 			}
+-#ifdef RT2860
+-			if ((pAd->CommonCfg.PhyMode == PHY_11GN_MIXED) &&
+-				((pInBss->SupRateLen + pInBss->ExtRateLen) < 12))
+-			{
+-				DBGPRINT(RT_DEBUG_TRACE,("STA is in GN-only Mode, this AP is in B mode.\n"));
+-				continue;
+-			}
+-#endif // RT2860 //
++
+ 			// New for WPA2
+ 			// Check the Authmode first
+ 			if (pAd->StaCfg.AuthMode >= Ndis802_11AuthModeWPA)
+@@ -5495,6 +5547,9 @@ VOID AsicEvaluateRxAnt(
+ #ifdef RT30xx
+ 				|| (pAd->EepromAccess)
+ #endif // RT30xx //
++#ifdef RT3090
++							|| (pAd->bPCIclkOff == TRUE)
++#endif // RT3090 //
+ 				)
+ 			return;
+ 
+@@ -5583,6 +5638,9 @@ VOID AsicRxAntEvalTimeout(
+ #ifdef RT30xx
+ 							|| (pAd->EepromAccess)
+ #endif // RT30xx //
++#ifdef RT3090
++							|| (pAd->bPCIclkOff == TRUE)
++#endif // RT3090 //
+ 							)
+ 		return;
+ 
+diff --git a/drivers/staging/rt2860/common/rt_rf.c b/drivers/staging/rt2860/common/rt_rf.c
+index 34a6fca..e9f9384 100644
+--- a/drivers/staging/rt2860/common/rt_rf.c
++++ b/drivers/staging/rt2860/common/rt_rf.c
+@@ -187,6 +187,14 @@ VOID RtmpChipOpsRFHook(
+ 			}
+ 		}
+ #endif // RT3070 //
++#ifdef RT3090
++		if (IS_RT3090(pAd) && (pAd->infType == RTMP_DEV_INF_PCI))
++		{
++			pChipOps->AsicRfTurnOff = RT30xxLoadRFSleepModeSetup;
++			pChipOps->AsicRfInit = NICInitRT3090RFRegisters;
++			pChipOps->AsicReverseRfFromSleepMode = RT30xxReverseRFSleepModeSetup;
++		}
++#endif // RT3090 //
+ 	}
+ #endif // RT30xx //
+ }
+diff --git a/drivers/staging/rt2860/common/rtmp_init.c b/drivers/staging/rt2860/common/rtmp_init.c
+index 1dd4c82..3b43101 100644
+--- a/drivers/staging/rt2860/common/rtmp_init.c
++++ b/drivers/staging/rt2860/common/rtmp_init.c
+@@ -191,6 +191,9 @@ NDIS_STATUS	RTMPAllocAdapterBlock(
+ 		NdisAllocateSpinLock(&pAd->MgmtRingLock);
+ #ifdef RTMP_MAC_PCI
+ 		NdisAllocateSpinLock(&pAd->RxRingLock);
++#ifdef RT3090
++	NdisAllocateSpinLock(&pAd->McuCmdLock);
++#endif // RT3090 //
+ #endif // RTMP_MAC_PCI //
+ 
+ 		for (index =0 ; index < NUM_OF_TX_RING; index++)
+@@ -1238,7 +1241,13 @@ VOID	NICInitAsicFromEEPROM(
+ 		{
+ 			RTMPSetLED(pAd, LED_RADIO_ON);
+ #ifdef RTMP_MAC_PCI
++#ifdef RT3090
++			AsicSendCommandToMcu(pAd, 0x30, PowerRadioOffCID, 0xff, 0x02);
++			AsicCheckCommanOk(pAd, PowerRadioOffCID);
++#endif // RT3090 //
++#ifndef RT3090
+ 			AsicSendCommandToMcu(pAd, 0x30, 0xff, 0xff, 0x02);
++#endif // RT3090 //
+ 			AsicSendCommandToMcu(pAd, 0x31, PowerWakeCID, 0x00, 0x00);
+ 			// 2-1. wait command ok.
+ 			AsicCheckCommanOk(pAd, PowerWakeCID);
+@@ -1246,6 +1255,29 @@ VOID	NICInitAsicFromEEPROM(
+ 		}
+ 	}
+ 
++#ifdef RTMP_MAC_PCI
++#ifdef RT30xx
++		if (IS_RT3090(pAd)|| IS_RT3572(pAd) || IS_RT3390(pAd))
++		{
++			RTMP_CHIP_OP *pChipOps = &pAd->chipOps;
++			if (pChipOps->AsicReverseRfFromSleepMode)
++				pChipOps->AsicReverseRfFromSleepMode(pAd);
++		}
++		// 3090 MCU Wakeup command needs more time to be stable.
++		// Before stable, don't issue other MCU command to prevent from firmware error.
++
++		if ((IS_RT3090(pAd)|| IS_RT3572(pAd) || IS_RT3390(pAd)) && IS_VERSION_AFTER_F(pAd)
++			&& (pAd->StaCfg.PSControl.field.rt30xxPowerMode == 3)
++			&& (pAd->StaCfg.PSControl.field.EnableNewPS == TRUE))
++		{
++			DBGPRINT(RT_DEBUG_TRACE,("%s::%d,release Mcu Lock\n",__FUNCTION__,__LINE__));
++			RTMP_SEM_LOCK(&pAd->McuCmdLock);
++			pAd->brt30xxBanMcuCmd = FALSE;
++			RTMP_SEM_UNLOCK(&pAd->McuCmdLock);
++		}
++#endif // RT30xx //
++#endif // RTMP_MAC_PCI //
++
+ 	// Turn off patching for cardbus controller
+ 	if (NicConfig2.field.CardbusAcceleration == 1)
+ 	{
+@@ -1443,11 +1475,6 @@ retry:
+ 	RTMP_IO_WRITE32(pAd, TX_BASE_PTR3, Value);
+ 	DBGPRINT(RT_DEBUG_TRACE, ("--> TX_BASE_PTR3 : 0x%x\n", Value));
+ 
+-	// Write HCCA base address register
+-	  Value = RTMP_GetPhysicalAddressLow(pAd->TxRing[QID_HCCA].Cell[0].AllocPa);
+-	  RTMP_IO_WRITE32(pAd, TX_BASE_PTR4, Value);
+-	DBGPRINT(RT_DEBUG_TRACE, ("--> TX_BASE_PTR4 : 0x%x\n", Value));
+-
+ 	// Write MGMT_BASE_CSR register
+ 	Value = RTMP_GetPhysicalAddressLow(pAd->MgmtRing.Cell[0].AllocPa);
+ 	RTMP_IO_WRITE32(pAd, TX_BASE_PTR5, Value);
+@@ -1641,7 +1668,7 @@ NDIS_STATUS	NICInitializeAsic(
+ 	for(Index=0; Index<NUM_MAC_REG_PARMS; Index++)
+ 	{
+ #ifdef RT30xx
+-		if ((MACRegTable[Index].Register == TX_SW_CFG0) && (IS_RT3070(pAd) || IS_RT3071(pAd) || IS_RT3572(pAd)))
++		if ((MACRegTable[Index].Register == TX_SW_CFG0) && (IS_RT3070(pAd) || IS_RT3071(pAd) || IS_RT3572(pAd) || IS_RT3090(pAd) ||  IS_RT3390(pAd)))
+ 		{
+ 			MACRegTable[Index].Value = 0x00000400;
+ 		}
+@@ -1713,6 +1740,11 @@ NDIS_STATUS	NICInitializeAsic(
+ 	// PCI and USB are not the same because PCI driver needs to wait for PCI bus ready
+ 	RTMP_IO_WRITE32(pAd, H2M_BBP_AGENT, 0);	// initialize BBP R/W access agent
+ 	RTMP_IO_WRITE32(pAd, H2M_MAILBOX_CSR, 0);
++#ifdef RT3090
++	//2008/11/28:KH add to fix the dead rf frequency offset bug<--
++	AsicSendCommandToMcu(pAd, 0x72, 0, 0, 0);
++	//2008/11/28:KH add to fix the dead rf frequency offset bug-->
++#endif // RT3090 //
+ 	RTMPusecDelay(1000);
+ 
+ 	// Read BBP register, make sure BBP is up and running before write new data
+@@ -2588,6 +2620,8 @@ VOID	UserCfgInit(
+ 	pAd->LedIndicatorStrength = 0;
+ 	pAd->RLnkCtrlOffset = 0;
+ 	pAd->HostLnkCtrlOffset = 0;
++	pAd->StaCfg.PSControl.field.EnableNewPS=TRUE;
++	pAd->CheckDmaBusyCount = 0;
+ #endif // RTMP_MAC_PCI //
+ 
+ 	pAd->bAutoTxAgcA = FALSE;			// Default is OFF
+@@ -2600,8 +2634,6 @@ VOID	UserCfgInit(
+ 	pAd->bForcePrintRX = FALSE;
+ 	pAd->bStaFifoTest = FALSE;
+ 	pAd->bProtectionTest = FALSE;
+-	pAd->bHCCATest = FALSE;
+-	pAd->bGenOneHCCA = FALSE;
+ 	pAd->CommonCfg.Dsifs = 10;      // in units of usec
+ 	pAd->CommonCfg.TxPower = 100; //mW
+ 	pAd->CommonCfg.TxPowerPercentage = 0xffffffff; // AUTO
+@@ -2720,6 +2752,15 @@ VOID	UserCfgInit(
+ 		pAd->StaCfg.DesiredTransmitSetting.field.MCS = MCS_AUTO;
+ 	}
+ 
++#ifdef PCIE_PS_SUPPORT
++pAd->brt30xxBanMcuCmd = FALSE;
++pAd->b3090ESpecialChip = FALSE;
++//KH Debug:the following must be removed
++pAd->StaCfg.PSControl.field.rt30xxPowerMode=3;
++pAd->StaCfg.PSControl.field.rt30xxForceASPMTest=0;
++pAd->StaCfg.PSControl.field.rt30xxFollowHostASPM=1;
++#endif // PCIE_PS_SUPPORT //
++
+ 	// global variables mXXXX used in MAC protocol state machines
+ 	OPSTATUS_SET_FLAG(pAd, fOP_STATUS_RECEIVE_DTIM);
+ 	OPSTATUS_CLEAR_FLAG(pAd, fOP_STATUS_ADHOC_ON);
+@@ -2757,6 +2798,9 @@ VOID	UserCfgInit(
+ 			pAd->StaCfg.LastScanTime -= (10 * OS_HZ);
+ 
+ 		NdisZeroMemory(pAd->nickname, IW_ESSID_MAX_SIZE+1);
++#ifdef RTMP_MAC_PCI
++		sprintf((PSTRING) pAd->nickname, "RT2860STA");
++#endif // RTMP_MAC_PCI //
+ #ifdef RTMP_MAC_USB
+ 			sprintf((PSTRING) pAd->nickname, "RT2870STA");
+ #endif // RTMP_MAC_USB //
+@@ -2766,7 +2810,6 @@ VOID	UserCfgInit(
+ 		pAd->StaCfg.WpaSupplicantUP = WPA_SUPPLICANT_DISABLE;
+ 		pAd->StaCfg.bRSN_IE_FromWpaSupplicant = FALSE;
+ 		pAd->StaCfg.WpaSupplicantUP = WPA_SUPPLICANT_ENABLE;
+-		pAd->StaCfg.bLostAp = FALSE;
+ 
+ 		NdisZeroMemory(pAd->StaCfg.ReplayCounter, 8);
+ 
+@@ -3272,7 +3315,7 @@ int rt28xx_init(
+ 	// NICLoadFirmware will hang forever when interface is up again.
+ 	// RT2860 PCI
+ 	if (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_DOZE) &&
+-		OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_ADVANCE_POWER_SAVE_PCIE_DEVICE))
++		OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_PCIE_DEVICE))
+ 	{
+ 		AUTO_WAKEUP_STRUC AutoWakeupCfg;
+ 			AsicForceWakeup(pAd, TRUE);
+@@ -3307,6 +3350,16 @@ int rt28xx_init(
+ 	DBGPRINT(RT_DEBUG_TRACE, ("MAC_CSR0  [ Ver:Rev=0x%08x]\n", pAd->MACVersion));
+ 
+ #ifdef RTMP_MAC_PCI
++#ifdef PCIE_PS_SUPPORT
++	/*Iverson patch PCIE L1 issue to make sure that driver can be read,write ,BBP and RF register  at pcie L.1 level */
++	if ((IS_RT3090(pAd) || IS_RT3572(pAd) || IS_RT3390(pAd))&&OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_PCIE_DEVICE))
++	{
++		RTMP_IO_READ32(pAd, AUX_CTRL, &MacCsr0);
++		MacCsr0 |= 0x402;
++		RTMP_IO_WRITE32(pAd, AUX_CTRL, MacCsr0);
++		DBGPRINT(RT_DEBUG_TRACE, ("AUX_CTRL = 0x%x\n", MacCsr0));
++	}
++#endif // PCIE_PS_SUPPORT //
+ 
+ 	// To fix driver disable/enable hang issue when radio off
+ 	RTMP_IO_WRITE32(pAd, PWR_PIN_CFG, 0x2);
+diff --git a/drivers/staging/rt2860/common/rtmp_mcu.c b/drivers/staging/rt2860/common/rtmp_mcu.c
+index 24531c5..229ea05 100644
+--- a/drivers/staging/rt2860/common/rtmp_mcu.c
++++ b/drivers/staging/rt2860/common/rtmp_mcu.c
+@@ -38,8 +38,9 @@
+ 
+ #include	"../rt_config.h"
+ 
+-#ifdef RT2860
++#if defined(RT2860) || defined(RT3090)
+ #include "firmware.h"
++#include "../../rt3090/firmware.h"
+ #endif
+ #ifdef RT2870
+ #include "../../rt3070/firmware.h"
+@@ -115,20 +116,18 @@ NDIS_STATUS RtmpAsicLoadFirmware(
+ {
+ 
+ 	NDIS_STATUS		Status = NDIS_STATUS_SUCCESS;
+-	PUCHAR			pFirmwareImage;
++	PUCHAR			pFirmwareImage = NULL;
+ 	ULONG			FileLength, Index;
+-	//ULONG			firm;
+ 	UINT32			MacReg = 0;
+ 	UINT32			Version = (pAd->MACVersion >> 16);
+ 
+-//	pFirmwareImage = FirmwareImage;
+-//	FileLength = sizeof(FirmwareImage);
+-
+ 	// New 8k byte firmware size for RT3071/RT3072
+ 	{
+ #ifdef RTMP_MAC_PCI
+-		if ((Version == 0x2860) || (Version == 0x3572) || IS_RT3090(pAd))
+-		{
++		if (IS_RT3090(pAd) || IS_RT3390(pAd)) {
++			pFirmwareImage = FirmwareImage_3090;
++			FileLength = FIRMWAREIMAGE_MAX_LENGTH;
++		} else {
+ 			pFirmwareImage = FirmwareImage_2860;
+ 			FileLength = FIRMWAREIMAGE_MAX_LENGTH;
+ 		}
+@@ -190,9 +189,72 @@ INT RtmpAsicSendCommandToMcu(
+ 	HOST_CMD_CSR_STRUC	H2MCmd;
+ 	H2M_MAILBOX_STRUC	H2MMailbox;
+ 	ULONG				i = 0;
+-#ifdef RTMP_MAC_PCI
+-#endif // RTMP_MAC_PCI //
+ 
++#ifdef PCIE_PS_SUPPORT
++	// 3090F power solution 3 has hw limitation that needs to ban all mcu command
++	// when firmware is in radio state.  For other chip doesn't have this limitation.
++	if (((IS_RT3090(pAd) || IS_RT3572(pAd) || IS_RT3390(pAd)) && IS_VERSION_AFTER_F(pAd)) && IS_VERSION_AFTER_F(pAd)
++		&& (pAd->StaCfg.PSControl.field.rt30xxPowerMode == 3)
++		&& (pAd->StaCfg.PSControl.field.EnableNewPS == TRUE))
++	{
++		RTMP_SEM_LOCK(&pAd->McuCmdLock);
++		if ((pAd->brt30xxBanMcuCmd == TRUE)
++			&& (Command != WAKE_MCU_CMD) && (Command != RFOFF_MCU_CMD))
++		{
++			RTMP_SEM_UNLOCK(&pAd->McuCmdLock);
++			DBGPRINT(RT_DEBUG_TRACE, (" Ban Mcu Cmd %x in sleep mode\n",  Command));
++			return FALSE;
++		}
++		else if ((Command == SLEEP_MCU_CMD)
++			||(Command == RFOFF_MCU_CMD))
++		{
++			pAd->brt30xxBanMcuCmd = TRUE;
++		}
++		else if (Command != WAKE_MCU_CMD)
++		{
++			pAd->brt30xxBanMcuCmd = FALSE;
++		}
++
++		RTMP_SEM_UNLOCK(&pAd->McuCmdLock);
++
++	}
++	if (((IS_RT3090(pAd) || IS_RT3572(pAd) || IS_RT3390(pAd)) && IS_VERSION_AFTER_F(pAd)) && IS_VERSION_AFTER_F(pAd)
++		&& (pAd->StaCfg.PSControl.field.rt30xxPowerMode == 3)
++		&& (pAd->StaCfg.PSControl.field.EnableNewPS == TRUE)
++		&& (Command == WAKE_MCU_CMD))
++	{
++
++	do
++	{
++			RTMP_IO_FORCE_READ32(pAd, H2M_MAILBOX_CSR, &H2MMailbox.word);
++			if (H2MMailbox.field.Owner == 0)
++				break;
++
++			RTMPusecDelay(2);
++			DBGPRINT(RT_DEBUG_INFO, ("AsicSendCommanToMcu::Mail box is busy\n"));
++		} while(i++ < 100);
++
++		if (i >= 100)
++		{
++			DBGPRINT_ERR(("H2M_MAILBOX still hold by MCU. command fail\n"));
++			return FALSE;
++		}
++
++		H2MMailbox.field.Owner	  = 1;	   // pass ownership to MCU
++		H2MMailbox.field.CmdToken = Token;
++		H2MMailbox.field.HighByte = Arg1;
++		H2MMailbox.field.LowByte  = Arg0;
++		RTMP_IO_FORCE_WRITE32(pAd, H2M_MAILBOX_CSR, H2MMailbox.word);
++
++		H2MCmd.word			  = 0;
++		H2MCmd.field.HostCommand  = Command;
++		RTMP_IO_FORCE_WRITE32(pAd, HOST_CMD_CSR, H2MCmd.word);
++
++
++	}
++	else
++#endif // PCIE_PS_SUPPORT //
++	{
+ 	do
+ 	{
+ 		RTMP_IO_READ32(pAd, H2M_MAILBOX_CSR, &H2MMailbox.word);
+@@ -228,6 +290,22 @@ INT RtmpAsicSendCommandToMcu(
+ 	if (Command != 0x80)
+ 	{
+ 	}
++}
++#ifdef PCIE_PS_SUPPORT
++	// 3090 MCU Wakeup command needs more time to be stable.
++	// Before stable, don't issue other MCU command to prevent from firmware error.
++	if (((IS_RT3090(pAd) || IS_RT3572(pAd) || IS_RT3390(pAd)) && IS_VERSION_AFTER_F(pAd)) && IS_VERSION_AFTER_F(pAd)
++		&& (pAd->StaCfg.PSControl.field.rt30xxPowerMode == 3)
++		&& (pAd->StaCfg.PSControl.field.EnableNewPS == TRUE)
++		&& (Command == WAKE_MCU_CMD))
++	{
++		RTMPusecDelay(2000);
++		//Put this is after RF programming.
++		//NdisAcquireSpinLock(&pAd->McuCmdLock);
++		//pAd->brt30xxBanMcuCmd = FALSE;
++		//NdisReleaseSpinLock(&pAd->McuCmdLock);
++	}
++#endif // PCIE_PS_SUPPORT //
+ 
+ 	return TRUE;
+ }
+diff --git a/drivers/staging/rt2860/common/rtmp_timer.c b/drivers/staging/rt2860/common/rtmp_timer.c
+index 258ab1b..fa77f5d 100644
+--- a/drivers/staging/rt2860/common/rtmp_timer.c
++++ b/drivers/staging/rt2860/common/rtmp_timer.c
+@@ -59,10 +59,10 @@ BUILD_TIMER_FUNCTION(DisassocTimeout);
+ BUILD_TIMER_FUNCTION(LinkDownExec);
+ BUILD_TIMER_FUNCTION(StaQuickResponeForRateUpExec);
+ BUILD_TIMER_FUNCTION(WpaDisassocApAndBlockAssoc);
+-#ifdef RTMP_PCI_SUPPORT
++#ifdef RTMP_MAC_PCI
+ BUILD_TIMER_FUNCTION(PsPollWakeExec);
+ BUILD_TIMER_FUNCTION(RadioOnExec);
+-#endif // RTMP_PCI_SUPPORT //
++#endif // RTMP_MAC_PCI //
+ #ifdef RTMP_MAC_USB
+ BUILD_TIMER_FUNCTION(RtmpUsbStaAsicForceWakeupTimeout);
+ #endif // RTMP_MAC_USB //
+diff --git a/drivers/staging/rt2860/iface/rtmp_pci.h b/drivers/staging/rt2860/iface/rtmp_pci.h
+index aa66ff7..7d7efbd 100644
+--- a/drivers/staging/rt2860/iface/rtmp_pci.h
++++ b/drivers/staging/rt2860/iface/rtmp_pci.h
+@@ -38,9 +38,7 @@
+ 
+ #define RT28XX_PUT_DEVICE(dev_p)
+ 
+-#ifndef SA_SHIRQ
+ #define SA_SHIRQ IRQF_SHARED
+-#endif
+ 
+ #ifdef PCI_MSI_SUPPORT
+ #define RTMP_MSI_ENABLE(_pAd) \
+diff --git a/drivers/staging/rt2860/pci_main_dev.c b/drivers/staging/rt2860/pci_main_dev.c
+index 5f39c44..0df1ac8 100644
+--- a/drivers/staging/rt2860/pci_main_dev.c
++++ b/drivers/staging/rt2860/pci_main_dev.c
+@@ -38,6 +38,13 @@
+ #include "rt_config.h"
+ #include <linux/pci.h>
+ 
++// Following information will be show when you run 'modinfo'
++// *** If you have a solution for the bug in current version of driver, please mail to me.
++// Otherwise post to forum in ralinktech's web site(www.ralinktech.com) and let all users help you. ***
++MODULE_AUTHOR("Jett Chen <jett_chen@ralinktech.com>");
++MODULE_DESCRIPTION("RT2860/RT3090 Wireless Lan Linux Driver");
++MODULE_LICENSE("GPL");
++
+ //
+ // Function declarations
+ //
+@@ -63,6 +70,7 @@ static int rt2860_resume(struct pci_dev *pci_dev);
+ //
+ static struct pci_device_id rt2860_pci_tbl[] __devinitdata =
+ {
++#ifdef RT2860
+ 	{PCI_DEVICE(NIC_PCI_VENDOR_ID, NIC2860_PCI_DEVICE_ID)},		//RT28602.4G
+ 	{PCI_DEVICE(NIC_PCI_VENDOR_ID, NIC2860_PCIe_DEVICE_ID)},
+ 	{PCI_DEVICE(NIC_PCI_VENDOR_ID, NIC2760_PCI_DEVICE_ID)},
+@@ -75,11 +83,21 @@ static struct pci_device_id rt2860_pci_tbl[] __devinitdata =
+ 	{PCI_DEVICE(EDIMAX_PCI_VENDOR_ID, 0x7738)},
+ 	{PCI_DEVICE(EDIMAX_PCI_VENDOR_ID, 0x7748)},
+ 	{PCI_DEVICE(EDIMAX_PCI_VENDOR_ID, 0x7768)},
++#endif
++#ifdef RT3090
++	{PCI_DEVICE(NIC_PCI_VENDOR_ID, NIC3090_PCIe_DEVICE_ID)},
++	{PCI_DEVICE(NIC_PCI_VENDOR_ID, NIC3091_PCIe_DEVICE_ID)},
++	{PCI_DEVICE(NIC_PCI_VENDOR_ID, NIC3092_PCIe_DEVICE_ID)},
++#endif // RT3090 //
++#ifdef RT3390
++	{PCI_DEVICE(NIC_PCI_VENDOR_ID, NIC3390_PCIe_DEVICE_ID)},
++	{PCI_DEVICE(NIC_PCI_VENDOR_ID, NIC3391_PCIe_DEVICE_ID)},
++	{PCI_DEVICE(NIC_PCI_VENDOR_ID, NIC3392_PCIe_DEVICE_ID)},
++#endif // RT3390 //
+     {0,}		// terminate list
+ };
+ 
+ MODULE_DEVICE_TABLE(pci, rt2860_pci_tbl);
+-MODULE_LICENSE("GPL");
+ #ifdef MODULE_VERSION
+ MODULE_VERSION(STA_DRIVER_VERSION);
+ #endif
+@@ -363,9 +381,6 @@ static INT __devinit   rt2860_probe(
+ 	pAd->StaCfg.OriDevType = net_dev->type;
+ 	RTMPInitPCIeDevice(pci_dev, pAd);
+ 
+-#ifdef KTHREAD_SUPPORT
+-#endif // KTHREAD_SUPPORT //
+-
+ 	DBGPRINT(RT_DEBUG_TRACE, ("<=== rt2860_probe\n"));
+ 
+ 	return 0; // probe ok
+@@ -478,11 +493,17 @@ BOOLEAN RT28XXChipsetCheck(
+ 	pci_read_config_word(pci_dev, PCI_DEVICE_ID, &device_id);
+ 	device_id = le2cpu16(device_id);
+ 	pObj->DeviceID = device_id;
+-	OPSTATUS_CLEAR_FLAG(pAd, fOP_STATUS_ADVANCE_POWER_SAVE_PCIE_DEVICE);
+ 	if (
++#ifdef RT2860
+ 		(device_id == NIC2860_PCIe_DEVICE_ID) ||
+ 		(device_id == NIC2790_PCIe_DEVICE_ID) ||
+ 		(device_id == VEN_AWT_PCIe_DEVICE_ID) ||
++#endif
++#ifdef RT3090
++		(device_id == NIC3090_PCIe_DEVICE_ID) ||
++		(device_id == NIC3091_PCIe_DEVICE_ID) ||
++		(device_id == NIC3092_PCIe_DEVICE_ID) ||
++#endif // RT3090 //
+ 		 0)
+ 	{
+ 		UINT32 MacCsr0 = 0, Index= 0;
+@@ -500,7 +521,7 @@ BOOLEAN RT28XXChipsetCheck(
+ 		// MAC version at offset 0x1000 is 0x2872XXXX/0x2870XXXX(PCIe, USB, SDIO).
+ 		if ((MacCsr0&0xffff0000) != 0x28600000)
+ 		{
+-			OPSTATUS_SET_FLAG(pAd, fOP_STATUS_ADVANCE_POWER_SAVE_PCIE_DEVICE);
++			OPSTATUS_SET_FLAG(pAd, fOP_STATUS_PCIE_DEVICE);
+ 		}
+ 	}
+ }
+@@ -511,24 +532,26 @@ VOID RTMPInitPCIeLinkCtrlValue(
+ {
+     INT     pos;
+     USHORT	reg16, data2, PCIePowerSaveLevel, Configuration;
++	UINT32 MacValue;
+     BOOLEAN	bFindIntel = FALSE;
+ 	POS_COOKIE pObj;
+ 
+ 	pObj = (POS_COOKIE) pAd->OS_Cookie;
+ 
+-	if (!OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_ADVANCE_POWER_SAVE_PCIE_DEVICE))
++	if (!OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_PCIE_DEVICE))
+ 		return;
+ 
+     DBGPRINT(RT_DEBUG_TRACE, ("%s.===>\n", __func__));
+ 	// Init EEPROM, and save settings
+-	if (!IS_RT3090(pAd))
++	if (!(IS_RT3090(pAd) || IS_RT3572(pAd) || IS_RT3390(pAd)))
+ 	{
+ 		RT28xx_EEPROM_READ16(pAd, 0x22, PCIePowerSaveLevel);
+ 		pAd->PCIePowerSaveLevel = PCIePowerSaveLevel & 0xff;
+ 
++		pAd->LnkCtrlBitMask = 0;
+ 		if ((PCIePowerSaveLevel&0xff) == 0xff)
+ 		{
+-			OPSTATUS_CLEAR_FLAG(pAd, fOP_STATUS_ADVANCE_POWER_SAVE_PCIE_DEVICE);
++			OPSTATUS_CLEAR_FLAG(pAd, fOP_STATUS_PCIE_DEVICE);
+ 			DBGPRINT(RT_DEBUG_TRACE, ("====> PCIePowerSaveLevel = 0x%x.\n", PCIePowerSaveLevel));
+ 			return;
+ 		}
+@@ -563,40 +586,108 @@ VOID RTMPInitPCIeLinkCtrlValue(
+ 				pAd->LnkCtrlBitMask = 0x103;
+ 				break;
+ 		}
++			RT28xx_EEPROM_READ16(pAd, 0x24, data2);
++			if ((PCIePowerSaveLevel&0xff) != 0xff)
++			{
++				PCIePowerSaveLevel &= 0x3;
++
++				if( !(((data2&0xff00) == 0x9200) && ((data2&0x80) !=0)) )
++				{
++					if (PCIePowerSaveLevel > 1 )
++						PCIePowerSaveLevel = 1;
++				}
++
++				DBGPRINT(RT_DEBUG_TRACE, ("====> rt28xx Write 0x83 Command = 0x%x.\n", PCIePowerSaveLevel));
++					       printk("\n\n\n%s:%d\n",__FUNCTION__,__LINE__);
++
++				AsicSendCommandToMcu(pAd, 0x83, 0xff, (UCHAR)PCIePowerSaveLevel, 0x00);
++			}
+ 		DBGPRINT(RT_DEBUG_TRACE, ("====> LnkCtrlBitMask = 0x%x.\n", pAd->LnkCtrlBitMask));
+ 	}
+ 	}
+-	else if (IS_RT3090(pAd))
++	else if (IS_RT3090(pAd) || IS_RT3572(pAd) || IS_RT3390(pAd))
+ 	{
++		UCHAR	LinkCtrlSetting = 0;
++
++		// Check 3090E special setting chip.
++			RT28xx_EEPROM_READ16(pAd, 0x24, data2);
++		if ((data2 == 0x9280) && ((pAd->MACVersion&0xffff) == 0x0211))
++		{
++			pAd->b3090ESpecialChip = TRUE;
++			DBGPRINT_RAW(RT_DEBUG_ERROR,("Special 3090E chip \n"));
++		}
++
++		RTMP_IO_READ32(pAd, AUX_CTRL, &MacValue);
++		//enable WAKE_PCIE function, which forces to enable PCIE clock when mpu interrupt asserting.
++		//Force PCIE 125MHz CLK to toggle
++		MacValue |= 0x402;
++		RTMP_IO_WRITE32(pAd, AUX_CTRL, MacValue);
++		DBGPRINT_RAW(RT_DEBUG_ERROR,(" AUX_CTRL = 0x%32x\n", MacValue));
++
++
++
++		// for RT30xx F and after, PCIe infterface, and for power solution 3
++		if ((IS_VERSION_AFTER_F(pAd))
++			&& (pAd->StaCfg.PSControl.field.rt30xxPowerMode >= 2)
++			&& (pAd->StaCfg.PSControl.field.rt30xxPowerMode <= 3))
++		{
++			RTMP_IO_READ32(pAd, AUX_CTRL, &MacValue);
++			DBGPRINT_RAW(RT_DEBUG_ERROR,(" Read AUX_CTRL = 0x%x\n", MacValue));
++			// turn on bit 12.
++			//enable 32KHz clock mode for power saving
++			MacValue |= 0x1000;
++			if (MacValue != 0xffffffff)
++			{
++				RTMP_IO_WRITE32(pAd, AUX_CTRL, MacValue);
++				DBGPRINT_RAW(RT_DEBUG_ERROR,(" Write AUX_CTRL = 0x%x\n", MacValue));
++				// 1. if use PCIePowerSetting is 2 or 3, need to program OSC_CTRL to 0x3ff11.
++				MacValue = 0x3ff11;
++				RTMP_IO_WRITE32(pAd, OSC_CTRL, MacValue);
++				DBGPRINT_RAW(RT_DEBUG_ERROR,(" OSC_CTRL = 0x%x\n", MacValue));
++				// 2. Write PCI register Clk ref bit
++				RTMPrt3xSetPCIePowerLinkCtrl(pAd);
++			}
++			else
++			{
++				// Error read Aux_Ctrl value.  Force to use solution 1
++				DBGPRINT(RT_DEBUG_ERROR,(" Error Value in AUX_CTRL = 0x%x\n", MacValue));
++				pAd->StaCfg.PSControl.field.rt30xxPowerMode = 1;
++				DBGPRINT(RT_DEBUG_ERROR,(" Force to use power solution1 \n"));
++			}
++		}
+ 		// 1. read setting from inf file.
+-		// .....
+-		USHORT	PCIePowerSetting = 0;
+-		/* code from windows, default value of rt30xxPowerMode = 0
+-		PCIePowerSetting = pAd->StaCfg.PSControl.field.rt30xxPowerMode;
+-		*/
+-		DBGPRINT(RT_DEBUG_TRACE, ("====> rt30xx Read PowerLevelMode =  0x%x.\n", PCIePowerSetting));
+-		// 2. Check EnableNewPS
+-		/*
++
++		PCIePowerSaveLevel = (USHORT)pAd->StaCfg.PSControl.field.rt30xxPowerMode;
++		DBGPRINT(RT_DEBUG_ERROR, ("====> rt30xx Read PowerLevelMode =  0x%x.\n", PCIePowerSaveLevel));
++		// 2. Check EnableNewPS.
+ 		if (pAd->StaCfg.PSControl.field.EnableNewPS == FALSE)
+-			PCIePowerSetting = 1;
+-		*/
++			PCIePowerSaveLevel = 1;
+ 
+-		if ((pAd->MACVersion&0xffff) <= 0x0211)
++		if (IS_VERSION_BEFORE_F(pAd) && (pAd->b3090ESpecialChip == FALSE))
+ 		{
+-			// Chip Version E only allow 1
+-			PCIePowerSetting = 1;
+-			DBGPRINT(RT_DEBUG_TRACE, ("====> rt30xx Write 0x83 Command = 0x%x.\n", PCIePowerSetting));
+-			AsicSendCommandToMcu(pAd, 0x83, 0xff, (UCHAR)PCIePowerSetting, 0x00);
++			// Chip Version E only allow 1, So force set 1.
++			PCIePowerSaveLevel &= 0x1;
++			pAd->PCIePowerSaveLevel = (USHORT)PCIePowerSaveLevel;
++			DBGPRINT(RT_DEBUG_TRACE, ("====> rt30xx E Write 0x83 Command = 0x%x.\n", PCIePowerSaveLevel));
++
++			AsicSendCommandToMcu(pAd, 0x83, 0xff, (UCHAR)PCIePowerSaveLevel, 0x00);
+ 		}
+ 		else
+ 		{
+-			// Chip Version F only allow 1 or 2
+-			if ((PCIePowerSetting > 2) || (PCIePowerSetting == 0))
+-				PCIePowerSetting = 1;
+-			DBGPRINT(RT_DEBUG_TRACE, ("====> rt30xx Write 0x83 Command = 0x%x.\n", PCIePowerSetting));
+-			AsicSendCommandToMcu(pAd, 0x83, 0xff, (UCHAR)PCIePowerSetting, 0x00);
++			// Chip Version F and after only allow 1 or 2 or 3. This might be modified after new chip version come out.
++			if (!((PCIePowerSaveLevel == 1) || (PCIePowerSaveLevel == 3)))
++				PCIePowerSaveLevel = 1;
++			DBGPRINT(RT_DEBUG_ERROR, ("====> rt30xx F Write 0x83 Command = 0x%x.\n", PCIePowerSaveLevel));
++			pAd->PCIePowerSaveLevel = (USHORT)PCIePowerSaveLevel;
++			// for 3090F , we need to add high-byte arg for 0x83 command to indicate the link control setting in
++			// PCI Configuration Space. Because firmware can't read PCI Configuration Space
++			if ((pAd->Rt3xxRalinkLinkCtrl & 0x2) && (pAd->Rt3xxHostLinkCtrl & 0x2))
++			{
++				LinkCtrlSetting = 1;
++			}
++			DBGPRINT(RT_DEBUG_TRACE, ("====> rt30xxF LinkCtrlSetting = 0x%x.\n", LinkCtrlSetting));
++			AsicSendCommandToMcu(pAd, 0x83, 0xff, (UCHAR)PCIePowerSaveLevel, LinkCtrlSetting);
+ 		}
+-
+ 	}
+ 
+     // Find Ralink PCIe Device's Express Capability Offset
+@@ -613,6 +704,7 @@ VOID RTMPInitPCIeLinkCtrlValue(
+         pAd->RLnkCtrlConfiguration = (Configuration & 0x103);
+         Configuration &= 0xfefc;
+         Configuration |= (0x0);
++#ifdef RT2860
+ 		if ((pObj->DeviceID == NIC2860_PCIe_DEVICE_ID)
+ 			||(pObj->DeviceID == NIC2790_PCIe_DEVICE_ID))
+ 		{
+@@ -621,6 +713,7 @@ VOID RTMPInitPCIeLinkCtrlValue(
+ 			DBGPRINT(RT_DEBUG_TRACE, ("Write (Ralink PCIe Link Control Register)  offset 0x%x = 0x%x\n",
+                                     pos + PCI_EXP_LNKCTL, Configuration));
+ 		}
++#endif // RT2860 //
+ 
+         RTMPFindHostPCIDev(pAd);
+         if (pObj->parent_pci_dev)
+@@ -630,7 +723,10 @@ VOID RTMPInitPCIeLinkCtrlValue(
+ 		pci_read_config_word(pObj->parent_pci_dev, PCI_VENDOR_ID, &vendor_id);
+ 		vendor_id = le2cpu16(vendor_id);
+ 		if (vendor_id == PCIBUS_INTEL_VENDOR)
++                 {
+ 			bFindIntel = TRUE;
++                        RTMP_SET_PSFLAG(pAd, fRTMP_PS_TOGGLE_L1);
++                 }
+ 
+ 		// Find PCI-to-PCI Bridge Express Capability Offset
+ 		pos = pci_find_capability(pObj->parent_pci_dev, PCI_CAP_ID_EXP);
+@@ -650,10 +746,20 @@ VOID RTMPInitPCIeLinkCtrlValue(
+ 
+ 			switch (pObj->DeviceID)
+ 			{
++#ifdef RT2860
+ 				case NIC2860_PCIe_DEVICE_ID:
+ 				case NIC2790_PCIe_DEVICE_ID:
+ 					bChange = TRUE;
+ 					break;
++#endif // RT2860 //
++#ifdef RT3090
++				case NIC3090_PCIe_DEVICE_ID:
++				case NIC3091_PCIe_DEVICE_ID:
++				case NIC3092_PCIe_DEVICE_ID:
++					if (bFindIntel == FALSE)
++					bChange = TRUE;
++					break;
++#endif // RT3090 //
+ 				default:
+ 					break;
+ 			}
+@@ -686,6 +792,11 @@ VOID RTMPInitPCIeLinkCtrlValue(
+ 		// Doesn't switch L0, L1, So set PCIePowerSaveLevel to 0xff
+ 		pAd->PCIePowerSaveLevel = 0xff;
+ 		if ((pAd->RLnkCtrlOffset != 0)
++#ifdef RT3090
++			&& ((pObj->DeviceID == NIC3090_PCIe_DEVICE_ID)
++				||(pObj->DeviceID == NIC3091_PCIe_DEVICE_ID)
++				||(pObj->DeviceID == NIC3092_PCIe_DEVICE_ID))
++#endif // RT3090 //
+ 		)
+ 		{
+ 			pci_read_config_word(pObj->pci_dev, pAd->RLnkCtrlOffset, &reg16);
+@@ -714,7 +825,7 @@ VOID RTMPFindHostPCIDev(
+ 
+ 	pObj = (POS_COOKIE) pAd->OS_Cookie;
+ 
+-	if (!OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_ADVANCE_POWER_SAVE_PCIE_DEVICE))
++	if (!OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_PCIE_DEVICE))
+ 		return;
+ 
+     DBGPRINT(RT_DEBUG_TRACE, ("%s.===>\n", __func__));
+@@ -761,12 +872,27 @@ VOID RTMPPCIeLinkCtrlValueRestore(
+ 
+ 	pObj = (POS_COOKIE) pAd->OS_Cookie;
+ 
+-	if (!OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_ADVANCE_POWER_SAVE_PCIE_DEVICE))
++	if (!OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_PCIE_DEVICE))
+ 		return;
+ 
++#ifdef RT2860
+ 	if (!((pObj->DeviceID == NIC2860_PCIe_DEVICE_ID)
+ 		||(pObj->DeviceID == NIC2790_PCIe_DEVICE_ID)))
+ 		return;
++#endif // RT2860 //
++	// Check PSControl Configuration
++	if (pAd->StaCfg.PSControl.field.EnableNewPS == FALSE)
++		return TRUE;
++
++	//3090 will not execute the following codes.
++	// Check interface : If not PCIe interface, return.
++
++#ifdef RT3090
++	if ((pObj->DeviceID == NIC3090_PCIe_DEVICE_ID)
++		||(pObj->DeviceID == NIC3091_PCIe_DEVICE_ID)
++		||(pObj->DeviceID == NIC3092_PCIe_DEVICE_ID))
++		return;
++#endif // RT3090 //
+ 
+ 	DBGPRINT(RT_DEBUG_TRACE, ("%s.===>\n", __func__));
+ 	PCIePowerSaveLevel = pAd->PCIePowerSaveLevel;
+@@ -840,12 +966,32 @@ VOID RTMPPCIeLinkCtrlSetting(
+ 
+ 	pObj = (POS_COOKIE) pAd->OS_Cookie;
+ 
+-	if (!OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_ADVANCE_POWER_SAVE_PCIE_DEVICE))
++	if (!OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_PCIE_DEVICE))
+ 		return;
+ 
++#ifdef RT2860
+ 	if (!((pObj->DeviceID == NIC2860_PCIe_DEVICE_ID)
+ 		||(pObj->DeviceID == NIC2790_PCIe_DEVICE_ID)))
+ 		return;
++#endif // RT2860 //
++	// Check PSControl Configuration
++	if (pAd->StaCfg.PSControl.field.EnableNewPS == FALSE)
++		return TRUE;
++
++	// Check interface : If not PCIe interface, return.
++	//Block 3090 to enter the following function
++
++#ifdef RT3090
++	if ((pObj->DeviceID == NIC3090_PCIe_DEVICE_ID)
++		||(pObj->DeviceID == NIC3091_PCIe_DEVICE_ID)
++		||(pObj->DeviceID == NIC3092_PCIe_DEVICE_ID))
++		return;
++#endif // RT3090 //
++	if (!RTMP_TEST_PSFLAG(pAd, fRTMP_PS_CAN_GO_SLEEP))
++	{
++		DBGPRINT(RT_DEBUG_INFO, ("RTMPPCIePowerLinkCtrl return on fRTMP_PS_CAN_GO_SLEEP flag\n"));
++		return;
++	}
+ 
+ 	DBGPRINT(RT_DEBUG_TRACE,("%s===>\n", __func__));
+ 	PCIePowerSaveLevel = pAd->PCIePowerSaveLevel;
+@@ -856,6 +1002,35 @@ VOID RTMPPCIeLinkCtrlSetting(
+ 	}
+ 	PCIePowerSaveLevel = PCIePowerSaveLevel>>6;
+ 
++    // Skip non-exist deice right away
++	if (pObj->parent_pci_dev && (pAd->HostLnkCtrlOffset != 0))
++	{
++        PCI_REG_READ_WORD(pObj->parent_pci_dev, pAd->HostLnkCtrlOffset, Configuration);
++		switch (PCIePowerSaveLevel)
++		{
++			case 0:
++				// Set b0 and b1 of LinkControl (both 2892 and PCIe bridge) to 00
++				Configuration &= 0xfefc;
++				break;
++			case 1:
++				// Set b0 and b1 of LinkControl (both 2892 and PCIe bridge) to 01
++				Configuration &= 0xfefc;
++				Configuration |= 0x1;
++				break;
++			case 2:
++				//  Set b0 and b1 of LinkControl (both 2892 and PCIe bridge) to 11
++				Configuration &= 0xfefc;
++				Configuration |= 0x3;
++				break;
++			case 3:
++				// Set b0 and b1 of LinkControl (both 2892 and PCIe bridge) to 11 and bit 8 of LinkControl of 2892 to 1
++				Configuration &= 0xfefc;
++				Configuration |= 0x103;
++				break;
++		}
++        PCI_REG_WIRTE_WORD(pObj->parent_pci_dev, pAd->HostLnkCtrlOffset, Configuration);
++		DBGPRINT(RT_DEBUG_TRACE, ("Write PCI host offset 0x%x = 0x%x\n", pAd->HostLnkCtrlOffset, Configuration));
++	}
+ 
+ 	if (pObj->pci_dev && (pAd->RLnkCtrlOffset != 0))
+ 	{
+@@ -864,10 +1039,149 @@ VOID RTMPPCIeLinkCtrlSetting(
+ 			PCIePowerSaveLevel = Max;
+ 
+         PCI_REG_READ_WORD(pObj->pci_dev, pAd->RLnkCtrlOffset, Configuration);
+-		Configuration |= 0x100;
++		switch (PCIePowerSaveLevel)
++		{
++			case 0:
++				// No PCI power safe
++				// Set b0 and b1 of LinkControl (both 2892 and PCIe bridge) to 00 .
++				Configuration &= 0xfefc;
++				break;
++			case 1:
++				//  L0
++				// Set b0 and b1 of LinkControl (both 2892 and PCIe bridge) to 01 .
++				Configuration &= 0xfefc;
++				Configuration |= 0x1;
++				break;
++			case 2:
++				// L0 and L1
++				//  Set b0 and b1 of LinkControl (both 2892 and PCIe bridge) to 11
++				Configuration &= 0xfefc;
++				Configuration |= 0x3;
++				break;
++			case 3:
++				// L0 , L1 and clock management.
++				// Set b0 and b1 of LinkControl (both 2892 and PCIe bridge) to 11 and bit 8 of LinkControl of 2892 to 1
++				Configuration &= 0xfefc;
++				Configuration |= 0x103;
++		              pAd->bPCIclkOff = TRUE;
++				break;
++		}
+         PCI_REG_WIRTE_WORD(pObj->pci_dev, pAd->RLnkCtrlOffset, Configuration);
+ 		DBGPRINT(RT_DEBUG_TRACE, ("Write Ralink device : offset 0x%x = 0x%x\n", pAd->RLnkCtrlOffset, Configuration));
+ 	}
+ 
+ 	DBGPRINT(RT_DEBUG_TRACE,("RTMPPCIePowerLinkCtrl <==============\n"));
+ }
++
++/*
++	========================================================================
++
++	Routine Description:
++		1. Write a PCI register for rt30xx power solution 3
++
++	========================================================================
++*/
++VOID RTMPrt3xSetPCIePowerLinkCtrl(
++	IN	PRTMP_ADAPTER	pAd)
++{
++
++	ULONG	HostConfiguration;
++	ULONG	Configuration;
++	ULONG	Vendor;
++	ULONG	offset;
++	POS_COOKIE	pObj;
++	INT     pos;
++	USHORT	reg16;
++
++	pObj = (POS_COOKIE) pAd->OS_Cookie;
++
++	DBGPRINT(RT_DEBUG_INFO, ("RTMPrt3xSetPCIePowerLinkCtrl.===> %x\n", pAd->StaCfg.PSControl.word));
++
++	// Check PSControl Configuration
++	if (pAd->StaCfg.PSControl.field.EnableNewPS == FALSE)
++		return;
++	RTMPFindHostPCIDev(pAd);
++        if (pObj->parent_pci_dev)
++        {
++		USHORT  vendor_id;
++		// Find PCI-to-PCI Bridge Express Capability Offset
++		pos = pci_find_capability(pObj->parent_pci_dev, PCI_CAP_ID_EXP);
++
++		if (pos != 0)
++		{
++			pAd->HostLnkCtrlOffset = pos + PCI_EXP_LNKCTL;
++		}
++	// If configurared to turn on L1.
++	HostConfiguration = 0;
++		if (pAd->StaCfg.PSControl.field.rt30xxForceASPMTest == 1)
++		{
++						DBGPRINT(RT_DEBUG_TRACE, ("Enter,PSM : Force ASPM \n"));
++
++			// Skip non-exist deice right away
++			if ((pAd->HostLnkCtrlOffset != 0))
++			{
++			 PCI_REG_READ_WORD(pObj->parent_pci_dev, pAd->HostLnkCtrlOffset, HostConfiguration);
++				// Prepare Configuration to write to Host
++				HostConfiguration |= 0x3;
++				PCI_REG_WIRTE_WORD(pObj->parent_pci_dev, pAd->HostLnkCtrlOffset, HostConfiguration);
++				pAd->Rt3xxHostLinkCtrl = HostConfiguration;
++				// Because in rt30xxForceASPMTest Mode, Force turn on L0s, L1.
++				// Fix HostConfiguration bit0:1 = 0x3 for later use.
++				HostConfiguration = 0x3;
++				DBGPRINT(RT_DEBUG_TRACE, ("PSM : Force ASPM : Host device L1/L0s Value =  0x%x\n", HostConfiguration));
++			}
++		}
++		else if (pAd->StaCfg.PSControl.field.rt30xxFollowHostASPM == 1)
++		{
++
++			// Skip non-exist deice right away
++			if ((pAd->HostLnkCtrlOffset != 0))
++			{
++			 PCI_REG_READ_WORD(pObj->parent_pci_dev, pAd->HostLnkCtrlOffset, HostConfiguration);
++				pAd->Rt3xxHostLinkCtrl = HostConfiguration;
++				HostConfiguration &= 0x3;
++				DBGPRINT(RT_DEBUG_TRACE, ("PSM : Follow Host ASPM : Host device L1/L0s Value =  0x%x\n", HostConfiguration));
++			}
++		}
++        }
++	// Prepare to write Ralink setting.
++	// Find Ralink PCIe Device's Express Capability Offset
++	pos = pci_find_capability(pObj->pci_dev, PCI_CAP_ID_EXP);
++
++    if (pos != 0)
++    {
++        // Ralink PCIe Device's Link Control Register Offset
++       pAd->RLnkCtrlOffset = pos + PCI_EXP_LNKCTL;
++	pci_read_config_word(pObj->pci_dev, pAd->RLnkCtrlOffset, &reg16);
++        Configuration = le2cpu16(reg16);
++	DBGPRINT(RT_DEBUG_TRACE, ("Read (Ralink PCIe Link Control Register) offset 0x%x = 0x%x\n",
++			                                    pAd->RLnkCtrlOffset, Configuration));
++		Configuration |= 0x100;
++		if ((pAd->StaCfg.PSControl.field.rt30xxFollowHostASPM == 1)
++			|| (pAd->StaCfg.PSControl.field.rt30xxForceASPMTest == 1))
++		{
++			switch(HostConfiguration)
++			{
++				case 0:
++					Configuration &= 0xffffffc;
++					break;
++				case 1:
++					Configuration &= 0xffffffc;
++					Configuration |= 0x1;
++					break;
++				case 2:
++					Configuration &= 0xffffffc;
++					Configuration |= 0x2;
++					break;
++				case 3:
++					Configuration |= 0x3;
++					break;
++			}
++		}
++		reg16 = cpu2le16(Configuration);
++		pci_write_config_word(pObj->pci_dev, pAd->RLnkCtrlOffset, reg16);
++		pAd->Rt3xxRalinkLinkCtrl = Configuration;
++		DBGPRINT(RT_DEBUG_TRACE, ("PSM :Write Ralink device L1/L0s Value =  0x%x\n", Configuration));
++	}
++	DBGPRINT(RT_DEBUG_INFO,("PSM :RTMPrt3xSetPCIePowerLinkCtrl <==============\n"));
++}
+diff --git a/drivers/staging/rt2860/rt_linux.c b/drivers/staging/rt2860/rt_linux.c
+index 940b385..b578360 100644
+--- a/drivers/staging/rt2860/rt_linux.c
++++ b/drivers/staging/rt2860/rt_linux.c
+@@ -284,6 +284,9 @@ VOID	RTMPFreeAdapter(
+ 
+ #ifdef RTMP_MAC_PCI
+ 	NdisFreeSpinLock(&pAd->RxRingLock);
++#ifdef RT3090
++NdisFreeSpinLock(&pAd->McuCmdLock);
++#endif // RT3090 //
+ #endif // RTMP_MAC_PCI //
+ 
+ 	for (index =0 ; index < NUM_OF_TX_RING; index++)
+diff --git a/drivers/staging/rt2860/rt_linux.h b/drivers/staging/rt2860/rt_linux.h
+index 4ebe943..e8c7d88 100644
+--- a/drivers/staging/rt2860/rt_linux.h
++++ b/drivers/staging/rt2860/rt_linux.h
+@@ -590,6 +590,12 @@ void linux_pci_unmap_single(void *handle, dma_addr_t dma_addr, size_t size, int
+ 		*_pV = 0;													\
+ }
+ 
++#define RTMP_IO_FORCE_READ32(_A, _R, _pV)							\
++{																	\
++	(*_pV = readl((void *)((_A)->CSRBaseAddress + MAC_CSR0)));		\
++	(*_pV = readl((void *)((_A)->CSRBaseAddress + (_R))));			\
++}
++
+ #define RTMP_IO_READ8(_A, _R, _pV)								\
+ {																\
+ 	(*_pV = readl((void *)((_A)->CSRBaseAddress + MAC_CSR0)));			\
+@@ -605,7 +611,12 @@ void linux_pci_unmap_single(void *handle, dma_addr_t dma_addr, size_t size, int
+     }                                                               \
+ }
+ 
+-
++#define RTMP_IO_FORCE_WRITE32(_A, _R, _V)												\
++{																				\
++	UINT	Val;																\
++	Val = readl((void *)((_A)->CSRBaseAddress + MAC_CSR0));			\
++	writel(_V, (void *)((_A)->CSRBaseAddress + (_R)));								\
++}
+ 
+ #if defined(RALINK_2880) || defined(RALINK_3052)
+ #define RTMP_IO_WRITE8(_A, _R, _V)            \
+diff --git a/drivers/staging/rt2860/rt_main_dev.c b/drivers/staging/rt2860/rt_main_dev.c
+index 89c67fc..7ea85e6 100644
+--- a/drivers/staging/rt2860/rt_main_dev.c
++++ b/drivers/staging/rt2860/rt_main_dev.c
+@@ -226,9 +226,9 @@ int rt28xx_close(IN PNET_DEV dev)
+ 		return 0; // close ok
+ 
+ 	{
+-#ifdef RTMP_PCI_SUPPORT
++#ifdef RTMP_MAC_PCI
+ 		RTMPPCIeLinkCtrlValueRestore(pAd, RESTORE_CLOSE);
+-#endif // RTMP_PCI_SUPPORT //
++#endif // RTMP_MAC_PCI //
+ 
+ 		// If dirver doesn't wake up firmware here,
+ 		// NICLoadFirmware will hang forever when interface is up again.
+@@ -320,6 +320,10 @@ int rt28xx_close(IN PNET_DEV dev)
+ 
+ 
+ 			brc=RT28xxPciAsicRadioOff(pAd, RTMP_HALT, 0);
++
++//In  solution 3 of 3090F, the bPCIclkOff will be set to TRUE after calling RT28xxPciAsicRadioOff
++			pAd->bPCIclkOff = FALSE;
++
+ 			if (brc==FALSE)
+ 	{
+ 				DBGPRINT(RT_DEBUG_ERROR,("%s call RT28xxPciAsicRadioOff fail !!\n", __func__));
+@@ -400,11 +404,6 @@ int rt28xx_open(IN PNET_DEV dev)
+ 		return -1;
+ 	}
+ 
+-#ifdef RTMP_PCI_SUPPORT
+-        RTMPInitPCIeLinkCtrlValue(pAd);
+-#endif // RTMP_PCI_SUPPORT //
+-
+-
+ 	if (net_dev->priv_flags == INT_MAIN)
+ 	{
+ 		if (pAd->OpMode == OPMODE_STA)
+@@ -449,7 +448,9 @@ int rt28xx_open(IN PNET_DEV dev)
+ //	RTMP_IO_WRITE32(pAd, XIFS_TIME_CFG, reg);
+ 
+ 	}
+-
++#ifdef RTMP_MAC_PCI
++        RTMPInitPCIeLinkCtrlValue(pAd);
++#endif // RTMP_MAC_PCI //
+ 
+ 	return (retval);
+ 
+diff --git a/drivers/staging/rt2860/rt_pci_rbus.c b/drivers/staging/rt2860/rt_pci_rbus.c
+index b24df06..5990001 100644
+--- a/drivers/staging/rt2860/rt_pci_rbus.c
++++ b/drivers/staging/rt2860/rt_pci_rbus.c
+@@ -236,7 +236,6 @@ VOID Invalid_Remaining_Packet(
+ 	PhysicalAddress = PCI_MAP_SINGLE(pAd, (void *)(VirtualAddress+1600), RX_BUFFER_NORMSIZE-1600, -1, PCI_DMA_FROMDEVICE);
+ }
+ 
+-
+ NDIS_STATUS RtmpNetTaskInit(IN RTMP_ADAPTER *pAd)
+ {
+ 	POS_COOKIE pObj;
+@@ -871,7 +870,6 @@ void linux_pci_unmap_single(void *handle, dma_addr_t dma_addr, size_t size, int
+ 	pAd=(PRTMP_ADAPTER)handle;
+ 	pObj = (POS_COOKIE)pAd->OS_Cookie;
+ 
+-	if (size > 0)
+-		pci_unmap_single(pObj->pci_dev, dma_addr, size, direction);
++	pci_unmap_single(pObj->pci_dev, dma_addr, size, direction);
+ 
+ }
+diff --git a/drivers/staging/rt2860/rtmp.h b/drivers/staging/rt2860/rtmp.h
+index ee047f8..12b1465 100644
+--- a/drivers/staging/rt2860/rtmp.h
++++ b/drivers/staging/rt2860/rtmp.h
+@@ -913,6 +913,20 @@ typedef enum _ABGBAND_STATE_ {
+ 	A_BAND,
+ } ABGBAND_STATE;
+ 
++#ifdef RTMP_MAC_PCI
++// Power save method control
++typedef	union	_PS_CONTROL	{
++	struct	{
++		ULONG		EnablePSinIdle:1;			// Enable radio off when not connect to AP. radio on only when sitesurvey,
++		ULONG		EnableNewPS:1;		// Enable new  Chip power save fucntion . New method can only be applied in chip version after 2872. and PCIe.
++		ULONG		rt30xxPowerMode:2;			// Power Level Mode for rt30xx chip
++		ULONG		rt30xxFollowHostASPM:1;			// Card Follows Host's setting for rt30xx chip.
++		ULONG		rt30xxForceASPMTest:1;			// Force enable L1 for rt30xx chip. This has higher priority than rt30xxFollowHostASPM Mode.
++		ULONG		rsv:26;			// Radio Measurement Enable
++	}	field;
++	ULONG			word;
++}	PS_CONTROL, *PPS_CONTROL;
++#endif // RTMP_MAC_PCI //
+ 
+ /***************************************************************************
+   *	structure for MLME state machine
+@@ -1542,7 +1556,6 @@ typedef struct _STA_ADMIN_CONFIG {
+     UCHAR               WpaSupplicantUP;
+ 	UCHAR				WpaSupplicantScanCount;
+ 	BOOLEAN				bRSN_IE_FromWpaSupplicant;
+-	BOOLEAN				bLostAp;
+ 
+     CHAR                dev_name[16];
+     USHORT              OriDevType;
+@@ -1557,6 +1570,10 @@ typedef struct _STA_ADMIN_CONFIG {
+ 
+ #ifdef RTMP_MAC_PCI
+     UCHAR       BBPR3;
++	// PS Control has 2 meanings for advanced power save function.
++	// 1. EnablePSinIdle : When no connection, always radio off except need to do site survey.
++	// 2. EnableNewPS  : will save more current in sleep or radio off mode.
++	PS_CONTROL				PSControl;
+ #endif // RTMP_MAC_PCI //
+ 
+ 
+@@ -1815,9 +1832,17 @@ struct _RTMP_ADAPTER
+     USHORT		            HostLnkCtrlConfiguration;
+     USHORT                  HostLnkCtrlOffset;
+ 	USHORT		            PCIePowerSaveLevel;
++	ULONG				Rt3xxHostLinkCtrl;	// USed for 3090F chip
++	ULONG				Rt3xxRalinkLinkCtrl;	// USed for 3090F chip
++	USHORT				DeviceID;           // Read from PCI config
++	ULONG				AccessBBPFailCount;
+    	BOOLEAN					bPCIclkOff;						// flag that indicate if the PICE power status in Configuration SPace..
+ 	BOOLEAN					bPCIclkOffDisableTx;			//
+ 
++	BOOLEAN					brt30xxBanMcuCmd;	//when = 0xff means all commands are ok to set .
++	BOOLEAN					b3090ESpecialChip;	//3090E special chip that write EEPROM 0x24=0x9280.
++	ULONG					CheckDmaBusyCount;  // Check Interrupt Status Register Count.
++
+ 	UINT					int_enable_reg;
+ 	UINT					int_disable_mask;
+ 	UINT					int_pending;
+@@ -1923,6 +1948,9 @@ struct _RTMP_ADAPTER
+ #ifdef RTMP_MAC_PCI
+ 	RTMP_RX_RING            RxRing;
+ 	NDIS_SPIN_LOCK          RxRingLock;                 // Rx Ring spinlock
++#ifdef RT3090
++	NDIS_SPIN_LOCK          McuCmdLock;              //MCU Command Queue spinlock
++#endif // RT3090 //
+ #endif // RTMP_MAC_PCI //
+ #ifdef RTMP_MAC_USB
+ 	RX_CONTEXT				RxContext[RX_RING_SIZE];  // 1 for redundant multiple IRP bulk in.
+@@ -2179,8 +2207,6 @@ struct _RTMP_ADAPTER
+ 	//BOOLEAN		bDisablescanning;		//defined in RT2870 USB
+ 	BOOLEAN		bStaFifoTest;
+ 	BOOLEAN		bProtectionTest;
+-	BOOLEAN		bHCCATest;
+-	BOOLEAN		bGenOneHCCA;
+ 	BOOLEAN		bBroadComHT;
+ 	//+++Following add from RT2870 USB.
+ 	ULONG		BulkOutReq;
+@@ -2333,6 +2359,7 @@ typedef struct _TX_BLK_
+ 	UCHAR				HeaderBuf[128];				// TempBuffer for TX_INFO + TX_WI + 802.11 Header + padding + AMSDU SubHeader + LLC/SNAP
+ 	//RT2870 2.1.0.0 uses only 80 bytes
+ 	//RT3070 2.1.1.0 uses only 96 bytes
++	//RT3090 2.1.0.0 uses only 96 bytes
+ 	UCHAR				MpduHeaderLen;				// 802.11 header length NOT including the padding
+ 	UCHAR				HdrPadLen;					// recording Header Padding Length;
+ 	UCHAR				apidx;						// The interface associated to this packet
+@@ -2875,10 +2902,6 @@ VOID WpaStaPairwiseKeySetting(
+ VOID WpaStaGroupKeySetting(
+ 	IN	PRTMP_ADAPTER	pAd);
+ 
+-VOID    WpaSendEapolStart(
+-	IN	PRTMP_ADAPTER	pAdapter,
+-	IN  PUCHAR          pBssid);
+-
+ NDIS_STATUS RTMPCloneNdisPacket(
+ 	IN  PRTMP_ADAPTER   pAd,
+ 	IN	BOOLEAN    pInsAMSDUHdr,
+@@ -3685,9 +3708,6 @@ VOID ScanNextChannel(
+ ULONG MakeIbssBeacon(
+ 	IN  PRTMP_ADAPTER   pAd);
+ 
+-VOID InitChannelRelatedValue(
+-	IN  PRTMP_ADAPTER   pAd);
+-
+ BOOLEAN MlmeScanReqSanity(
+ 	IN  PRTMP_ADAPTER   pAd,
+ 	IN  VOID *Msg,
+@@ -4063,6 +4083,10 @@ VOID RT30xxReverseRFSleepModeSetup(
+ VOID NICInitRT3070RFRegisters(
+ 	IN RTMP_ADAPTER *pAd);
+ #endif // RT3070 //
++#ifdef RT3090
++VOID NICInitRT3090RFRegisters(
++	IN RTMP_ADAPTER *pAd);
++#endif // RT3090 //
+ 
+ VOID RT30xxHaltAction(
+ 	IN PRTMP_ADAPTER	pAd);
+@@ -5239,7 +5263,6 @@ BOOLEAN RT28xxPciAsicRadioOn(
+ 	IN PRTMP_ADAPTER pAd,
+ 	IN UCHAR     Level);
+ 
+-#ifdef RTMP_PCI_SUPPORT
+ VOID RTMPInitPCIeLinkCtrlValue(
+ 	IN	PRTMP_ADAPTER	pAd);
+ 
+@@ -5254,6 +5277,9 @@ VOID RTMPPCIeLinkCtrlSetting(
+ 	IN	PRTMP_ADAPTER	pAd,
+ 	IN 	USHORT		Max);
+ 
++VOID RTMPrt3xSetPCIePowerLinkCtrl(
++	IN	PRTMP_ADAPTER	pAd);
++
+ VOID PsPollWakeExec(
+ 	IN PVOID SystemSpecific1,
+ 	IN PVOID FunctionContext,
+@@ -5265,7 +5291,6 @@ VOID  RadioOnExec(
+ 	IN PVOID FunctionContext,
+ 	IN PVOID SystemSpecific2,
+ 	IN PVOID SystemSpecific3);
+-#endif // RTMP_PCI_SUPPORT //
+ 
+ VOID RT28xxPciStaAsicForceWakeup(
+ 	IN	PRTMP_ADAPTER	pAd,
+diff --git a/drivers/staging/rt2860/rtmp_chip.h b/drivers/staging/rt2860/rtmp_chip.h
+index 998960e..1284a44 100644
+--- a/drivers/staging/rt2860/rtmp_chip.h
++++ b/drivers/staging/rt2860/rtmp_chip.h
+@@ -49,6 +49,9 @@
+ #ifdef RT3070
+ #include "chip/rt3070.h"
+ #endif // RT3070 //
++#ifdef RT3090
++#include "chip/rt3090.h"
++#endif // RT3090 //
+ 
+ // We will have a cost down version which mac version is 0x3090xxxx
+ //
+diff --git a/drivers/staging/rt2860/rtmp_def.h b/drivers/staging/rt2860/rtmp_def.h
+index e999710..ca700d0 100644
+--- a/drivers/staging/rt2860/rtmp_def.h
++++ b/drivers/staging/rt2860/rtmp_def.h
+@@ -221,6 +221,11 @@
+ #define fRTMP_PS_GO_TO_SLEEP_NOW         0x00000008
+ #define fRTMP_PS_TOGGLE_L1		0x00000010	// Use Toggle L1 mechanism for rt28xx PCIe
+ 
++#ifdef RT3090
++#define WAKE_MCU_CMD				0x31
++#define SLEEP_MCU_CMD					0x30
++#define RFOFF_MCU_CMD				0x35
++#endif // RT3090 //
+ 
+ #define CCKSETPROTECT		0x1
+ #define OFDMSETPROTECT		0x2
+diff --git a/drivers/staging/rt2860/sta/assoc.c b/drivers/staging/rt2860/sta/assoc.c
+index b13d3a2..a67e213 100644
+--- a/drivers/staging/rt2860/sta/assoc.c
++++ b/drivers/staging/rt2860/sta/assoc.c
+@@ -464,18 +464,6 @@ VOID MlmeAssocReqAction(
+ 						break;
+ 					}
+ 				}
+-#ifdef RT2860
+-				/*
+-					When AuthMode is WPA2-Enterprise and AP reboot or STA lost AP,
+-					AP would not do PMK cache with STA after STA re-connect to AP again.
+-					In this case, driver doesn't need to send PMKID to AP and WpaSupplicant.
+-				*/
+-				if ((pAd->StaCfg.AuthMode == Ndis802_11AuthModeWPA2) &&
+-					(NdisEqualMemory(pAd->MlmeAux.Bssid, pAd->CommonCfg.LastBssid, MAC_ADDR_LEN)))
+-				{
+-					FoundPMK = FALSE;
+-				}
+-#endif // RT2860 //
+ 				if (FoundPMK)
+ 				{
+ 					// Set PMK number
+diff --git a/drivers/staging/rt2860/sta/auth_rsp.c b/drivers/staging/rt2860/sta/auth_rsp.c
+index 0a5d28c..9c2fde4 100644
+--- a/drivers/staging/rt2860/sta/auth_rsp.c
++++ b/drivers/staging/rt2860/sta/auth_rsp.c
+@@ -137,10 +137,6 @@ VOID PeerDeauthAction(
+ 			if (pAd->CommonCfg.bWirelessEvent)
+ 				RTMPSendWirelessEvent(pAd, IW_DEAUTH_EVENT_FLAG, pAd->MacTab.Content[BSSID_WCID].Addr, BSS0, 0);
+ 
+-			if ((pAd->StaCfg.WpaSupplicantUP != WPA_SUPPLICANT_DISABLE) &&
+-				(pAd->StaCfg.AuthMode == Ndis802_11AuthModeWPA2))
+-				pAd->StaCfg.bLostAp = TRUE;
+-
+             LinkDown(pAd, TRUE);
+         }
+     }
+diff --git a/drivers/staging/rt2860/sta/connect.c b/drivers/staging/rt2860/sta/connect.c
+index 3852d04..7f263a6 100644
+--- a/drivers/staging/rt2860/sta/connect.c
++++ b/drivers/staging/rt2860/sta/connect.c
+@@ -1125,6 +1125,26 @@ VOID LinkUp(
+ 
+ 	COPY_HTSETTINGS_FROM_MLME_AUX_TO_ACTIVE_CFG(pAd);
+ 
++#ifdef RTMP_MAC_PCI
++	// Before power save before link up function, We will force use 1R.
++	// So after link up, check Rx antenna # again.
++	RTMP_BBP_IO_READ8_BY_REG_ID(pAd, BBP_R3, &Value);
++	if(pAd->Antenna.field.RxPath == 3)
++	{
++		Value |= (0x10);
++	}
++	else if(pAd->Antenna.field.RxPath == 2)
++	{
++		Value |= (0x8);
++	}
++	else if(pAd->Antenna.field.RxPath == 1)
++	{
++		Value |= (0x0);
++	}
++	RTMP_BBP_IO_WRITE8_BY_REG_ID(pAd, BBP_R3, Value);
++	pAd->StaCfg.BBPR3 = Value;
++#endif // RTMP_MAC_PCI //
++
+ 	if (BssType == BSS_ADHOC)
+ 	{
+ 		OPSTATUS_SET_FLAG(pAd, fOP_STATUS_ADHOC_ON);
+@@ -1134,8 +1154,6 @@ VOID LinkUp(
+ 		if (pAd->CommonCfg.PhyMode >= PHY_11ABGN_MIXED)
+ 			AdhocTurnOnQos(pAd);
+ 
+-		InitChannelRelatedValue(pAd);
+-
+ 		DBGPRINT(RT_DEBUG_TRACE, ("!!!Adhoc LINK UP !!! \n" ));
+ 	}
+ 	else
+@@ -1146,7 +1164,6 @@ VOID LinkUp(
+ 		DBGPRINT(RT_DEBUG_TRACE, ("!!!Infra LINK UP !!! \n" ));
+ 	}
+ 
+-#if defined(RT2870) || defined(RT3070)
+ 	// 3*3
+ 	// reset Tx beamforming bit
+ 	RTMP_BBP_IO_READ8_BY_REG_ID(pAd, BBP_R4, &Value);
+@@ -1171,6 +1188,9 @@ VOID LinkUp(
+ 		RTMP_BBP_IO_READ8_BY_REG_ID(pAd, BBP_R3, &Value);
+ 		Value &= (~0x20);
+ 		RTMP_BBP_IO_WRITE8_BY_REG_ID(pAd, BBP_R3, Value);
++#ifdef RTMP_MAC_PCI
++            pAd->StaCfg.BBPR3 = Value;
++#endif // RTMP_MAC_PCI //
+ 
+ 		RTMP_IO_READ32(pAd, TX_BAND_CFG, &Data);
+ 		Data &= 0xfffffffe;
+@@ -1205,6 +1225,9 @@ VOID LinkUp(
+ 		RTMP_BBP_IO_READ8_BY_REG_ID(pAd, BBP_R3, &Value);
+ 	    Value |= (0x20);
+ 		RTMP_BBP_IO_WRITE8_BY_REG_ID(pAd, BBP_R3, Value);
++#ifdef RTMP_MAC_PCI
++            pAd->StaCfg.BBPR3 = Value;
++#endif // RTMP_MAC_PCI //
+ 
+ 		if (pAd->MACVersion == 0x28600100)
+ 		{
+@@ -1234,6 +1257,9 @@ VOID LinkUp(
+ 		RTMP_BBP_IO_READ8_BY_REG_ID(pAd, BBP_R3, &Value);
+ 		Value &= (~0x20);
+ 		RTMP_BBP_IO_WRITE8_BY_REG_ID(pAd, BBP_R3, Value);
++#ifdef RTMP_MAC_PCI
++            pAd->StaCfg.BBPR3 = Value;
++#endif // RTMP_MAC_PCI //
+ 
+ 		if (pAd->MACVersion == 0x28600100)
+ 		{
+@@ -1247,7 +1273,6 @@ VOID LinkUp(
+     }
+ 
+ 	RTMPSetAGCInitValue(pAd, pAd->CommonCfg.BBPCurrentBW);
+-#endif // RT2870 //
+ 
+ 	//
+ 	// Save BBP_R66 value, it will be used in RTUSBResumeMsduTransmission
+@@ -1752,21 +1777,6 @@ VOID LinkUp(
+ 	RTMP_CLEAR_FLAG(pAd, fRTMP_ADAPTER_BSS_SCAN_IN_PROGRESS);
+ 
+ 	RTMP_CLEAR_PSFLAG(pAd, fRTMP_PS_GO_TO_SLEEP_NOW);
+-
+-#ifdef RT2860
+-	/*
+-		When AuthMode is WPA2-Enterprise and AP reboot or STA lost AP,
+-		WpaSupplicant would not send EapolStart to AP after STA re-connect to AP again.
+-		In this case, driver would send EapolStart to AP.
+-	*/
+-	if ((pAd->StaCfg.AuthMode == Ndis802_11AuthModeWPA2) &&
+-		(NdisEqualMemory(pAd->CommonCfg.Bssid, pAd->CommonCfg.LastBssid, MAC_ADDR_LEN)) &&
+-		(pAd->StaCfg.bLostAp == TRUE))
+-	{
+-		WpaSendEapolStart(pAd, pAd->CommonCfg.Bssid);
+-	}
+-#endif // RT2860 //
+-	pAd->StaCfg.bLostAp = FALSE;
+ }
+ 
+ /*
+@@ -1820,7 +1830,7 @@ VOID LinkDown(
+ 	OPSTATUS_CLEAR_FLAG(pAd, fOP_STATUS_AGGREGATION_INUSED);
+ 
+ #ifdef RTMP_MAC_PCI
+-    if (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_ADVANCE_POWER_SAVE_PCIE_DEVICE))
++    if (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_PCIE_DEVICE))
+     {
+ 	    BOOLEAN Cancelled;
+         pAd->Mlme.bPsPollTimerRunning = FALSE;
+@@ -1841,6 +1851,10 @@ VOID LinkDown(
+         OPSTATUS_CLEAR_FLAG(pAd, fOP_STATUS_DOZE);
+     }
+ 
++#ifdef RTMP_MAC_PCI
++	pAd->bPCIclkOff = FALSE;
++#endif // RTMP_MAC_PCI //
++
+ 	if (ADHOC_ON(pAd))		// Adhoc mode link down
+ 	{
+ 		DBGPRINT(RT_DEBUG_TRACE, ("!!! LINK DOWN 1!!!\n"));
+@@ -2520,139 +2534,3 @@ ULONG MakeIbssBeacon(
+ 					FrameLen, SupRateLen, ExtRateLen, pAd->CommonCfg.Channel, pAd->CommonCfg.PhyMode));
+ 	return FrameLen;
+ }
+-
+-VOID InitChannelRelatedValue(
+-	IN PRTMP_ADAPTER pAd)
+-{
+-#ifdef RT2860
+-	UCHAR	Value = 0;
+-	UINT32	Data = 0;
+-
+-#ifdef RTMP_MAC_PCI
+-	// In power save , We will force use 1R.
+-	// So after link up, check Rx antenna # again.
+-	RTMP_BBP_IO_READ8_BY_REG_ID(pAd, BBP_R3, &Value);
+-	if(pAd->Antenna.field.RxPath == 3)
+-	{
+-		Value |= (0x10);
+-	}
+-	else if(pAd->Antenna.field.RxPath == 2)
+-	{
+-		Value |= (0x8);
+-	}
+-	else if(pAd->Antenna.field.RxPath == 1)
+-	{
+-		Value |= (0x0);
+-	}
+-	RTMP_BBP_IO_WRITE8_BY_REG_ID(pAd, BBP_R3, Value);
+-	pAd->StaCfg.BBPR3 = Value;
+-#endif // RTMP_MAC_PCI //
+-
+-	pAd->CommonCfg.CentralChannel = pAd->MlmeAux.CentralChannel;
+-	pAd->CommonCfg.Channel = pAd->MlmeAux.Channel;
+-	// Change to AP channel
+-    if ((pAd->CommonCfg.CentralChannel > pAd->CommonCfg.Channel) && (pAd->MlmeAux.HtCapability.HtCapInfo.ChannelWidth == BW_40))
+-	{
+-		// Must using 40MHz.
+-		pAd->CommonCfg.BBPCurrentBW = BW_40;
+-		AsicSwitchChannel(pAd, pAd->CommonCfg.CentralChannel, FALSE);
+-		AsicLockChannel(pAd, pAd->CommonCfg.CentralChannel);
+-
+-		RTMP_BBP_IO_READ8_BY_REG_ID(pAd, BBP_R4, &Value);
+-		Value &= (~0x18);
+-		Value |= 0x10;
+-		RTMP_BBP_IO_WRITE8_BY_REG_ID(pAd, BBP_R4, Value);
+-
+-		//  RX : control channel at lower
+-		RTMP_BBP_IO_READ8_BY_REG_ID(pAd, BBP_R3, &Value);
+-		Value &= (~0x20);
+-		RTMP_BBP_IO_WRITE8_BY_REG_ID(pAd, BBP_R3, Value);
+-#ifdef RTMP_MAC_PCI
+-        pAd->StaCfg.BBPR3 = Value;
+-#endif // RTMP_MAC_PCI //
+-
+-		RTMP_IO_READ32(pAd, TX_BAND_CFG, &Data);
+-		Data &= 0xfffffffe;
+-		RTMP_IO_WRITE32(pAd, TX_BAND_CFG, Data);
+-
+-		if (pAd->MACVersion == 0x28600100)
+-		{
+-			RTMP_BBP_IO_WRITE8_BY_REG_ID(pAd, BBP_R69, 0x1A);
+-			RTMP_BBP_IO_WRITE8_BY_REG_ID(pAd, BBP_R70, 0x0A);
+-			RTMP_BBP_IO_WRITE8_BY_REG_ID(pAd, BBP_R73, 0x16);
+-            DBGPRINT(RT_DEBUG_TRACE, ("!!!rt2860C !!! \n" ));
+-		}
+-
+-		DBGPRINT(RT_DEBUG_TRACE, ("!!!40MHz Lower !!! Control Channel at Below. Central = %d \n", pAd->CommonCfg.CentralChannel ));
+-	}
+-	else if ((pAd->CommonCfg.CentralChannel < pAd->CommonCfg.Channel) && (pAd->MlmeAux.HtCapability.HtCapInfo.ChannelWidth == BW_40))
+-    {
+-	    // Must using 40MHz.
+-		pAd->CommonCfg.BBPCurrentBW = BW_40;
+-		AsicSwitchChannel(pAd, pAd->CommonCfg.CentralChannel, FALSE);
+-	    AsicLockChannel(pAd, pAd->CommonCfg.CentralChannel);
+-
+-		RTMP_BBP_IO_READ8_BY_REG_ID(pAd, BBP_R4, &Value);
+-		Value &= (~0x18);
+-		Value |= 0x10;
+-		RTMP_BBP_IO_WRITE8_BY_REG_ID(pAd, BBP_R4, Value);
+-
+-		RTMP_IO_READ32(pAd, TX_BAND_CFG, &Data);
+-		Data |= 0x1;
+-		RTMP_IO_WRITE32(pAd, TX_BAND_CFG, Data);
+-
+-		RTMP_BBP_IO_READ8_BY_REG_ID(pAd, BBP_R3, &Value);
+-	    Value |= (0x20);
+-		RTMP_BBP_IO_WRITE8_BY_REG_ID(pAd, BBP_R3, Value);
+-#ifdef RTMP_MAC_PCI
+-        pAd->StaCfg.BBPR3 = Value;
+-#endif // RTMP_MAC_PCI //
+-
+-		if (pAd->MACVersion == 0x28600100)
+-		{
+-			RTMP_BBP_IO_WRITE8_BY_REG_ID(pAd, BBP_R69, 0x1A);
+-			RTMP_BBP_IO_WRITE8_BY_REG_ID(pAd, BBP_R70, 0x0A);
+-			RTMP_BBP_IO_WRITE8_BY_REG_ID(pAd, BBP_R73, 0x16);
+-			    DBGPRINT(RT_DEBUG_TRACE, ("!!!rt2860C !!! \n" ));
+-		}
+-
+-	    DBGPRINT(RT_DEBUG_TRACE, ("!!! 40MHz Upper !!! Control Channel at UpperCentral = %d \n", pAd->CommonCfg.CentralChannel ));
+-    }
+-    else
+-    {
+-	    pAd->CommonCfg.BBPCurrentBW = BW_20;
+-		pAd->CommonCfg.CentralChannel = pAd->CommonCfg.Channel;
+-		AsicSwitchChannel(pAd, pAd->CommonCfg.Channel, FALSE);
+-		AsicLockChannel(pAd, pAd->CommonCfg.Channel);
+-
+-		RTMP_BBP_IO_READ8_BY_REG_ID(pAd, BBP_R4, &Value);
+-		Value &= (~0x18);
+-		RTMP_BBP_IO_WRITE8_BY_REG_ID(pAd, BBP_R4, Value);
+-
+-		RTMP_IO_READ32(pAd, TX_BAND_CFG, &Data);
+-		Data &= 0xfffffffe;
+-		RTMP_IO_WRITE32(pAd, TX_BAND_CFG, Data);
+-
+-		RTMP_BBP_IO_READ8_BY_REG_ID(pAd, BBP_R3, &Value);
+-		Value &= (~0x20);
+-		RTMP_BBP_IO_WRITE8_BY_REG_ID(pAd, BBP_R3, Value);
+-#ifdef RTMP_MAC_PCI
+-        pAd->StaCfg.BBPR3 = Value;
+-#endif // RTMP_MAC_PCI //
+-
+-		if (pAd->MACVersion == 0x28600100)
+-		{
+-			RTMP_BBP_IO_WRITE8_BY_REG_ID(pAd, BBP_R69, 0x16);
+-			RTMP_BBP_IO_WRITE8_BY_REG_ID(pAd, BBP_R70, 0x08);
+-			RTMP_BBP_IO_WRITE8_BY_REG_ID(pAd, BBP_R73, 0x11);
+-			DBGPRINT(RT_DEBUG_TRACE, ("!!!rt2860C !!! \n" ));
+-		}
+-
+-	    DBGPRINT(RT_DEBUG_TRACE, ("!!! 20MHz !!! \n" ));
+-	}
+-
+-	RTMPSetAGCInitValue(pAd, pAd->CommonCfg.BBPCurrentBW);
+-#endif // RT2860 //
+-}
+-
+-
+diff --git a/drivers/staging/rt2860/sta/rtmp_data.c b/drivers/staging/rt2860/sta/rtmp_data.c
+index 6a8ffde..0ab3dce 100644
+--- a/drivers/staging/rt2860/sta/rtmp_data.c
++++ b/drivers/staging/rt2860/sta/rtmp_data.c
+@@ -1208,7 +1208,6 @@ NDIS_STATUS RTMPFreeTXDRequest(
+ 		case QID_AC_BE:
+ 		case QID_AC_VI:
+ 		case QID_AC_VO:
+-		case QID_HCCA:
+ 			if (pAd->TxRing[QueIdx].TxSwFreeIdx > pAd->TxRing[QueIdx].TxCpuIdx)
+ 				FreeNumber = pAd->TxRing[QueIdx].TxSwFreeIdx - pAd->TxRing[QueIdx].TxCpuIdx - 1;
+ 			else
+diff --git a/drivers/staging/rt2860/sta/sync.c b/drivers/staging/rt2860/sta/sync.c
+index f72f11a..dc71c1d 100644
+--- a/drivers/staging/rt2860/sta/sync.c
++++ b/drivers/staging/rt2860/sta/sync.c
+@@ -195,13 +195,23 @@ VOID MlmeScanReqAction(
+ 	pAd->StaCfg.ScanCnt++;
+ 
+ #ifdef RTMP_MAC_PCI
+-    if ((OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_ADVANCE_POWER_SAVE_PCIE_DEVICE)) &&
++    if ((OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_PCIE_DEVICE)) &&
+         (IDLE_ON(pAd)) &&
+ 		(pAd->StaCfg.bRadio == TRUE) &&
+ 		(RTMP_TEST_FLAG(pAd, fRTMP_ADAPTER_IDLE_RADIO_OFF)))
+ 	{
++	        if (pAd->StaCfg.PSControl.field.EnableNewPS == FALSE)
++		{
++			AsicSendCommandToMcu(pAd, 0x31, PowerWakeCID, 0x00, 0x02);
++			AsicCheckCommanOk(pAd, PowerWakeCID);
++			RTMP_CLEAR_FLAG(pAd, fRTMP_ADAPTER_IDLE_RADIO_OFF);
++			DBGPRINT(RT_DEBUG_TRACE, ("PSM - Issue Wake up command \n"));
++		}
++		else
++		{
+ 		RT28xxPciAsicRadioOn(pAd, GUI_IDLE_POWER_SAVE);
+ 	}
++	}
+ #endif // RTMP_MAC_PCI //
+ 
+ 	// first check the parameter sanity
+@@ -303,7 +313,7 @@ VOID MlmeJoinReqAction(
+ 	DBGPRINT(RT_DEBUG_TRACE, ("SYNC - MlmeJoinReqAction(BSS #%ld)\n", pInfo->BssIdx));
+ 
+ #ifdef RTMP_MAC_PCI
+-    if ((OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_ADVANCE_POWER_SAVE_PCIE_DEVICE)) &&
++    if ((OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_PCIE_DEVICE)) &&
+         (IDLE_ON(pAd)) &&
+ 		(pAd->StaCfg.bRadio == TRUE) &&
+ 		(RTMP_TEST_FLAG(pAd, fRTMP_ADAPTER_IDLE_RADIO_OFF)))
+@@ -338,9 +348,7 @@ VOID MlmeJoinReqAction(
+ 	RTMP_BBP_IO_READ8_BY_REG_ID(pAd, BBP_R4, &BBPValue);
+ 	BBPValue &= (~0x18);
+ 	RTMP_BBP_IO_WRITE8_BY_REG_ID(pAd, BBP_R4, BBPValue);
+-#ifdef RT2860
+-	pAd->CommonCfg.BBPCurrentBW = BW_20;
+-#endif // RT2860 //
++
+ 	DBGPRINT(RT_DEBUG_TRACE, ("SYNC - BBP R4 to 20MHz.l\n"));
+ 
+ 	// switch channel and waiting for beacon timer
+@@ -898,8 +906,6 @@ VOID PeerBeaconAtJoinAction(
+ 			else  //Used the default TX Power Percentage.
+ 				pAd->CommonCfg.TxPowerPercentage = pAd->CommonCfg.TxPowerDefault;
+ 
+-			InitChannelRelatedValue(pAd);
+-
+ 			pAd->Mlme.SyncMachine.CurrState = SYNC_IDLE;
+ 			Status = MLME_SUCCESS;
+ 			MlmeEnqueue(pAd, MLME_CNTL_STATE_MACHINE, MT2_JOIN_CONF, 2, &Status);
+@@ -1317,7 +1323,7 @@ VOID PeerBeacon(
+ 				if (MessageToMe)
+ 				{
+ #ifdef RTMP_MAC_PCI
+-					if (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_ADVANCE_POWER_SAVE_PCIE_DEVICE))
++					if (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_PCIE_DEVICE))
+ 					{
+ 						// Restore to correct BBP R3 value
+ 						if (pAd->Antenna.field.RxPath > 1)
+@@ -1336,7 +1342,7 @@ VOID PeerBeacon(
+ 				else if (BcastFlag && (DtimCount == 0) && OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_RECEIVE_DTIM))
+ 				{
+ #ifdef RTMP_MAC_PCI
+-					if (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_ADVANCE_POWER_SAVE_PCIE_DEVICE))
++					if (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_PCIE_DEVICE))
+ 					{
+ 						if (pAd->Antenna.field.RxPath > 1)
+ 						RTMP_BBP_IO_WRITE8_BY_REG_ID(pAd, BBP_R3, pAd->StaCfg.BBPR3);
+@@ -1356,7 +1362,7 @@ VOID PeerBeacon(
+ 					// TODO: consider scheduled HCCA. might not be proper to use traditional DTIM-based power-saving scheme
+ 					// can we cheat here (i.e. just check MGMT & AC_BE) for better performance?
+ #ifdef RTMP_MAC_PCI
+-					if (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_ADVANCE_POWER_SAVE_PCIE_DEVICE))
++					if (OPSTATUS_TEST_FLAG(pAd, fOP_STATUS_PCIE_DEVICE))
+ 					{
+ 						if (pAd->Antenna.field.RxPath > 1)
+ 						RTMP_BBP_IO_WRITE8_BY_REG_ID(pAd, BBP_R3, pAd->StaCfg.BBPR3);
+diff --git a/drivers/staging/rt2860/sta/wpa.c b/drivers/staging/rt2860/sta/wpa.c
+index d45b9ba..c6c3f3b 100644
+--- a/drivers/staging/rt2860/sta/wpa.c
++++ b/drivers/staging/rt2860/sta/wpa.c
+@@ -389,51 +389,3 @@ VOID WpaStaGroupKeySetting(
+ 							  NULL);
+ 
+ }
+-
+-
+-/*
+-	========================================================================
+-
+-	Routine Description:
+-		Send EAPoL-Start packet to AP.
+-
+-	Arguments:
+-		pAd         - NIC Adapter pointer
+-
+-	Return Value:
+-		None
+-
+-	IRQL = DISPATCH_LEVEL
+-
+-	Note:
+-		Actions after link up
+-		1. Change the correct parameters
+-		2. Send EAPOL - START
+-
+-	========================================================================
+-*/
+-VOID    WpaSendEapolStart(
+-	IN	PRTMP_ADAPTER	pAd,
+-	IN  PUCHAR          pBssid)
+-{
+-	IEEE8021X_FRAME		Packet;
+-	UCHAR               Header802_3[14];
+-
+-	DBGPRINT(RT_DEBUG_TRACE, ("-----> WpaSendEapolStart\n"));
+-
+-	NdisZeroMemory(Header802_3,sizeof(UCHAR)*14);
+-
+-	MAKE_802_3_HEADER(Header802_3, pBssid, &pAd->CurrentAddress[0], EAPOL);
+-
+-	// Zero message 2 body
+-	NdisZeroMemory(&Packet, sizeof(Packet));
+-	Packet.Version = EAPOL_VER;
+-	Packet.Type    = EAPOLStart;
+-	Packet.Length  = cpu2be16(0);
+-
+-	// Copy frame to Tx ring
+-	RTMPToWirelessSta((PRTMP_ADAPTER)pAd, &pAd->MacTab.Content[BSSID_WCID],
+-					 Header802_3, LENGTH_802_3, (PUCHAR)&Packet, 4, TRUE);
+-
+-	DBGPRINT(RT_DEBUG_TRACE, ("<----- WpaSendEapolStart\n"));
+-}
+diff --git a/drivers/staging/rt2860/sta_ioctl.c b/drivers/staging/rt2860/sta_ioctl.c
+index b6a3c90..e5e2942 100644
+--- a/drivers/staging/rt2860/sta_ioctl.c
++++ b/drivers/staging/rt2860/sta_ioctl.c
+@@ -160,6 +160,12 @@ INT Set_PSMode_Proc(
+     IN  PRTMP_ADAPTER   pAdapter,
+     IN  PSTRING          arg);
+ 
++#ifdef RT3090
++INT Set_PCIePSLevel_Proc(
++IN  PRTMP_ADAPTER   pAdapter,
++IN  PUCHAR          arg);
++#endif // RT3090 //
++
+ INT Set_Wpa_Support(
+     IN	PRTMP_ADAPTER	pAd,
+ 	IN	PSTRING			arg);
+@@ -515,6 +521,7 @@ rt_ioctl_giwname(struct net_device *dev,
+ {
+ 	strncpy(name, "Ralink STA", IFNAMSIZ);
+ 	// RT2870 2.1.0.0 uses "RT2870 Wireless"
++	// RT3090 2.1.0.0 uses "RT2860 Wireless"
+ 	return 0;
+ }
+ 
+diff --git a/drivers/staging/rt2860/wpa.h b/drivers/staging/rt2860/wpa.h
+index 63f4774..27e5aab 100644
+--- a/drivers/staging/rt2860/wpa.h
++++ b/drivers/staging/rt2860/wpa.h
+@@ -347,13 +347,6 @@ typedef	enum	_WpaMixPairCipher
+ 	WPA_TKIPAES_WPA2_TKIPAES	= 0x0F,
+ }	WPA_MIX_PAIR_CIPHER;
+ 
+-// 802.1x authentication format
+-typedef	struct	_IEEE8021X_FRAME	{
+-	UCHAR	Version;					// 1.0
+-	UCHAR	Type;						// 0 = EAP Packet
+-	USHORT	Length;
+-}	IEEE8021X_FRAME, *PIEEE8021X_FRAME;
+-
+ typedef struct PACKED _RSN_IE_HEADER_STRUCT	{
+ 	UCHAR		Eid;
+ 	UCHAR		Length;
+diff --git a/drivers/staging/rt3090/common/rtmp_mcu.c b/drivers/staging/rt3090/common/rtmp_mcu.c
+index 23f785a..20319e6 100644
+--- a/drivers/staging/rt3090/common/rtmp_mcu.c
++++ b/drivers/staging/rt3090/common/rtmp_mcu.c
+@@ -43,7 +43,7 @@
+ 
+ // New 8k byte firmware size for RT3071/RT3072
+ #define FIRMWAREIMAGE_MAX_LENGTH	0x2000
+-#define FIRMWAREIMAGE_LENGTH			(sizeof (FirmwareImage) / sizeof(UCHAR))
++#define FIRMWAREIMAGE_LENGTH			(sizeof (FirmwareImage_3090) / sizeof(UCHAR))
+ #define FIRMWARE_MAJOR_VERSION		0
+ 
+ #define FIRMWAREIMAGEV1_LENGTH		0x1000
+@@ -335,8 +335,8 @@ NDIS_STATUS RtmpAsicLoadFirmware(
+ 	UINT32			MacReg = 0;
+ 	UINT32			Version = (pAd->MACVersion >> 16);
+ 
+-	pFirmwareImage = FirmwareImage;
+-	FileLength = sizeof(FirmwareImage);
++	pFirmwareImage = FirmwareImage_3090;
++	FileLength = sizeof(*pFirmwareImage);
+ 
+ 	// New 8k byte firmware size for RT3071/RT3072
+ 	//DBGPRINT(RT_DEBUG_TRACE, ("Usb Chip\n"));
+@@ -347,7 +347,7 @@ NDIS_STATUS RtmpAsicLoadFirmware(
+ #ifdef RTMP_MAC_PCI
+ 		if ((Version == 0x2860) || IS_RT3090(pAd)||IS_RT3390(pAd))
+ 		{
+-			pFirmwareImage = FirmwareImage;
++			pFirmwareImage = FirmwareImage_3090;
+ 			FileLength = FIRMWAREIMAGE_LENGTH;
+ 		}
+ #endif // RTMP_MAC_PCI //
+-- 
+1.7.1
+
