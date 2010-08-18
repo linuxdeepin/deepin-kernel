@@ -1,6 +1,9 @@
 #!/usr/bin/env python
 
 import os.path, re, sys, textwrap
+sys.path.append('debian/lib/python')
+from debian_linux.config import ConfigCoreHierarchy
+from debian_linux.debian import Changelog
 
 class Version(object):
     _rules = ur"^(\d+\.\d+\.\d+)\.(\d+)$"
@@ -16,6 +19,8 @@ class Version(object):
 
 class GenPatch(object):
     def __init__(self, path, repo, version):
+        self.config = ConfigCoreHierarchy(['debian/config'])
+        self.package_version = Changelog()[0].version
         self.path = path
         self.repo = repo
         self.version = version
@@ -33,11 +38,24 @@ class GenPatch(object):
         tag_out = "v%s" % self.version.complete
         print tag_in, tag_out
 
-        f = os.popen("cd %s; git diff %s %s | filterdiff -p 1 -x Makefile > %s" % (self.repo, tag_in, tag_out, os.path.join(self.path, patch)))
+        backports = self.config[('backports',)]
+        diff_filter = '-x Makefile'
+        if self.version.release == self.package_version.upstream:
+            diff_filter += ' ' + ' '.join("-x '%s'" % re.sub(r'/$', r'/*', path)
+                                          for path in backports)
+            git_paths = ''
+        else:
+            git_paths = ' '.join("'%s'" % path for path in backports
+                                 if backports[path] == self.version.release)
+
+        f = os.popen("cd %s; git diff %s %s -- %s | filterdiff -p 1 %s > %s" %
+                     (self.repo, tag_in, tag_out, git_paths, diff_filter,
+                      os.path.join(self.path, patch)))
         if f.close() is not None:
             raise RuntimeError
 
-        f = os.popen("cd %s; git log --oneline --reverse %s..%s^" % (self.repo, tag_in, tag_out))
+        f = os.popen("cd %s; git log --oneline --reverse %s..%s^ -- %s" %
+                     (self.repo, tag_in, tag_out, git_paths))
         out = file(os.path.join(self.path, log), 'w')
         out.write("  * Add stable release %s:\n" % self.version.complete)
         for line in f:
