@@ -47,7 +47,8 @@ class Gencontrol(Base):
         libc_dev = self.templates["control.libc-dev"]
         packages_headers_arch[0:0] = self.process_packages(libc_dev, {})
         
-        extra['headers_arch_depends'] = packages_headers_arch[-1]['Depends'] = PackageRelation()
+        packages_headers_arch[-1]['Depends'].extend(PackageRelation())
+        extra['headers_arch_depends'] = packages_headers_arch[-1]['Depends']
 
         self.merge_packages(packages, packages_headers_arch, arch)
 
