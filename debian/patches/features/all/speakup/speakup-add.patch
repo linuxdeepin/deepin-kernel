@@ -1,5 +1,5 @@
 --- a/drivers/staging/speakup/allmodule.mk	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/allmodule.mk	2009-08-13 01:21:12.000000000 +0100
++++ b/drivers/staging/speakup/allmodule.mk	2010-07-22 15:06:52.000000000 +0100
 @@ -0,0 +1,15 @@
 +CONFIG_SPEAKUP_SYNTH_ACNTSA=m
 +CONFIG_SPEAKUP_SYNTH_ACNTPC=m
@@ -17,7 +17,7 @@
 +CONFIG_SPEAKUP_SYNTH_DUMMY=m
 +CONFIG_SPEAKUP=m
 --- a/drivers/staging/speakup/buffers.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/buffers.c	2009-08-13 01:21:12.000000000 +0100
++++ b/drivers/staging/speakup/buffers.c	2010-07-22 15:06:52.000000000 +0100
 @@ -0,0 +1,124 @@
 +#include <linux/console.h>
 +#include <linux/smp_lock.h>
@@ -144,7 +144,7 @@
 +}
 +EXPORT_SYMBOL_GPL(synth_buffer_clear);
 --- a/drivers/staging/speakup/devsynth.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/devsynth.c	2009-08-13 01:21:12.000000000 +0100
++++ b/drivers/staging/speakup/devsynth.c	2010-07-22 15:06:52.000000000 +0100
 @@ -0,0 +1,92 @@
 +#include <linux/errno.h>
 +#include <linux/miscdevice.h>	/* for misc_register, and SYNTH_MINOR */
@@ -238,12 +238,121 @@
 +	misc_deregister(&synth_device);
 +	misc_registered = 0;
 +}
+--- a/drivers/staging/speakup/fakekey.c	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/staging/speakup/fakekey.c	2010-07-22 15:06:52.000000000 +0100
+@@ -0,0 +1,105 @@
++/* fakekey.c
++ * Functions for simulating keypresses.
++ *
++ * Copyright (C) 2010 the Speakup Team
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
++ */
++#include <linux/types.h>
++#include <linux/slab.h>
++#include <linux/preempt.h>
++#include <linux/percpu.h>
++#include <linux/input.h>
++
++#include "speakup.h"
++
++#define PRESSED 1
++#define RELEASED 0
++
++DEFINE_PER_CPU(bool, reporting_keystroke);
++
++static struct input_dev *virt_keyboard;
++
++int speakup_add_virtual_keyboard(void)
++{
++	int err;
++
++	virt_keyboard = input_allocate_device();
++
++	if (!virt_keyboard)
++		return -ENOMEM;
++
++	virt_keyboard->name = "Speakup";
++	virt_keyboard->id.bustype = BUS_VIRTUAL;
++	virt_keyboard->phys = "speakup/input0";
++	virt_keyboard->dev.parent = NULL;
++
++	__set_bit(EV_KEY, virt_keyboard->evbit);
++	__set_bit(KEY_DOWN, virt_keyboard->keybit);
++
++	err = input_register_device(virt_keyboard);
++	if (err) {
++		input_free_device(virt_keyboard);
++		virt_keyboard = NULL;
++	}
++
++	return err;
++}
++
++void speakup_remove_virtual_keyboard(void)
++{
++	if (virt_keyboard != NULL) {
++		input_unregister_device(virt_keyboard);
++		input_free_device(virt_keyboard);
++		virt_keyboard = NULL;
++	}
++}
++
++/*
++	 * Send a simulated down-arrow to the application.
++	 */
++void speakup_fake_down_arrow(void)
++{
++	unsigned long flags;
++
++	/* disable keyboard interrupts */
++	local_irq_save(flags);
++	/* don't change CPU */
++	preempt_disable();
++
++	__get_cpu_var(reporting_keystroke) = true;
++	input_report_key(virt_keyboard, KEY_DOWN, PRESSED);
++	input_report_key(virt_keyboard, KEY_DOWN, RELEASED);
++	__get_cpu_var(reporting_keystroke) = false;
++
++	/* reenable preemption */
++	preempt_enable();
++	/* reenable keyboard interrupts */
++	local_irq_restore(flags);
++}
++
++/*
++	 * Are we handling a simulated keypress on the current CPU?
++	 * Returns a boolean.
++	 */
++bool speakup_fake_key_pressed(void)
++{
++	bool is_pressed;
++
++	is_pressed = get_cpu_var(reporting_keystroke);
++	put_cpu_var(reporting_keystroke);
++
++	return is_pressed;
++}
 --- a/drivers/staging/speakup/i18n.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/i18n.c	2009-08-13 01:21:12.000000000 +0100
-@@ -0,0 +1,621 @@
++++ b/drivers/staging/speakup/i18n.c	2010-07-22 15:06:52.000000000 +0100
+@@ -0,0 +1,622 @@
 +/* Internationalization implementation.  Includes definitions of English
 + * string arrays, and the i18n pointer. */
 +
++#include <linux/slab.h>		/* For kmalloc. */
 +#include <linux/ctype.h>
 +#include <linux/module.h>
 +#include <linux/string.h>
@@ -863,7 +972,7 @@
 +	spk_unlock(flags);
 +}
 --- a/drivers/staging/speakup/i18n.h	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/i18n.h	2009-08-13 01:21:12.000000000 +0100
++++ b/drivers/staging/speakup/i18n.h	2010-07-22 15:06:52.000000000 +0100
 @@ -0,0 +1,228 @@
 +#ifndef I18N_H
 +#define I18N_H
@@ -1094,8 +1203,8 @@
 +
 +#endif
 --- a/drivers/staging/speakup/Kbuild	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/Kbuild	2009-10-04 16:44:13.000000000 +0100
-@@ -0,0 +1,29 @@
++++ b/drivers/staging/speakup/Kbuild	2010-09-18 17:20:01.000000000 +0100
+@@ -0,0 +1,30 @@
 +include $M/allmodule.mk
 +obj-$(CONFIG_SPEAKUP_SYNTH_ACNTSA) += speakup_acntsa.o
 +obj-$(CONFIG_SPEAKUP_SYNTH_ACNTPC) += speakup_acntpc.o
@@ -1117,6 +1226,7 @@
 +	buffers.o \
 +	devsynth.o \
 +	i18n.o \
++	fakekey.o \
 +	main.o \
 +	keyhelp.o \
 +	kobjects.o \
@@ -1126,7 +1236,7 @@
 +	thread.o \
 +	varhandlers.o
 --- a/drivers/staging/speakup/Kconfig	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/Kconfig	2009-08-13 01:21:12.000000000 +0100
++++ b/drivers/staging/speakup/Kconfig	2010-07-22 15:06:52.000000000 +0100
 @@ -0,0 +1,168 @@
 +menu "Speakup console speech"
 +
@@ -1297,7 +1407,7 @@
 +endif	# SPEAKUP
 +endmenu
 --- a/drivers/staging/speakup/keyhelp.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/keyhelp.c	2009-08-13 01:21:12.000000000 +0100
++++ b/drivers/staging/speakup/keyhelp.c	2010-07-22 15:06:52.000000000 +0100
 @@ -0,0 +1,212 @@
 +/* speakup_keyhelp.c
 +   help module for speakup
@@ -1512,8 +1622,8 @@
 +	return 1;
 +}
 --- a/drivers/staging/speakup/kobjects.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/kobjects.c	2009-08-13 01:21:12.000000000 +0100
-@@ -0,0 +1,986 @@
++++ b/drivers/staging/speakup/kobjects.c	2010-07-22 15:06:52.000000000 +0100
+@@ -0,0 +1,1007 @@
 +/*
 + * Speakup kobject implementation
 + *
@@ -1527,6 +1637,7 @@
 + * Released under the GPL version 2 only.
 + *
 + */
++#include <linux/slab.h>		/* For kmalloc. */
 +#include <linux/kernel.h>
 +#include <linux/kobject.h>
 +#include <linux/string.h>
@@ -2159,6 +2270,26 @@
 +			param->name, (int)param->var_type);
 +	break;
 +	}
++	/*
++	 * If voice was just changed, we might need to reset our default
++	 * pitch and volume.
++	 */
++	if (strcmp(attr->attr.name, "voice") == 0) {
++		if (synth && synth->default_pitch) {
++			param = var_header_by_name("pitch");
++			if (param)  {
++				set_num_var(synth->default_pitch[value], param, E_NEW_DEFAULT);
++				set_num_var(0, param, E_DEFAULT);
++			}
++		}
++		if (synth && synth->default_vol) {
++			param = var_header_by_name("vol");
++			if (param)  {
++				set_num_var(synth->default_vol[value], param, E_NEW_DEFAULT);
++				set_num_var(0, param, E_DEFAULT);
++			}
++		}
++	}
 +	spk_unlock(flags);
 +
 +	if (ret == SET_DEFAULT)
@@ -2501,8 +2632,8 @@
 +	kobject_put(accessibility_kobj);
 +}
 --- a/drivers/staging/speakup/main.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/main.c	2009-08-13 01:21:12.000000000 +0100
-@@ -0,0 +1,2284 @@
++++ b/drivers/staging/speakup/main.c	2010-07-22 15:06:52.000000000 +0100
+@@ -0,0 +1,2304 @@
 +/* speakup.c
 +   review functions for the speakup screen review package.
 +   originally written by: Kirk Reiser and Andy Berdan.
@@ -2620,9 +2751,6 @@
 +#define read_all_mode CT_Max
 +
 +static struct tty_struct *tty;
-+typedef void (*k_handler_fn)(struct vc_data *vc, unsigned char value,
-+			     char up_flag);
-+extern k_handler_fn k_handler[16];
 +
 +static void spkup_write(const char *in_buf, int count);
 +
@@ -2725,6 +2853,7 @@
 +};
 +
 +struct task_struct *speakup_task;
++struct bleep unprocessed_sound;
 +static int spk_keydown;
 +static u_char spk_lastkey, spk_close_press, keymap_flags;
 +static u_char last_keycode, this_speakup_key;
@@ -2772,7 +2901,10 @@
 +	freq = vals[val%12];
 +	if (val > 11)
 +		freq *= (1 << (val/12));
-+	kd_mksound(freq, msecs_to_jiffies(time));
++	unprocessed_sound.freq = freq;
++	unprocessed_sound.jiffies = msecs_to_jiffies(time);
++	unprocessed_sound.active = 1;
++	/* We can only have 1 active sound at a time. */
 +}
 +
 +static void speakup_shut_up(struct vc_data *vc)
@@ -2950,7 +3082,7 @@
 +		if (w & vc->vc_hi_font_mask)
 +			c |= 0x100;
 +
-+		ch = inverse_translate(vc, c);
++		ch = inverse_translate(vc, c, 0);
 +		*attribs = (w & 0xff00) >> 8;
 +	}
 +	return ch;
@@ -3812,11 +3944,10 @@
 +};
 +
 +static void
-+kbd_fakekey2(struct vc_data *vc, int v, int command)
++kbd_fakekey2(struct vc_data *vc, int command)
 +{
 +	del_timer(&cursor_timer);
-+	k_handler[KT_CUR](vc, v, 0);
-+	k_handler[KT_CUR](vc, v, 1);
++	speakup_fake_down_arrow();
 +	start_read_all_timer(vc, command);
 +}
 +
@@ -3832,7 +3963,7 @@
 +	cursor_track = read_all_mode;
 +	reset_index_count(0);
 +	if (get_sentence_buf(vc, 0) == -1)
-+		kbd_fakekey2(vc, 0, RA_DOWN_ARROW);
++		kbd_fakekey2(vc, RA_DOWN_ARROW);
 +	else {
 +		say_sentence_num(0, 0);
 +		synth_insert_next_index(0);
@@ -3873,7 +4004,7 @@
 +		reset_index_count(sentcount+1);
 +		if (indcount == 1) {
 +			if (!say_sentence_num(sentcount+1, 0)) {
-+				kbd_fakekey2(vc, 0, RA_FIND_NEXT_SENT);
++				kbd_fakekey2(vc, RA_FIND_NEXT_SENT);
 +				return;
 +			}
 +			synth_insert_next_index(0);
@@ -3885,7 +4016,7 @@
 +			} else
 +				synth_insert_next_index(0);
 +			if (!say_sentence_num(sn, 0)) {
-+				kbd_fakekey2(vc, 0, RA_FIND_NEXT_SENT);
++				kbd_fakekey2(vc, RA_FIND_NEXT_SENT);
 +				return;
 +			}
 +			synth_insert_next_index(0);
@@ -3901,7 +4032,7 @@
 +		break;
 +	case RA_DOWN_ARROW:
 +		if (get_sentence_buf(vc, 0) == -1) {
-+			kbd_fakekey2(vc, 0, RA_DOWN_ARROW);
++			kbd_fakekey2(vc, RA_DOWN_ARROW);
 +		} else {
 +			say_sentence_num(0, 0);
 +			synth_insert_next_index(0);
@@ -3913,7 +4044,7 @@
 +		if (rv == -1)
 +			read_all_doc(vc);
 +		if (rv == 0)
-+			kbd_fakekey2(vc, 0, RA_FIND_NEXT_SENT);
++			kbd_fakekey2(vc, RA_FIND_NEXT_SENT);
 +		else {
 +			say_sentence_num(1, 0);
 +			synth_insert_next_index(0);
@@ -3925,7 +4056,7 @@
 +	case RA_TIMER:
 +		get_index_count(&indcount, &sentcount);
 +		if (indcount < 2)
-+			kbd_fakekey2(vc, 0, RA_DOWN_ARROW);
++			kbd_fakekey2(vc, RA_DOWN_ARROW);
 +		else
 +			start_read_all_timer(vc, RA_TIMER);
 +		break;
@@ -4628,6 +4759,19 @@
 +
 +	if (vc->vc_mode == KD_GRAPHICS)
 +		return ret;
++
++	/*
++	 * First, determine whether we are handling a fake keypress on
++	 * the current processor.  If we are, then return NOTIFY_OK,
++	 * to pass the keystroke up the chain.  This prevents us from
++	 * trying to take the Speakup lock while it is held by the
++	 * processor on which the simulated keystroke was generated.
++	 * Also, the simulated keystrokes should be ignored by Speakup.
++	 */
++
++	if (speakup_fake_key_pressed())
++		return ret;
++
 +	switch (code) {
 +	case KBD_KEYCODE:
 +		/* speakup requires keycode and keysym currently */
@@ -4727,15 +4871,21 @@
 +	for (i = 0; speakup_console[i]; i++)
 +		kfree(speakup_console[i]);
 +	speakup_kobj_exit();
++	speakup_remove_virtual_keyboard();
 +}
 +
 +/* call by: module_init() */
 +static int __init speakup_init(void)
 +{
 +	int i;
++	int err;
 +	struct st_spk_t *first_console;
 +	struct vc_data *vc = vc_cons[fg_console].d;
 +	struct var_t *var;
++
++	err = speakup_add_virtual_keyboard();
++	if (err)
++		return err;
 +
 +	initialize_msgs(); /* Initialize arrays for i18n. */
 +	first_console = kzalloc(sizeof(*first_console), GFP_KERNEL);
@@ -4784,11 +4934,12 @@
 +	return 0;
 +}
 +
++
 +module_init(speakup_init);
 +module_exit(speakup_exit);
 +
 --- a/drivers/staging/speakup/Makefile	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/Makefile	2009-08-13 01:21:12.000000000 +0100
++++ b/drivers/staging/speakup/Makefile	2010-07-22 15:06:52.000000000 +0100
 @@ -0,0 +1,12 @@
 +KERNELDIR = /lib/modules/`uname -r`/build
 +
@@ -4803,8 +4954,9 @@
 +clean:
 +	make -C $(KERNELDIR) M=`pwd` `cat allmodule.mk` $@
 --- a/drivers/staging/speakup/selection.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/selection.c	2009-08-13 01:21:12.000000000 +0100
-@@ -0,0 +1,152 @@
++++ b/drivers/staging/speakup/selection.c	2010-07-22 15:06:52.000000000 +0100
+@@ -0,0 +1,153 @@
++#include <linux/slab.h> /* for kmalloc */
 +#include <linux/consolemap.h>
 +#include <linux/interrupt.h>
 +#include <linux/sched.h>
@@ -4829,7 +4981,7 @@
 +
 +static unsigned char sel_pos(int n)
 +{
-+	return inverse_translate(spk_sel_cons, screen_glyph(spk_sel_cons, n));
++	return inverse_translate(spk_sel_cons, screen_glyph(spk_sel_cons, n), 0);
 +}
 +
 +void speakup_clear_selection(void)
@@ -4958,8 +5110,8 @@
 +}
 +
 --- a/drivers/staging/speakup/serialio.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/serialio.c	2009-08-13 01:21:12.000000000 +0100
-@@ -0,0 +1,208 @@
++++ b/drivers/staging/speakup/serialio.c	2010-07-22 15:06:52.000000000 +0100
+@@ -0,0 +1,212 @@
 +#include <linux/interrupt.h>
 +#include <linux/ioport.h>
 +
@@ -4982,6 +5134,7 @@
 +	unsigned int cval = 0;
 +	int cflag = CREAD | HUPCL | CLOCAL | B9600 | CS8;
 +	struct serial_state *ser = NULL;
++	int err;
 +
 +	ser = rs_table + index;
 +	/*	Divisor, bytesize and parity */
@@ -5000,8 +5153,11 @@
 +		/* try to take it back. */
 +		printk("Ports not available, trying to steal them\n");
 +		__release_region(&ioport_resource, ser->port, 8);
-+		if (synth_request_region(ser->port, 8))
++		err = synth_request_region(ser->port, 8);
++		if (err) {
++			pr_warn("Unable to allocate port at %x, errno %i", ser->port, err);
 +			return NULL;
++		}
 +	}
 +
 +	/*	Disable UART interrupts, set DTR and RTS high
@@ -5169,7 +5325,7 @@
 +EXPORT_SYMBOL_GPL(spk_serial_release);
 +
 --- a/drivers/staging/speakup/serialio.h	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/serialio.h	2009-08-13 01:21:12.000000000 +0100
++++ b/drivers/staging/speakup/serialio.h	2010-07-22 15:06:52.000000000 +0100
 @@ -0,0 +1,55 @@
 +#ifndef _SPEAKUP_SERIAL_H
 +#define _SPEAKUP_SERIAL_H
@@ -5227,7 +5383,7 @@
 +
 +#endif
 --- a/drivers/staging/speakup/speakup_acnt.h	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/speakup_acnt.h	2009-08-13 01:21:12.000000000 +0100
++++ b/drivers/staging/speakup/speakup_acnt.h	2010-07-22 15:06:52.000000000 +0100
 @@ -0,0 +1,16 @@
 +/* speakup_acntpc.h - header file for speakups Accent-PC driver. */
 +
@@ -5246,8 +5402,8 @@
 +#define SYNTH_ALMOST_EMPTY 'M' /* synth has les than 2 seconds of text left */
 +#define SYNTH_SPEAKING	's' /* synth is speaking and has a fare way to go */
 --- a/drivers/staging/speakup/speakup_acntpc.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/speakup_acntpc.c	2009-08-13 01:21:12.000000000 +0100
-@@ -0,0 +1,323 @@
++++ b/drivers/staging/speakup/speakup_acntpc.c	2010-07-22 15:06:52.000000000 +0100
+@@ -0,0 +1,327 @@
 +/*
 + * written by: Kirk Reiser <kirk@braille.uwo.ca>
 + * this version considerably modified by David Borowski, david575@rogers.com
@@ -5284,7 +5440,7 @@
 +#include "speakup.h"
 +#include "speakup_acnt.h" /* local header file for Accent values */
 +
-+#define DRV_VERSION "2.9"
++#define DRV_VERSION "2.10"
 +#define synth_readable() (inb_p(synth_port_control) & SYNTH_READABLE)
 +#define synth_writable() (inb_p(synth_port_control) & SYNTH_WRITABLE)
 +#define synth_full() (inb_p(speakup_info.port_tts + UART_RX) == 'F')
@@ -5307,6 +5463,7 @@
 +	{ PITCH, .u.n = {"\033P%d", 5, 0, 9, 0, 0, NULL }},
 +	{ VOL, .u.n = {"\033A%d", 5, 0, 9, 0, 0, NULL }},
 +	{ TONE, .u.n = {"\033V%d", 5, 0, 9, 0, 0, NULL }},
++	{ DIRECT, .u.n = {NULL, 0, 0, 1, 0, 0, NULL }},
 +	V_LAST_VAR
 +};
 +
@@ -5328,6 +5485,8 @@
 +
 +static struct kobj_attribute delay_time_attribute =
 +	__ATTR(delay_time, ROOT_W, spk_var_show, spk_var_store);
++static struct kobj_attribute direct_attribute =
++	__ATTR(direct, USER_RW, spk_var_show, spk_var_store);
 +static struct kobj_attribute full_time_attribute =
 +	__ATTR(full_time, ROOT_W, spk_var_show, spk_var_store);
 +static struct kobj_attribute jiffy_delta_attribute =
@@ -5347,6 +5506,7 @@
 +	&tone_attribute.attr,
 +	&vol_attribute.attr,
 +	&delay_time_attribute.attr,
++	&direct_attribute.attr,
 +	&full_time_attribute.attr,
 +	&jiffy_delta_attribute.attr,
 +	&trigger_time_attribute.attr,
@@ -5529,7 +5689,7 @@
 +	if (port_val != 0x53fc) {
 +		/* 'S' and out&input bits */
 +		pr_info("%s: not found\n", synth->long_name);
-+		synth_release_region(synth_portlist[i], SYNTH_IO_EXTENT);
++		synth_release_region(synth_port_control, SYNTH_IO_EXTENT);
 +		synth_port_control = 0;
 +		return -ENODEV;
 +	}
@@ -5572,8 +5732,8 @@
 +MODULE_VERSION(DRV_VERSION);
 +
 --- a/drivers/staging/speakup/speakup_acntsa.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/speakup_acntsa.c	2009-08-13 01:21:12.000000000 +0100
-@@ -0,0 +1,160 @@
++++ b/drivers/staging/speakup/speakup_acntsa.c	2010-07-22 15:06:52.000000000 +0100
+@@ -0,0 +1,164 @@
 +/*
 + * originally written by: Kirk Reiser <kirk@braille.uwo.ca>
 +* this version considerably modified by David Borowski, david575@rogers.com
@@ -5603,7 +5763,7 @@
 +#include "speakup.h"
 +#include "speakup_acnt.h" /* local header file for Accent values */
 +
-+#define DRV_VERSION "2.10"
++#define DRV_VERSION "2.11"
 +#define synth_full() (inb_p(speakup_info.port_tts + UART_RX) == 'F')
 +#define PROCSPEECH '\r'
 +
@@ -5616,6 +5776,7 @@
 +	{ PITCH, .u.n = {"\033P%d", 5, 0, 9, 0, 0, NULL }},
 +	{ VOL, .u.n = {"\033A%d", 9, 0, 9, 0, 0, NULL }},
 +	{ TONE, .u.n = {"\033V%d", 5, 0, 9, 0, 0, NULL }},
++	{ DIRECT, .u.n = {NULL, 0, 0, 1, 0, 0, NULL }},
 +	V_LAST_VAR
 +};
 +
@@ -5637,6 +5798,8 @@
 +
 +static struct kobj_attribute delay_time_attribute =
 +	__ATTR(delay_time, ROOT_W, spk_var_show, spk_var_store);
++static struct kobj_attribute direct_attribute =
++	__ATTR(direct, USER_RW, spk_var_show, spk_var_store);
 +static struct kobj_attribute full_time_attribute =
 +	__ATTR(full_time, ROOT_W, spk_var_show, spk_var_store);
 +static struct kobj_attribute jiffy_delta_attribute =
@@ -5656,6 +5819,7 @@
 +	&tone_attribute.attr,
 +	&vol_attribute.attr,
 +	&delay_time_attribute.attr,
++	&direct_attribute.attr,
 +	&full_time_attribute.attr,
 +	&jiffy_delta_attribute.attr,
 +	&trigger_time_attribute.attr,
@@ -5735,8 +5899,8 @@
 +MODULE_VERSION(DRV_VERSION);
 +
 --- a/drivers/staging/speakup/speakup_apollo.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/speakup_apollo.c	2009-08-13 01:21:12.000000000 +0100
-@@ -0,0 +1,221 @@
++++ b/drivers/staging/speakup/speakup_apollo.c	2010-07-22 15:06:52.000000000 +0100
+@@ -0,0 +1,225 @@
 +/*
 + * originally written by: Kirk Reiser <kirk@braille.uwo.ca>
 +* this version considerably modified by David Borowski, david575@rogers.com
@@ -5770,7 +5934,7 @@
 +#include "serialio.h"
 +#include "speakup.h"
 +
-+#define DRV_VERSION "2.20"
++#define DRV_VERSION "2.21"
 +#define SYNTH_CLEAR 0x18
 +#define PROCSPEECH '\r'
 +
@@ -5784,6 +5948,7 @@
 +	{ VOL, .u.n = {"@A%x", 10, 0, 15, 0, 0, NULL }},
 +	{ VOICE, .u.n = {"@V%d", 1, 1, 6, 0, 0, NULL }},
 +	{ LANG, .u.n = {"@=%d,", 1, 1, 4, 0, 0, NULL }},
++	{ DIRECT, .u.n = {NULL, 0, 0, 1, 0, 0, NULL }},
 +	V_LAST_VAR
 +};
 +
@@ -5807,6 +5972,8 @@
 +
 +static struct kobj_attribute delay_time_attribute =
 +	__ATTR(delay_time, ROOT_W, spk_var_show, spk_var_store);
++static struct kobj_attribute direct_attribute =
++	__ATTR(direct, USER_RW, spk_var_show, spk_var_store);
 +static struct kobj_attribute full_time_attribute =
 +	__ATTR(full_time, ROOT_W, spk_var_show, spk_var_store);
 +static struct kobj_attribute jiffy_delta_attribute =
@@ -5827,6 +5994,7 @@
 +	&voice_attribute.attr,
 +	&vol_attribute.attr,
 +	&delay_time_attribute.attr,
++	&direct_attribute.attr,
 +	&full_time_attribute.attr,
 +	&jiffy_delta_attribute.attr,
 +	&trigger_time_attribute.attr,
@@ -5959,8 +6127,8 @@
 +MODULE_VERSION(DRV_VERSION);
 +
 --- a/drivers/staging/speakup/speakup_audptr.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/speakup_audptr.c	2009-08-13 01:21:12.000000000 +0100
-@@ -0,0 +1,191 @@
++++ b/drivers/staging/speakup/speakup_audptr.c	2010-07-22 15:06:52.000000000 +0100
+@@ -0,0 +1,195 @@
 +/*
 + * originally written by: Kirk Reiser <kirk@braille.uwo.ca>
 + * this version considerably modified by David Borowski, david575@rogers.com
@@ -5989,7 +6157,7 @@
 +#include "speakup.h"
 +#include "serialio.h"
 +
-+#define DRV_VERSION "2.10"
++#define DRV_VERSION "2.11"
 +#define SYNTH_CLEAR 0x18 /* flush synth buffer */
 +#define PROCSPEECH '\r' /* start synth processing speech char */
 +
@@ -6004,6 +6172,7 @@
 +	{ VOL, .u.n = {"\x05[g%d]", 21, 0, 40, 0, 0, NULL }},
 +	{ TONE, .u.n = {"\x05[s%d]", 9, 0, 63, 0, 0, 0 }},
 +	{ PUNCT, .u.n = {"\x05[A%c]", 0, 0, 3, 0, 0, "nmsa" }},
++	{ DIRECT, .u.n = {NULL, 0, 0, 1, 0, 0, NULL }},
 +	V_LAST_VAR
 +};
 +
@@ -6027,6 +6196,8 @@
 +
 +static struct kobj_attribute delay_time_attribute =
 +	__ATTR(delay_time, ROOT_W, spk_var_show, spk_var_store);
++static struct kobj_attribute direct_attribute =
++	__ATTR(direct, USER_RW, spk_var_show, spk_var_store);
 +static struct kobj_attribute full_time_attribute =
 +	__ATTR(full_time, ROOT_W, spk_var_show, spk_var_store);
 +static struct kobj_attribute jiffy_delta_attribute =
@@ -6047,6 +6218,7 @@
 +	&tone_attribute.attr,
 +	&vol_attribute.attr,
 +	&delay_time_attribute.attr,
++	&direct_attribute.attr,
 +	&full_time_attribute.attr,
 +	&jiffy_delta_attribute.attr,
 +	&trigger_time_attribute.attr,
@@ -6153,8 +6325,8 @@
 +MODULE_VERSION(DRV_VERSION);
 +
 --- a/drivers/staging/speakup/speakup_bns.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/speakup_bns.c	2009-08-13 01:21:12.000000000 +0100
-@@ -0,0 +1,143 @@
++++ b/drivers/staging/speakup/speakup_bns.c	2010-07-22 15:06:52.000000000 +0100
+@@ -0,0 +1,147 @@
 +/*
 + * originally written by: Kirk Reiser <kirk@braille.uwo.ca>
 +* this version considerably modified by David Borowski, david575@rogers.com
@@ -6182,7 +6354,7 @@
 +#include "spk_priv.h"
 +#include "speakup.h"
 +
-+#define DRV_VERSION "2.10"
++#define DRV_VERSION "2.11"
 +#define SYNTH_CLEAR 0x18
 +#define PROCSPEECH '\r'
 +
@@ -6193,6 +6365,7 @@
 +	{ PITCH, .u.n = {"\x05%dP", 8, 0, 16, 0, 0, NULL }},
 +	{ VOL, .u.n = {"\x05%dV", 8, 0, 16, 0, 0, NULL }},
 +	{ TONE, .u.n = {"\x05%dT", 8, 0, 16, 0, 0, NULL }},
++	{ DIRECT, .u.n = {NULL, 0, 0, 1, 0, 0, NULL }},
 +	V_LAST_VAR
 +};
 +
@@ -6214,6 +6387,8 @@
 +
 +static struct kobj_attribute delay_time_attribute =
 +	__ATTR(delay_time, ROOT_W, spk_var_show, spk_var_store);
++static struct kobj_attribute direct_attribute =
++	__ATTR(direct, USER_RW, spk_var_show, spk_var_store);
 +static struct kobj_attribute full_time_attribute =
 +	__ATTR(full_time, ROOT_W, spk_var_show, spk_var_store);
 +static struct kobj_attribute jiffy_delta_attribute =
@@ -6233,6 +6408,7 @@
 +	&tone_attribute.attr,
 +	&vol_attribute.attr,
 +	&delay_time_attribute.attr,
++	&direct_attribute.attr,
 +	&full_time_attribute.attr,
 +	&jiffy_delta_attribute.attr,
 +	&trigger_time_attribute.attr,
@@ -6299,8 +6475,8 @@
 +MODULE_VERSION(DRV_VERSION);
 +
 --- a/drivers/staging/speakup/speakup_decext.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/speakup_decext.c	2009-08-13 01:21:12.000000000 +0100
-@@ -0,0 +1,238 @@
++++ b/drivers/staging/speakup/speakup_decext.c	2010-07-22 15:06:52.000000000 +0100
+@@ -0,0 +1,242 @@
 +/*
 + * originally written by: Kirk Reiser <kirk@braille.uwo.ca>
 +* this version considerably modified by David Borowski, david575@rogers.com
@@ -6334,7 +6510,7 @@
 +#include "serialio.h"
 +#include "speakup.h"
 +
-+#define DRV_VERSION "2.13"
++#define DRV_VERSION "2.14"
 +#define SYNTH_CLEAR 0x03
 +#define PROCSPEECH 0x0b
 +static unsigned char last_char;
@@ -6355,6 +6531,7 @@
 +	{ VOL, .u.n = {"[:dv gv %d]", 13, 0, 16, 0, 5, NULL }},
 +	{ PUNCT, .u.n = {"[:pu %c]", 0, 0, 2, 0, 0, "nsa" }},
 +	{ VOICE, .u.n = {"[:n%c]", 0, 0, 9, 0, 0, "phfdburwkv" }},
++	{ DIRECT, .u.n = {NULL, 0, 0, 1, 0, 0, NULL }},
 +	V_LAST_VAR
 +};
 +
@@ -6378,6 +6555,8 @@
 +
 +static struct kobj_attribute delay_time_attribute =
 +	__ATTR(delay_time, ROOT_W, spk_var_show, spk_var_store);
++static struct kobj_attribute direct_attribute =
++	__ATTR(direct, USER_RW, spk_var_show, spk_var_store);
 +static struct kobj_attribute full_time_attribute =
 +	__ATTR(full_time, ROOT_W, spk_var_show, spk_var_store);
 +static struct kobj_attribute jiffy_delta_attribute =
@@ -6398,6 +6577,7 @@
 +	&voice_attribute.attr,
 +	&vol_attribute.attr,
 +	&delay_time_attribute.attr,
++	&direct_attribute.attr,
 +	&full_time_attribute.attr,
 +	&jiffy_delta_attribute.attr,
 +	&trigger_time_attribute.attr,
@@ -6540,8 +6720,8 @@
 +MODULE_VERSION(DRV_VERSION);
 +
 --- a/drivers/staging/speakup/speakup_dectlk.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/speakup_dectlk.c	2009-08-13 01:21:12.000000000 +0100
-@@ -0,0 +1,306 @@
++++ b/drivers/staging/speakup/speakup_dectlk.c	2010-07-22 15:06:52.000000000 +0100
+@@ -0,0 +1,315 @@
 +/*
 + * originally written by: Kirk Reiser <kirk@braille.uwo.ca>
 + * this version considerably modified by David Borowski, david575@rogers.com
@@ -6577,7 +6757,7 @@
 +#include "spk_priv.h"
 +#include "serialio.h"
 +
-+#define DRV_VERSION "2.15"
++#define DRV_VERSION "2.20"
 +#define SYNTH_CLEAR 0x03
 +#define PROCSPEECH 0x0b
 +static volatile int xoff;
@@ -6595,13 +6775,14 @@
 +static DECLARE_WAIT_QUEUE_HEAD(flush);
 +
 +static struct var_t vars[] = {
-+	{ CAPS_START, .u.s = {"[:dv ap 200]" }},
-+	{ CAPS_STOP, .u.s = {"[:dv ap 100]" }},
-+	{ RATE, .u.n = {"[:ra %d]", 9, 0, 18, 150, 25, NULL }},
-+	{ PITCH, .u.n = {"[:dv ap %d]", 80, 0, 200, 20, 0, NULL }},
-+	{ VOL, .u.n = {"[:dv gv %d]", 13, 0, 14, 0, 5, NULL }},
-+	{ PUNCT, .u.n = {"[:pu %c]", 0, 0, 2, 0, 0, "nsa" }},
-+	{ VOICE, .u.n = {"[:n%c]", 0, 0, 9, 0, 0, "phfdburwkv" }},
++	{ CAPS_START, .u.s = {"[:dv ap 160] " }},
++	{ CAPS_STOP, .u.s = {"[:dv ap 100 ] " }},
++	{ RATE, .u.n = {"[:ra %d] ", 180, 75, 650, 0, 0, NULL }},
++	{ PITCH, .u.n = {"[:dv ap %d] ", 122, 50, 350, 0, 0, NULL }},
++	{ VOL, .u.n = {"[:dv g5 %d] ", 86, 60, 86, 0, 0, NULL }},
++	{ PUNCT, .u.n = {"[:pu %c] ", 0, 0, 2, 0, 0, "nsa" }},
++	{ VOICE, .u.n = {"[:n%c] ", 0, 0, 9, 0, 0, "phfdburwkv" }},
++	{ DIRECT, .u.n = {NULL, 0, 0, 1, 0, 0, NULL }},
 +	V_LAST_VAR
 +};
 +
@@ -6625,6 +6806,8 @@
 +
 +static struct kobj_attribute delay_time_attribute =
 +	__ATTR(delay_time, ROOT_W, spk_var_show, spk_var_store);
++static struct kobj_attribute direct_attribute =
++	__ATTR(direct, USER_RW, spk_var_show, spk_var_store);
 +static struct kobj_attribute full_time_attribute =
 +	__ATTR(full_time, ROOT_W, spk_var_show, spk_var_store);
 +static struct kobj_attribute jiffy_delta_attribute =
@@ -6645,17 +6828,21 @@
 +	&voice_attribute.attr,
 +	&vol_attribute.attr,
 +	&delay_time_attribute.attr,
++	&direct_attribute.attr,
 +	&full_time_attribute.attr,
 +	&jiffy_delta_attribute.attr,
 +	&trigger_time_attribute.attr,
 +	NULL,	/* need to NULL terminate the list of attributes */
 +};
 +
++static int ap_defaults[] = {122, 89, 155, 110, 208, 240, 200, 106, 306};
++static int g5_defaults[] = {86, 81, 86, 84, 81, 80, 83, 83, 73};
++
 +static struct spk_synth synth_dectlk = {
 +	.name = "dectlk",
 +	.version = DRV_VERSION,
 +	.long_name = "Dectalk Express",
-+	.init = "[:dv ap 100][:error sp]",
++	.init = "[:error sp :name paul :rate 180 :tsr off] ",
 +	.procspeech = PROCSPEECH,
 +	.clear = SYNTH_CLEAR,
 +	.delay = 500,
@@ -6665,6 +6852,8 @@
 +	.startup = SYNTH_START,
 +	.checkval = SYNTH_CHECK,
 +	.vars = vars,
++	.default_pitch = ap_defaults,
++	.default_vol = g5_defaults,
 +	.probe = serial_synth_probe,
 +	.release = spk_serial_release,
 +	.synth_immediate = spk_synth_immediate,
@@ -6675,7 +6864,7 @@
 +	.read_buff_add = read_buff_add,
 +	.get_index = get_index,
 +	.indexing = {
-+		.command = "[:in re %d] ",
++		.command = "[:in re %d ] ",
 +		.lowindex = 1,
 +		.highindex = 8,
 +		.currindex = 1,
@@ -6849,8 +7038,8 @@
 +MODULE_VERSION(DRV_VERSION);
 +
 --- a/drivers/staging/speakup/speakup_dtlk.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/speakup_dtlk.c	2009-08-13 01:21:12.000000000 +0100
-@@ -0,0 +1,379 @@
++++ b/drivers/staging/speakup/speakup_dtlk.c	2010-07-22 15:06:52.000000000 +0100
+@@ -0,0 +1,386 @@
 +/*
 + * originally written by: Kirk Reiser <kirk@braille.uwo.ca>
 +* this version considerably modified by David Borowski, david575@rogers.com
@@ -6886,7 +7075,7 @@
 +#include "speakup_dtlk.h" /* local header file for DoubleTalk values */
 +#include "speakup.h"
 +
-+#define DRV_VERSION "2.9"
++#define DRV_VERSION "2.10"
 +#define PROCSPEECH 0x00
 +#define synth_readable() ((synth_status = inb_p(speakup_info.port_tts + UART_RX)) & TTS_READABLE)
 +#define synth_writable() ((synth_status = inb_p(speakup_info.port_tts + UART_RX)) & TTS_WRITABLE)
@@ -6914,6 +7103,7 @@
 +	{ PUNCT, .u.n = {"\x01%db", 7, 0, 15, 0, 0, NULL }},
 +	{ VOICE, .u.n = {"\x01%do", 0, 0, 7, 0, 0, NULL }},
 +	{ FREQUENCY, .u.n = {"\x01%df", 5, 0, 9, 0, 0, NULL }},
++	{ DIRECT, .u.n = {NULL, 0, 0, 1, 0, 0, NULL }},
 +	V_LAST_VAR
 +};
 +
@@ -6941,6 +7131,8 @@
 +
 +static struct kobj_attribute delay_time_attribute =
 +	__ATTR(delay_time, ROOT_W, spk_var_show, spk_var_store);
++static struct kobj_attribute direct_attribute =
++	__ATTR(direct, USER_RW, spk_var_show, spk_var_store);
 +static struct kobj_attribute full_time_attribute =
 +	__ATTR(full_time, ROOT_W, spk_var_show, spk_var_store);
 +static struct kobj_attribute jiffy_delta_attribute =
@@ -6963,6 +7155,7 @@
 +	&voice_attribute.attr,
 +	&vol_attribute.attr,
 +	&delay_time_attribute.attr,
++	&direct_attribute.attr,
 +	&full_time_attribute.attr,
 +	&jiffy_delta_attribute.attr,
 +	&trigger_time_attribute.attr,
@@ -7162,6 +7355,8 @@
 +		speakup_info.port_tts = port_forced;
 +		pr_info("probe forced to %x by kernel command line\n",
 +				speakup_info.port_tts);
++		if ((port_forced & 0xf) != 0xf)
++			pr_info("warning: port base should probably end with f\n");
 +		if (synth_request_region(speakup_info.port_tts-1,
 +					SYNTH_IO_EXTENT)) {
 +			pr_warn("sorry, port already reserved\n");
@@ -7187,6 +7382,7 @@
 +	port_val &= 0xfbff;
 +	if (port_val != 0x107f) {
 +		pr_info("DoubleTalk PC: not found\n");
++		synth_release_region(synth_lpc, SYNTH_IO_EXTENT);
 +		return -ENODEV;
 +	}
 +	while (inw_p(synth_lpc) != 0x147f)
@@ -7231,7 +7427,7 @@
 +MODULE_VERSION(DRV_VERSION);
 +
 --- a/drivers/staging/speakup/speakup_dtlk.h	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/speakup_dtlk.h	2009-08-13 01:21:12.000000000 +0100
++++ b/drivers/staging/speakup/speakup_dtlk.h	2010-07-22 15:06:52.000000000 +0100
 @@ -0,0 +1,54 @@
 +/* speakup_dtlk.h - header file for speakups DoubleTalk driver. */
 +
@@ -7288,8 +7484,8 @@
 +	u_char has_indexing;	/* nonzero if indexing is implemented */
 +};
 --- a/drivers/staging/speakup/speakup_dummy.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/speakup_dummy.c	2009-08-13 01:21:12.000000000 +0100
-@@ -0,0 +1,144 @@
++++ b/drivers/staging/speakup/speakup_dummy.c	2010-07-22 15:06:52.000000000 +0100
+@@ -0,0 +1,148 @@
 +/*
 + * originally written by: Kirk Reiser <kirk@braille.uwo.ca>
 + * this version considerably modified by David Borowski, david575@rogers.com
@@ -7320,7 +7516,7 @@
 +#include "speakup.h"
 +
 +#define PROCSPEECH '\n'
-+#define DRV_VERSION "2.10"
++#define DRV_VERSION "2.11"
 +#define SYNTH_CLEAR '!'
 +
 +static struct var_t vars[] = {
@@ -7330,6 +7526,7 @@
 +	{ PITCH, .u.n = {"PITCH %d\n", 8, 0, 16, 0, 0, NULL }},
 +	{ VOL, .u.n = {"VOL %d\n", 8, 0, 16, 0, 0, NULL }},
 +	{ TONE, .u.n = {"TONE %d\n", 8, 0, 16, 0, 0, NULL }},
++	{ DIRECT, .u.n = {NULL, 0, 0, 1, 0, 0, NULL }},
 +	V_LAST_VAR
 +};
 +
@@ -7351,6 +7548,8 @@
 +
 +static struct kobj_attribute delay_time_attribute =
 +	__ATTR(delay_time, ROOT_W, spk_var_show, spk_var_store);
++static struct kobj_attribute direct_attribute =
++	__ATTR(direct, USER_RW, spk_var_show, spk_var_store);
 +static struct kobj_attribute full_time_attribute =
 +	__ATTR(full_time, ROOT_W, spk_var_show, spk_var_store);
 +static struct kobj_attribute jiffy_delta_attribute =
@@ -7370,6 +7569,7 @@
 +	&tone_attribute.attr,
 +	&vol_attribute.attr,
 +	&delay_time_attribute.attr,
++	&direct_attribute.attr,
 +	&full_time_attribute.attr,
 +	&jiffy_delta_attribute.attr,
 +	&trigger_time_attribute.attr,
@@ -7435,8 +7635,8 @@
 +MODULE_VERSION(DRV_VERSION);
 +
 --- a/drivers/staging/speakup/speakup.h	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/speakup.h	2009-08-13 01:21:12.000000000 +0100
-@@ -0,0 +1,124 @@
++++ b/drivers/staging/speakup/speakup.h	2010-07-22 15:06:52.000000000 +0100
+@@ -0,0 +1,127 @@
 +#ifndef _SPEAKUP_H
 +#define _SPEAKUP_H
 +#include <linux/version.h>
@@ -7444,7 +7644,7 @@
 +#include "spk_types.h"
 +#include "i18n.h"
 +
-+#define SPEAKUP_VERSION "3.1.3"
++#define SPEAKUP_VERSION "3.1.5"
 +#define KEY_MAP_VER 119
 +#define SHIFT_TBL_SIZE 64
 +#define MAX_DESC_LEN 72
@@ -7479,10 +7679,6 @@
 +#define A_CTL (B_CTL+SYNTH_OK)
 +#define B_SYM 0x0800
 +#define B_CAPSYM (B_CAP|B_SYM)
-+
-+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,23)
-+#define inverse_translate(vc, c) inverse_translate(vc, c, 0)
-+#endif
 +
 +#define IS_WDLM(x) (spk_chartab[((u_char)x)]&B_WDLM)
 +#define IS_CHAR(x, type) (spk_chartab[((u_char)x)]&type)
@@ -7559,11 +7755,18 @@
 +extern short pitch_shift, synth_flags;
 +extern int quiet_boot;
 +extern char *synth_name;
++extern struct bleep unprocessed_sound;
++
++/* Prototypes from fakekey.c. */
++int speakup_add_virtual_keyboard(void);
++void speakup_remove_virtual_keyboard(void);
++void speakup_fake_down_arrow(void);
++bool speakup_fake_key_pressed(void);
 +
 +#endif
 --- a/drivers/staging/speakup/speakup_keypc.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/speakup_keypc.c	2009-08-13 01:21:12.000000000 +0100
-@@ -0,0 +1,323 @@
++++ b/drivers/staging/speakup/speakup_keypc.c	2010-07-22 15:06:52.000000000 +0100
+@@ -0,0 +1,327 @@
 +/*
 + * written by David Borowski
 + *
@@ -7596,7 +7799,7 @@
 +#include "spk_priv.h"
 +#include "speakup.h"
 +
-+#define DRV_VERSION "2.9"
++#define DRV_VERSION "2.10"
 +#define SYNTH_IO_EXTENT	0x04
 +#define SWAIT udelay(70)
 +#define synth_writable() (inb_p(synth_port + UART_RX) & 0x10)
@@ -7620,6 +7823,7 @@
 +	{ CAPS_STOP, .u.s = {"[f90]" }},
 +	{ RATE, .u.n = {"\04%c ", 8, 0, 10, 81, -8, NULL }},
 +	{ PITCH, .u.n = {"[f%d]", 5, 0, 9, 40, 10, NULL }},
++	{ DIRECT, .u.n = {NULL, 0, 0, 1, 0, 0, NULL }},
 +	V_LAST_VAR
 +};
 +
@@ -7637,6 +7841,8 @@
 +
 +static struct kobj_attribute delay_time_attribute =
 +	__ATTR(delay_time, ROOT_W, spk_var_show, spk_var_store);
++static struct kobj_attribute direct_attribute =
++	__ATTR(direct, USER_RW, spk_var_show, spk_var_store);
 +static struct kobj_attribute full_time_attribute =
 +	__ATTR(full_time, ROOT_W, spk_var_show, spk_var_store);
 +static struct kobj_attribute jiffy_delta_attribute =
@@ -7654,6 +7860,7 @@
 +	&pitch_attribute.attr,
 +	&rate_attribute.attr,
 +	&delay_time_attribute.attr,
++	&direct_attribute.attr,
 +	&full_time_attribute.attr,
 +	&jiffy_delta_attribute.attr,
 +	&trigger_time_attribute.attr,
@@ -7846,7 +8053,7 @@
 +	}
 +	if (port_val != 0x80) {
 +		pr_info("%s: not found\n", synth->long_name);
-+		synth_release_region(synth_portlist[i], SYNTH_IO_EXTENT);
++		synth_release_region(synth_port, SYNTH_IO_EXTENT);
 +		synth_port = 0;
 +		return -ENODEV;
 +	}
@@ -7888,8 +8095,8 @@
 +MODULE_VERSION(DRV_VERSION);
 +
 --- a/drivers/staging/speakup/speakup_ltlk.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/speakup_ltlk.c	2009-08-13 01:21:12.000000000 +0100
-@@ -0,0 +1,191 @@
++++ b/drivers/staging/speakup/speakup_ltlk.c	2010-07-22 15:06:52.000000000 +0100
+@@ -0,0 +1,195 @@
 +/*
 + * originally written by: Kirk Reiser <kirk@braille.uwo.ca>
 +* this version considerably modified by David Borowski, david575@rogers.com
@@ -7919,7 +8126,7 @@
 +#include "serialio.h"
 +#include "speakup_dtlk.h" /* local header file for LiteTalk values */
 +
-+#define DRV_VERSION "2.10"
++#define DRV_VERSION "2.11"
 +#define synth_full( ) ( !( inb( synth_port_tts + UART_MSR ) & UART_MSR_CTS ) )
 +#define PROCSPEECH 0x0d
 +
@@ -7935,6 +8142,7 @@
 +	{ PUNCT, .u.n = {"\x01%db", 7, 0, 15, 0, 0, NULL }},
 +	{ VOICE, .u.n = {"\x01%do", 0, 0, 7, 0, 0, NULL }},
 +	{ FREQUENCY, .u.n = {"\x01%df", 5, 0, 9, 0, 0, NULL }},
++	{ DIRECT, .u.n = {NULL, 0, 0, 1, 0, 0, NULL }},
 +	V_LAST_VAR
 +};
 +
@@ -7962,6 +8170,8 @@
 +
 +static struct kobj_attribute delay_time_attribute =
 +	__ATTR(delay_time, ROOT_W, spk_var_show, spk_var_store);
++static struct kobj_attribute direct_attribute =
++	__ATTR(direct, USER_RW, spk_var_show, spk_var_store);
 +static struct kobj_attribute full_time_attribute =
 +	__ATTR(full_time, ROOT_W, spk_var_show, spk_var_store);
 +static struct kobj_attribute jiffy_delta_attribute =
@@ -7984,6 +8194,7 @@
 +	&voice_attribute.attr,
 +	&vol_attribute.attr,
 +	&delay_time_attribute.attr,
++	&direct_attribute.attr,
 +	&full_time_attribute.attr,
 +	&jiffy_delta_attribute.attr,
 +	&trigger_time_attribute.attr,
@@ -8082,7 +8293,7 @@
 +MODULE_VERSION(DRV_VERSION);
 +
 --- a/drivers/staging/speakup/speakupmap.h	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/speakupmap.h	2009-08-13 01:21:12.000000000 +0100
++++ b/drivers/staging/speakup/speakupmap.h	2010-07-22 15:06:52.000000000 +0100
 @@ -0,0 +1,65 @@
 +	119, 62, 6,
 +	0, 16, 20, 17, 32, 48, 0,
@@ -8150,7 +8361,7 @@
 +	125, 128, 128, 0, 0, 0, 0,
 +	0, 119
 --- a/drivers/staging/speakup/speakupmap.map	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/speakupmap.map	2009-08-13 01:21:12.000000000 +0100
++++ b/drivers/staging/speakup/speakupmap.map	2010-07-22 15:06:52.000000000 +0100
 @@ -0,0 +1,93 @@
 +spk key_f9 = punc_level_dec
 +spk key_f10 = punc_level_inc
@@ -8246,7 +8457,7 @@
 + ctrl spk key_semicolon = say_last_char
 +spk key_r = read_all_doc
 --- a/drivers/staging/speakup/speakup_soft.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/speakup_soft.c	2009-08-13 01:21:12.000000000 +0100
++++ b/drivers/staging/speakup/speakup_soft.c	2010-07-22 15:06:52.000000000 +0100
 @@ -0,0 +1,366 @@
 +/* speakup_soft.c - speakup driver to register and make available
 + * a user space device for software synthesizers.  written by: Kirk
@@ -8274,7 +8485,7 @@
 +#include <linux/unistd.h>
 +#include <linux/miscdevice.h> /* for misc_register, and SYNTH_MINOR */
 +#include <linux/poll.h> /* for poll_wait() */
-+#include <linux/sched.h>
++#include <linux/sched.h> /* schedule(), signal_pending(), TASK_INTERRUPTIBLE */
 +
 +#include "spk_priv.h"
 +#include "speakup.h"
@@ -8615,8 +8826,8 @@
 +MODULE_VERSION(DRV_VERSION);
 +
 --- a/drivers/staging/speakup/speakup_spkout.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/speakup_spkout.c	2009-08-13 01:21:12.000000000 +0100
-@@ -0,0 +1,161 @@
++++ b/drivers/staging/speakup/speakup_spkout.c	2010-07-22 15:06:52.000000000 +0100
+@@ -0,0 +1,165 @@
 +/*
 + * originally written by: Kirk Reiser <kirk@braille.uwo.ca>
 +* this version considerably modified by David Borowski, david575@rogers.com
@@ -8645,7 +8856,7 @@
 +#include "speakup.h"
 +#include "serialio.h"
 +
-+#define DRV_VERSION "2.10"
++#define DRV_VERSION "2.11"
 +#define SYNTH_CLEAR 0x18
 +#define PROCSPEECH '\r'
 +
@@ -8659,6 +8870,7 @@
 +	{ VOL, .u.n = {"\x05V%d", 9, 0, 9, 0, 0, NULL }},
 +	{ TONE, .u.n = {"\x05T%c", 8, 0, 25, 65, 0, NULL }},
 +	{ PUNCT, .u.n = {"\x05M%c", 0, 0, 3, 0, 0, "nsma" }},
++	{ DIRECT, .u.n = {NULL, 0, 0, 1, 0, 0, NULL }},
 +	V_LAST_VAR
 +};
 +
@@ -8682,6 +8894,8 @@
 +
 +static struct kobj_attribute delay_time_attribute =
 +	__ATTR(delay_time, ROOT_W, spk_var_show, spk_var_store);
++static struct kobj_attribute direct_attribute =
++	__ATTR(direct, USER_RW, spk_var_show, spk_var_store);
 +static struct kobj_attribute full_time_attribute =
 +	__ATTR(full_time, ROOT_W, spk_var_show, spk_var_store);
 +static struct kobj_attribute jiffy_delta_attribute =
@@ -8702,6 +8916,7 @@
 +	&tone_attribute.attr,
 +	&vol_attribute.attr,
 +	&delay_time_attribute.attr,
++	&direct_attribute.attr,
 +	&full_time_attribute.attr,
 +	&jiffy_delta_attribute.attr,
 +	&trigger_time_attribute.attr,
@@ -8779,8 +8994,8 @@
 +MODULE_VERSION(DRV_VERSION);
 +
 --- a/drivers/staging/speakup/speakup_txprt.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/speakup_txprt.c	2009-08-13 01:21:12.000000000 +0100
-@@ -0,0 +1,143 @@
++++ b/drivers/staging/speakup/speakup_txprt.c	2010-07-22 15:06:52.000000000 +0100
+@@ -0,0 +1,147 @@
 +/*
 + * originally written by: Kirk Reiser <kirk@braille.uwo.ca>
 +* this version considerably modified by David Borowski, david575@rogers.com
@@ -8808,7 +9023,7 @@
 +#include "spk_priv.h"
 +#include "speakup.h"
 +
-+#define DRV_VERSION "2.10"
++#define DRV_VERSION "2.11"
 +#define SYNTH_CLEAR 0x18
 +#define PROCSPEECH '\r' /* process speech char */
 +
@@ -8819,6 +9034,7 @@
 +	{ PITCH, .u.n = {"\x05P%d", 5, 0, 9, 0, 0, NULL }},
 +	{ VOL, .u.n = {"\x05V%d", 5, 0, 9, 0, 0, NULL }},
 +	{ TONE, .u.n = {"\x05T%c", 12, 0, 25, 61, 0, NULL }},
++	{ DIRECT, .u.n = {NULL, 0, 0, 1, 0, 0, NULL }},
 +	V_LAST_VAR
 +	 };
 +
@@ -8840,6 +9056,8 @@
 +
 +static struct kobj_attribute delay_time_attribute =
 +	__ATTR(delay_time, ROOT_W, spk_var_show, spk_var_store);
++static struct kobj_attribute direct_attribute =
++	__ATTR(direct, USER_RW, spk_var_show, spk_var_store);
 +static struct kobj_attribute full_time_attribute =
 +	__ATTR(full_time, ROOT_W, spk_var_show, spk_var_store);
 +static struct kobj_attribute jiffy_delta_attribute =
@@ -8859,6 +9077,7 @@
 +	&tone_attribute.attr,
 +	&vol_attribute.attr,
 +	&delay_time_attribute.attr,
++	&direct_attribute.attr,
 +	&full_time_attribute.attr,
 +	&jiffy_delta_attribute.attr,
 +	&trigger_time_attribute.attr,
@@ -8925,7 +9144,7 @@
 +MODULE_VERSION(DRV_VERSION);
 +
 --- a/drivers/staging/speakup/spk_priv.h	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/spk_priv.h	2009-08-13 01:21:12.000000000 +0100
++++ b/drivers/staging/speakup/spk_priv.h	2010-07-22 15:06:52.000000000 +0100
 @@ -0,0 +1,93 @@
 +/* spk_priv.h
 +   review functions for the speakup screen review package.
@@ -9021,7 +9240,7 @@
 +
 +#endif
 --- a/drivers/staging/speakup/spk_priv_keyinfo.h	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/spk_priv_keyinfo.h	2009-08-13 01:21:12.000000000 +0100
++++ b/drivers/staging/speakup/spk_priv_keyinfo.h	2010-07-22 15:06:52.000000000 +0100
 @@ -0,0 +1,110 @@
 +/* spk_priv.h
 +   review functions for the speakup screen review package.
@@ -9134,8 +9353,8 @@
 +
 +#endif
 --- a/drivers/staging/speakup/spk_types.h	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/spk_types.h	2009-08-13 01:21:12.000000000 +0100
-@@ -0,0 +1,185 @@
++++ b/drivers/staging/speakup/spk_types.h	2010-07-22 15:06:52.000000000 +0100
+@@ -0,0 +1,193 @@
 +#ifndef SPEAKUP_TYPES_H
 +#define SPEAKUP_TYPES_H
 +
@@ -9166,7 +9385,8 @@
 +	E_DEFAULT = 0,
 +	E_SET,
 +	E_INC,
-+	E_DEC
++	E_DEC,
++	E_NEW_DEFAULT,
 +};
 +
 +enum var_id_t {
@@ -9300,6 +9520,8 @@
 +	short startup;
 +	const int checkval; /* for validating a proper synth module */
 +	struct var_t *vars;
++	int *default_pitch;
++	int *default_vol;
 +	int (*probe)(struct spk_synth *synth);
 +	void (*release)(void);
 +	const char *(*synth_immediate)(struct spk_synth *synth, const char *buff);
@@ -9320,9 +9542,14 @@
 +	int flushing;
 +};
 +
++struct bleep {
++	short freq;
++	unsigned long jiffies;
++	int active;
++};
 +#endif
 --- a/drivers/staging/speakup/synth.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/synth.c	2009-08-13 01:21:12.000000000 +0100
++++ b/drivers/staging/speakup/synth.c	2010-07-22 15:06:52.000000000 +0100
 @@ -0,0 +1,458 @@
 +#include <linux/types.h>
 +#include <linux/ctype.h>	/* for isdigit() and friends */
@@ -9783,8 +10010,8 @@
 +
 +short punc_masks[] = { 0, SOME, MOST, PUNC, PUNC|B_SYM };
 --- a/drivers/staging/speakup/thread.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/thread.c	2009-08-13 01:21:12.000000000 +0100
-@@ -0,0 +1,47 @@
++++ b/drivers/staging/speakup/thread.c	2010-07-22 15:06:52.000000000 +0100
+@@ -0,0 +1,58 @@
 +#include <linux/kthread.h>
 +#include <linux/wait.h>
 +
@@ -9799,14 +10026,22 @@
 +{
 +	unsigned long flags;
 +	int should_break;
++	struct bleep our_sound;
++
++	our_sound.active = 0;
++	our_sound.freq = 0;
++	our_sound.jiffies = 0;
 +
 +	mutex_lock(&spk_mutex);
 +	while (1) {
 +		DEFINE_WAIT(wait);
 +		while(1) {
 +			spk_lock(flags);
++			our_sound = unprocessed_sound;
++			unprocessed_sound.active = 0;
 +			prepare_to_wait(&speakup_event, &wait, TASK_INTERRUPTIBLE);
 +			should_break = kthread_should_stop() ||
++				our_sound.active ||
 +				(synth && synth->catch_up && synth->alive &&
 +					(speakup_info.flushing ||
 +					!synth_buffer_empty()));
@@ -9821,6 +10056,9 @@
 +		if (kthread_should_stop())
 +			break;
 +
++		if (our_sound.active) {
++			kd_mksound(our_sound.freq, our_sound.jiffies);
++		}
 +		if (synth && synth->catch_up && synth->alive) {
 +			/* It is up to the callee to take the lock, so that it
 +			 * can sleep whenever it likes */
@@ -9833,8 +10071,8 @@
 +	return 0;
 +}
 --- a/drivers/staging/speakup/varhandlers.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/speakup/varhandlers.c	2009-08-13 01:21:12.000000000 +0100
-@@ -0,0 +1,395 @@
++++ b/drivers/staging/speakup/varhandlers.c	2010-07-22 15:06:52.000000000 +0100
+@@ -0,0 +1,403 @@
 +#include <linux/ctype.h>
 +#include "spk_types.h"
 +#include "spk_priv.h"
@@ -10023,6 +10261,14 @@
 +	struct var_t *var_data = var->data;
 +	if (var_data == NULL)
 +		return E_UNDEF;
++
++	if (how == E_NEW_DEFAULT) {
++		if (input < var_data->u.n.low || input > var_data->u.n.high)
++			ret = E_RANGE;
++		else
++			var_data->u.n.default_val = input;
++		return ret;
++	}
 +	if (how == E_DEFAULT) {
 +		val = var_data->u.n.default_val;
 +		ret = SET_DEFAULT;
