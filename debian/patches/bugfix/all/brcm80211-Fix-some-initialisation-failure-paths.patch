@@ -1,0 +1,120 @@
+From 6b5b361fb06eccdd53d3e85e0366b1f3687c0b2f Mon Sep 17 00:00:00 2001
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Fri, 10 Sep 2010 01:23:30 +0100
+Subject: [PATCH] brcm80211: Fix some initialisation failure paths
+
+Initialise wl_info::tasklet early so that it's safe to tasklet_kill()
+it in wl_free().
+
+Remove assertions from wl_free() that may not be true in case of
+initialisation failure.
+
+Call wl_release_fw() in case of failure after wl_request_fw().
+Don't rely on wl_firmware::fw_cnt in wl_release_fw().
+
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+---
+ drivers/staging/brcm80211/TODO              |    1 -
+ drivers/staging/brcm80211/sys/wl_mac80211.c |   25 ++++++++++++-------------
+ 2 files changed, 12 insertions(+), 14 deletions(-)
+
+diff --git a/drivers/staging/brcm80211/TODO b/drivers/staging/brcm80211/TODO
+index aa38d49..5870bca 100644
+--- a/drivers/staging/brcm80211/TODO
++++ b/drivers/staging/brcm80211/TODO
+@@ -25,7 +25,6 @@ Bugs
+ - Various occasional asserts/hangs
+ - Scanning during data transfer sometimes causes major slowdowns.  Sometimes
+   revcovers when scan is done, other times not.
+-- Driver does not handle missing firmware gracefully.
+ - Mac80211 API not completely implemented (ie ops_bss_info_changed,
+   ops_get_stats, etc)
+ 
+diff --git a/drivers/staging/brcm80211/sys/wl_mac80211.c b/drivers/staging/brcm80211/sys/wl_mac80211.c
+index 6c93472..d467bd7 100644
+--- a/drivers/staging/brcm80211/sys/wl_mac80211.c
++++ b/drivers/staging/brcm80211/sys/wl_mac80211.c
+@@ -840,6 +840,9 @@ static wl_info_t *wl_attach(uint16 vendor, uint16 device, ulong regs,
+ 	wl->osh = osh;
+ 	atomic_set(&wl->callbacks, 0);
+ 
++	/* setup the bottom half handler */
++	tasklet_init(&wl->tasklet, wl_dpc, (ulong) wl);
++
+ #ifdef WLC_HIGH_ONLY
+ 	wl->rpc_th = bcm_rpc_tp_attach(osh, NULL);
+ 	if (wl->rpc_th == NULL) {
+@@ -908,17 +911,16 @@ static wl_info_t *wl_attach(uint16 vendor, uint16 device, ulong regs,
+ #endif
+ 
+ 	/* common load-time initialization */
+-	if (!
+-	    (wl->wlc =
+-	     wlc_attach((void *)wl, vendor, device, unit, wl->piomode, osh,
+-			wl->regsva, wl->bcm_bustype, btparam, &err))) {
++	wl->wlc = wlc_attach((void *)wl, vendor, device, unit, wl->piomode, osh,
++			     wl->regsva, wl->bcm_bustype, btparam, &err);
++#ifndef WLC_HIGH_ONLY
++	wl_release_fw(wl);
++#endif
++	if (!wl->wlc) {
+ 		printf("%s: %s driver failed with code %d\n", KBUILD_MODNAME,
+ 		       EPI_VERSION_STR, err);
+ 		goto fail;
+ 	}
+-#ifndef WLC_HIGH_ONLY
+-	wl_release_fw(wl);
+-#endif
+ 	wl->pub = wlc_pub(wl->wlc);
+ 
+ 	wl->pub->ieee_hw = hw;
+@@ -945,9 +947,6 @@ static wl_info_t *wl_attach(uint16 vendor, uint16 device, ulong regs,
+ 	wlc_iovar_setint(wl->wlc, "sd_drivestrength", sd_drivestrength);
+ #endif
+ 
+-	/* setup the bottom half handler */
+-	tasklet_init(&wl->tasklet, wl_dpc, (ulong) wl);
+-
+ #ifdef WLC_LOW
+ 	/* register our interrupt handler */
+ 	if (request_irq(irq, wl_isr, IRQF_SHARED, KBUILD_MODNAME, wl)) {
+@@ -1713,11 +1712,9 @@ void wl_free(wl_info_t * wl)
+ 
+ 	ASSERT(wl);
+ #ifndef WLC_HIGH_ONLY
+-	ASSERT(wl->irq);	/* bmac does not use direct interrupt */
+ 	/* free ucode data */
+ 	if (wl->fw.fw_cnt)
+ 		wl_ucode_data_free();
+-	ASSERT(wl->wlc);
+ 	if (wl->irq)
+ 		free_irq(wl->irq, wl);
+ #endif
+@@ -2512,6 +2509,7 @@ static int wl_request_fw(wl_info_t * wl, struct pci_dev *pdev)
+ 		status = request_firmware(&wl->fw.fw_bin[i], fw_name, device);
+ 		if (status) {
+ 			printf("fail to request firmware %s\n", fw_name);
++			wl_release_fw(wl);
+ 			return status;
+ 		}
+ 		WL_NONE(("request fw %s\n", fw_name));
+@@ -2520,6 +2518,7 @@ static int wl_request_fw(wl_info_t * wl, struct pci_dev *pdev)
+ 		status = request_firmware(&wl->fw.fw_hdr[i], fw_name, device);
+ 		if (status) {
+ 			printf("fail to request firmware %s\n", fw_name);
++			wl_release_fw(wl);
+ 			return status;
+ 		}
+ 		wl->fw.hdr_num_entries[i] =
+@@ -2542,7 +2541,7 @@ void wl_ucode_free_buf(void *p)
+ static void wl_release_fw(wl_info_t * wl)
+ {
+ 	int i;
+-	for (i = 0; i < wl->fw.fw_cnt; i++) {
++	for (i = 0; i < WL_MAX_FW; i++) {
+ 		release_firmware(wl->fw.fw_bin[i]);
+ 		release_firmware(wl->fw.fw_hdr[i]);
+ 	}
+-- 
+1.7.1
+
