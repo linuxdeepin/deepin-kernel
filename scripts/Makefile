@@ -19,6 +19,7 @@ SCRIPTS =  \
 	checkincludes.pl \
 	checkstack.pl \
 	checkversion.pl \
+	gcc-goto.sh \
 	gcc-version.sh \
 	gcc-x86_32-has-stack-protector.sh \
 	gcc-x86_64-has-stack-protector.sh \
