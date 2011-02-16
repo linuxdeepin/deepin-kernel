@@ -117,6 +117,7 @@ class ConfigCoreHierarchy(ConfigCore):
             'parts': SchemaItemList(),
         },
         'image': {
+            'bootloaders': SchemaItemList(),
             'configs': SchemaItemList(),
             'initramfs': SchemaItemBoolean(),
             'initramfs-generators': SchemaItemList(),

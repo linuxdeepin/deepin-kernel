@@ -29,14 +29,14 @@ class Operation(object):
         raise NotImplementedError
 
 class OperationPatch(Operation):
-    def __init__(self, name, fp, data):
+    def __init__(self, name, fopen, data):
         super(OperationPatch, self).__init__(name, data)
-        self.fp = fp
+        self.fopen = fopen
 
     def _call(self, dir, extraargs):
         cmdline = "cd %s; patch -p1 -f -s -t --no-backup-if-mismatch %s" % (dir, extraargs)
         f = os.popen(cmdline, 'wb')
-        shutil.copyfileobj(self.fp, f)
+        shutil.copyfileobj(self.fopen(), f)
         if f.close():
             raise RuntimeError("Patch failed")
 
@@ -103,12 +103,12 @@ class OperationFiles(Operation):
         'unifdef': SubOperationFilesUnifdef,
     }
 
-    def __init__(self, name, fp, data):
+    def __init__(self, name, fopen, data):
         super(OperationFiles, self).__init__(name, data)
 
         ops = []
 
-        for line in fp:
+        for line in fopen():
             line = line.strip()
             if not line or line[0] == '#':
                 continue
@@ -156,14 +156,15 @@ class PatchSeries(list):
                 for suffix, cls in (('', file), ('.bz2', BZ2File), ('.gz', GzipFile)):
                     f1 = f + suffix
                     if os.path.exists(f1):
-                        fp = cls(f1)
+                        # Must copy current bindings into the lambda-function
+                        fopen = lambda cls=cls, f1=f1: cls(f1)
                         break
                 else:
                     raise RuntimeError("Can't find patch %s for series %s" % (filename, self.name))
             else:
                 raise RuntimeError('Undefined operation "%s" in series %s' % (operation, name))
 
-            self.append(self.operations[operation](filename, fp, data))
+            self.append(self.operations[operation](filename, fopen, data))
 
     def __call__(self, cond = bool, dir = '.', reverse = False):
         if not reverse:

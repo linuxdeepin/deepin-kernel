@@ -345,6 +345,7 @@ class Package(dict):
         ('Recommends', PackageRelation),
         ('Suggests', PackageRelation),
         ('Replaces', PackageRelation),
+        ('Breaks', PackageRelation),
         ('Conflicts', PackageRelation),
         ('Description', PackageDescription),
     ))
