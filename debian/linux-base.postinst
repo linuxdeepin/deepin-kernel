@@ -18,6 +18,7 @@
 
 use strict;
 use warnings;
+use AptPkg::Config;
 use Debconf::Client::ConfModule ':all';
 use FileHandle;
 use POSIX ();
@@ -237,15 +238,6 @@ sub shellvars_quote {
 }
 
 ### GRUB 1 (grub-legacy) config
-
-sub grub1_path {
-    for ('/boot/grub', '/boot/boot/grub') {
-	if (-d) {
-	    return "$_/menu.lst";
-	}
-    }
-    return undef;
-}
 
 sub grub1_parse {
     my ($file) = @_;
@@ -479,8 +471,8 @@ sub lilo_list {
     return @bdevs;
 }
 
-sub _lilo_update {
-    my ($old, $new, $map, $replace) = @_;
+sub lilo_update {
+    my ($old, $new, $map) = @_;
     my @tokens = lilo_tokenize($old);
     my $i = 0;
     my $in_generic = 1; # global or image=/vmlinuz or image=/vmlinuz.old
@@ -513,8 +505,7 @@ sub _lilo_update {
 	    }
 	    if (defined($new_value)) {
 		$new_value =~ s/\\/\\\\/g;
-		$text = &{$replace}($name, $value, $new_value) ||
-		    "\n# $name = $value\n$name = \"$new_value\"\n";
+		$text = "\n# $name = $value\n$name = \"$new_value\"\n";
 	    } else {
 		$text .= $tokens[$i + 1][0] . $tokens[$i + 2][0];
 	    }
@@ -527,11 +518,6 @@ sub _lilo_update {
     }
 }
 
-sub lilo_update {
-    my ($old, $new, $map) = @_;
-    _lilo_update($old, $new, $map, sub { return undef });
-}
-
 sub lilo_post {
     system('lilo');
 }
@@ -542,27 +528,217 @@ sub silo_post {
     system('silo');
 }
 
-### Yaboot
-
-sub yaboot_post {
-    system('ybin');
-}
-
 ### ELILO
-
-sub elilo_update {
-    my ($old, $new, $map) = @_;
-    # Work around bug #581173 - boot value must have no space before
-    # and no quotes around it.
-    sub replace {
-	my ($name, $value, $new_value) = @_;
-	return ($name eq 'boot') ? "# boot=$value\nboot=$new_value\n" : undef;
-    }
-    _lilo_update($old, $new, $map, \&replace);
-}
 
 sub elilo_post {
     system('elilo');
+}
+
+### PALO
+
+sub palo_next {
+    my ($file, $expect_opt) = @_;
+    my $text = <$file>;
+
+    if (!defined($text) || $text eq '') {
+	return ();
+    }
+
+    my $arg = $text;
+    $arg =~ s/^\s*(?:#.*)?//s;
+    $arg =~ s/\s*$//;
+
+    # I would like to use Getopt::Long but it would make it
+    # impossible to determine which source text to replace.
+    if ($expect_opt && $arg =~ /^-(?!-)[?v]*(.)(.+)?$/) {
+	return ($text, "-$1", $2,    defined($2));
+    } elsif ($expect_opt && $arg =~ /^(--[^=]+)(?:=(.*))?$/) {
+	return ($text, $1,    $2,    defined($2));
+    } elsif ($arg ne '') {
+	return ($text, undef, $arg,  1);
+    } else {
+	return ($text, undef, undef, $expect_opt);
+    }
+}
+
+sub palo_list {
+    my ($file) = @_;
+    my $optopt;
+    my @bdevs;
+
+    while (1) {
+	my ($text, $optarg, $complete);
+	if (defined($optopt)) {
+	    ($text, undef,   $optarg, $complete) = palo_next($file, 0);
+	} else {
+	    ($text, $optopt, $optarg, $complete) = palo_next($file, 1);
+	}
+	last unless defined($text);
+
+	if ($complete && defined($optopt)) {
+	    if ($optopt eq '-c' || $optopt eq '--commandline') {
+		# If PALO is not configured to use the generic sym-link,
+		# ignore it
+		if ($optarg !~ m|^\d+/vmlinux\b|) {
+		    return ();
+		}
+		push @bdevs, kernel_list($optarg);
+	    } elsif ($optopt eq '-I' || $optopt eq '--init-partitioned') {
+		push @bdevs, $optarg;
+	    }
+	    $optopt = undef;
+	}
+
+	if (!defined($optopt) && defined($optarg) && $optarg eq '--') {
+	    last;
+	}
+    }
+
+    return @bdevs;
+}
+
+sub palo_update {
+    my ($old, $new, $map) = @_;
+    my $optopt;
+    my $allow_opts = 1;
+
+    while (1) {
+	my ($text, $optarg, $complete);
+	if (defined($optopt)) {
+	    ($text, undef,   $optarg, $complete) = palo_next($old, 0);
+	} else {
+	    ($text, $optopt, $optarg, $complete) = palo_next($old, $allow_opts);
+	}
+	last unless defined($text);
+
+	if (defined($optopt)) {
+	    if ($optopt eq '-c' || $optopt eq '--commandline') {
+		$text = "# $text";
+		if ($complete) {
+		    my $new_cmdline = kernel_update($optarg, $map);
+		    if (!defined($new_cmdline)) {
+			$new_cmdline = $optarg;
+		    }
+		    $text .= "--commandline=$new_cmdline\n";
+		}
+	    }
+	    $optopt = undef;
+	}
+
+	$new->print($text);
+
+	if (!defined($optopt) && defined($optarg) && $optarg eq '--') {
+	    $allow_opts = 0;
+	}
+    }
+}
+
+sub palo_post {
+    system('palo');
+}
+
+### delo
+
+sub delo_next {
+    # Based on getconfig() in config.c
+
+    my ($file) = @_;
+    my $text = <$file>;
+
+    if (!defined($text) || $text eq '') {
+	return ();
+    }
+
+    local $_ = $text;
+    s/[ \t]*(?:#.*)?\n//;
+    s/^[ \t]*//;
+
+    if (/^([a-z]+)=(.*)$/) {
+	return ($text, $1, $2);
+    } else {
+	return ($text);
+    }
+}
+
+sub delo_sections {
+    my ($file) = @_;
+    my @sections;
+    my $section = {};
+
+    while (1) {
+	my ($text, $name, $value) = delo_next($file);
+
+	# If this is EOF or a new section, finish the current section
+	if (!defined($text) || (defined($name) && $name eq 'label')) {
+	    $section->{is_generic} =
+		(exists($section->{image}) &&
+		 exists($section->{append}) &&
+		 $section->{image} =~ m|^/vmlinux(?:\.old)?$|);
+	    push @sections, $section;
+	    $section = {};
+	}
+
+	last unless defined($text);
+
+	if (defined($name)) {
+	    if ($name eq 'append') {
+		$value =~ s/^"([^"]*).*/$1/;
+	    }
+	    $section->{$name} = $value;
+	}
+    }
+
+    return @sections;
+}
+
+sub delo_list {
+    my ($file) = @_;
+    my ($globals, @entries) = delo_sections($file);
+    my @bdevs;
+
+    if (exists($globals->{boot})) {
+	push @bdevs, $globals->{boot};
+    }
+
+    for my $entry (@entries) {
+	if ($entry->{is_generic}) {
+	    push @bdevs, kernel_list($entry->{append});
+	}
+    }
+
+    return @bdevs;
+}
+
+sub delo_update {
+    my ($old, $new, $map) = @_;
+    my ($globals, @entries) = delo_sections($old);
+    my $i = -1;
+
+    $old->seek(0, 0);
+
+    while (1) {
+	my ($text, $name, $value) = delo_next($old);
+	last unless defined($text);
+
+	if (defined($name)) {
+	    if ($name eq 'label') {
+		++$i; # next entry
+	    } elsif ($name eq 'boot' && $i < 0) {
+		my $new_value = $map->{$value} && id_to_path($map->{$value});
+		if (defined($new_value)) {
+		    $text = "# $text" . "boot=$new_value\n";
+		}
+	    } elsif ($name eq 'append' &&
+		     $i >= 0 && $entries[$i]->{is_generic}) {
+		my $new_cmdline = kernel_update($value, $map);
+		if (defined($new_cmdline)) {
+		    $text = "# $text" . "append=\"$new_cmdline\"\n";
+		}
+	    }
+	}
+
+	$new->print($text);
+    }
 }
 
 ### extlinux
@@ -626,6 +802,51 @@ sub extlinux_new_update {
 
 sub extlinux_post {
     system('update-extlinux');
+}
+
+### aboot
+
+sub aboot_next {
+    my ($file) = @_;
+    my $text = <$file>;
+
+    if (!defined($text) || $text eq '') {
+	return ();
+    }
+
+    if ($text =~ /^([0-9]):([^ ]*) (.*)/) {
+	return ($text, $1, $2, $3);
+    } else {
+	return ($text);
+    }
+}
+
+sub aboot_list {
+    my ($file) = @_;
+    my @bdevs;
+    while (1) {
+	my ($text, $preset, $kernel, $params) = aboot_next($file);
+	last unless defined($text);
+	if (defined($params) && $kernel =~ m|^\d+/vmlinux(?:\.old)?$|) {
+	    push @bdevs, kernel_list($params);
+	}
+    }
+    return @bdevs;
+}
+
+sub aboot_update {
+    my ($old, $new, $map) = @_;
+    while (1) {
+	my ($text, $preset, $kernel, $params) = aboot_next($old);
+	last unless defined($text);
+	if (defined($params) && $kernel =~ m|^\d+/vmlinux(?:\.old)?$|) {
+	    my $new_params = kernel_update($params, $map);
+	    if (defined($new_params)) {
+		$text = "# $text" . "$preset:$kernel $new_params\n";
+	    }
+	}
+	$new->print($text);
+    }
 }
 
 # udev persistent-cd
@@ -699,8 +920,7 @@ sub udev_cd_find_unmatched_ide_rules {
 		}
 	    } elsif ($path =~ /-scsi-\d+:\d+:\d+:\d+$/) {
 		my $rule_key =  $path . ' ' . $symlink;
-		my $j = $wanted_rule{$rule_key};
-		if (defined($j) && $j >= 0) {
+		if (defined(my $j = $wanted_rule{$rule_key})) {
 		    $unmatched[$j] = undef;
 		}
 		$wanted_rule{$rule_key} = -1;
@@ -846,90 +1066,6 @@ sub uswsusp_resume_update {
     }
 }
 
-# cryptsetup
-
-sub cryptsetup_next {
-    my ($file) = @_;
-    my $text = <$file>;
-    unless (defined($text)) {
-	return ();
-    }
-
-    my $line = $text;
-    if ($line =~ /^\s*(#|$)/) {
-	return ($text);
-    } else {
-	$line =~ s/\s*$//;
-	$line =~ s/^\s*//;
-	return ($text, split(/\s+/, $line, 4));
-    }
-}
-
-sub cryptsetup_list {
-    my ($file) = @_;
-    my (@results) = ();
-
-    while (1) {
-	my ($text, undef, $src) = cryptsetup_next($file);
-	last unless defined($text);
-	if (defined($src)) {
-	    push @results, $src;
-	}
-    }
-
-    return @results;
-}
-
-sub cryptsetup_update {
-    my ($old, $new, $map) = @_;
-
-    while (1) {
-	my ($text, $dst, $src, $key, $opts) = cryptsetup_next($old);
-	last unless defined($text);
-	if (defined($src) && defined($map->{$src})) {
-	    $text = "# $text" .
-		join(' ', $dst, $map->{$src}, $key, $opts) . "\n";
-	}
-	$new->print($text);
-    }
-}
-
-# hdparm
-
-sub hdparm_list {
-    my ($file) = @_;
-    my (@results) = ();
-
-    # I really can't be bothered to parse this mess.  Just see if
-    # there's anything like a device name on a non-comment line.
-    while (<$file>) {
-	if (!/^\s*#/) {
-	    push @results, grep({m|^/dev/|} split(/\s+/));
-	}
-    }
-
-    return @results;
-}
-
-### mdadm
-
-sub mdadm_list {
-    my ($file) = @_;
-    my (@results) = ();
-
-    while (<$file>) {
-	# Look for DEVICE (case-insensitive, may be abbreviated to as
-	# little as 3 letters) followed by a whitespace-separated list
-	# of devices (or wildcards, or keywords!).  Ignore comments
-	# (hash preceded by whitespace).
-	if (/^DEV(?:I(?:C(?:E)?)?)?[ \t]*((?:[^ \t]|[ \t][^#])*)/i) {
-	    push @results, split(/[ \t]+/, $1);
-	}
-    }
-
-    return @results;
-}
-
 ### list of all configuration files and functions
 
 my @config_files = ({packages => 'mount',
@@ -937,58 +1073,65 @@ my @config_files = ({packages => 'mount',
 		     list => \&fstab_list,
 		     update => \&fstab_update},
 		    {packages => 'grub grub-legacy',
-		     path => grub1_path(),
+		     path => '/boot/grub/menu.lst',
 		     list => \&grub1_list,
 		     update => \&grub1_update,
-		     post_update => \&grub1_post,
-		     is_boot_loader => 1},
+		     post_update => \&grub1_post},
 		    {packages => 'grub-common',
 		     path => '/etc/default/grub',
 		     list => \&grub2_list,
 		     update => \&grub2_update,
-		     post_update => \&grub2_post,
-		     is_boot_loader => 1},
+		     post_update => \&grub2_post},
 		    {packages => 'lilo',
 		     path => '/etc/lilo.conf',
 		     list => \&lilo_list,
 		     update => \&lilo_update,
-		     post_update => \&lilo_post,
-		     is_boot_loader => 1},
+		     post_update => \&lilo_post},
 		    {packages => 'silo',
 		     path => '/etc/silo.conf',
 		     list => \&lilo_list,
 		     update => \&lilo_update,
-		     post_update => \&silo_post,
-		     is_boot_loader => 1},
+		     post_update => \&silo_post},
 		    {packages => 'quik',
 		     path => '/etc/quik.conf',
 		     list => \&lilo_list,
-		     update => \&lilo_update,
-		     is_boot_loader => 1},
+		     update => \&lilo_update},
 		    {packages => 'yaboot',
 		     path => '/etc/yaboot.conf',
 		     list => \&lilo_list,
-		     update => \&lilo_update,
-		     post_update => \&yaboot_post,
-		     is_boot_loader => 1},
+		     update => \&lilo_update},
 		    {packages => 'elilo',
 		     path => '/etc/elilo.conf',
 		     list => \&lilo_list,
-		     update => \&elilo_update,
-		     post_update => \&elilo_post,
-		     is_boot_loader => 1},
+		     update => \&lilo_update,
+		     post_update => \&elilo_post},
+		    {packages => 'palo',
+		     path => '/etc/palo.conf',
+		     list => \&palo_list,
+		     update => \&palo_update,
+		     post_update => \&palo_post},
+		    {packages => 'delo',
+		     path => '/etc/delo.conf',
+		     list => \&delo_list,
+		     update => \&delo_update},
+		    {packages => 'arcboot',
+		     path => '/etc/arcboot.conf',
+		     list => \&delo_list,
+		     update => \&delo_update},
 		    {packages => 'extlinux',
 		     path => extlinux_old_path(),
 		     list => \&extlinux_old_list,
 		     update => \&extlinux_old_update,
-		     post_update => \&extlinux_post,
-		     is_boot_loader => 1},
+		     post_update => \&extlinux_post},
 		    {packages => 'extlinux',
 		     path => '/etc/default/extlinux',
 		     list => \&extlinux_new_list,
 		     update => \&extlinux_new_update,
-		     post_update => \&extlinux_post,
-		     is_boot_loader => 1},
+		     post_update => \&extlinux_post},
+		    {packages => 'aboot',
+		     path => '/etc/aboot.conf',
+		     list => \&aboot_list,
+		     update => \&aboot_update},
 		    {packages => 'udev',
 		     path => '/etc/udev/rules.d/70-persistent-cd.rules',
 		     needs_update => \&udev_cd_needs_update,
@@ -1003,23 +1146,7 @@ my @config_files = ({packages => 'mount',
 		    {packages => 'uswsusp',
 		     path => '/etc/uswsusp.conf',
 		     list => \&uswsusp_resume_list,
-		     update => \&uswsusp_resume_update},
-		    {packages => 'cryptsetup',
-		     path => '/etc/crypttab',
-		     list => \&cryptsetup_list,
-		     update => \&cryptsetup_update},
-		    # mdadm.conf requires manual update because it may
-		    # contain wildcards.
-		    {packages => 'mdadm',
-		     path => '/etc/mdadm/mdadm.conf',
-		     list => \&mdadm_list},
-		    # hdparm.conf requires manual update because it
-		    # (1) refers to whole disks (2) might not work
-		    # properly with the new drivers (3) is in a very
-		    # special format.
-		    {packages => 'hdparm',
-		     path => '/etc/hdparm.conf',
-		     list => \&hdparm_list});
+		     update => \&uswsusp_resume_update});
 
 ### Filesystem labels and UUIDs
 
@@ -1156,11 +1283,10 @@ my %filesystem_types = (
     );
 
 my %bdev_map;
+my @matched_configs;
 my %id_map;
 
 sub scan_config_files {
-    my @configs;
-
     # Find all IDE/SCSI disks mentioned in configurations
     for my $config (@config_files) {
 	# Is the file present?
@@ -1173,7 +1299,7 @@ sub scan_config_files {
 	    if ($! == POSIX::ENOENT) {
 		next;
 	    }
-	    die "$!";
+	    die $!;
 	}
 
 	# Are any of the related packages wanted or installed?
@@ -1191,36 +1317,28 @@ sub scan_config_files {
 
 	my @matched_bdevs = ();
 	my $id_map_text;
-	my $needs_update;
 
 	if (exists($config->{needs_update})) {
 	    $id_map_text = &{$config->{needs_update}}($file);
-	    $needs_update = defined($id_map_text) && $id_map_text ne '';
-	} elsif (exists($config->{list})) {
+	} else {
 	    for my $bdev (&{$config->{list}}($file)) {
-		# Match standard IDE and SCSI device names, plus wildcards
-		# in disk device names to allow for mdadm insanity.
-		if ($bdev =~ m{^/dev/(?:[hs]d[a-z\?\*][\d\?\*]*|
-                                        s(?:cd|r)\d+)$}x &&
-		    ($bdev =~ m/[\?\*]/ || -b $bdev)) {
+		if ($bdev =~ m{^/dev/(?:[hs]d[a-z]\d*|s(?:cd|r)\d+)$} &&
+		    -b $bdev) {
 		    $bdev_map{$bdev} = {};
 		    push @matched_bdevs, $bdev;
 		}
 	    }
-	    $needs_update = @matched_bdevs > 0;
-	} else {
-	    # Needs manual update
-	    $needs_update = 1;
 	}
 
-	push @configs, {config => $config,
-			devices => \@matched_bdevs,
-			id_map_text => $id_map_text,
-			installed => $installed,
-			needs_update => $needs_update};
+	if (@matched_bdevs || $id_map_text) {
+	    push @matched_configs, {config => $config,
+				    devices => \@matched_bdevs,
+				    id_map_text => $id_map_text,
+				    installed => $installed};
+	}
     }
 
-    my $fstab = new FileHandle('/etc/fstab', 'r') or die "$!";
+    my $fstab = new FileHandle('/etc/fstab', 'r');
     while (1) {
 	my ($text, $bdev, $path, $type) = fstab_next($fstab);
 	last unless defined($text);
@@ -1230,8 +1348,6 @@ sub scan_config_files {
 	}
     }
     $fstab->close();
-
-    return @configs;
 }
 
 sub add_tag {
@@ -1250,41 +1366,20 @@ sub add_tag {
 }
 
 sub scan_devices {
-    my $id_command;
-    if (-x '/sbin/vol_id') {
-	$id_command = '/sbin/vol_id';
-    } else {
-	$id_command = 'blkid -o udev -s LABEL -s UUID -s TYPE';
-    }
     for (`blkid -o device`) {
 	chomp;
 	my $bdev = $_;
-	for (`$id_command '$bdev'`) {
+	for (`blkid -o udev -s LABEL -s UUID '$bdev'`) {
 	    if (/^ID_FS_(LABEL|UUID)_ENC=(.+)\n$/) {
 		add_tag($bdev, $1, $2);
-	    } elsif (/^ID_FS_TYPE=(.+)\n$/ && exists($bdev_map{$bdev})) {
-		$bdev_map{$bdev}->{type} //= $1;
 	    }
 	}
     }
 
-    # Discard UUIDs for LVM2 PVs, as we assume there are symlinks for all
-    # UUIDs under /dev/disk/by-uuid and this is not true for PVs.
     # Discard all labels and UUIDs(!) that are ambiguous.
-    # Discard all labels with 'unsafe' characters (escaped by blkid using
-    # backslashes) as they will not be usable in all configuration files.
-    # Similarly for '#' which blkid surprisingly does not consider unsafe.
-    # Sort each device's IDs in reverse lexical order so that UUIDs are
-    # preferred.
     for my $bdev (keys(%bdev_map)) {
-	if ($bdev_map{$bdev}->{type} eq 'LVM2_member') {
-	    @{$bdev_map{$bdev}->{ids}} = ();
-	} else {
-	    @{$bdev_map{$bdev}->{ids}} =
-		sort({$b cmp $a}
-		     grep({ @{$id_map{$_}} == 1 && $_ !~ /[\\#]/ }
-			  @{$bdev_map{$bdev}->{ids}}));
-	}
+	@{$bdev_map{$bdev}->{ids}} = grep({ $#{$id_map{$_}} == 0 }
+					  @{$bdev_map{$bdev}->{ids}});
     }
 
     # Add persistent aliases for CD/DVD/BD drives
@@ -1325,7 +1420,7 @@ sub assign_new_ids {
 	    next;
 	}
 
-	my $label_len = $filesystem_types{$type}->{label_len};
+	my $label_len = $filesystem_types{$type}->{len};
 	my $label;
 	use bytes; # string lengths are in bytes
 
@@ -1387,16 +1482,19 @@ sub set_new_ids {
 }
 
 sub update_config {
-    my $map = shift;
+    my %map;
+    for my $bdev (keys(%bdev_map)) {
+	$map{$bdev} = $bdev_map{$bdev}->{ids}->[0];
+    }
 
-    for my $match (@_) {
+    for my $match (@matched_configs) {
 	# Generate a new config
 	my $path = $match->{config}->{path};
 	my $old = new FileHandle($path, 'r') or die "$!";
 	my $new = new FileHandle("$path.new", POSIX::O_WRONLY | POSIX::O_CREAT,
 				 0600)
 	    or die "$!";
-	&{$match->{config}->{update}}($old, $new, $map);
+	&{$match->{config}->{update}}($old, $new, \%map);
 	$old->close();
 	$new->close();
 
@@ -1418,56 +1516,16 @@ sub update_config {
     }
 }
 
-sub update_all {
-    # The update process may be aborted if a command fails, but we now
-    # want to recover and ask the user what to do.  We can use 'do' to
-    # prevent 'die' from exiting the process, but we also need to
-    # capture and present error messages using debconf as they may
-    # otherwise be hidden.  Therefore, we fork and capture stdout and
-    # stderr from the update process in the main process.
-    my $pid = open(PIPE, '-|');
-    return (-1, '') unless defined $pid;
-
-    if ($pid == 0) {
-	# Complete redirection
-	# </dev/null
-	POSIX::close(0);
-	POSIX::open('/dev/null', POSIX::O_RDONLY) or die "$!";
-	# 2>&1
-	POSIX::dup2(1, 2) or die "$!";
-
-	# Do the update
-	set_new_ids();
-	update_config(@_);
-	exit;
-    } else {
-	my @output = ();
-	while (<PIPE>) {
-	    push @output, $_;
-	}
-	close(PIPE);
-	return ($?, join('', @output));
-    }
-}
-
 sub transition {
     use Debconf::Client::ConfModule ':all';
 
-retry:
     %bdev_map = ();
+    @matched_configs = ();
     %id_map = ();
 
-    my @found_configs = scan_config_files();
-    my @matched_configs = grep({$_->{needs_update}} @found_configs);
-    my @auto_configs = grep({defined($_->{config}->{update})} @matched_configs);
-    my $found_boot_loader =
-	grep({$_->{config}->{is_boot_loader} && $_->{installed}} @found_configs);
-    my %update_map = ();
+    scan_config_files();
 
-    # We can skip all of this if we didn't find any configuration
-    # files that need conversion and we found the configuration file
-    # for an installed boot loader.
-    if (!@matched_configs && $found_boot_loader) {
+    if ($#matched_configs < 0) {
 	return;
     }
 
@@ -1485,26 +1543,10 @@ retry:
     ($ret, $answer) = get($question);
     die "Error retrieving answer for $question: $answer" if $ret;
 
-    if (@auto_configs && $answer eq 'true') {
+    if ($answer eq 'true') {
 	scan_devices();
 	assign_new_ids();
 
-	# Construct the device ID update map
-	for my $bdev (keys(%bdev_map)) {
-	    if (@{$bdev_map{$bdev}->{ids}}) {
-		$update_map{$bdev} = $bdev_map{$bdev}->{ids}->[0];
-	    }
-	}
-
-	# Weed out configurations which will be unaffected by this
-	# mapping or by a custom mapping described in id_map_text.
-	@auto_configs = grep({ defined($_->{id_map_text}) ||
-				   grep({exists($update_map{$_})}
-					@{$_->{devices}}) }
-			     @auto_configs);
-    }
-
-    if (@auto_configs && $answer eq 'true') {
 	if (grep({$bdev_map{$_}->{new_id}} keys(%bdev_map))) {
 	    $question = 'linux-base/disk-id-convert-plan';
 	    ($ret, $seen) = subst($question, 'relabel',
@@ -1519,14 +1561,15 @@ retry:
 	}
 	($ret, $seen) = subst($question, 'id_map',
 			      join("\\n",
-				   map({sprintf("%s: %s", $_, $update_map{$_})}
-				       keys(%update_map)),
+				   map({sprintf("%s: %s", $_, $bdev_map{$_}->{ids}->[0])}
+				       grep({@{$bdev_map{$_}->{ids}}}
+					    keys(%bdev_map))),
 				   grep({defined}
-					map({$_->{id_map_text}} @auto_configs))));
+					map({$_->{id_map_text}} @matched_configs))));
 	die "Error setting debconf substitutions in $question: $seen" if $ret;
 	($ret, $seen) = subst($question, 'files',
 			      join(', ',
-				   map({$_->{config}->{path}} @auto_configs)));
+				   map({$_->{config}->{path}} @matched_configs)));
 	die "Error setting debconf substitutions in $question: $seen" if $ret;
 	($ret, $seen) = input('high', $question);
 	if ($ret && $ret != 30) {
@@ -1540,44 +1583,19 @@ retry:
 	die "Error retrieving answer for $question: $answer" if $ret;
     
 	if ($answer eq 'true') {
-	    my ($rc, $output) = update_all(\%update_map, @auto_configs);
-	    if ($rc != 0) {
-		# Display output of update commands
-		$question = 'linux-base/disk-id-update-failed';
-		$output =~ s/\n/\\n/g;
-		($ret, $seen) = subst($question, 'output', $output);
-		die "Error setting debconf substitutions in $question: $seen"
-		    if $ret;
-		($ret, $seen) = input('high', $question);
-		if ($ret && $ret != 30) {
-		    die "Error setting debconf question $question: $seen";
-		}
-		($ret, $seen) = go();
-		if ($ret && $ret != 30) {
-		    die "Error asking debconf question $question: $seen";
-		}
-
-		# Mark previous questions as unseen
-		fset('linux-base/disk-id-convert-auto', 'seen', 'false');
-		fset('linux-base/disk-id-convert-plan', 'seen', 'false');
-		fset('linux-base/disk-id-convert-plan-no-relabel', 'seen',
-		     'false');
-		goto retry;
-	    }
+	    set_new_ids();
+	    update_config();
 	}
     }
 
     my @unconv_files = ();
     for my $match (@matched_configs) {
-	if (!defined($match->{config}->{update})) {
-	    push @unconv_files, $match->{config}->{path};
-	} else {
-	    my @unconv_bdevs = grep({!exists($update_map{$_})}
-				    @{$match->{devices}});
-	    if (@unconv_bdevs) {
-		push @unconv_files, sprintf('%s: %s', $match->{config}->{path},
-					    join(', ',@unconv_bdevs));
-	    }
+	my @unconv_bdevs = grep({!exists($bdev_map{$_}->{ids}) ||
+				     @{$bdev_map{$_}->{ids}} == 0}
+				@{$match->{devices}});
+	if (@unconv_bdevs) {
+	    push @unconv_files, sprintf('%s: %s', $match->{config}->{path},
+					join(', ',@unconv_bdevs));
 	}
     }
     if (@unconv_files) {
@@ -1594,104 +1612,19 @@ retry:
 	    die "Error showing debconf note $question: $seen";
 	}
     }
-
-    # Also note whether some (unknown) boot loader configuration file
-    # must be manually converted.
-    if (!$found_boot_loader) {
-	$question = 'linux-base/disk-id-manual-boot-loader';
-	($ret, $seen) = input('high', $question);
-	if ($ret && $ret != 30) {
-	    die "Error setting debconf note $question: $seen";
-	}
-	($ret, $seen) = go();
-	if ($ret && $ret != 30) {
-	    die "Error showing debconf note $question: $seen";
-	}
-    }
-}
-
-package DebianKernel::BootloaderConfig;
-
-my %default_bootloader = (amd64 => 'lilo',
-			  i386  => 'lilo',
-			  ia64  => 'elilo',
-			  s390  => 'zipl');
-
-sub check {
-    use Debconf::Client::ConfModule ':all';
-
-    my ($deb_arch) = @_;
-
-    # Is there an historical 'default' boot loader for this architecture?
-    my $loader_exec = $default_bootloader{$deb_arch};
-    return unless defined($loader_exec);
-
-    # Is the boot loader installed?
-    my ($loaderloc) = grep(-x, map("$_/$loader_exec",
-				   map({ length($_) ? $_ : "." }
-				       split(/:/, $ENV{PATH}))));
-    return unless defined($loaderloc);
-
-    # Is do_bootloader explicitly set one way or the other?
-    my $do_bootloader;
-    if (my $conf = new FileHandle('/etc/kernel-img.conf', 'r')) {
-	while (<$conf>) {
-	    $do_bootloader = 0 if /^\s*do_bootloader\s*=\s*(no|false|0)\s*$/i;
-	    $do_bootloader = 1 if /^\s*do_bootloader\s*=\s*(yes|true|1)\s*$/i;
-	}
-	$conf->close();
-    }
-    return if defined($do_bootloader);
-
-    # Warn the user that do_bootloader is disabled by default.
-    my ($question, $ret, $seen);
-    $question = "linux-base/do-bootloader-default-changed";
-    ($ret,$seen) = input('high', "$question");
-    die "Error setting debconf question $question: $seen" if $ret && $ret != 30;
-    ($ret,$seen) = go();
-    die "Error asking debconf question $question: $seen" if $ret && $ret != 30;
 }
 
 package main;
 
 capb('escape');
 
-sub version_lessthan {
-    my ($left, $right) = @_;
-    return system('dpkg', '--compare-versions', $left, 'lt', $right) == 0;
+sub compare_versions {
+    return $AptPkg::Config::_config->system->versioning->compare(@_);
 }
 
-# No upgrade work is necessary during a fresh system installation.
-# But since linux-base is a new dependency of linux-image-* and did
-# not exist until needed for the libata transition, we cannot simply
-# test whether this is a fresh installation of linux-base.  Instead,
-# we test:
-# - does /etc/fstab exist yet (this won't even work without it), and
-# - are any linux-image-* packages installed yet?
-sub is_fresh_installation {
-    if (-f '/etc/fstab') {
-	for (`dpkg-query 2>/dev/null --showformat '\${status}\\n' -W 'linux-image-*'`) {
-	    return 0 if / installed\n$/;
-	}
-    }
-    return 1;
-}
-
-my $deb_arch = `dpkg --print-architecture`;
-chomp $deb_arch;
-
-if ($deb_arch ne 's390') {
-    my $libata_transition_ver =
-	($deb_arch eq 'i386' || $deb_arch eq 'amd64') ? '2.6.32-10' : '2.6.32-11';
-    if ($ARGV[0] eq 'reconfigure' || defined($ENV{DEBCONF_RECONFIGURE}) ||
-	(!is_fresh_installation() &&
-	 version_lessthan($ARGV[1], $libata_transition_ver))) {
-	DebianKernel::DiskId::transition();
-    }
-}
-
-if (!is_fresh_installation() && version_lessthan($ARGV[1], '2.6.32-18')) {
-    DebianKernel::BootloaderConfig::check($deb_arch);
+if ($ARGV[0] eq 'reconfigure' ||
+    compare_versions($ARGV[1], '2.6.32-10') < 0) {
+    DebianKernel::DiskId::transition();
 }
 
 exec("set -e\nset -- @ARGV\n" . << 'EOF');
