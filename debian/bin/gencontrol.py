@@ -129,9 +129,6 @@ class Gencontrol(Base):
 
         if config_entry_image.get('initramfs', True):
             generators = config_entry_image['initramfs-generators']
-            config_entry_commands_initramfs = self.config.merge('commands-image-initramfs-generators', arch, featureset, flavour)
-            commands = [config_entry_commands_initramfs[i] for i in generators if config_entry_commands_initramfs.has_key(i)]
-            makeflags['INITRD_CMD'] = ' '.join(commands)
             l = PackageRelationGroup()
             for i in generators:
                 i = config_entry_relations.get(i, i)
