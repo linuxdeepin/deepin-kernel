@@ -1,5 +1,4 @@
 PROGS = \
-	docproc \
 	fixdep
 
 OUTDIR = scripts/basic
