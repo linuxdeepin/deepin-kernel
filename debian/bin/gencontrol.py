@@ -38,7 +38,6 @@ class gencontrol(object):
 
     def do_main_setup(self, vars, makeflags):
         makeflags.update({
-            'MAJOR': self.version.linux_major,
             'VERSION': self.version.linux_version,
             'UPSTREAMVERSION': self.version.linux_upstream,
         })
@@ -58,7 +57,6 @@ class gencontrol(object):
             'upstreamversion': version.linux_upstream,
             'version': version.linux_version,
             'source_upstream': version.upstream,
-            'major': version.linux_major,
         }
 
     def process_relation(self, key, e, in_e, vars):

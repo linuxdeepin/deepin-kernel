@@ -94,9 +94,7 @@ class VersionLinux(Version):
     _version_linux_rules = ur"""
 ^
 (?P<version>
-    (?P<major>\d+\.\d+)
-    \.
-    \d+
+    \d+\.\d+\.\d+
 )
 (?:
     (\.\d+)
@@ -124,7 +122,6 @@ $
         if match is None:
             raise RuntimeError, "Invalid debian linux version"
         d = match.groupdict()
-        self.linux_major = d['major']
         self.linux_modifier = d['modifier']
         self.linux_version = d['version']
         if d['modifier'] is not None:

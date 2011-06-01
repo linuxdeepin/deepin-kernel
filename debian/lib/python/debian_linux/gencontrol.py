@@ -105,7 +105,6 @@ class Gencontrol(object):
 
     def do_main_setup(self, vars, makeflags, extra):
         makeflags.update({
-            'MAJOR': self.version.linux_major,
             'VERSION': self.version.linux_version,
             'UPSTREAMVERSION': self.version.linux_upstream,
             'ABINAME': self.abiname,
@@ -282,7 +281,6 @@ class Gencontrol(object):
             'upstreamversion': version.linux_upstream,
             'version': version.linux_version,
             'source_upstream': version.upstream,
-            'major': version.linux_major,
             'abiname': abiname,
         }
 
