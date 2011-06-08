@@ -196,7 +196,6 @@ class Gencontrol(Base):
         else:
             build_modules = True
             image = self.templates["control.image.type-%s" % config_entry_image['type']]
-            #image = self.templates["control.image.type-modulesinline"]
 
         config_entry_xen = self.config.merge('xen', arch, featureset, flavour)
         if config_entry_xen.get('dom0-support', False):
