@@ -177,22 +177,6 @@ class Gencontrol(Base):
         if config_entry_image['type'] == 'plain-s390-tape':
             image = self.templates["control.image.type-standalone"]
             build_modules = False
-        elif config_entry_image['type'] == 'plain-xen':
-            raise RuntimeError
-            image = self.templates["control.image.type-modulesextra"]
-            build_modules = True
-            config_entry_xen = self.config.merge('xen', arch, featureset, flavour)
-            if config_entry_xen.get('dom0-support', True):
-                p = self.process_packages(self.templates['control.xen-linux-system'], vars)
-                l = PackageRelationGroup()
-                xen_versions = []
-                for xen_flavour in config_entry_xen['flavours']:
-                    for version in config_entry_xen['versions']:
-                        l.append("xen-hypervisor-%s-%s" % (version, xen_flavour))
-                        xen_versions.append('%s-%s' % (version, xen_flavour))
-                makeflags['XEN_VERSIONS'] = ' '.join(xen_versions)
-                p[0]['Depends'].append(l)
-                packages_dummy.extend(p)
         else:
             build_modules = True
             image = self.templates["control.image.type-%s" % config_entry_image['type']]
