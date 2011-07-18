@@ -258,8 +258,6 @@ class Gencontrol(object):
                 value = self.process_relation(value, vars)
             elif isinstance(value, PackageDescription):
                 value = self.process_description(value, vars)
-            elif key.startswith('X-'):
-                continue
             else:
                 value = self.substitute(value, vars)
             entry[key] = value
