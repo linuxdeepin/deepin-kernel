@@ -63,6 +63,12 @@ class Gencontrol(Base):
         makefile.add('binary-arch_%s_real' % arch, cmds = cmds_binary_arch)
         makefile.add('source_%s_real' % arch, cmds = cmds_source)
 
+        # Shortcut to aid architecture bootstrapping
+        makefile.add('binary-libc-dev_%s' % arch,
+                     ['source_%s_real' % arch],
+                     ["$(MAKE) -f debian/rules.real install-libc-dev_%s %s" %
+                      (arch, makeflags)])
+
     def do_featureset_setup(self, vars, makeflags, arch, featureset, extra):
         config_base = self.config.merge('base', arch, featureset)
         makeflags['LOCALVERSION_HEADERS'] = vars['localversion_headers'] = vars['localversion']
