@@ -9,4 +9,4 @@ OUTDIR = .
 
 top_srcdir = .
 
-include $(top_srcdir)/Makefile.inc
+include $(top_srcdir)/debian/build/Makefile.inc

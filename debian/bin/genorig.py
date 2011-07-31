@@ -98,7 +98,7 @@ class Main(object):
 
     def generate(self):
         self.log("Generate orig\n")
-        orig = os.path.join(self.dir, self.orig, 'kbuild')
+        orig = os.path.join(self.dir, self.orig)
         temp = os.path.join(self.dir, 'temp')
         os.makedirs(os.path.join(orig, 'include', 'linux'))
         for i in 'COPYING', 'Kbuild', 'Makefile':

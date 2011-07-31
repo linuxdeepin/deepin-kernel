@@ -47,4 +47,4 @@ top_srcdir = ..
 
 VPATH = $(top_srcdir)/kbuild/scripts
 
-include $(top_srcdir)/Makefile.inc
+include $(top_srcdir)/debian/build/Makefile.inc
