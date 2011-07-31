@@ -12,12 +12,12 @@ top_srcdir = ../..
 include $(top_srcdir)/debian/build/Makefile.inc
 
 modpost.real-%:
-	$(MAKE) -f Makefile.real TYPE=$* SOURCEDIR=$(top_srcdir)/kbuild/scripts/mod
+	$(MAKE) -f Makefile.real TYPE=$* SOURCEDIR=$(top_srcdir)/scripts/mod
 
 %: %.o
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
 
-modpost.h: $(top_srcdir)/kbuild/scripts/mod/modpost.c
+modpost.h: $(top_srcdir)/scripts/mod/modpost.c
 	python ./gendef.py $< > $@
 
 modpost.o: modpost.c modpost.h
