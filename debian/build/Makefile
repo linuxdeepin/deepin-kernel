@@ -3,7 +3,8 @@ DATA = \
 	Makefile \
 
 SUBDIRS = \
-	scripts
+	scripts \
+	tools
 
 OUTDIR = .
 

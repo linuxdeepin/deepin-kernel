@@ -100,12 +100,22 @@ class Main(object):
         self.log("Generate orig\n")
         orig = os.path.join(self.dir, self.orig)
         temp = os.path.join(self.dir, 'temp')
-        os.makedirs(os.path.join(orig, 'include', 'linux'))
+        # TODO: move this informations somewhere else
+        os.mkdir(os.path.join(orig))
         for i in 'COPYING', 'Kbuild', 'Makefile':
             shutil.copyfile(os.path.join(temp, i), os.path.join(orig, i))
-        for i in 'input.h', 'license.h', 'mod_devicetable.h':
-            shutil.copyfile(os.path.join(temp, 'include', 'linux', i), os.path.join(orig, 'include', 'linux', i))
+        for i in 's390', 'x86':
+            os.makedirs(os.path.join(orig, 'arch', i, 'include'))
+            shutil.copyfile(os.path.join(temp, 'arch', i, 'Makefile'), os.path.join(orig, 'arch', i, 'Makefile'))
+            shutil.copytree(os.path.join(temp, 'arch', i, 'include', 'asm'), os.path.join(orig, 'arch', i, 'include', 'asm'))
+        os.mkdir(os.path.join(orig, 'arch', 'x86', 'lib'))
+        shutil.copyfile(os.path.join(temp, 'arch', 'x86', 'lib', 'memcpy_64.S'), os.path.join(orig, 'arch', 'x86', 'lib', 'memcpy_64.S'))
+        os.mkdir(os.path.join(orig, 'include'))
+        shutil.copytree(os.path.join(temp, 'include', 'linux'), os.path.join(orig, 'include', 'linux'))
+        os.mkdir(os.path.join(orig, 'lib'))
+        shutil.copyfile(os.path.join(temp, 'lib', 'rbtree.c'), os.path.join(orig, 'lib', 'rbtree.c'))
         shutil.copytree(os.path.join(temp, 'scripts'), os.path.join(orig, 'scripts'))
+        shutil.copytree(os.path.join(temp, 'tools'), os.path.join(orig, 'tools'))
 
     def tar(self):
         out = os.path.join("../orig", self.orig_tar)
