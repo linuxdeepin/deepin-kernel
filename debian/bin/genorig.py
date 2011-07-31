@@ -12,7 +12,7 @@ import subprocess
 from debian_linux.debian import Changelog, VersionLinux
 
 class Main(object):
-    def __init__(self, input_files, override_version):
+    def __init__(self, input_files, override_version, override_tag):
         self.log = sys.stdout.write
 
         self.input_files = input_files
@@ -24,11 +24,15 @@ class Main(object):
         if override_version:
             version = VersionLinux('%s-undef' % override_version)
 
-        self.log('Using source name %s, version %s\n' % (source, version.upstream))
+        self.version_dfsg = version.linux_dfsg
+        if self.version_dfsg is None:
+            self.version_dfsg = '0'
+
+        self.log('Using source name %s, version %s, dfsg %s\n' % (source, version.upstream, self.version_dfsg))
 
         self.orig = '%s-%s' % (source, version.upstream)
         self.orig_tar = '%s_%s.orig.tar.gz' % (source, version.upstream)
-        self.tag = 'v' + version.upstream.replace('~', '-')
+        self.tag = override_tag or ('v' + version.upstream.replace('~', '-'))
 
     def __call__(self):
         import tempfile
@@ -129,7 +133,8 @@ if __name__ == '__main__':
     from optparse import OptionParser
     parser = OptionParser(usage = "%prog [OPTION]... {TAR [PATCH] | REPO}")
     parser.add_option("-V", "--override-version", dest = "override_version", help = "Override version", metavar = "VERSION")
+    parser.add_option("-t", "--override-tag", dest = "override_tag", help = "Override tag", metavar = "TAG")
     options, args = parser.parse_args()
 
     assert 1 <= len(args) <= 2
-    Main(args, options.override_version)()
+    Main(args, options.override_version, options.override_tag)()
