@@ -1,97 +1,3 @@
-Index: linux-2.6/drivers/rtc/interface.c
-===================================================================
---- linux-2.6.orig/drivers/rtc/interface.c
-+++ linux-2.6/drivers/rtc/interface.c
-@@ -636,6 +636,29 @@ void rtc_irq_unregister(struct rtc_devic
- }
- EXPORT_SYMBOL_GPL(rtc_irq_unregister);
- 
-+static int rtc_update_hrtimer(struct rtc_device *rtc, int enabled)
-+{
-+	/*
-+	 * We unconditionally cancel the timer here, because otherwise
-+	 * we could run into BUG_ON(timer->state != HRTIMER_STATE_CALLBACK);
-+	 * when we manage to start the timer before the callback
-+	 * returns HRTIMER_RESTART.
-+	 *
-+	 * We cannot use hrtimer_cancel() here as a running callback
-+	 * could be blocked on rtc->irq_task_lock and hrtimer_cancel()
-+	 * would spin forever.
-+	 */
-+	if (hrtimer_try_to_cancel(&rtc->pie_timer) < 0)
-+		return -1;
-+
-+	if (enabled) {
-+		ktime_t period = ktime_set(0, NSEC_PER_SEC / rtc->irq_freq);
-+
-+		hrtimer_start(&rtc->pie_timer, period, HRTIMER_MODE_REL);
-+	}
-+	return 0;
-+}
-+
- /**
-  * rtc_irq_set_state - enable/disable 2^N Hz periodic IRQs
-  * @rtc: the rtc device
-@@ -651,21 +674,21 @@ int rtc_irq_set_state(struct rtc_device 
- 	int err = 0;
- 	unsigned long flags;
- 
-+retry:
- 	spin_lock_irqsave(&rtc->irq_task_lock, flags);
- 	if (rtc->irq_task != NULL && task == NULL)
- 		err = -EBUSY;
- 	if (rtc->irq_task != task)
- 		err = -EACCES;
--
--	if (enabled) {
--		ktime_t period = ktime_set(0, NSEC_PER_SEC/rtc->irq_freq);
--		hrtimer_start(&rtc->pie_timer, period, HRTIMER_MODE_REL);
--	} else {
--		hrtimer_cancel(&rtc->pie_timer);
-+	if (!err) {
-+		if (rtc_update_hrtimer(rtc, enabled) < 0) {
-+			spin_unlock_irqrestore(&rtc->irq_task_lock, flags);
-+			cpu_relax();
-+			goto retry;
-+		}
-+		rtc->pie_enabled = enabled;
- 	}
--	rtc->pie_enabled = enabled;
- 	spin_unlock_irqrestore(&rtc->irq_task_lock, flags);
--
- 	return err;
- }
- EXPORT_SYMBOL_GPL(rtc_irq_set_state);
-@@ -685,22 +708,20 @@ int rtc_irq_set_freq(struct rtc_device *
- 	int err = 0;
- 	unsigned long flags;
- 
--	if (freq <= 0)
-+	if (freq <= 0 || freq > 5000)
- 		return -EINVAL;
--
-+retry:
- 	spin_lock_irqsave(&rtc->irq_task_lock, flags);
- 	if (rtc->irq_task != NULL && task == NULL)
- 		err = -EBUSY;
- 	if (rtc->irq_task != task)
- 		err = -EACCES;
--	if (err == 0) {
-+	if (!err) {
- 		rtc->irq_freq = freq;
--		if (rtc->pie_enabled) {
--			ktime_t period;
--			hrtimer_cancel(&rtc->pie_timer);
--			period = ktime_set(0, NSEC_PER_SEC/rtc->irq_freq);
--			hrtimer_start(&rtc->pie_timer, period,
--					HRTIMER_MODE_REL);
-+		if (rtc->pie_enabled && rtc_update_hrtimer(rtc, 1) < 0) {
-+			spin_unlock_irqrestore(&rtc->irq_task_lock, flags);
-+			cpu_relax();
-+			goto retry;
- 		}
- 	}
- 	spin_unlock_irqrestore(&rtc->irq_task_lock, flags);
 Index: linux-2.6/kernel/trace/ftrace.c
 ===================================================================
 --- linux-2.6.orig/kernel/trace/ftrace.c
@@ -224,7 +130,7 @@ Index: linux-2.6/drivers/block/floppy.c
  	current_drive = 0;
  	initialized = true;
  	if (have_no_fdc) {
-@@ -4368,7 +4368,7 @@ out_unreg_blkdev:
+@@ -4368,7 +4368,7 @@ static int __init floppy_init(void)
  	unregister_blkdev(FLOPPY_MAJOR, "fd");
  out_put_disk:
  	while (dr--) {
@@ -393,7 +299,7 @@ Index: linux-2.6/kernel/sched.c
  
  	success = 1; /* we're going to change ->state */
  	cpu = task_cpu(p);
-@@ -2735,40 +2754,6 @@ out:
+@@ -2735,40 +2754,6 @@ try_to_wake_up(struct task_struct *p, un
  }
  
  /**
@@ -516,7 +422,7 @@ Index: linux-2.6/kernel/sched.c
  {
  	struct task_struct *prev, *next;
  	unsigned long *switch_count;
-@@ -4272,29 +4273,6 @@ need_resched:
+@@ -4272,29 +4273,6 @@ asmlinkage void __sched schedule(void)
  		} else {
  			deactivate_task(rq, prev, DEQUEUE_SLEEP);
  			prev->on_rq = 0;
@@ -546,7 +452,7 @@ Index: linux-2.6/kernel/sched.c
  		}
  		switch_count = &prev->nvcsw;
  	}
-@@ -4328,12 +4306,62 @@ need_resched:
+@@ -4328,12 +4306,62 @@ asmlinkage void __sched schedule(void)
  
  	post_schedule(rq);
  
@@ -558,7 +464,7 @@ Index: linux-2.6/kernel/sched.c
 +
 +static inline void sched_submit_work(struct task_struct *tsk)
 +{
-+	if (!tsk->state || tsk->pi_blocked_on)
++	if (!tsk->state || tsk_is_pi_blocked(tsk))
 +		return;
 +
 +	/*
@@ -578,7 +484,7 @@ Index: linux-2.6/kernel/sched.c
 +
 +static inline void sched_update_worker(struct task_struct *tsk)
 +{
-+	if (tsk->pi_blocked_on)
++	if (tsk_is_pi_blocked(tsk))
 +		return;
 +
 +	if (tsk->flags & PF_WQ_WORKER)
@@ -628,11 +534,10 @@ Index: linux-2.6/kernel/sched.c
  		local_irq_disable();
  		sub_preempt_count(PREEMPT_ACTIVE);
  
-@@ -4827,10 +4855,8 @@ long __sched sleep_on_timeout(wait_queue
- }
+@@ -4828,9 +4856,8 @@ long __sched sleep_on_timeout(wait_queue
  EXPORT_SYMBOL(sleep_on_timeout);
  
--#ifdef CONFIG_RT_MUTEXES
+ #ifdef CONFIG_RT_MUTEXES
 -
  /*
 - * rt_mutex_setprio - set the current priority of a task
@@ -640,7 +545,7 @@ Index: linux-2.6/kernel/sched.c
   * @p: task
   * @prio: prio value (kernel-internal form)
   *
-@@ -4839,7 +4865,7 @@ EXPORT_SYMBOL(sleep_on_timeout);
+@@ -4839,7 +4866,7 @@ EXPORT_SYMBOL(sleep_on_timeout);
   *
   * Used by the rt_mutex code to implement priority inheritance logic.
   */
@@ -649,7 +554,7 @@ Index: linux-2.6/kernel/sched.c
  {
  	int oldprio, on_rq, running;
  	struct rq *rq;
-@@ -4849,6 +4875,24 @@ void rt_mutex_setprio(struct task_struct
+@@ -4849,6 +4876,24 @@ void rt_mutex_setprio(struct task_struct
  
  	rq = __task_rq_lock(p);
  
@@ -674,20 +579,18 @@ Index: linux-2.6/kernel/sched.c
  	trace_sched_pi_setprio(p, prio);
  	oldprio = p->prio;
  	prev_class = p->sched_class;
-@@ -4872,11 +4916,10 @@ void rt_mutex_setprio(struct task_struct
+@@ -4872,9 +4917,9 @@ void rt_mutex_setprio(struct task_struct
  		enqueue_task(rq, p, oldprio < prio ? ENQUEUE_HEAD : 0);
  
  	check_class_changed(rq, p, prev_class, oldprio);
 +out_unlock:
  	__task_rq_unlock(rq);
  }
- 
--#endif
 -
+ #endif
+ 
  void set_user_nice(struct task_struct *p, long nice)
- {
- 	int old_prio, delta, on_rq;
-@@ -5543,7 +5586,7 @@ SYSCALL_DEFINE0(sched_yield)
+@@ -5543,7 +5588,7 @@ SYSCALL_DEFINE0(sched_yield)
  	__release(rq->lock);
  	spin_release(&rq->lock.dep_map, 1, _THIS_IP_);
  	do_raw_spin_unlock(&rq->lock);
@@ -696,7 +599,7 @@ Index: linux-2.6/kernel/sched.c
  
  	schedule();
  
-@@ -5557,9 +5600,17 @@ static inline int should_resched(void)
+@@ -5557,9 +5602,17 @@ static inline int should_resched(void)
  
  static void __cond_resched(void)
  {
@@ -717,7 +620,7 @@ Index: linux-2.6/kernel/sched.c
  }
  
  int __sched _cond_resched(void)
-@@ -5600,6 +5651,7 @@ int __cond_resched_lock(spinlock_t *lock
+@@ -5600,6 +5653,7 @@ int __cond_resched_lock(spinlock_t *lock
  }
  EXPORT_SYMBOL(__cond_resched_lock);
  
@@ -725,7 +628,7 @@ Index: linux-2.6/kernel/sched.c
  int __sched __cond_resched_softirq(void)
  {
  	BUG_ON(!in_softirq());
-@@ -5613,6 +5665,7 @@ int __sched __cond_resched_softirq(void)
+@@ -5613,6 +5667,7 @@ int __sched __cond_resched_softirq(void)
  	return 0;
  }
  EXPORT_SYMBOL(__cond_resched_softirq);
@@ -733,7 +636,7 @@ Index: linux-2.6/kernel/sched.c
  
  /**
   * yield - yield the current processor to other threads.
-@@ -5859,7 +5912,7 @@ void show_state_filter(unsigned long sta
+@@ -5859,7 +5914,7 @@ void show_state_filter(unsigned long sta
  	printk(KERN_INFO
  		"  task                        PC stack   pid father\n");
  #endif
@@ -742,7 +645,7 @@ Index: linux-2.6/kernel/sched.c
  	do_each_thread(g, p) {
  		/*
  		 * reset the NMI-timeout, listing all files on a slow
-@@ -5875,7 +5928,7 @@ void show_state_filter(unsigned long sta
+@@ -5875,7 +5930,7 @@ void show_state_filter(unsigned long sta
  #ifdef CONFIG_SCHED_DEBUG
  	sysrq_sched_debug_show();
  #endif
@@ -751,7 +654,7 @@ Index: linux-2.6/kernel/sched.c
  	/*
  	 * Only show locks if all tasks are dumped:
  	 */
-@@ -5997,12 +6050,12 @@ static inline void sched_init_granularit
+@@ -5997,12 +6052,12 @@ static inline void sched_init_granularit
  #ifdef CONFIG_SMP
  void do_set_cpus_allowed(struct task_struct *p, const struct cpumask *new_mask)
  {
@@ -768,7 +671,7 @@ Index: linux-2.6/kernel/sched.c
  }
  
  /*
-@@ -6053,7 +6106,7 @@ int set_cpus_allowed_ptr(struct task_str
+@@ -6053,7 +6108,7 @@ int set_cpus_allowed_ptr(struct task_str
  	do_set_cpus_allowed(p, new_mask);
  
  	/* Can the task run on the task's current CPU? If so, we're done */
@@ -777,7 +680,7 @@ Index: linux-2.6/kernel/sched.c
  		goto out;
  
  	dest_cpu = cpumask_any_and(cpu_active_mask, new_mask);
-@@ -6072,6 +6125,83 @@ out:
+@@ -6072,6 +6127,83 @@ int set_cpus_allowed_ptr(struct task_str
  }
  EXPORT_SYMBOL_GPL(set_cpus_allowed_ptr);
  
@@ -861,7 +764,7 @@ Index: linux-2.6/kernel/sched.c
  /*
   * Move (not current) task off this cpu, onto dest cpu. We're doing
   * this because either it can't run here any more (set_cpus_allowed()
-@@ -6100,7 +6230,7 @@ static int __migrate_task(struct task_st
+@@ -6100,7 +6232,7 @@ static int __migrate_task(struct task_st
  	if (task_cpu(p) != src_cpu)
  		goto done;
  	/* Affinity changed (again). */
@@ -870,7 +773,7 @@ Index: linux-2.6/kernel/sched.c
  		goto fail;
  
  	/*
-@@ -6142,6 +6272,8 @@ static int migration_cpu_stop(void *data
+@@ -6142,6 +6274,8 @@ static int migration_cpu_stop(void *data
  
  #ifdef CONFIG_HOTPLUG_CPU
  
@@ -879,7 +782,7 @@ Index: linux-2.6/kernel/sched.c
  /*
   * Ensures that the idle task is using init_mm right before its cpu goes
   * offline.
-@@ -6154,7 +6286,12 @@ void idle_task_exit(void)
+@@ -6154,7 +6288,12 @@ void idle_task_exit(void)
  
  	if (mm != &init_mm)
  		switch_mm(mm, &init_mm, current);
@@ -893,7 +796,7 @@ Index: linux-2.6/kernel/sched.c
  }
  
  /*
-@@ -6472,6 +6609,12 @@ migration_call(struct notifier_block *nf
+@@ -6472,6 +6611,12 @@ migration_call(struct notifier_block *nf
  		migrate_nr_uninterruptible(rq);
  		calc_global_load_remove(rq);
  		break;
@@ -906,7 +809,7 @@ Index: linux-2.6/kernel/sched.c
  #endif
  	}
  
-@@ -8188,7 +8331,8 @@ void __init sched_init(void)
+@@ -8188,7 +8333,8 @@ void __init sched_init(void)
  #ifdef CONFIG_DEBUG_SPINLOCK_SLEEP
  static inline int preempt_count_equals(int preempt_offset)
  {
@@ -942,7 +845,7 @@ Index: linux-2.6/block/blk-core.c
  	q->request_fn(q);
  }
  EXPORT_SYMBOL(__blk_run_queue);
-@@ -2667,11 +2671,11 @@ static void queue_unplugged(struct reque
+@@ -2670,11 +2674,11 @@ static void queue_unplugged(struct reque
  	 * this lock).
  	 */
  	if (from_schedule) {
@@ -956,7 +859,7 @@ Index: linux-2.6/block/blk-core.c
  	}
  
  }
-@@ -2697,7 +2701,6 @@ static void flush_plug_callbacks(struct 
+@@ -2700,7 +2704,6 @@ static void flush_plug_callbacks(struct
  void blk_flush_plug_list(struct blk_plug *plug, bool from_schedule)
  {
  	struct request_queue *q;
@@ -964,7 +867,7 @@ Index: linux-2.6/block/blk-core.c
  	struct request *rq;
  	LIST_HEAD(list);
  	unsigned int depth;
-@@ -2718,11 +2721,6 @@ void blk_flush_plug_list(struct blk_plug
+@@ -2721,11 +2724,6 @@ void blk_flush_plug_list(struct blk_plug
  	q = NULL;
  	depth = 0;
  
@@ -976,7 +879,7 @@ Index: linux-2.6/block/blk-core.c
  	while (!list_empty(&list)) {
  		rq = list_entry_rq(list.next);
  		list_del_init(&rq->queuelist);
-@@ -2735,7 +2733,7 @@ void blk_flush_plug_list(struct blk_plug
+@@ -2738,7 +2736,7 @@ void blk_flush_plug_list(struct blk_plug
  				queue_unplugged(q, depth, from_schedule);
  			q = rq->q;
  			depth = 0;
@@ -985,7 +888,7 @@ Index: linux-2.6/block/blk-core.c
  		}
  		/*
  		 * rq is already accounted, so use raw insert
-@@ -2753,8 +2751,6 @@ void blk_flush_plug_list(struct blk_plug
+@@ -2756,8 +2754,6 @@ void blk_flush_plug_list(struct blk_plug
  	 */
  	if (q)
  		queue_unplugged(q, depth, from_schedule);
@@ -1178,6 +1081,327 @@ Index: linux-2.6/kernel/workqueue_sched.h
 -				       unsigned int cpu);
 +void wq_worker_running(struct task_struct *task);
 +void wq_worker_sleeping(struct task_struct *task);
+Index: linux-2.6/arch/x86/kernel/cpu/intel_cacheinfo.c
+===================================================================
+--- linux-2.6.orig/arch/x86/kernel/cpu/intel_cacheinfo.c
++++ linux-2.6/arch/x86/kernel/cpu/intel_cacheinfo.c
+@@ -151,28 +151,17 @@ union _cpuid4_leaf_ecx {
+ 	u32 full;
+ };
+ 
+-struct amd_l3_cache {
+-	struct	 amd_northbridge *nb;
+-	unsigned indices;
+-	u8	 subcaches[4];
+-};
+-
+-struct _cpuid4_info {
++struct _cpuid4_info_regs {
+ 	union _cpuid4_leaf_eax eax;
+ 	union _cpuid4_leaf_ebx ebx;
+ 	union _cpuid4_leaf_ecx ecx;
+ 	unsigned long size;
+-	struct amd_l3_cache *l3;
+-	DECLARE_BITMAP(shared_cpu_map, NR_CPUS);
++	struct amd_northbridge *nb;
+ };
+ 
+-/* subset of above _cpuid4_info w/o shared_cpu_map */
+-struct _cpuid4_info_regs {
+-	union _cpuid4_leaf_eax eax;
+-	union _cpuid4_leaf_ebx ebx;
+-	union _cpuid4_leaf_ecx ecx;
+-	unsigned long size;
+-	struct amd_l3_cache *l3;
++struct _cpuid4_info {
++	struct _cpuid4_info_regs base;
++	DECLARE_BITMAP(shared_cpu_map, NR_CPUS);
+ };
+ 
+ unsigned short			num_cache_leaves;
+@@ -314,12 +303,13 @@ struct _cache_attr {
+ /*
+  * L3 cache descriptors
+  */
+-static void __cpuinit amd_calc_l3_indices(struct amd_l3_cache *l3)
++static void __cpuinit amd_calc_l3_indices(struct amd_northbridge *nb)
+ {
++	struct amd_l3_cache *l3 = &nb->l3_cache;
+ 	unsigned int sc0, sc1, sc2, sc3;
+ 	u32 val = 0;
+ 
+-	pci_read_config_dword(l3->nb->misc, 0x1C4, &val);
++	pci_read_config_dword(nb->misc, 0x1C4, &val);
+ 
+ 	/* calculate subcache sizes */
+ 	l3->subcaches[0] = sc0 = !(val & BIT(0));
+@@ -333,33 +323,16 @@ static void __cpuinit amd_calc_l3_indice
+ static void __cpuinit amd_init_l3_cache(struct _cpuid4_info_regs *this_leaf,
+ 					int index)
+ {
+-	static struct amd_l3_cache *__cpuinitdata l3_caches;
+ 	int node;
+ 
+ 	/* only for L3, and not in virtualized environments */
+-	if (index < 3 || amd_nb_num() == 0)
++	if (index < 3)
+ 		return;
+ 
+-	/*
+-	 * Strictly speaking, the amount in @size below is leaked since it is
+-	 * never freed but this is done only on shutdown so it doesn't matter.
+-	 */
+-	if (!l3_caches) {
+-		int size = amd_nb_num() * sizeof(struct amd_l3_cache);
+-
+-		l3_caches = kzalloc(size, GFP_ATOMIC);
+-		if (!l3_caches)
+-			return;
+-	}
+-
+ 	node = amd_get_nb_id(smp_processor_id());
+-
+-	if (!l3_caches[node].nb) {
+-		l3_caches[node].nb = node_to_amd_nb(node);
+-		amd_calc_l3_indices(&l3_caches[node]);
+-	}
+-
+-	this_leaf->l3 = &l3_caches[node];
++	this_leaf->nb = node_to_amd_nb(node);
++	if (this_leaf->nb && !this_leaf->nb->l3_cache.indices)
++		amd_calc_l3_indices(this_leaf->nb);
+ }
+ 
+ /*
+@@ -369,11 +342,11 @@ static void __cpuinit amd_init_l3_cache(
+  *
+  * @returns: the disabled index if used or negative value if slot free.
+  */
+-int amd_get_l3_disable_slot(struct amd_l3_cache *l3, unsigned slot)
++int amd_get_l3_disable_slot(struct amd_northbridge *nb, unsigned slot)
+ {
+ 	unsigned int reg = 0;
+ 
+-	pci_read_config_dword(l3->nb->misc, 0x1BC + slot * 4, &reg);
++	pci_read_config_dword(nb->misc, 0x1BC + slot * 4, &reg);
+ 
+ 	/* check whether this slot is activated already */
+ 	if (reg & (3UL << 30))
+@@ -387,11 +360,10 @@ static ssize_t show_cache_disable(struct
+ {
+ 	int index;
+ 
+-	if (!this_leaf->l3 ||
+-	    !amd_nb_has_feature(AMD_NB_L3_INDEX_DISABLE))
++	if (!this_leaf->base.nb || !amd_nb_has_feature(AMD_NB_L3_INDEX_DISABLE))
+ 		return -EINVAL;
+ 
+-	index = amd_get_l3_disable_slot(this_leaf->l3, slot);
++	index = amd_get_l3_disable_slot(this_leaf->base.nb, slot);
+ 	if (index >= 0)
+ 		return sprintf(buf, "%d\n", index);
+ 
+@@ -408,7 +380,7 @@ show_cache_disable_##slot(struct _cpuid4
+ SHOW_CACHE_DISABLE(0)
+ SHOW_CACHE_DISABLE(1)
+ 
+-static void amd_l3_disable_index(struct amd_l3_cache *l3, int cpu,
++static void amd_l3_disable_index(struct amd_northbridge *nb, int cpu,
+ 				 unsigned slot, unsigned long idx)
+ {
+ 	int i;
+@@ -421,10 +393,10 @@ static void amd_l3_disable_index(struct
+ 	for (i = 0; i < 4; i++) {
+ 		u32 reg = idx | (i << 20);
+ 
+-		if (!l3->subcaches[i])
++		if (!nb->l3_cache.subcaches[i])
+ 			continue;
+ 
+-		pci_write_config_dword(l3->nb->misc, 0x1BC + slot * 4, reg);
++		pci_write_config_dword(nb->misc, 0x1BC + slot * 4, reg);
+ 
+ 		/*
+ 		 * We need to WBINVD on a core on the node containing the L3
+@@ -434,7 +406,7 @@ static void amd_l3_disable_index(struct
+ 		wbinvd_on_cpu(cpu);
+ 
+ 		reg |= BIT(31);
+-		pci_write_config_dword(l3->nb->misc, 0x1BC + slot * 4, reg);
++		pci_write_config_dword(nb->misc, 0x1BC + slot * 4, reg);
+ 	}
+ }
+ 
+@@ -448,24 +420,24 @@ static void amd_l3_disable_index(struct
+  *
+  * @return: 0 on success, error status on failure
+  */
+-int amd_set_l3_disable_slot(struct amd_l3_cache *l3, int cpu, unsigned slot,
++int amd_set_l3_disable_slot(struct amd_northbridge *nb, int cpu, unsigned slot,
+ 			    unsigned long index)
+ {
+ 	int ret = 0;
+ 
+ 	/*  check if @slot is already used or the index is already disabled */
+-	ret = amd_get_l3_disable_slot(l3, slot);
++	ret = amd_get_l3_disable_slot(nb, slot);
+ 	if (ret >= 0)
+ 		return -EINVAL;
+ 
+-	if (index > l3->indices)
++	if (index > nb->l3_cache.indices)
+ 		return -EINVAL;
+ 
+ 	/* check whether the other slot has disabled the same index already */
+-	if (index == amd_get_l3_disable_slot(l3, !slot))
++	if (index == amd_get_l3_disable_slot(nb, !slot))
+ 		return -EINVAL;
+ 
+-	amd_l3_disable_index(l3, cpu, slot, index);
++	amd_l3_disable_index(nb, cpu, slot, index);
+ 
+ 	return 0;
+ }
+@@ -480,8 +452,7 @@ static ssize_t store_cache_disable(struc
+ 	if (!capable(CAP_SYS_ADMIN))
+ 		return -EPERM;
+ 
+-	if (!this_leaf->l3 ||
+-	    !amd_nb_has_feature(AMD_NB_L3_INDEX_DISABLE))
++	if (!this_leaf->base.nb || !amd_nb_has_feature(AMD_NB_L3_INDEX_DISABLE))
+ 		return -EINVAL;
+ 
+ 	cpu = cpumask_first(to_cpumask(this_leaf->shared_cpu_map));
+@@ -489,7 +460,7 @@ static ssize_t store_cache_disable(struc
+ 	if (strict_strtoul(buf, 10, &val) < 0)
+ 		return -EINVAL;
+ 
+-	err = amd_set_l3_disable_slot(this_leaf->l3, cpu, slot, val);
++	err = amd_set_l3_disable_slot(this_leaf->base.nb, cpu, slot, val);
+ 	if (err) {
+ 		if (err == -EEXIST)
+ 			printk(KERN_WARNING "L3 disable slot %d in use!\n",
+@@ -518,7 +489,7 @@ static struct _cache_attr cache_disable_
+ static ssize_t
+ show_subcaches(struct _cpuid4_info *this_leaf, char *buf, unsigned int cpu)
+ {
+-	if (!this_leaf->l3 || !amd_nb_has_feature(AMD_NB_L3_PARTITIONING))
++	if (!this_leaf->base.nb || !amd_nb_has_feature(AMD_NB_L3_PARTITIONING))
+ 		return -EINVAL;
+ 
+ 	return sprintf(buf, "%x\n", amd_get_subcaches(cpu));
+@@ -533,7 +504,7 @@ store_subcaches(struct _cpuid4_info *thi
+ 	if (!capable(CAP_SYS_ADMIN))
+ 		return -EPERM;
+ 
+-	if (!this_leaf->l3 || !amd_nb_has_feature(AMD_NB_L3_PARTITIONING))
++	if (!this_leaf->base.nb || !amd_nb_has_feature(AMD_NB_L3_PARTITIONING))
+ 		return -EINVAL;
+ 
+ 	if (strict_strtoul(buf, 16, &val) < 0)
+@@ -769,7 +740,7 @@ static void __cpuinit cache_shared_cpu_m
+ 		return;
+ 	}
+ 	this_leaf = CPUID4_INFO_IDX(cpu, index);
+-	num_threads_sharing = 1 + this_leaf->eax.split.num_threads_sharing;
++	num_threads_sharing = 1 + this_leaf->base.eax.split.num_threads_sharing;
+ 
+ 	if (num_threads_sharing == 1)
+ 		cpumask_set_cpu(cpu, to_cpumask(this_leaf->shared_cpu_map));
+@@ -820,29 +791,19 @@ static void __cpuinit free_cache_attribu
+ 	for (i = 0; i < num_cache_leaves; i++)
+ 		cache_remove_shared_cpu_map(cpu, i);
+ 
+-	kfree(per_cpu(ici_cpuid4_info, cpu)->l3);
+ 	kfree(per_cpu(ici_cpuid4_info, cpu));
+ 	per_cpu(ici_cpuid4_info, cpu) = NULL;
+ }
+ 
+-static int
+-__cpuinit cpuid4_cache_lookup(int index, struct _cpuid4_info *this_leaf)
+-{
+-	struct _cpuid4_info_regs *leaf_regs =
+-		(struct _cpuid4_info_regs *)this_leaf;
+-
+-	return cpuid4_cache_lookup_regs(index, leaf_regs);
+-}
+-
+ static void __cpuinit get_cpu_leaves(void *_retval)
+ {
+ 	int j, *retval = _retval, cpu = smp_processor_id();
+ 
+ 	/* Do cpuid and store the results */
+ 	for (j = 0; j < num_cache_leaves; j++) {
+-		struct _cpuid4_info *this_leaf;
+-		this_leaf = CPUID4_INFO_IDX(cpu, j);
+-		*retval = cpuid4_cache_lookup(j, this_leaf);
++		struct _cpuid4_info *this_leaf = CPUID4_INFO_IDX(cpu, j);
++
++		*retval = cpuid4_cache_lookup_regs(j, &this_leaf->base);
+ 		if (unlikely(*retval < 0)) {
+ 			int i;
+ 
+@@ -900,16 +861,16 @@ static ssize_t show_##file_name(struct _
+ 	return sprintf(buf, "%lu\n", (unsigned long)this_leaf->object + val); \
+ }
+ 
+-show_one_plus(level, eax.split.level, 0);
+-show_one_plus(coherency_line_size, ebx.split.coherency_line_size, 1);
+-show_one_plus(physical_line_partition, ebx.split.physical_line_partition, 1);
+-show_one_plus(ways_of_associativity, ebx.split.ways_of_associativity, 1);
+-show_one_plus(number_of_sets, ecx.split.number_of_sets, 1);
++show_one_plus(level, base.eax.split.level, 0);
++show_one_plus(coherency_line_size, base.ebx.split.coherency_line_size, 1);
++show_one_plus(physical_line_partition, base.ebx.split.physical_line_partition, 1);
++show_one_plus(ways_of_associativity, base.ebx.split.ways_of_associativity, 1);
++show_one_plus(number_of_sets, base.ecx.split.number_of_sets, 1);
+ 
+ static ssize_t show_size(struct _cpuid4_info *this_leaf, char *buf,
+ 			 unsigned int cpu)
+ {
+-	return sprintf(buf, "%luK\n", this_leaf->size / 1024);
++	return sprintf(buf, "%luK\n", this_leaf->base.size / 1024);
+ }
+ 
+ static ssize_t show_shared_cpu_map_func(struct _cpuid4_info *this_leaf,
+@@ -946,7 +907,7 @@ static inline ssize_t show_shared_cpu_li
+ static ssize_t show_type(struct _cpuid4_info *this_leaf, char *buf,
+ 			 unsigned int cpu)
+ {
+-	switch (this_leaf->eax.split.type) {
++	switch (this_leaf->base.eax.split.type) {
+ 	case CACHE_TYPE_DATA:
+ 		return sprintf(buf, "Data\n");
+ 	case CACHE_TYPE_INST:
+@@ -1135,7 +1096,7 @@ static int __cpuinit cache_add_dev(struc
+ 
+ 		ktype_cache.default_attrs = default_attrs;
+ #ifdef CONFIG_AMD_NB
+-		if (this_leaf->l3)
++		if (this_leaf->base.nb)
+ 			ktype_cache.default_attrs = amd_l3_attrs();
+ #endif
+ 		retval = kobject_init_and_add(&(this_object->kobj),
+Index: linux-2.6/arch/x86/include/asm/amd_nb.h
+===================================================================
+--- linux-2.6.orig/arch/x86/include/asm/amd_nb.h
++++ linux-2.6/arch/x86/include/asm/amd_nb.h
+@@ -19,9 +19,15 @@ extern int amd_numa_init(void);
+ extern int amd_get_subcaches(int);
+ extern int amd_set_subcaches(int, int);
+ 
++struct amd_l3_cache {
++	unsigned indices;
++	u8	 subcaches[4];
++};
++
+ struct amd_northbridge {
+ 	struct pci_dev *misc;
+ 	struct pci_dev *link;
++	struct amd_l3_cache l3_cache;
+ };
+ 
+ struct amd_northbridge_info {
 Index: linux-2.6/arch/mips/sibyte/sb1250/irq.c
 ===================================================================
 --- linux-2.6.orig/arch/mips/sibyte/sb1250/irq.c
@@ -1290,7 +1514,7 @@ Index: linux-2.6/arch/mips/ar7/irq.c
 ===================================================================
 --- linux-2.6.orig/arch/mips/ar7/irq.c
 +++ linux-2.6/arch/mips/ar7/irq.c
-@@ -98,7 +98,8 @@ static struct irq_chip ar7_sec_irq_type 
+@@ -98,7 +98,8 @@ static struct irq_chip ar7_sec_irq_type
  
  static struct irqaction ar7_cascade_action = {
  	.handler = no_action,
@@ -1421,7 +1645,7 @@ Index: linux-2.6/arch/mips/pnx8550/common/int.c
 ===================================================================
 --- linux-2.6.orig/arch/mips/pnx8550/common/int.c
 +++ linux-2.6/arch/mips/pnx8550/common/int.c
-@@ -167,7 +167,7 @@ static struct irq_chip level_irq_type = 
+@@ -167,7 +167,7 @@ static struct irq_chip level_irq_type =
  
  static struct irqaction gic_action = {
  	.handler =	no_action,
@@ -1562,6 +1786,110 @@ Index: linux-2.6/arch/mips/kernel/signal.c
  	if (test_thread_flag(TIF_RESTORE_SIGMASK))
  		oldset = &current->saved_sigmask;
  	else
+Index: linux-2.6/arch/arm/kernel/signal.c
+===================================================================
+--- linux-2.6.orig/arch/arm/kernel/signal.c
++++ linux-2.6/arch/arm/kernel/signal.c
+@@ -673,6 +673,9 @@ static void do_signal(struct pt_regs *re
+ 	if (!user_mode(regs))
+ 		return;
+ 
++	local_irq_enable();
++	preempt_check_resched();
++
+ 	/*
+ 	 * If we were from a system call, check for system call restarting...
+ 	 */
+Index: linux-2.6/kernel/time/clocksource.c
+===================================================================
+--- linux-2.6.orig/kernel/time/clocksource.c
++++ linux-2.6/kernel/time/clocksource.c
+@@ -186,6 +186,7 @@ static struct timer_list watchdog_timer;
+ static DECLARE_WORK(watchdog_work, clocksource_watchdog_work);
+ static DEFINE_SPINLOCK(watchdog_lock);
+ static int watchdog_running;
++static atomic_t watchdog_reset_pending;
+ 
+ static int clocksource_watchdog_kthread(void *data);
+ static void __clocksource_change_rating(struct clocksource *cs, int rating);
+@@ -247,12 +248,14 @@ static void clocksource_watchdog(unsigne
+ 	struct clocksource *cs;
+ 	cycle_t csnow, wdnow;
+ 	int64_t wd_nsec, cs_nsec;
+-	int next_cpu;
++	int next_cpu, reset_pending;
+ 
+ 	spin_lock(&watchdog_lock);
+ 	if (!watchdog_running)
+ 		goto out;
+ 
++	reset_pending = atomic_read(&watchdog_reset_pending);
++
+ 	list_for_each_entry(cs, &watchdog_list, wd_list) {
+ 
+ 		/* Clocksource already marked unstable? */
+@@ -268,7 +271,8 @@ static void clocksource_watchdog(unsigne
+ 		local_irq_enable();
+ 
+ 		/* Clocksource initialized ? */
+-		if (!(cs->flags & CLOCK_SOURCE_WATCHDOG)) {
++		if (!(cs->flags & CLOCK_SOURCE_WATCHDOG) ||
++		    atomic_read(&watchdog_reset_pending)) {
+ 			cs->flags |= CLOCK_SOURCE_WATCHDOG;
+ 			cs->wd_last = wdnow;
+ 			cs->cs_last = csnow;
+@@ -283,8 +287,11 @@ static void clocksource_watchdog(unsigne
+ 		cs->cs_last = csnow;
+ 		cs->wd_last = wdnow;
+ 
++		if (atomic_read(&watchdog_reset_pending))
++			continue;
++
+ 		/* Check the deviation from the watchdog clocksource. */
+-		if (abs(cs_nsec - wd_nsec) > WATCHDOG_THRESHOLD) {
++		if ((abs(cs_nsec - wd_nsec) > WATCHDOG_THRESHOLD)) {
+ 			clocksource_unstable(cs, cs_nsec - wd_nsec);
+ 			continue;
+ 		}
+@@ -303,6 +310,13 @@ static void clocksource_watchdog(unsigne
+ 	}
+ 
+ 	/*
++	 * We only clear the watchdog_reset_pending, when we did a
++	 * full cycle through all clocksources.
++	 */
++	if (reset_pending)
++		atomic_dec(&watchdog_reset_pending);
++
++	/*
+ 	 * Cycle through CPUs to check if the CPUs stay synchronized
+ 	 * to each other.
+ 	 */
+@@ -344,23 +358,7 @@ static inline void clocksource_reset_wat
+ 
+ static void clocksource_resume_watchdog(void)
+ {
+-	unsigned long flags;
+-
+-	/*
+-	 * We use trylock here to avoid a potential dead lock when
+-	 * kgdb calls this code after the kernel has been stopped with
+-	 * watchdog_lock held. When watchdog_lock is held we just
+-	 * return and accept, that the watchdog might trigger and mark
+-	 * the monitored clock source (usually TSC) unstable.
+-	 *
+-	 * This does not affect the other caller clocksource_resume()
+-	 * because at this point the kernel is UP, interrupts are
+-	 * disabled and nothing can hold watchdog_lock.
+-	 */
+-	if (!spin_trylock_irqsave(&watchdog_lock, flags))
+-		return;
+-	clocksource_reset_watchdog();
+-	spin_unlock_irqrestore(&watchdog_lock, flags);
++	atomic_inc(&watchdog_reset_pending);
+ }
+ 
+ static void clocksource_enqueue_watchdog(struct clocksource *cs)
 Index: linux-2.6/kernel/watchdog.c
 ===================================================================
 --- linux-2.6.orig/kernel/watchdog.c
@@ -1690,7 +2018,7 @@ Index: linux-2.6/kernel/rtmutex-debug.c
  static void printk_task(struct task_struct *p)
  {
  	if (p)
-@@ -111,8 +56,8 @@ static void printk_lock(struct rt_mutex 
+@@ -111,8 +56,8 @@ static void printk_lock(struct rt_mutex
  
  void rt_mutex_debug_task_free(struct task_struct *task)
  {
@@ -1929,13 +2257,17 @@ Index: linux-2.6/include/linux/sched.h
  #endif /* CONFIG_TRACING */
  #ifdef CONFIG_CGROUP_MEM_RES_CTLR /* memcg uses this to do batch job */
  	struct memcg_batch_info {
-@@ -1570,11 +1583,12 @@ struct task_struct {
+@@ -1570,11 +1583,16 @@ struct task_struct {
  #ifdef CONFIG_HAVE_HW_BREAKPOINT
  	atomic_t ptrace_bp_refcnt;
  #endif
 +#ifdef CONFIG_PREEMPT_RT_BASE
 +	struct rcu_head put_rcu;
 +	int softirq_nestcnt;
++#endif
++#if defined CONFIG_PREEMPT_RT_FULL && defined CONFIG_HIGHMEM
++	int kmap_idx;
++	pte_t kmap_pte[KM_TYPE_NR];
 +#endif
  };
  
@@ -1945,7 +2277,7 @@ Index: linux-2.6/include/linux/sched.h
  /*
   * Priority of a process goes from 0..MAX_PRIO-1, valid RT
   * priority is 0..MAX_RT_PRIO-1, and SCHED_NORMAL/SCHED_BATCH
-@@ -1743,6 +1757,15 @@ extern struct pid *cad_pid;
+@@ -1743,6 +1761,15 @@ extern struct pid *cad_pid;
  extern void free_task(struct task_struct *tsk);
  #define get_task_struct(tsk) do { atomic_inc(&(tsk)->usage); } while(0)
  
@@ -1961,7 +2293,7 @@ Index: linux-2.6/include/linux/sched.h
  extern void __put_task_struct(struct task_struct *t);
  
  static inline void put_task_struct(struct task_struct *t)
-@@ -1750,6 +1773,7 @@ static inline void put_task_struct(struc
+@@ -1750,6 +1777,7 @@ static inline void put_task_struct(struc
  	if (atomic_dec_and_test(&t->usage))
  		__put_task_struct(t);
  }
@@ -1969,7 +2301,7 @@ Index: linux-2.6/include/linux/sched.h
  
  extern void task_times(struct task_struct *p, cputime_t *ut, cputime_t *st);
  extern void thread_group_times(struct task_struct *p, cputime_t *ut, cputime_t *st);
-@@ -1774,6 +1798,7 @@ extern void thread_group_times(struct ta
+@@ -1774,6 +1802,7 @@ extern void thread_group_times(struct ta
  #define PF_FROZEN	0x00010000	/* frozen for system suspend */
  #define PF_FSTRANS	0x00020000	/* inside a filesystem transaction */
  #define PF_KSWAPD	0x00040000	/* I am kswapd */
@@ -1977,13 +2309,11 @@ Index: linux-2.6/include/linux/sched.h
  #define PF_LESS_THROTTLE 0x00100000	/* Throttle me less: I clean memory */
  #define PF_KTHREAD	0x00200000	/* I am a kernel thread */
  #define PF_RANDOMIZE	0x00400000	/* randomize virtual address space */
-@@ -2021,9 +2046,14 @@ static inline void sched_autogroup_fork(
- static inline void sched_autogroup_exit(struct signal_struct *sig) { }
+@@ -2022,15 +2051,27 @@ static inline void sched_autogroup_exit(
  #endif
  
-+extern void task_setprio(struct task_struct *p, int prio);
-+
  #ifdef CONFIG_RT_MUTEXES
++extern void task_setprio(struct task_struct *p, int prio);
  extern int rt_mutex_getprio(struct task_struct *p);
 -extern void rt_mutex_setprio(struct task_struct *p, int prio);
 +static inline void rt_mutex_setprio(struct task_struct *p, int prio)
@@ -1991,9 +2321,24 @@ Index: linux-2.6/include/linux/sched.h
 +	task_setprio(p, prio);
 +}
  extern void rt_mutex_adjust_pi(struct task_struct *p);
++static inline bool tsk_is_pi_blocked(struct task_struct *tsk)
++{
++	return tsk->pi_blocked_on != NULL;
++}
  #else
  static inline int rt_mutex_getprio(struct task_struct *p)
-@@ -2110,6 +2140,7 @@ extern void xtime_update(unsigned long t
+ {
+ 	return p->normal_prio;
+ }
+ # define rt_mutex_adjust_pi(p)		do { } while (0)
++static inline bool tsk_is_pi_blocked(struct task_struct *tsk)
++{
++	return false;
++}
+ #endif
+ 
+ extern bool yield_to(struct task_struct *p, bool preempt);
+@@ -2110,6 +2151,7 @@ extern void xtime_update(unsigned long t
  
  extern int wake_up_state(struct task_struct *tsk, unsigned int state);
  extern int wake_up_process(struct task_struct *tsk);
@@ -2001,7 +2346,7 @@ Index: linux-2.6/include/linux/sched.h
  extern void wake_up_new_task(struct task_struct *tsk);
  #ifdef CONFIG_SMP
   extern void kick_process(struct task_struct *tsk);
-@@ -2199,12 +2230,24 @@ extern struct mm_struct * mm_alloc(void)
+@@ -2199,12 +2241,24 @@ extern struct mm_struct * mm_alloc(void)
  
  /* mmdrop drops the mm and the page tables */
  extern void __mmdrop(struct mm_struct *);
@@ -2026,7 +2371,7 @@ Index: linux-2.6/include/linux/sched.h
  /* mmput gets rid of the mappings and all user-space */
  extern void mmput(struct mm_struct *);
  /* Grab a reference to a task's mm, if it is not already going away */
-@@ -2510,7 +2553,7 @@ extern int _cond_resched(void);
+@@ -2510,7 +2564,7 @@ extern int _cond_resched(void);
  
  extern int __cond_resched_lock(spinlock_t *lock);
  
@@ -2035,7 +2380,7 @@ Index: linux-2.6/include/linux/sched.h
  #define PREEMPT_LOCK_OFFSET	PREEMPT_OFFSET
  #else
  #define PREEMPT_LOCK_OFFSET	0
-@@ -2521,12 +2564,16 @@ extern int __cond_resched_lock(spinlock_
+@@ -2521,12 +2575,16 @@ extern int __cond_resched_lock(spinlock_
  	__cond_resched_lock(lock);				\
  })
  
@@ -2052,7 +2397,7 @@ Index: linux-2.6/include/linux/sched.h
  
  /*
   * Does a critical section need to be broken due to another
-@@ -2550,7 +2597,7 @@ void thread_group_cputimer(struct task_s
+@@ -2550,7 +2608,7 @@ void thread_group_cputimer(struct task_s
  
  static inline void thread_group_cputime_init(struct signal_struct *sig)
  {
@@ -2061,7 +2406,7 @@ Index: linux-2.6/include/linux/sched.h
  }
  
  /*
-@@ -2589,6 +2636,15 @@ static inline void set_task_cpu(struct t
+@@ -2589,6 +2647,15 @@ static inline void set_task_cpu(struct t
  
  #endif /* CONFIG_SMP */
  
@@ -2447,7 +2792,15 @@ Index: linux-2.6/arch/x86/kernel/process_32.c
 ===================================================================
 --- linux-2.6.orig/arch/x86/kernel/process_32.c
 +++ linux-2.6/arch/x86/kernel/process_32.c
-@@ -113,9 +113,7 @@ void cpu_idle(void)
+@@ -38,6 +38,7 @@
+ #include <linux/uaccess.h>
+ #include <linux/io.h>
+ #include <linux/kdebug.h>
++#include <linux/highmem.h>
+ 
+ #include <asm/pgtable.h>
+ #include <asm/system.h>
+@@ -113,9 +114,7 @@ void cpu_idle(void)
  			start_critical_timings();
  		}
  		tick_nohz_restart_sched_tick();
@@ -2458,6 +2811,48 @@ Index: linux-2.6/arch/x86/kernel/process_32.c
  	}
  }
  
+@@ -348,6 +347,41 @@ __switch_to(struct task_struct *prev_p,
+ 		     task_thread_info(next_p)->flags & _TIF_WORK_CTXSW_NEXT))
+ 		__switch_to_xtra(prev_p, next_p, tss);
+ 
++#if defined CONFIG_PREEMPT_RT_FULL && defined CONFIG_HIGHMEM
++	/*
++	 * Save @prev's kmap_atomic stack
++	 */
++	prev_p->kmap_idx = __this_cpu_read(__kmap_atomic_idx);
++	if (unlikely(prev_p->kmap_idx)) {
++		int i;
++
++		for (i = 0; i < prev_p->kmap_idx; i++) {
++			int idx = i + KM_TYPE_NR * smp_processor_id();
++
++			pte_t *ptep = kmap_pte - idx;
++			prev_p->kmap_pte[i] = *ptep;
++			kpte_clear_flush(ptep, __fix_to_virt(FIX_KMAP_BEGIN + idx));
++		}
++
++		__this_cpu_write(__kmap_atomic_idx, 0);
++	}
++
++	/*
++	 * Restore @next_p's kmap_atomic stack
++	 */
++	if (unlikely(next_p->kmap_idx)) {
++		int i;
++
++		__this_cpu_write(__kmap_atomic_idx, next_p->kmap_idx);
++
++		for (i = 0; i < next_p->kmap_idx; i++) {
++			int idx = i + KM_TYPE_NR * smp_processor_id();
++
++			set_pte(kmap_pte - idx, next_p->kmap_pte[i]);
++		}
++	}
++#endif
++
+ 	/* If we're going to preload the fpu context, make sure clts
+ 	   is run while we're batching the cpu state updates. */
+ 	if (preload_fpu)
 Index: linux-2.6/arch/x86/kernel/process_64.c
 ===================================================================
 --- linux-2.6.orig/arch/x86/kernel/process_64.c
@@ -2523,7 +2918,7 @@ Index: linux-2.6/kernel/mutex.c
 ===================================================================
 --- linux-2.6.orig/kernel/mutex.c
 +++ linux-2.6/kernel/mutex.c
-@@ -240,9 +240,7 @@ __mutex_lock_common(struct mutex *lock, 
+@@ -240,9 +240,7 @@ __mutex_lock_common(struct mutex *lock,
  
  		/* didn't get the lock, go to sleep: */
  		spin_unlock_mutex(&lock->wait_lock, flags);
@@ -2589,7 +2984,7 @@ Index: linux-2.6/kernel/softirq.c
 +	}
 +
 +	if (warnpending) {
-+		printk(KERN_ERR "NOHZ: local_softirq_pending %02lx\n",
++		printk(KERN_ERR "NOHZ: local_softirq_pending %02x\n",
 +		       pending);
 +		rate_limit++;
 +	}
@@ -2603,7 +2998,7 @@ Index: linux-2.6/kernel/softirq.c
 +	static int rate_limit;
 +
 +	if (rate_limit < 10) {
-+		printk(KERN_ERR "NOHZ: local_softirq_pending %02lx\n",
++		printk(KERN_ERR "NOHZ: local_softirq_pending %02x\n",
 +		       local_softirq_pending());
 +		rate_limit++;
 +	}
@@ -2667,7 +3062,7 @@ Index: linux-2.6/kernel/softirq.c
  	lockdep_softirq_enter();
  
  	cpu = smp_processor_id();
-@@ -223,36 +313,7 @@ restart:
+@@ -223,36 +313,7 @@ asmlinkage void __do_softirq(void)
  	/* Reset the pending bitmask before enabling irqs */
  	set_softirq_pending(0);
  
@@ -2705,7 +3100,7 @@ Index: linux-2.6/kernel/softirq.c
  
  	pending = local_softirq_pending();
  	if (pending && --max_restart)
-@@ -267,6 +328,26 @@ restart:
+@@ -267,6 +328,26 @@ asmlinkage void __do_softirq(void)
  	__local_bh_enable(SOFTIRQ_OFFSET);
  }
  
@@ -3122,7 +3517,7 @@ Index: linux-2.6/kernel/kprobes.c
  	}
  	return 0;
  }
-@@ -1708,7 +1708,7 @@ int __kprobes register_kretprobe(struct 
+@@ -1708,7 +1708,7 @@ int __kprobes register_kretprobe(struct
  		rp->maxactive = num_possible_cpus();
  #endif
  	}
@@ -3238,7 +3633,7 @@ Index: linux-2.6/kernel/cgroup.c
  static void cgroup_release_agent(struct work_struct *work);
  static DECLARE_WORK(release_agent_work, cgroup_release_agent);
  static void check_for_release(struct cgroup *cgrp);
-@@ -4010,11 +4010,11 @@ again:
+@@ -4010,11 +4010,11 @@ static int cgroup_rmdir(struct inode *un
  	finish_wait(&cgroup_rmdir_waitq, &wait);
  	clear_bit(CGRP_WAIT_ON_RMDIR, &cgrp->flags);
  
@@ -3268,7 +3663,7 @@ Index: linux-2.6/kernel/cgroup.c
  		if (need_schedule_work)
  			schedule_work(&release_agent_work);
  	}
-@@ -4725,7 +4725,7 @@ static void cgroup_release_agent(struct 
+@@ -4725,7 +4725,7 @@ static void cgroup_release_agent(struct
  {
  	BUG_ON(work != &release_agent_work);
  	mutex_lock(&cgroup_mutex);
@@ -3277,7 +3672,7 @@ Index: linux-2.6/kernel/cgroup.c
  	while (!list_empty(&release_list)) {
  		char *argv[3], *envp[3];
  		int i;
-@@ -4734,7 +4734,7 @@ static void cgroup_release_agent(struct 
+@@ -4734,7 +4734,7 @@ static void cgroup_release_agent(struct
  						    struct cgroup,
  						    release_list);
  		list_del_init(&cgrp->release_list);
@@ -3286,7 +3681,7 @@ Index: linux-2.6/kernel/cgroup.c
  		pathbuf = kmalloc(PAGE_SIZE, GFP_KERNEL);
  		if (!pathbuf)
  			goto continue_free;
-@@ -4764,9 +4764,9 @@ static void cgroup_release_agent(struct 
+@@ -4764,9 +4764,9 @@ static void cgroup_release_agent(struct
   continue_free:
  		kfree(pathbuf);
  		kfree(agentbuf);
@@ -3668,7 +4063,14 @@ Index: linux-2.6/kernel/trace/trace_irqsoff.c
 ===================================================================
 --- linux-2.6.orig/kernel/trace/trace_irqsoff.c
 +++ linux-2.6/kernel/trace/trace_irqsoff.c
-@@ -23,7 +23,7 @@ static int				tracer_enabled __read_most
+@@ -17,13 +17,14 @@
+ #include <linux/fs.h>
+ 
+ #include "trace.h"
++#include <trace/events/hist.h>
+ 
+ static struct trace_array		*irqsoff_trace __read_mostly;
+ static int				tracer_enabled __read_mostly;
  
  static DEFINE_PER_CPU(int, tracing_cpu);
  
@@ -3677,7 +4079,7 @@ Index: linux-2.6/kernel/trace/trace_irqsoff.c
  
  enum {
  	TRACER_IRQS_OFF		= (1 << 1),
-@@ -319,7 +319,7 @@ check_critical_timing(struct trace_array
+@@ -319,7 +320,7 @@ check_critical_timing(struct trace_array
  	if (!report_latency(delta))
  		goto out;
  
@@ -3686,7 +4088,7 @@ Index: linux-2.6/kernel/trace/trace_irqsoff.c
  
  	/* check if we are still the max latency */
  	if (!report_latency(delta))
-@@ -342,7 +342,7 @@ check_critical_timing(struct trace_array
+@@ -342,7 +343,7 @@ check_critical_timing(struct trace_array
  	max_sequence++;
  
  out_unlock:
@@ -3695,6 +4097,81 @@ Index: linux-2.6/kernel/trace/trace_irqsoff.c
  
  out:
  	data->critical_sequence = max_sequence;
+@@ -424,11 +425,13 @@ void start_critical_timings(void)
+ {
+ 	if (preempt_trace() || irq_trace())
+ 		start_critical_timing(CALLER_ADDR0, CALLER_ADDR1);
++	trace_preemptirqsoff_hist(TRACE_START, 1);
+ }
+ EXPORT_SYMBOL_GPL(start_critical_timings);
+ 
+ void stop_critical_timings(void)
+ {
++	trace_preemptirqsoff_hist(TRACE_STOP, 0);
+ 	if (preempt_trace() || irq_trace())
+ 		stop_critical_timing(CALLER_ADDR0, CALLER_ADDR1);
+ }
+@@ -438,6 +441,7 @@ EXPORT_SYMBOL_GPL(stop_critical_timings)
+ #ifdef CONFIG_PROVE_LOCKING
+ void time_hardirqs_on(unsigned long a0, unsigned long a1)
+ {
++	trace_preemptirqsoff_hist(IRQS_ON, 0);
+ 	if (!preempt_trace() && irq_trace())
+ 		stop_critical_timing(a0, a1);
+ }
+@@ -446,6 +450,7 @@ void time_hardirqs_off(unsigned long a0,
+ {
+ 	if (!preempt_trace() && irq_trace())
+ 		start_critical_timing(a0, a1);
++	trace_preemptirqsoff_hist(IRQS_OFF, 1);
+ }
+ 
+ #else /* !CONFIG_PROVE_LOCKING */
+@@ -471,6 +476,7 @@ inline void print_irqtrace_events(struct
+  */
+ void trace_hardirqs_on(void)
+ {
++	trace_preemptirqsoff_hist(IRQS_ON, 0);
+ 	if (!preempt_trace() && irq_trace())
+ 		stop_critical_timing(CALLER_ADDR0, CALLER_ADDR1);
+ }
+@@ -480,11 +486,13 @@ void trace_hardirqs_off(void)
+ {
+ 	if (!preempt_trace() && irq_trace())
+ 		start_critical_timing(CALLER_ADDR0, CALLER_ADDR1);
++	trace_preemptirqsoff_hist(IRQS_OFF, 1);
+ }
+ EXPORT_SYMBOL(trace_hardirqs_off);
+ 
+ void trace_hardirqs_on_caller(unsigned long caller_addr)
+ {
++	trace_preemptirqsoff_hist(IRQS_ON, 0);
+ 	if (!preempt_trace() && irq_trace())
+ 		stop_critical_timing(CALLER_ADDR0, caller_addr);
+ }
+@@ -494,6 +502,7 @@ void trace_hardirqs_off_caller(unsigned
+ {
+ 	if (!preempt_trace() && irq_trace())
+ 		start_critical_timing(CALLER_ADDR0, caller_addr);
++	trace_preemptirqsoff_hist(IRQS_OFF, 1);
+ }
+ EXPORT_SYMBOL(trace_hardirqs_off_caller);
+ 
+@@ -503,12 +512,14 @@ EXPORT_SYMBOL(trace_hardirqs_off_caller)
+ #ifdef CONFIG_PREEMPT_TRACER
+ void trace_preempt_on(unsigned long a0, unsigned long a1)
+ {
++	trace_preemptirqsoff_hist(PREEMPT_ON, 0);
+ 	if (preempt_trace())
+ 		stop_critical_timing(a0, a1);
+ }
+ 
+ void trace_preempt_off(unsigned long a0, unsigned long a1)
+ {
++	trace_preemptirqsoff_hist(PREEMPT_OFF, 1);
+ 	if (preempt_trace())
+ 		start_critical_timing(a0, a1);
+ }
 Index: linux-2.6/include/linux/ratelimit.h
 ===================================================================
 --- linux-2.6.orig/include/linux/ratelimit.h
@@ -3921,7 +4398,7 @@ Index: linux-2.6/kernel/printk.c
  	return retval;
  }
  static const char recursion_bug_msg [] =
-@@ -833,6 +880,13 @@ asmlinkage int vprintk(const char *fmt, 
+@@ -833,6 +880,13 @@ asmlinkage int vprintk(const char *fmt,
  	size_t plen;
  	char special;
  
@@ -3935,7 +4412,7 @@ Index: linux-2.6/kernel/printk.c
  	boot_delay_msec();
  	printk_delay();
  
-@@ -860,7 +914,7 @@ asmlinkage int vprintk(const char *fmt, 
+@@ -860,7 +914,7 @@ asmlinkage int vprintk(const char *fmt,
  	}
  
  	lockdep_off();
@@ -3944,7 +4421,7 @@ Index: linux-2.6/kernel/printk.c
  	printk_cpu = this_cpu;
  
  	if (recursion_bug) {
-@@ -953,8 +1007,15 @@ asmlinkage int vprintk(const char *fmt, 
+@@ -953,8 +1007,15 @@ asmlinkage int vprintk(const char *fmt,
  	 * will release 'logbuf_lock' regardless of whether it
  	 * actually gets the semaphore or not.
  	 */
@@ -4025,7 +4502,7 @@ Index: linux-2.6/lib/ratelimit.c
 ===================================================================
 --- linux-2.6.orig/lib/ratelimit.c
 +++ linux-2.6/lib/ratelimit.c
-@@ -39,7 +39,7 @@ int ___ratelimit(struct ratelimit_state 
+@@ -39,7 +39,7 @@ int ___ratelimit(struct ratelimit_state
  	 * in addition to the one that will be printed by
  	 * the entity that is holding the lock already:
  	 */
@@ -4034,7 +4511,7 @@ Index: linux-2.6/lib/ratelimit.c
  		return 0;
  
  	if (!rs->begin)
-@@ -60,7 +60,7 @@ int ___ratelimit(struct ratelimit_state 
+@@ -60,7 +60,7 @@ int ___ratelimit(struct ratelimit_state
  		rs->missed++;
  		ret = 0;
  	}
@@ -4116,19 +4593,21 @@ Index: linux-2.6/kernel/posix-cpu-timers.c
  	arm_timer(timer);
  	spin_unlock(&p->sighand->siglock);
  
-@@ -1289,9 +1289,9 @@ static inline int fastpath_timer_check(s
+@@ -1288,10 +1288,11 @@ static inline int fastpath_timer_check(s
+ 	sig = tsk->signal;
  	if (sig->cputimer.running) {
  		struct task_cputime group_sample;
++		unsigned long flags;
  
 -		spin_lock(&sig->cputimer.lock);
-+		raw_spin_lock(&sig->cputimer.lock);
++		raw_spin_lock_irqsave(&sig->cputimer.lock, flags);
  		group_sample = sig->cputimer.cputime;
 -		spin_unlock(&sig->cputimer.lock);
-+		raw_spin_unlock(&sig->cputimer.lock);
++		raw_spin_unlock_irqrestore(&sig->cputimer.lock, flags);
  
  		if (task_cputime_expired(&group_sample, &sig->cputime_expires))
  			return 1;
-@@ -1305,13 +1305,13 @@ static inline int fastpath_timer_check(s
+@@ -1305,13 +1306,13 @@ static inline int fastpath_timer_check(s
   * already updated our counts.  We need to check if any timers fire now.
   * Interrupts are disabled.
   */
@@ -4144,7 +4623,7 @@ Index: linux-2.6/kernel/posix-cpu-timers.c
  
  	/*
  	 * The fast path checks that there are no expired thread or thread
-@@ -1369,6 +1369,177 @@ void run_posix_cpu_timers(struct task_st
+@@ -1369,6 +1370,177 @@ void run_posix_cpu_timers(struct task_st
  	}
  }
  
@@ -4322,7 +4801,7 @@ Index: linux-2.6/kernel/posix-cpu-timers.c
  /*
   * Set one of the process-wide special case CPU timers or RLIMIT_CPU.
   * The tsk->sighand->siglock must be held by the caller.
-@@ -1617,6 +1788,11 @@ static __init int init_posix_cpu_timers(
+@@ -1617,6 +1789,11 @@ static __init int init_posix_cpu_timers(
  		.timer_create	= thread_cpu_timer_create,
  	};
  	struct timespec ts;
@@ -4414,7 +4893,7 @@ Index: linux-2.6/kernel/semaphore.c
  }
  EXPORT_SYMBOL(down);
  
-@@ -77,12 +77,12 @@ int down_interruptible(struct semaphore 
+@@ -77,12 +77,12 @@ int down_interruptible(struct semaphore
  	unsigned long flags;
  	int result = 0;
  
@@ -4458,7 +4937,7 @@ Index: linux-2.6/kernel/semaphore.c
  
  	return (count < 0);
  }
-@@ -157,12 +157,12 @@ int down_timeout(struct semaphore *sem, 
+@@ -157,12 +157,12 @@ int down_timeout(struct semaphore *sem,
  	unsigned long flags;
  	int result = 0;
  
@@ -4954,7 +5433,7 @@ Index: linux-2.6/lib/rwsem-spinlock.c
  		goto out;
  	}
  
-@@ -232,7 +232,7 @@ void __sched __down_write_nested(struct 
+@@ -232,7 +232,7 @@ void __sched __down_write_nested(struct
  	list_add_tail(&waiter.list, &sem->wait_list);
  
  	/* we don't need to touch the semaphore struct anymore */
@@ -4963,7 +5442,7 @@ Index: linux-2.6/lib/rwsem-spinlock.c
  
  	/* wait to be given the lock */
  	for (;;) {
-@@ -247,7 +247,7 @@ void __sched __down_write_nested(struct 
+@@ -247,7 +247,7 @@ void __sched __down_write_nested(struct
  	;
  }
  
@@ -5516,7 +5995,7 @@ Index: linux-2.6/drivers/oprofile/oprofilefs.c
  
  static struct inode *oprofilefs_get_inode(struct super_block *sb, int mode)
  {
-@@ -76,9 +76,9 @@ int oprofilefs_ulong_from_user(unsigned 
+@@ -76,9 +76,9 @@ int oprofilefs_ulong_from_user(unsigned
  	if (copy_from_user(tmpbuf, buf, count))
  		return -EFAULT;
  
@@ -5675,7 +6154,7 @@ Index: linux-2.6/arch/powerpc/sysdev/uic.c
  }
  
  static void uic_ack_irq(struct irq_data *d)
-@@ -91,9 +91,9 @@ static void uic_ack_irq(struct irq_data 
+@@ -91,9 +91,9 @@ static void uic_ack_irq(struct irq_data
  	unsigned int src = irqd_to_hwirq(d);
  	unsigned long flags;
  
@@ -5944,6 +6423,100 @@ Index: linux-2.6/drivers/dca/dca-core.c
  
  	dca_sysfs_remove_provider(dca);
  }
+Index: linux-2.6/arch/arm/common/gic.c
+===================================================================
+--- linux-2.6.orig/arch/arm/common/gic.c
++++ linux-2.6/arch/arm/common/gic.c
+@@ -33,7 +33,7 @@
+ #include <asm/mach/irq.h>
+ #include <asm/hardware/gic.h>
+ 
+-static DEFINE_SPINLOCK(irq_controller_lock);
++static DEFINE_RAW_SPINLOCK(irq_controller_lock);
+ 
+ /* Address of GIC 0 CPU interface */
+ void __iomem *gic_cpu_base_addr __read_mostly;
+@@ -88,30 +88,30 @@ static void gic_mask_irq(struct irq_data
+ {
+ 	u32 mask = 1 << (d->irq % 32);
+ 
+-	spin_lock(&irq_controller_lock);
++	raw_spin_lock(&irq_controller_lock);
+ 	writel_relaxed(mask, gic_dist_base(d) + GIC_DIST_ENABLE_CLEAR + (gic_irq(d) / 32) * 4);
+ 	if (gic_arch_extn.irq_mask)
+ 		gic_arch_extn.irq_mask(d);
+-	spin_unlock(&irq_controller_lock);
++	raw_spin_unlock(&irq_controller_lock);
+ }
+ 
+ static void gic_unmask_irq(struct irq_data *d)
+ {
+ 	u32 mask = 1 << (d->irq % 32);
+ 
+-	spin_lock(&irq_controller_lock);
++	raw_spin_lock(&irq_controller_lock);
+ 	if (gic_arch_extn.irq_unmask)
+ 		gic_arch_extn.irq_unmask(d);
+ 	writel_relaxed(mask, gic_dist_base(d) + GIC_DIST_ENABLE_SET + (gic_irq(d) / 32) * 4);
+-	spin_unlock(&irq_controller_lock);
++	raw_spin_unlock(&irq_controller_lock);
+ }
+ 
+ static void gic_eoi_irq(struct irq_data *d)
+ {
+ 	if (gic_arch_extn.irq_eoi) {
+-		spin_lock(&irq_controller_lock);
++		raw_spin_lock(&irq_controller_lock);
+ 		gic_arch_extn.irq_eoi(d);
+-		spin_unlock(&irq_controller_lock);
++		raw_spin_unlock(&irq_controller_lock);
+ 	}
+ 
+ 	writel_relaxed(gic_irq(d), gic_cpu_base(d) + GIC_CPU_EOI);
+@@ -135,7 +135,7 @@ static int gic_set_type(struct irq_data
+ 	if (type != IRQ_TYPE_LEVEL_HIGH && type != IRQ_TYPE_EDGE_RISING)
+ 		return -EINVAL;
+ 
+-	spin_lock(&irq_controller_lock);
++	raw_spin_lock(&irq_controller_lock);
+ 
+ 	if (gic_arch_extn.irq_set_type)
+ 		gic_arch_extn.irq_set_type(d, type);
+@@ -160,7 +160,7 @@ static int gic_set_type(struct irq_data
+ 	if (enabled)
+ 		writel_relaxed(enablemask, base + GIC_DIST_ENABLE_SET + enableoff);
+ 
+-	spin_unlock(&irq_controller_lock);
++	raw_spin_unlock(&irq_controller_lock);
+ 
+ 	return 0;
+ }
+@@ -188,11 +188,11 @@ static int gic_set_affinity(struct irq_d
+ 	mask = 0xff << shift;
+ 	bit = 1 << (cpu + shift);
+ 
+-	spin_lock(&irq_controller_lock);
++	raw_spin_lock(&irq_controller_lock);
+ 	d->node = cpu;
+ 	val = readl_relaxed(reg) & ~mask;
+ 	writel_relaxed(val | bit, reg);
+-	spin_unlock(&irq_controller_lock);
++	raw_spin_unlock(&irq_controller_lock);
+ 
+ 	return 0;
+ }
+@@ -222,9 +222,9 @@ static void gic_handle_cascade_irq(unsig
+ 
+ 	chained_irq_enter(chip, desc);
+ 
+-	spin_lock(&irq_controller_lock);
++	raw_spin_lock(&irq_controller_lock);
+ 	status = readl_relaxed(chip_data->cpu_base + GIC_CPU_INTACK);
+-	spin_unlock(&irq_controller_lock);
++	raw_spin_unlock(&irq_controller_lock);
+ 
+ 	gic_irq = (status & 0x3ff);
+ 	if (gic_irq == 1023)
 Index: linux-2.6/arch/arm/include/asm/dma.h
 ===================================================================
 --- linux-2.6.orig/arch/arm/include/asm/dma.h
@@ -5970,6 +6543,28 @@ Index: linux-2.6/arch/arm/include/asm/dma.h
  }
  
  /* Clear the 'DMA Pointer Flip Flop'.
+Index: linux-2.6/arch/arm/include/asm/mmu.h
+===================================================================
+--- linux-2.6.orig/arch/arm/include/asm/mmu.h
++++ linux-2.6/arch/arm/include/asm/mmu.h
+@@ -6,7 +6,7 @@
+ typedef struct {
+ #ifdef CONFIG_CPU_HAS_ASID
+ 	unsigned int id;
+-	spinlock_t id_lock;
++	raw_spinlock_t id_lock;
+ #endif
+ 	unsigned int kvm_seq;
+ } mm_context_t;
+@@ -16,7 +16,7 @@ typedef struct {
+ 
+ /* init_mm.context.id_lock should be initialized. */
+ #define INIT_MM_CONTEXT(name)                                                 \
+-	.context.id_lock    = __SPIN_LOCK_UNLOCKED(name.context.id_lock),
++	.context.id_lock    = __RAW_SPIN_LOCK_UNLOCKED(name.context.id_lock),
+ #else
+ #define ASID(mm)	(0)
+ #endif
 Index: linux-2.6/arch/arm/kernel/dma.c
 ===================================================================
 --- linux-2.6.orig/arch/arm/kernel/dma.c
@@ -6333,7 +6928,7 @@ Index: linux-2.6/arch/arm/mach-ixp4xx/common-pci.c
  	return retval;
  }
  
-@@ -127,7 +127,7 @@ int ixp4xx_pci_read_no_errata(u32 addr, 
+@@ -127,7 +127,7 @@ int ixp4xx_pci_read_no_errata(u32 addr,
  	unsigned long flags;
  	int retval = 0;
  
@@ -6342,7 +6937,7 @@ Index: linux-2.6/arch/arm/mach-ixp4xx/common-pci.c
  
  	*PCI_NP_AD = addr;
  
-@@ -140,7 +140,7 @@ int ixp4xx_pci_read_no_errata(u32 addr, 
+@@ -140,7 +140,7 @@ int ixp4xx_pci_read_no_errata(u32 addr,
  	if(check_master_abort())
  		retval = 1;
  
@@ -6351,7 +6946,7 @@ Index: linux-2.6/arch/arm/mach-ixp4xx/common-pci.c
  	return retval;
  }
  
-@@ -149,7 +149,7 @@ int ixp4xx_pci_write(u32 addr, u32 cmd, 
+@@ -149,7 +149,7 @@ int ixp4xx_pci_write(u32 addr, u32 cmd,
  	unsigned long flags;
  	int retval = 0;
  
@@ -6360,7 +6955,7 @@ Index: linux-2.6/arch/arm/mach-ixp4xx/common-pci.c
  
  	*PCI_NP_AD = addr;
  
-@@ -162,7 +162,7 @@ int ixp4xx_pci_write(u32 addr, u32 cmd, 
+@@ -162,7 +162,7 @@ int ixp4xx_pci_write(u32 addr, u32 cmd,
  	if(check_master_abort())
  		retval = 1;
  
@@ -6571,6 +7166,33 @@ Index: linux-2.6/arch/arm/mm/context.c
  unsigned int cpu_last_asid = ASID_FIRST_VERSION;
  #ifdef CONFIG_SMP
  DEFINE_PER_CPU(struct mm_struct *, current_mm);
+@@ -31,7 +31,7 @@ DEFINE_PER_CPU(struct mm_struct *, curre
+ void __init_new_context(struct task_struct *tsk, struct mm_struct *mm)
+ {
+ 	mm->context.id = 0;
+-	spin_lock_init(&mm->context.id_lock);
++	raw_spin_lock_init(&mm->context.id_lock);
+ }
+ 
+ static void flush_context(void)
+@@ -58,7 +58,7 @@ static void set_mm_context(struct mm_str
+ 	 * the broadcast. This function is also called via IPI so the
+ 	 * mm->context.id_lock has to be IRQ-safe.
+ 	 */
+-	spin_lock_irqsave(&mm->context.id_lock, flags);
++	raw_spin_lock_irqsave(&mm->context.id_lock, flags);
+ 	if (likely((mm->context.id ^ cpu_last_asid) >> ASID_BITS)) {
+ 		/*
+ 		 * Old version of ASID found. Set the new one and
+@@ -67,7 +67,7 @@ static void set_mm_context(struct mm_str
+ 		mm->context.id = asid;
+ 		cpumask_clear(mm_cpumask(mm));
+ 	}
+-	spin_unlock_irqrestore(&mm->context.id_lock, flags);
++	raw_spin_unlock_irqrestore(&mm->context.id_lock, flags);
+ 
+ 	/*
+ 	 * Set the mm_cpumask(mm) bit for the current CPU.
 @@ -117,7 +117,7 @@ void __new_context(struct mm_struct *mm)
  {
  	unsigned int asid;
@@ -6703,6 +7325,184 @@ Index: linux-2.6/arch/arm/mm/copypage-xscale.c
  
  	kunmap_atomic(kto, KM_USER1);
  }
+Index: linux-2.6/drivers/dma/ipu/ipu_irq.c
+===================================================================
+--- linux-2.6.orig/drivers/dma/ipu/ipu_irq.c
++++ linux-2.6/drivers/dma/ipu/ipu_irq.c
+@@ -81,7 +81,7 @@ static struct ipu_irq_map irq_map[CONFIG
+ /* Protects allocations from the above array of maps */
+ static DEFINE_MUTEX(map_lock);
+ /* Protects register accesses and individual mappings */
+-static DEFINE_SPINLOCK(bank_lock);
++static DEFINE_RAW_SPINLOCK(bank_lock);
+ 
+ static struct ipu_irq_map *src2map(unsigned int src)
+ {
+@@ -101,11 +101,11 @@ static void ipu_irq_unmask(struct irq_da
+ 	uint32_t reg;
+ 	unsigned long lock_flags;
+ 
+-	spin_lock_irqsave(&bank_lock, lock_flags);
++	raw_spin_lock_irqsave(&bank_lock, lock_flags);
+ 
+ 	bank = map->bank;
+ 	if (!bank) {
+-		spin_unlock_irqrestore(&bank_lock, lock_flags);
++		raw_spin_unlock_irqrestore(&bank_lock, lock_flags);
+ 		pr_err("IPU: %s(%u) - unmapped!\n", __func__, d->irq);
+ 		return;
+ 	}
+@@ -114,7 +114,7 @@ static void ipu_irq_unmask(struct irq_da
+ 	reg |= (1UL << (map->source & 31));
+ 	ipu_write_reg(bank->ipu, reg, bank->control);
+ 
+-	spin_unlock_irqrestore(&bank_lock, lock_flags);
++	raw_spin_unlock_irqrestore(&bank_lock, lock_flags);
+ }
+ 
+ static void ipu_irq_mask(struct irq_data *d)
+@@ -124,11 +124,11 @@ static void ipu_irq_mask(struct irq_data
+ 	uint32_t reg;
+ 	unsigned long lock_flags;
+ 
+-	spin_lock_irqsave(&bank_lock, lock_flags);
++	raw_spin_lock_irqsave(&bank_lock, lock_flags);
+ 
+ 	bank = map->bank;
+ 	if (!bank) {
+-		spin_unlock_irqrestore(&bank_lock, lock_flags);
++		raw_spin_unlock_irqrestore(&bank_lock, lock_flags);
+ 		pr_err("IPU: %s(%u) - unmapped!\n", __func__, d->irq);
+ 		return;
+ 	}
+@@ -137,7 +137,7 @@ static void ipu_irq_mask(struct irq_data
+ 	reg &= ~(1UL << (map->source & 31));
+ 	ipu_write_reg(bank->ipu, reg, bank->control);
+ 
+-	spin_unlock_irqrestore(&bank_lock, lock_flags);
++	raw_spin_unlock_irqrestore(&bank_lock, lock_flags);
+ }
+ 
+ static void ipu_irq_ack(struct irq_data *d)
+@@ -146,17 +146,17 @@ static void ipu_irq_ack(struct irq_data
+ 	struct ipu_irq_bank *bank;
+ 	unsigned long lock_flags;
+ 
+-	spin_lock_irqsave(&bank_lock, lock_flags);
++	raw_spin_lock_irqsave(&bank_lock, lock_flags);
+ 
+ 	bank = map->bank;
+ 	if (!bank) {
+-		spin_unlock_irqrestore(&bank_lock, lock_flags);
++		raw_spin_unlock_irqrestore(&bank_lock, lock_flags);
+ 		pr_err("IPU: %s(%u) - unmapped!\n", __func__, d->irq);
+ 		return;
+ 	}
+ 
+ 	ipu_write_reg(bank->ipu, 1UL << (map->source & 31), bank->status);
+-	spin_unlock_irqrestore(&bank_lock, lock_flags);
++	raw_spin_unlock_irqrestore(&bank_lock, lock_flags);
+ }
+ 
+ /**
+@@ -172,11 +172,11 @@ bool ipu_irq_status(unsigned int irq)
+ 	unsigned long lock_flags;
+ 	bool ret;
+ 
+-	spin_lock_irqsave(&bank_lock, lock_flags);
++	raw_spin_lock_irqsave(&bank_lock, lock_flags);
+ 	bank = map->bank;
+ 	ret = bank && ipu_read_reg(bank->ipu, bank->status) &
+ 		(1UL << (map->source & 31));
+-	spin_unlock_irqrestore(&bank_lock, lock_flags);
++	raw_spin_unlock_irqrestore(&bank_lock, lock_flags);
+ 
+ 	return ret;
+ }
+@@ -213,10 +213,10 @@ int ipu_irq_map(unsigned int source)
+ 		if (irq_map[i].source < 0) {
+ 			unsigned long lock_flags;
+ 
+-			spin_lock_irqsave(&bank_lock, lock_flags);
++			raw_spin_lock_irqsave(&bank_lock, lock_flags);
+ 			irq_map[i].source = source;
+ 			irq_map[i].bank = irq_bank + source / 32;
+-			spin_unlock_irqrestore(&bank_lock, lock_flags);
++			raw_spin_unlock_irqrestore(&bank_lock, lock_flags);
+ 
+ 			ret = irq_map[i].irq;
+ 			pr_debug("IPU: mapped source %u to IRQ %u\n",
+@@ -252,10 +252,10 @@ int ipu_irq_unmap(unsigned int source)
+ 			pr_debug("IPU: unmapped source %u from IRQ %u\n",
+ 				 source, irq_map[i].irq);
+ 
+-			spin_lock_irqsave(&bank_lock, lock_flags);
++			raw_spin_lock_irqsave(&bank_lock, lock_flags);
+ 			irq_map[i].source = -EINVAL;
+ 			irq_map[i].bank = NULL;
+-			spin_unlock_irqrestore(&bank_lock, lock_flags);
++			raw_spin_unlock_irqrestore(&bank_lock, lock_flags);
+ 
+ 			ret = 0;
+ 			break;
+@@ -276,7 +276,7 @@ static void ipu_irq_err(unsigned int irq
+ 	for (i = IPU_IRQ_NR_FN_BANKS; i < IPU_IRQ_NR_BANKS; i++) {
+ 		struct ipu_irq_bank *bank = irq_bank + i;
+ 
+-		spin_lock(&bank_lock);
++		raw_spin_lock(&bank_lock);
+ 		status = ipu_read_reg(ipu, bank->status);
+ 		/*
+ 		 * Don't think we have to clear all interrupts here, they will
+@@ -284,18 +284,18 @@ static void ipu_irq_err(unsigned int irq
+ 		 * might want to clear unhandled interrupts after the loop...
+ 		 */
+ 		status &= ipu_read_reg(ipu, bank->control);
+-		spin_unlock(&bank_lock);
++		raw_spin_unlock(&bank_lock);
+ 		while ((line = ffs(status))) {
+ 			struct ipu_irq_map *map;
+ 
+ 			line--;
+ 			status &= ~(1UL << line);
+ 
+-			spin_lock(&bank_lock);
++			raw_spin_lock(&bank_lock);
+ 			map = src2map(32 * i + line);
+ 			if (map)
+ 				irq = map->irq;
+-			spin_unlock(&bank_lock);
++			raw_spin_unlock(&bank_lock);
+ 
+ 			if (!map) {
+ 				pr_err("IPU: Interrupt on unmapped source %u bank %d\n",
+@@ -317,22 +317,22 @@ static void ipu_irq_fn(unsigned int irq,
+ 	for (i = 0; i < IPU_IRQ_NR_FN_BANKS; i++) {
+ 		struct ipu_irq_bank *bank = irq_bank + i;
+ 
+-		spin_lock(&bank_lock);
++		raw_spin_lock(&bank_lock);
+ 		status = ipu_read_reg(ipu, bank->status);
+ 		/* Not clearing all interrupts, see above */
+ 		status &= ipu_read_reg(ipu, bank->control);
+-		spin_unlock(&bank_lock);
++		raw_spin_unlock(&bank_lock);
+ 		while ((line = ffs(status))) {
+ 			struct ipu_irq_map *map;
+ 
+ 			line--;
+ 			status &= ~(1UL << line);
+ 
+-			spin_lock(&bank_lock);
++			raw_spin_lock(&bank_lock);
+ 			map = src2map(32 * i + line);
+ 			if (map)
+ 				irq = map->irq;
+-			spin_unlock(&bank_lock);
++			raw_spin_unlock(&bank_lock);
+ 
+ 			if (!map) {
+ 				pr_err("IPU: Interrupt on unmapped source %u bank %d\n",
 Index: linux-2.6/drivers/pci/dmar.c
 ===================================================================
 --- linux-2.6.orig/drivers/pci/dmar.c
@@ -6731,7 +7531,7 @@ Index: linux-2.6/drivers/pci/dmar.c
  	}
  
  	index = qi->free_head;
-@@ -965,15 +965,15 @@ restart:
+@@ -965,15 +965,15 @@ int qi_submit_sync(struct qi_desc *desc,
  		if (rc)
  			break;
  
@@ -6750,7 +7550,7 @@ Index: linux-2.6/drivers/pci/dmar.c
  
  	if (rc == -EAGAIN)
  		goto restart;
-@@ -1062,7 +1062,7 @@ void dmar_disable_qi(struct intel_iommu 
+@@ -1062,7 +1062,7 @@ void dmar_disable_qi(struct intel_iommu
  	if (!ecap_qis(iommu->ecap))
  		return;
  
@@ -6759,7 +7559,7 @@ Index: linux-2.6/drivers/pci/dmar.c
  
  	sts =  dmar_readq(iommu->reg + DMAR_GSTS_REG);
  	if (!(sts & DMA_GSTS_QIES))
-@@ -1082,7 +1082,7 @@ void dmar_disable_qi(struct intel_iommu 
+@@ -1082,7 +1082,7 @@ void dmar_disable_qi(struct intel_iommu
  	IOMMU_WAIT_OP(iommu, DMAR_GSTS_REG, readl,
  		      !(sts & DMA_GSTS_QIES), sts);
  end:
@@ -6899,7 +7699,7 @@ Index: linux-2.6/drivers/pci/intel-iommu.c
 ===================================================================
 --- linux-2.6.orig/drivers/pci/intel-iommu.c
 +++ linux-2.6/drivers/pci/intel-iommu.c
-@@ -933,7 +933,7 @@ static void iommu_set_root_entry(struct 
+@@ -933,7 +933,7 @@ static void iommu_set_root_entry(struct
  
  	addr = iommu->root_entry;
  
@@ -6908,7 +7708,7 @@ Index: linux-2.6/drivers/pci/intel-iommu.c
  	dmar_writeq(iommu->reg + DMAR_RTADDR_REG, virt_to_phys(addr));
  
  	writel(iommu->gcmd | DMA_GCMD_SRTP, iommu->reg + DMAR_GCMD_REG);
-@@ -942,7 +942,7 @@ static void iommu_set_root_entry(struct 
+@@ -942,7 +942,7 @@ static void iommu_set_root_entry(struct
  	IOMMU_WAIT_OP(iommu, DMAR_GSTS_REG,
  		      readl, (sts & DMA_GSTS_RTPS), sts);
  
@@ -7114,7 +7914,7 @@ Index: linux-2.6/drivers/pci/intr_remapping.c
  
  	return index;
  }
-@@ -153,10 +153,10 @@ int map_irq_to_irte_handle(int irq, u16 
+@@ -153,10 +153,10 @@ int map_irq_to_irte_handle(int irq, u16
  	if (!irq_iommu)
  		return -1;
  
@@ -7491,7 +8291,7 @@ Index: linux-2.6/kernel/posix-timers.c
  /* Set a POSIX.1b interval timer. */
  /* timr->it_lock is taken. */
  static int
-@@ -841,6 +857,7 @@ retry:
+@@ -841,6 +857,7 @@ SYSCALL_DEFINE4(timer_settime, timer_t,
  	if (!timr)
  		return -EINVAL;
  
@@ -7499,7 +8299,7 @@ Index: linux-2.6/kernel/posix-timers.c
  	kc = clockid_to_kclock(timr->it_clock);
  	if (WARN_ON_ONCE(!kc || !kc->timer_set))
  		error = -EINVAL;
-@@ -849,9 +866,12 @@ retry:
+@@ -849,9 +866,12 @@ SYSCALL_DEFINE4(timer_settime, timer_t,
  
  	unlock_timer(timr, flag);
  	if (error == TIMER_RETRY) {
@@ -7512,7 +8312,7 @@ Index: linux-2.6/kernel/posix-timers.c
  
  	if (old_setting && !error &&
  	    copy_to_user(old_setting, &old_spec, sizeof (old_spec)))
-@@ -889,10 +909,15 @@ retry_delete:
+@@ -889,10 +909,15 @@ SYSCALL_DEFINE1(timer_delete, timer_t, t
  	if (!timer)
  		return -EINVAL;
  
@@ -7774,7 +8574,7 @@ Index: linux-2.6/drivers/char/random.c
  	.pool = nonblocking_pool_data
  };
  
-@@ -633,8 +633,11 @@ static void add_timer_randomness(struct 
+@@ -633,8 +633,11 @@ static void add_timer_randomness(struct
  	preempt_disable();
  	/* if over the trickle threshold, use only 1 in 4096 samples */
  	if (input_pool.entropy_count > trickle_thresh &&
@@ -7788,7 +8588,7 @@ Index: linux-2.6/drivers/char/random.c
  
  	sample.jiffies = jiffies;
  	sample.cycles = get_cycles();
-@@ -676,8 +679,6 @@ static void add_timer_randomness(struct 
+@@ -676,8 +679,6 @@ static void add_timer_randomness(struct
  		credit_entropy_bits(&input_pool,
  				    min_t(int, fls(delta>>1), 11));
  	}
@@ -7801,7 +8601,7 @@ Index: linux-2.6/fs/ioprio.c
 ===================================================================
 --- linux-2.6.orig/fs/ioprio.c
 +++ linux-2.6/fs/ioprio.c
-@@ -226,6 +226,7 @@ SYSCALL_DEFINE2(ioprio_get, int, which, 
+@@ -226,6 +226,7 @@ SYSCALL_DEFINE2(ioprio_get, int, which,
  			if (!user)
  				break;
  
@@ -7809,7 +8609,7 @@ Index: linux-2.6/fs/ioprio.c
  			do_each_thread(g, p) {
  				if (__task_cred(p)->uid != user->uid)
  					continue;
-@@ -237,6 +238,7 @@ SYSCALL_DEFINE2(ioprio_get, int, which, 
+@@ -237,6 +238,7 @@ SYSCALL_DEFINE2(ioprio_get, int, which,
  				else
  					ret = ioprio_best(ret, tmpio);
  			} while_each_thread(g, p);
@@ -7928,7 +8728,7 @@ Index: linux-2.6/drivers/clocksource/tcb_clksrc.c
  		__raw_writel(timer_clock | ATMEL_TC_CPCSTOP
  				| ATMEL_TC_WAVE | ATMEL_TC_WAVESEL_UP_AUTO,
  				regs + ATMEL_TC_REG(2, CMR));
-@@ -152,8 +146,12 @@ static struct tc_clkevt_device clkevt = 
+@@ -152,8 +146,12 @@ static struct tc_clkevt_device clkevt =
  		.features	= CLOCK_EVT_FEAT_PERIODIC
  					| CLOCK_EVT_FEAT_ONESHOT,
  		.shift		= 32,
@@ -8212,7 +9012,7 @@ Index: linux-2.6/include/linux/uaccess.h
 ===================================================================
 --- linux-2.6.orig/include/linux/uaccess.h
 +++ linux-2.6/include/linux/uaccess.h
-@@ -6,37 +6,10 @@
+@@ -6,38 +6,37 @@
  
  /*
   * These routines enable/disable the pagefault handler in that
@@ -8225,34 +9025,62 @@ Index: linux-2.6/include/linux/uaccess.h
 + * it will not take any MM locks and go straight to the fixup table.
   */
 -static inline void pagefault_disable(void)
--{
--	inc_preempt_count();
++static inline void raw_pagefault_disable(void)
+ {
+ 	inc_preempt_count();
 -	/*
 -	 * make sure to have issued the store before a pagefault
 -	 * can hit.
 -	 */
--	barrier();
--}
--
+ 	barrier();
+ }
+ 
 -static inline void pagefault_enable(void)
--{
++static inline void raw_pagefault_enable(void)
+ {
 -	/*
 -	 * make sure to issue those last loads/stores before enabling
 -	 * the pagefault handler again.
 -	 */
--	barrier();
--	dec_preempt_count();
+ 	barrier();
+ 	dec_preempt_count();
 -	/*
 -	 * make sure we do..
 -	 */
--	barrier();
--	preempt_check_resched();
--}
+ 	barrier();
+ 	preempt_check_resched();
+ }
+ 
++#ifndef CONFIG_PREEMPT_RT_FULL
++static inline void pagefault_disable(void)
++{
++	raw_pagefault_disable();
++}
++
++static inline void pagefault_enable(void)
++{
++	raw_pagefault_enable();
++}
++#else
 +extern void pagefault_disable(void);
 +extern void pagefault_enable(void);
- 
++#endif
++
  #ifndef ARCH_HAS_NOCACHE_UACCESS
  
+ static inline unsigned long __copy_from_user_inatomic_nocache(void *to,
+@@ -77,9 +76,9 @@ static inline unsigned long __copy_from_
+ 		mm_segment_t old_fs = get_fs();		\
+ 							\
+ 		set_fs(KERNEL_DS);			\
+-		pagefault_disable();			\
++		raw_pagefault_disable();		\
+ 		ret = __copy_from_user_inatomic(&(retval), (__force typeof(retval) __user *)(addr), sizeof(retval));		\
+-		pagefault_enable();			\
++		raw_pagefault_enable();			\
+ 		set_fs(old_fs);				\
+ 		ret;					\
+ 	})
 Index: linux-2.6/mm/memory.c
 ===================================================================
 --- linux-2.6.orig/mm/memory.c
@@ -8273,12 +9101,14 @@ Index: linux-2.6/mm/memory.c
  # define ZAP_BLOCK_SIZE	(1024 * PAGE_SIZE)
  #endif
  
-@@ -3379,6 +3382,28 @@ unlock:
+@@ -3435,6 +3438,32 @@ int handle_pte_fault(struct mm_struct *m
  	return 0;
  }
  
++#ifdef CONFIG_PREEMPT_RT_FULL
 +void pagefault_disable(void)
 +{
++	migrate_disable();
 +	current->pagefault_disabled++;
 +	/*
 +	 * make sure to have issued the store before a pagefault
@@ -8296,13 +9126,15 @@ Index: linux-2.6/mm/memory.c
 +	 */
 +	barrier();
 +	current->pagefault_disabled--;
++	migrate_enable();
 +}
 +EXPORT_SYMBOL_GPL(pagefault_enable);
++#endif
 +
  /*
   * By the time we get here, we already hold the mm semaphore
   */
-@@ -3927,3 +3952,35 @@ void copy_user_huge_page(struct page *ds
+@@ -3983,3 +4012,35 @@ void copy_user_huge_page(struct page *ds
  	}
  }
  #endif /* CONFIG_TRANSPARENT_HUGEPAGE || CONFIG_HUGETLBFS */
@@ -8434,7 +9266,7 @@ Index: linux-2.6/arch/m68k/mm/fault.c
 ===================================================================
 --- linux-2.6.orig/arch/m68k/mm/fault.c
 +++ linux-2.6/arch/m68k/mm/fault.c
-@@ -85,7 +85,7 @@ int do_page_fault(struct pt_regs *regs, 
+@@ -85,7 +85,7 @@ int do_page_fault(struct pt_regs *regs,
  	 * If we're in an interrupt or have no user
  	 * context, we must not take the fault..
  	 */
@@ -8522,7 +9354,7 @@ Index: linux-2.6/arch/s390/mm/fault.c
  		goto out;
  
  	address = trans_exc_code & __FAIL_ADDR_MASK;
-@@ -410,7 +411,8 @@ void __kprobes do_asce_exception(struct 
+@@ -410,7 +411,8 @@ void __kprobes do_asce_exception(struct
  	struct mm_struct *mm = current->mm;
  	struct vm_area_struct *vma;
  
@@ -8638,304 +9470,6 @@ Index: linux-2.6/arch/xtensa/mm/fault.c
  		bad_page_fault(regs, address, SIGSEGV);
  		return;
  	}
-Index: linux-2.6/arch/arm/include/asm/futex.h
-===================================================================
---- linux-2.6.orig/arch/arm/include/asm/futex.h
-+++ linux-2.6/arch/arm/include/asm/futex.h
-@@ -125,7 +125,7 @@ futex_atomic_op_inuser (int encoded_op, 
- 	if (!access_ok(VERIFY_WRITE, uaddr, sizeof(u32)))
- 		return -EFAULT;
- 
--	pagefault_disable();	/* implies preempt_disable() */
-+	pagefault_disable();
- 
- 	switch (op) {
- 	case FUTEX_OP_SET:
-@@ -147,7 +147,7 @@ futex_atomic_op_inuser (int encoded_op, 
- 		ret = -ENOSYS;
- 	}
- 
--	pagefault_enable();	/* subsumes preempt_enable() */
-+	pagefault_enable();
- 
- 	if (!ret) {
- 		switch (cmp) {
-Index: linux-2.6/arch/arm/mm/highmem.c
-===================================================================
---- linux-2.6.orig/arch/arm/mm/highmem.c
-+++ linux-2.6/arch/arm/mm/highmem.c
-@@ -43,6 +43,7 @@ void *__kmap_atomic(struct page *page)
- 	void *kmap;
- 	int type;
- 
-+	preempt_disable();
- 	pagefault_disable();
- 	if (!PageHighMem(page))
- 		return page_address(page);
-@@ -107,6 +108,7 @@ void __kunmap_atomic(void *kvaddr)
- 		kunmap_high(pte_page(pkmap_page_table[PKMAP_NR(vaddr)]));
- 	}
- 	pagefault_enable();
-+	preempt_enable();
- }
- EXPORT_SYMBOL(__kunmap_atomic);
- 
-@@ -115,6 +117,7 @@ void *kmap_atomic_pfn(unsigned long pfn)
- 	unsigned long vaddr;
- 	int idx, type;
- 
-+	preempt_disable();
- 	pagefault_disable();
- 
- 	type = kmap_atomic_idx_push();
-Index: linux-2.6/arch/frv/include/asm/highmem.h
-===================================================================
---- linux-2.6.orig/arch/frv/include/asm/highmem.h
-+++ linux-2.6/arch/frv/include/asm/highmem.h
-@@ -116,6 +116,7 @@ static inline void *kmap_atomic_primary(
- {
- 	unsigned long paddr;
- 
-+	preempt_disable();
- 	pagefault_disable();
- 	paddr = page_to_phys(page);
- 
-@@ -155,6 +156,7 @@ static inline void kunmap_atomic_primary
- 		BUG();
- 	}
- 	pagefault_enable();
-+	preempt_enable();
- }
- 
- void *__kmap_atomic(struct page *page);
-Index: linux-2.6/arch/frv/mm/highmem.c
-===================================================================
---- linux-2.6.orig/arch/frv/mm/highmem.c
-+++ linux-2.6/arch/frv/mm/highmem.c
-@@ -42,6 +42,7 @@ void *__kmap_atomic(struct page *page)
- 	unsigned long paddr;
- 	int type;
- 
-+	preempt_disable();
- 	pagefault_disable();
- 	type = kmap_atomic_idx_push();
- 	paddr = page_to_phys(page);
-@@ -85,5 +86,6 @@ void __kunmap_atomic(void *kvaddr)
- 	}
- 	kmap_atomic_idx_pop();
- 	pagefault_enable();
-+	preempt_enable();
- }
- EXPORT_SYMBOL(__kunmap_atomic);
-Index: linux-2.6/arch/mips/mm/highmem.c
-===================================================================
---- linux-2.6.orig/arch/mips/mm/highmem.c
-+++ linux-2.6/arch/mips/mm/highmem.c
-@@ -46,7 +46,7 @@ void *__kmap_atomic(struct page *page)
- 	unsigned long vaddr;
- 	int idx, type;
- 
--	/* even !CONFIG_PREEMPT needs this, for in_atomic in do_page_fault */
-+	preempt_disable();
- 	pagefault_disable();
- 	if (!PageHighMem(page))
- 		return page_address(page);
-@@ -71,6 +71,7 @@ void __kunmap_atomic(void *kvaddr)
- 
- 	if (vaddr < FIXADDR_START) { // FIXME
- 		pagefault_enable();
-+		preempt_enable();
- 		return;
- 	}
- 
-@@ -91,6 +92,7 @@ void __kunmap_atomic(void *kvaddr)
- #endif
- 	kmap_atomic_idx_pop();
- 	pagefault_enable();
-+	preempt_enable();
- }
- EXPORT_SYMBOL(__kunmap_atomic);
- 
-@@ -103,6 +105,7 @@ void *kmap_atomic_pfn(unsigned long pfn)
- 	unsigned long vaddr;
- 	int idx, type;
- 
-+	preempt_disable();
- 	pagefault_disable();
- 
- 	type = kmap_atomic_idx_push();
-Index: linux-2.6/arch/mn10300/include/asm/highmem.h
-===================================================================
---- linux-2.6.orig/arch/mn10300/include/asm/highmem.h
-+++ linux-2.6/arch/mn10300/include/asm/highmem.h
-@@ -75,6 +75,7 @@ static inline unsigned long __kmap_atomi
- 	unsigned long vaddr;
- 	int idx, type;
- 
-+	preempt_disable();
- 	pagefault_disable();
- 	if (page < highmem_start_page)
- 		return page_address(page);
-@@ -98,6 +99,7 @@ static inline void __kunmap_atomic(unsig
- 
- 	if (vaddr < FIXADDR_START) { /* FIXME */
- 		pagefault_enable();
-+		preempt_enable();
- 		return;
- 	}
- 
-@@ -122,6 +124,7 @@ static inline void __kunmap_atomic(unsig
- 
- 	kmap_atomic_idx_pop();
- 	pagefault_enable();
-+	preempt_enable();
- }
- #endif /* __KERNEL__ */
- 
-Index: linux-2.6/arch/powerpc/mm/highmem.c
-===================================================================
---- linux-2.6.orig/arch/powerpc/mm/highmem.c
-+++ linux-2.6/arch/powerpc/mm/highmem.c
-@@ -34,7 +34,7 @@ void *kmap_atomic_prot(struct page *page
- 	unsigned long vaddr;
- 	int idx, type;
- 
--	/* even !CONFIG_PREEMPT needs this, for in_atomic in do_page_fault */
-+	preempt_disable();
- 	pagefault_disable();
- 	if (!PageHighMem(page))
- 		return page_address(page);
-@@ -59,6 +59,7 @@ void __kunmap_atomic(void *kvaddr)
- 
- 	if (vaddr < __fix_to_virt(FIX_KMAP_END)) {
- 		pagefault_enable();
-+		preempt_enable();
- 		return;
- 	}
- 
-@@ -82,5 +83,6 @@ void __kunmap_atomic(void *kvaddr)
- 
- 	kmap_atomic_idx_pop();
- 	pagefault_enable();
-+	preempt_enable();
- }
- EXPORT_SYMBOL(__kunmap_atomic);
-Index: linux-2.6/arch/sh/mm/kmap.c
-===================================================================
---- linux-2.6.orig/arch/sh/mm/kmap.c
-+++ linux-2.6/arch/sh/mm/kmap.c
-@@ -36,6 +36,7 @@ void *kmap_coherent(struct page *page, u
- 
- 	BUG_ON(!test_bit(PG_dcache_clean, &page->flags));
- 
-+	preempt_disable();
- 	pagefault_disable();
- 
- 	idx = FIX_CMAP_END -
-@@ -64,4 +65,5 @@ void kunmap_coherent(void *kvaddr)
- 	}
- 
- 	pagefault_enable();
-+	preempt_enable();
- }
-Index: linux-2.6/arch/sparc/mm/highmem.c
-===================================================================
---- linux-2.6.orig/arch/sparc/mm/highmem.c
-+++ linux-2.6/arch/sparc/mm/highmem.c
-@@ -34,7 +34,7 @@ void *__kmap_atomic(struct page *page)
- 	unsigned long vaddr;
- 	long idx, type;
- 
--	/* even !CONFIG_PREEMPT needs this, for in_atomic in do_page_fault */
-+	preempt_disable();
- 	pagefault_disable();
- 	if (!PageHighMem(page))
- 		return page_address(page);
-@@ -72,6 +72,7 @@ void __kunmap_atomic(void *kvaddr)
- 
- 	if (vaddr < FIXADDR_START) { // FIXME
- 		pagefault_enable();
-+		preempt_enable();
- 		return;
- 	}
- 
-@@ -107,6 +108,7 @@ void __kunmap_atomic(void *kvaddr)
- 
- 	kmap_atomic_idx_pop();
- 	pagefault_enable();
-+	preempt_enable();
- }
- EXPORT_SYMBOL(__kunmap_atomic);
- 
-Index: linux-2.6/arch/tile/mm/highmem.c
-===================================================================
---- linux-2.6.orig/arch/tile/mm/highmem.c
-+++ linux-2.6/arch/tile/mm/highmem.c
-@@ -202,7 +202,7 @@ void *kmap_atomic_prot(struct page *page
- 	int idx, type;
- 	pte_t *pte;
- 
--	/* even !CONFIG_PREEMPT needs this, for in_atomic in do_page_fault */
-+	preempt_disable();
- 	pagefault_disable();
- 
- 	/* Avoid icache flushes by disallowing atomic executable mappings. */
-@@ -261,6 +261,7 @@ void __kunmap_atomic(void *kvaddr)
- 
- 	arch_flush_lazy_mmu_mode();
- 	pagefault_enable();
-+	preempt_enable();
- }
- EXPORT_SYMBOL(__kunmap_atomic);
- 
-Index: linux-2.6/arch/x86/mm/highmem_32.c
-===================================================================
---- linux-2.6.orig/arch/x86/mm/highmem_32.c
-+++ linux-2.6/arch/x86/mm/highmem_32.c
-@@ -34,7 +34,6 @@ void *kmap_atomic_prot(struct page *page
- 	unsigned long vaddr;
- 	int idx, type;
- 
--	/* even !CONFIG_PREEMPT needs this, for in_atomic in do_page_fault */
- 	pagefault_disable();
- 
- 	if (!PageHighMem(page))
-@@ -43,7 +42,7 @@ void *kmap_atomic_prot(struct page *page
- 	type = kmap_atomic_idx_push();
- 	idx = type + KM_TYPE_NR*smp_processor_id();
- 	vaddr = __fix_to_virt(FIX_KMAP_BEGIN + idx);
--	BUG_ON(!pte_none(*(kmap_pte-idx)));
-+	WARN_ON(!pte_none(*(kmap_pte-idx)));
- 	set_pte(kmap_pte-idx, mk_pte(page, prot));
- 
- 	return (void *)vaddr;
-@@ -97,6 +96,7 @@ void __kunmap_atomic(void *kvaddr)
- #endif
- 
- 	pagefault_enable();
-+	preempt_enable();
- }
- EXPORT_SYMBOL(__kunmap_atomic);
- 
-Index: linux-2.6/arch/x86/mm/iomap_32.c
-===================================================================
---- linux-2.6.orig/arch/x86/mm/iomap_32.c
-+++ linux-2.6/arch/x86/mm/iomap_32.c
-@@ -59,6 +59,7 @@ void *kmap_atomic_prot_pfn(unsigned long
- 	unsigned long vaddr;
- 	int idx, type;
- 
-+	preempt_disable();
- 	pagefault_disable();
- 
- 	type = kmap_atomic_idx_push();
-@@ -115,5 +116,6 @@ iounmap_atomic(void __iomem *kvaddr)
- 	}
- 
- 	pagefault_enable();
-+	preempt_enable();
- }
- EXPORT_SYMBOL_GPL(iounmap_atomic);
 Index: linux-2.6/mm/filemap.c
 ===================================================================
 --- linux-2.6.orig/mm/filemap.c
@@ -8949,6 +9483,19 @@ Index: linux-2.6/mm/filemap.c
  	kaddr = kmap_atomic(page, KM_USER0);
  	if (likely(i->nr_segs == 1)) {
  		int left;
+Index: linux-2.6/arch/x86/mm/highmem_32.c
+===================================================================
+--- linux-2.6.orig/arch/x86/mm/highmem_32.c
++++ linux-2.6/arch/x86/mm/highmem_32.c
+@@ -43,7 +43,7 @@ void *kmap_atomic_prot(struct page *page
+ 	type = kmap_atomic_idx_push();
+ 	idx = type + KM_TYPE_NR*smp_processor_id();
+ 	vaddr = __fix_to_virt(FIX_KMAP_BEGIN + idx);
+-	BUG_ON(!pte_none(*(kmap_pte-idx)));
++	WARN_ON(!pte_none(*(kmap_pte-idx)));
+ 	set_pte(kmap_pte-idx, mk_pte(page, prot));
+ 
+ 	return (void *)vaddr;
 Index: linux-2.6/include/linux/kernel.h
 ===================================================================
 --- linux-2.6.orig/include/linux/kernel.h
@@ -9069,7 +9616,7 @@ Index: linux-2.6/drivers/of/base.c
  	for (pp = np->properties; pp != 0; pp = pp->next) {
  		if (of_prop_cmp(pp->name, name) == 0) {
  			if (lenp != 0)
-@@ -155,11 +153,23 @@ struct property *of_find_property(const 
+@@ -155,11 +153,23 @@ struct property *of_find_property(const
  			break;
  		}
  	}
@@ -9692,7 +10239,7 @@ Index: linux-2.6/mm/page_alloc.c
  }
  
  static bool free_pages_prepare(struct page *page, unsigned int order)
-@@ -682,13 +718,13 @@ static void __free_pages_ok(struct page 
+@@ -682,13 +718,13 @@ static void __free_pages_ok(struct page
  	if (!free_pages_prepare(page, order))
  		return;
  
@@ -9802,7 +10349,7 @@ Index: linux-2.6/mm/page_alloc.c
  }
  
  /*
-@@ -1301,7 +1358,7 @@ again:
+@@ -1301,7 +1358,7 @@ struct page *buffered_rmqueue(struct zon
  		struct per_cpu_pages *pcp;
  		struct list_head *list;
  
@@ -9811,7 +10358,7 @@ Index: linux-2.6/mm/page_alloc.c
  		pcp = &this_cpu_ptr(zone->pageset)->pcp;
  		list = &pcp->lists[migratetype];
  		if (list_empty(list)) {
-@@ -1333,17 +1390,19 @@ again:
+@@ -1333,17 +1390,19 @@ struct page *buffered_rmqueue(struct zon
  			 */
  			WARN_ON_ONCE(order > 1);
  		}
@@ -9835,7 +10382,7 @@ Index: linux-2.6/mm/page_alloc.c
  
  	VM_BUG_ON(bad_range(zone, page));
  	if (prep_new_page(page, order, gfp_flags))
-@@ -1351,7 +1410,7 @@ again:
+@@ -1351,7 +1410,7 @@ struct page *buffered_rmqueue(struct zon
  	return page;
  
  failed:
@@ -9875,7 +10422,7 @@ Index: linux-2.6/mm/page_alloc.c
  	}
  	return 0;
  }
-@@ -4972,6 +5033,7 @@ static int page_alloc_cpu_notify(struct 
+@@ -4972,6 +5033,7 @@ static int page_alloc_cpu_notify(struct
  void __init page_alloc_init(void)
  {
  	hotcpu_notifier(page_alloc_cpu_notify, 0);
@@ -9895,7 +10442,107 @@ Index: linux-2.6/mm/slab.c
  
  #include	<asm/cacheflush.h>
  #include	<asm/tlbflush.h>
-@@ -678,12 +679,66 @@ static DEFINE_MUTEX(cache_chain_mutex);
+@@ -620,6 +621,51 @@ int slab_is_available(void)
+ static struct lock_class_key on_slab_l3_key;
+ static struct lock_class_key on_slab_alc_key;
+ 
++static struct lock_class_key debugobj_l3_key;
++static struct lock_class_key debugobj_alc_key;
++
++static void slab_set_lock_classes(struct kmem_cache *cachep,
++		struct lock_class_key *l3_key, struct lock_class_key *alc_key,
++		int q)
++{
++	struct array_cache **alc;
++	struct kmem_list3 *l3;
++	int r;
++
++	l3 = cachep->nodelists[q];
++	if (!l3)
++		return;
++
++	lockdep_set_class(&l3->list_lock, l3_key);
++	alc = l3->alien;
++	/*
++	 * FIXME: This check for BAD_ALIEN_MAGIC
++	 * should go away when common slab code is taught to
++	 * work even without alien caches.
++	 * Currently, non NUMA code returns BAD_ALIEN_MAGIC
++	 * for alloc_alien_cache,
++	 */
++	if (!alc || (unsigned long)alc == BAD_ALIEN_MAGIC)
++		return;
++	for_each_node(r) {
++		if (alc[r])
++			lockdep_set_class(&alc[r]->lock, alc_key);
++	}
++}
++
++static void slab_set_debugobj_lock_classes_node(struct kmem_cache *cachep, int node)
++{
++	slab_set_lock_classes(cachep, &debugobj_l3_key, &debugobj_alc_key, node);
++}
++
++static void slab_set_debugobj_lock_classes(struct kmem_cache *cachep)
++{
++	int node;
++
++	for_each_online_node(node)
++		slab_set_debugobj_lock_classes_node(cachep, node);
++}
++
+ static void init_node_lock_keys(int q)
+ {
+ 	struct cache_sizes *s = malloc_sizes;
+@@ -628,29 +674,14 @@ static void init_node_lock_keys(int q)
+ 		return;
+ 
+ 	for (s = malloc_sizes; s->cs_size != ULONG_MAX; s++) {
+-		struct array_cache **alc;
+ 		struct kmem_list3 *l3;
+-		int r;
+ 
+ 		l3 = s->cs_cachep->nodelists[q];
+ 		if (!l3 || OFF_SLAB(s->cs_cachep))
+ 			continue;
+-		lockdep_set_class(&l3->list_lock, &on_slab_l3_key);
+-		alc = l3->alien;
+-		/*
+-		 * FIXME: This check for BAD_ALIEN_MAGIC
+-		 * should go away when common slab code is taught to
+-		 * work even without alien caches.
+-		 * Currently, non NUMA code returns BAD_ALIEN_MAGIC
+-		 * for alloc_alien_cache,
+-		 */
+-		if (!alc || (unsigned long)alc == BAD_ALIEN_MAGIC)
+-			continue;
+-		for_each_node(r) {
+-			if (alc[r])
+-				lockdep_set_class(&alc[r]->lock,
+-					&on_slab_alc_key);
+-		}
++
++		slab_set_lock_classes(s->cs_cachep, &on_slab_l3_key,
++				&on_slab_alc_key, q);
+ 	}
+ }
+ 
+@@ -669,6 +700,14 @@ static void init_node_lock_keys(int q)
+ static inline void init_lock_keys(void)
+ {
+ }
++
++static void slab_set_debugobj_lock_classes_node(struct kmem_cache *cachep, int node)
++{
++}
++
++static void slab_set_debugobj_lock_classes(struct kmem_cache *cachep)
++{
++}
+ #endif
+ 
+ /*
+@@ -678,12 +717,66 @@ static DEFINE_MUTEX(cache_chain_mutex);
  static struct list_head cache_chain;
  
  static DEFINE_PER_CPU(struct delayed_work, slab_reap_work);
@@ -9962,7 +10609,7 @@ Index: linux-2.6/mm/slab.c
  static inline struct kmem_cache *__find_general_cachep(size_t size,
  							gfp_t gfpflags)
  {
-@@ -1021,9 +1076,10 @@ static void reap_alien(struct kmem_cache
+@@ -1021,9 +1114,10 @@ static void reap_alien(struct kmem_cache
  	if (l3->alien) {
  		struct array_cache *ac = l3->alien[node];
  
@@ -9975,7 +10622,7 @@ Index: linux-2.6/mm/slab.c
  		}
  	}
  }
-@@ -1038,9 +1094,9 @@ static void drain_alien_cache(struct kme
+@@ -1038,9 +1132,9 @@ static void drain_alien_cache(struct kme
  	for_each_online_node(i) {
  		ac = alien[i];
  		if (ac) {
@@ -9987,7 +10634,7 @@ Index: linux-2.6/mm/slab.c
  		}
  	}
  }
-@@ -1119,11 +1175,11 @@ static int init_cache_nodelists_node(int
+@@ -1119,11 +1213,11 @@ static int init_cache_nodelists_node(int
  			cachep->nodelists[node] = l3;
  		}
  
@@ -10001,7 +10648,7 @@ Index: linux-2.6/mm/slab.c
  	}
  	return 0;
  }
-@@ -1148,7 +1204,7 @@ static void __cpuinit cpuup_canceled(lon
+@@ -1148,7 +1242,7 @@ static void __cpuinit cpuup_canceled(lon
  		if (!l3)
  			goto free_array_cache;
  
@@ -10010,7 +10657,7 @@ Index: linux-2.6/mm/slab.c
  
  		/* Free limit for this kmem_list3 */
  		l3->free_limit -= cachep->batchcount;
-@@ -1156,7 +1212,7 @@ static void __cpuinit cpuup_canceled(lon
+@@ -1156,7 +1250,7 @@ static void __cpuinit cpuup_canceled(lon
  			free_block(cachep, nc->entry, nc->avail, node);
  
  		if (!cpumask_empty(mask)) {
@@ -10019,7 +10666,7 @@ Index: linux-2.6/mm/slab.c
  			goto free_array_cache;
  		}
  
-@@ -1170,7 +1226,7 @@ static void __cpuinit cpuup_canceled(lon
+@@ -1170,7 +1264,7 @@ static void __cpuinit cpuup_canceled(lon
  		alien = l3->alien;
  		l3->alien = NULL;
  
@@ -10028,7 +10675,7 @@ Index: linux-2.6/mm/slab.c
  
  		kfree(shared);
  		if (alien) {
-@@ -1244,7 +1300,7 @@ static int __cpuinit cpuup_prepare(long 
+@@ -1244,7 +1338,7 @@ static int __cpuinit cpuup_prepare(long
  		l3 = cachep->nodelists[node];
  		BUG_ON(!l3);
  
@@ -10037,7 +10684,7 @@ Index: linux-2.6/mm/slab.c
  		if (!l3->shared) {
  			/*
  			 * We are serialised from CPU_DEAD or
-@@ -1259,7 +1315,7 @@ static int __cpuinit cpuup_prepare(long 
+@@ -1259,9 +1353,11 @@ static int __cpuinit cpuup_prepare(long
  			alien = NULL;
  		}
  #endif
@@ -10045,8 +10692,12 @@ Index: linux-2.6/mm/slab.c
 +		local_spin_unlock_irq(slab_lock, &l3->list_lock);
  		kfree(shared);
  		free_alien_cache(alien);
++		if (cachep->flags & SLAB_DEBUG_OBJECTS)
++			slab_set_debugobj_lock_classes_node(cachep, node);
  	}
-@@ -1448,6 +1504,10 @@ void __init kmem_cache_init(void)
+ 	init_node_lock_keys(node);
+ 
+@@ -1448,6 +1544,10 @@ void __init kmem_cache_init(void)
  	if (num_possible_nodes() == 1)
  		use_alien_caches = 0;
  
@@ -10057,7 +10708,27 @@ Index: linux-2.6/mm/slab.c
  	for (i = 0; i < NUM_INIT_LISTS; i++) {
  		kmem_list3_init(&initkmem_list3[i]);
  		if (i < MAX_NUMNODES)
-@@ -1725,12 +1785,14 @@ static void *kmem_getpages(struct kmem_c
+@@ -1625,6 +1725,9 @@ void __init kmem_cache_init_late(void)
+ {
+ 	struct kmem_cache *cachep;
+ 
++	/* Annotate slab for lockdep -- annotate the malloc caches */
++	init_lock_keys();
++
+ 	/* 6) resize the head arrays to their final sizes */
+ 	mutex_lock(&cache_chain_mutex);
+ 	list_for_each_entry(cachep, &cache_chain, next)
+@@ -1635,9 +1738,6 @@ void __init kmem_cache_init_late(void)
+ 	/* Done! */
+ 	g_cpucache_up = FULL;
+ 
+-	/* Annotate slab for lockdep -- annotate the malloc caches */
+-	init_lock_keys();
+-
+ 	/*
+ 	 * Register a cpu startup notifier callback that initializes
+ 	 * cpu_cache_get for all new cpus
+@@ -1725,12 +1825,14 @@ static void *kmem_getpages(struct kmem_c
  /*
   * Interface to system's page release.
   */
@@ -10074,7 +10745,7 @@ Index: linux-2.6/mm/slab.c
  	kmemcheck_free_shadow(page, cachep->gfporder);
  
  	if (cachep->flags & SLAB_RECLAIM_ACCOUNT)
-@@ -1746,7 +1808,13 @@ static void kmem_freepages(struct kmem_c
+@@ -1746,7 +1848,13 @@ static void kmem_freepages(struct kmem_c
  	}
  	if (current->reclaim_state)
  		current->reclaim_state->reclaimed_slab += nr_freed;
@@ -10089,7 +10760,7 @@ Index: linux-2.6/mm/slab.c
  }
  
  static void kmem_rcu_free(struct rcu_head *head)
-@@ -1754,7 +1822,7 @@ static void kmem_rcu_free(struct rcu_hea
+@@ -1754,7 +1862,7 @@ static void kmem_rcu_free(struct rcu_hea
  	struct slab_rcu *slab_rcu = (struct slab_rcu *)head;
  	struct kmem_cache *cachep = slab_rcu->cachep;
  
@@ -10098,7 +10769,7 @@ Index: linux-2.6/mm/slab.c
  	if (OFF_SLAB(cachep))
  		kmem_cache_free(cachep->slabp_cache, slab_rcu);
  }
-@@ -1973,7 +2041,8 @@ static void slab_destroy_debugcheck(stru
+@@ -1973,7 +2081,8 @@ static void slab_destroy_debugcheck(stru
   * Before calling the slab must have been unlinked from the cache.  The
   * cache-lock is not held/needed.
   */
@@ -10108,7 +10779,7 @@ Index: linux-2.6/mm/slab.c
  {
  	void *addr = slabp->s_mem - slabp->colouroff;
  
-@@ -1986,7 +2055,7 @@ static void slab_destroy(struct kmem_cac
+@@ -1986,7 +2095,7 @@ static void slab_destroy(struct kmem_cac
  		slab_rcu->addr = addr;
  		call_rcu(&slab_rcu->head, kmem_rcu_free);
  	} else {
@@ -10117,7 +10788,24 @@ Index: linux-2.6/mm/slab.c
  		if (OFF_SLAB(cachep))
  			kmem_cache_free(cachep->slabp_cache, slabp);
  	}
-@@ -2441,7 +2510,7 @@ EXPORT_SYMBOL(kmem_cache_create);
+@@ -2424,6 +2533,16 @@ kmem_cache_create (const char *name, siz
+ 		goto oops;
+ 	}
+ 
++	if (flags & SLAB_DEBUG_OBJECTS) {
++		/*
++		 * Would deadlock through slab_destroy()->call_rcu()->
++		 * debug_object_activate()->kmem_cache_alloc().
++		 */
++		WARN_ON_ONCE(flags & SLAB_DESTROY_BY_RCU);
++
++		slab_set_debugobj_lock_classes(cachep);
++	}
++
+ 	/* cache setup completed, link it into the list */
+ 	list_add(&cachep->next, &cache_chain);
+ oops:
+@@ -2441,7 +2560,7 @@ EXPORT_SYMBOL(kmem_cache_create);
  #if DEBUG
  static void check_irq_off(void)
  {
@@ -10126,7 +10814,7 @@ Index: linux-2.6/mm/slab.c
  }
  
  static void check_irq_on(void)
-@@ -2476,13 +2545,12 @@ static void drain_array(struct kmem_cach
+@@ -2476,13 +2595,12 @@ static void drain_array(struct kmem_cach
  			struct array_cache *ac,
  			int force, int node);
  
@@ -10142,7 +10830,7 @@ Index: linux-2.6/mm/slab.c
  	ac = cpu_cache_get(cachep);
  	spin_lock(&cachep->nodelists[node]->list_lock);
  	free_block(cachep, ac->entry, ac->avail, node);
-@@ -2490,12 +2558,30 @@ static void do_drain(void *arg)
+@@ -2490,12 +2608,30 @@ static void do_drain(void *arg)
  	ac->avail = 0;
  }
  
@@ -10174,7 +10862,7 @@ Index: linux-2.6/mm/slab.c
  	check_irq_on();
  	for_each_online_node(node) {
  		l3 = cachep->nodelists[node];
-@@ -2526,10 +2612,10 @@ static int drain_freelist(struct kmem_ca
+@@ -2526,10 +2662,10 @@ static int drain_freelist(struct kmem_ca
  	nr_freed = 0;
  	while (nr_freed < tofree && !list_empty(&l3->slabs_free)) {
  
@@ -10187,7 +10875,7 @@ Index: linux-2.6/mm/slab.c
  			goto out;
  		}
  
-@@ -2543,8 +2629,8 @@ static int drain_freelist(struct kmem_ca
+@@ -2543,8 +2679,8 @@ static int drain_freelist(struct kmem_ca
  		 * to the cache.
  		 */
  		l3->free_objects -= cache->num;
@@ -10198,7 +10886,7 @@ Index: linux-2.6/mm/slab.c
  		nr_freed++;
  	}
  out:
-@@ -2838,7 +2924,7 @@ static int cache_grow(struct kmem_cache 
+@@ -2838,7 +2974,7 @@ static int cache_grow(struct kmem_cache
  	offset *= cachep->colour_off;
  
  	if (local_flags & __GFP_WAIT)
@@ -10207,7 +10895,7 @@ Index: linux-2.6/mm/slab.c
  
  	/*
  	 * The test for missing atomic flag is performed here, rather than
-@@ -2868,7 +2954,7 @@ static int cache_grow(struct kmem_cache 
+@@ -2868,7 +3004,7 @@ static int cache_grow(struct kmem_cache
  	cache_init_objs(cachep, slabp);
  
  	if (local_flags & __GFP_WAIT)
@@ -10216,7 +10904,7 @@ Index: linux-2.6/mm/slab.c
  	check_irq_off();
  	spin_lock(&l3->list_lock);
  
-@@ -2879,10 +2965,10 @@ static int cache_grow(struct kmem_cache 
+@@ -2879,10 +3015,10 @@ static int cache_grow(struct kmem_cache
  	spin_unlock(&l3->list_lock);
  	return 1;
  opps1:
@@ -10229,7 +10917,7 @@ Index: linux-2.6/mm/slab.c
  	return 0;
  }
  
-@@ -3280,11 +3366,11 @@ retry:
+@@ -3280,11 +3416,11 @@ static void *fallback_alloc(struct kmem_
  		 * set and go into memory reserves if necessary.
  		 */
  		if (local_flags & __GFP_WAIT)
@@ -10243,7 +10931,7 @@ Index: linux-2.6/mm/slab.c
  		if (obj) {
  			/*
  			 * Insert into the appropriate per node queues
-@@ -3400,7 +3486,7 @@ __cache_alloc_node(struct kmem_cache *ca
+@@ -3400,7 +3536,7 @@ __cache_alloc_node(struct kmem_cache *ca
  		return NULL;
  
  	cache_alloc_debugcheck_before(cachep, flags);
@@ -10252,7 +10940,7 @@ Index: linux-2.6/mm/slab.c
  
  	if (nodeid == -1)
  		nodeid = slab_node;
-@@ -3425,7 +3511,7 @@ __cache_alloc_node(struct kmem_cache *ca
+@@ -3425,7 +3561,7 @@ __cache_alloc_node(struct kmem_cache *ca
  	/* ___cache_alloc_node can fall back to other nodes */
  	ptr = ____cache_alloc_node(cachep, flags, nodeid);
    out:
@@ -10261,7 +10949,7 @@ Index: linux-2.6/mm/slab.c
  	ptr = cache_alloc_debugcheck_after(cachep, flags, ptr, caller);
  	kmemleak_alloc_recursive(ptr, obj_size(cachep), 1, cachep->flags,
  				 flags);
-@@ -3485,9 +3571,9 @@ __cache_alloc(struct kmem_cache *cachep,
+@@ -3485,9 +3621,9 @@ __cache_alloc(struct kmem_cache *cachep,
  		return NULL;
  
  	cache_alloc_debugcheck_before(cachep, flags);
@@ -10273,7 +10961,7 @@ Index: linux-2.6/mm/slab.c
  	objp = cache_alloc_debugcheck_after(cachep, flags, objp, caller);
  	kmemleak_alloc_recursive(objp, obj_size(cachep), 1, cachep->flags,
  				 flags);
-@@ -3535,7 +3621,7 @@ static void free_block(struct kmem_cache
+@@ -3535,7 +3671,7 @@ static void free_block(struct kmem_cache
  				 * a different cache, refer to comments before
  				 * alloc_slabmgmt.
  				 */
@@ -10282,7 +10970,7 @@ Index: linux-2.6/mm/slab.c
  			} else {
  				list_add(&slabp->list, &l3->slabs_free);
  			}
-@@ -3798,12 +3884,12 @@ void kmem_cache_free(struct kmem_cache *
+@@ -3798,12 +3934,12 @@ void kmem_cache_free(struct kmem_cache *
  {
  	unsigned long flags;
  
@@ -10297,7 +10985,7 @@ Index: linux-2.6/mm/slab.c
  
  	trace_kmem_cache_free(_RET_IP_, objp);
  }
-@@ -3827,13 +3913,13 @@ void kfree(const void *objp)
+@@ -3827,13 +3963,13 @@ void kfree(const void *objp)
  
  	if (unlikely(ZERO_OR_NULL_PTR(objp)))
  		return;
@@ -10313,7 +11001,7 @@ Index: linux-2.6/mm/slab.c
  }
  EXPORT_SYMBOL(kfree);
  
-@@ -3876,7 +3962,7 @@ static int alloc_kmemlist(struct kmem_ca
+@@ -3876,7 +4012,7 @@ static int alloc_kmemlist(struct kmem_ca
  		if (l3) {
  			struct array_cache *shared = l3->shared;
  
@@ -10322,7 +11010,7 @@ Index: linux-2.6/mm/slab.c
  
  			if (shared)
  				free_block(cachep, shared->entry,
-@@ -3889,7 +3975,8 @@ static int alloc_kmemlist(struct kmem_ca
+@@ -3889,7 +4025,8 @@ static int alloc_kmemlist(struct kmem_ca
  			}
  			l3->free_limit = (1 + nr_cpus_node(node)) *
  					cachep->batchcount + cachep->num;
@@ -10332,7 +11020,7 @@ Index: linux-2.6/mm/slab.c
  			kfree(shared);
  			free_alien_cache(new_alien);
  			continue;
-@@ -3936,18 +4023,31 @@ struct ccupdate_struct {
+@@ -3936,17 +4073,30 @@ struct ccupdate_struct {
  	struct array_cache *new[NR_CPUS];
  };
  
@@ -10350,8 +11038,8 @@ Index: linux-2.6/mm/slab.c
 -	new->new[smp_processor_id()] = old;
 +	new->cachep->array[cpu] = new->new[cpu];
 +	new->new[cpu] = old;
- }
- 
++}
++
 +#ifndef CONFIG_PREEMPT_RT_BASE
 +static void do_ccupdate_local(void *info)
 +{
@@ -10363,13 +11051,12 @@ Index: linux-2.6/mm/slab.c
 +	spin_lock_irq(&per_cpu(slab_lock, cpu).lock);
 +	__do_ccupdate_local(info, cpu);
 +	spin_unlock_irq(&per_cpu(slab_lock, cpu).lock);
-+}
+ }
 +#endif
-+
+ 
  /* Always called with the cache_chain_mutex held */
  static int do_tune_cpucache(struct kmem_cache *cachep, int limit,
- 				int batchcount, int shared, gfp_t gfp)
-@@ -3971,7 +4071,7 @@ static int do_tune_cpucache(struct kmem_
+@@ -3971,7 +4121,7 @@ static int do_tune_cpucache(struct kmem_
  	}
  	new->cachep = cachep;
  
@@ -10378,7 +11065,7 @@ Index: linux-2.6/mm/slab.c
  
  	check_irq_on();
  	cachep->batchcount = batchcount;
-@@ -3982,9 +4082,11 @@ static int do_tune_cpucache(struct kmem_
+@@ -3982,9 +4132,11 @@ static int do_tune_cpucache(struct kmem_
  		struct array_cache *ccold = new->new[i];
  		if (!ccold)
  			continue;
@@ -10392,7 +11079,7 @@ Index: linux-2.6/mm/slab.c
  		kfree(ccold);
  	}
  	kfree(new);
-@@ -4060,7 +4162,7 @@ static void drain_array(struct kmem_cach
+@@ -4060,7 +4212,7 @@ static void drain_array(struct kmem_cach
  	if (ac->touched && !force) {
  		ac->touched = 0;
  	} else {
@@ -10401,7 +11088,7 @@ Index: linux-2.6/mm/slab.c
  		if (ac->avail) {
  			tofree = force ? ac->avail : (ac->limit + 4) / 5;
  			if (tofree > ac->avail)
-@@ -4070,7 +4172,7 @@ static void drain_array(struct kmem_cach
+@@ -4070,7 +4222,7 @@ static void drain_array(struct kmem_cach
  			memmove(ac->entry, &(ac->entry[tofree]),
  				sizeof(void *) * ac->avail);
  		}
@@ -10410,7 +11097,7 @@ Index: linux-2.6/mm/slab.c
  	}
  }
  
-@@ -4209,7 +4311,7 @@ static int s_show(struct seq_file *m, vo
+@@ -4209,7 +4361,7 @@ static int s_show(struct seq_file *m, vo
  			continue;
  
  		check_irq_on();
@@ -10419,7 +11106,7 @@ Index: linux-2.6/mm/slab.c
  
  		list_for_each_entry(slabp, &l3->slabs_full, list) {
  			if (slabp->inuse != cachep->num && !error)
-@@ -4234,7 +4336,7 @@ static int s_show(struct seq_file *m, vo
+@@ -4234,7 +4386,7 @@ static int s_show(struct seq_file *m, vo
  		if (l3->shared)
  			shared_avail += l3->shared->avail;
  
@@ -10428,7 +11115,7 @@ Index: linux-2.6/mm/slab.c
  	}
  	num_slabs += active_slabs;
  	num_objs = num_slabs * cachep->num;
-@@ -4463,13 +4565,13 @@ static int leaks_show(struct seq_file *m
+@@ -4463,13 +4615,13 @@ static int leaks_show(struct seq_file *m
  			continue;
  
  		check_irq_on();
@@ -10484,7 +11171,7 @@ Index: linux-2.6/kernel/sched_fair.c
  			want_affine = 1;
  		new_cpu = prev_cpu;
  	}
-@@ -2067,7 +2067,7 @@ int can_migrate_task(struct task_struct 
+@@ -2067,7 +2067,7 @@ int can_migrate_task(struct task_struct
  	 * 2) cannot be migrated to this CPU due to cpus_allowed, or
  	 * 3) are cache-hot on their current CPU.
  	 */
@@ -10525,7 +11212,7 @@ Index: linux-2.6/kernel/sched_fair.c
  	}
  	rcu_read_unlock();
  
-@@ -3418,7 +3436,7 @@ redo:
+@@ -3418,7 +3436,7 @@ static int load_balance(int this_cpu, st
  			 * moved to this_cpu
  			 */
  			if (!cpumask_test_cpu(this_cpu,
@@ -10869,7 +11556,7 @@ Index: linux-2.6/include/linux/interrupt.h
 ===================================================================
 --- linux-2.6.orig/include/linux/interrupt.h
 +++ linux-2.6/include/linux/interrupt.h
-@@ -202,7 +202,7 @@ extern void devm_free_irq(struct device 
+@@ -202,7 +202,7 @@ extern void devm_free_irq(struct device
  #ifdef CONFIG_LOCKDEP
  # define local_irq_enable_in_hardirq()	do { } while (0)
  #else
@@ -11033,20 +11720,6 @@ Index: linux-2.6/net/core/dev.c
  		sd->completion_queue = NULL;
  		INIT_LIST_HEAD(&sd->poll_list);
  		sd->output_queue = NULL;
-Index: linux-2.6/arch/arm/kernel/signal.c
-===================================================================
---- linux-2.6.orig/arch/arm/kernel/signal.c
-+++ linux-2.6/arch/arm/kernel/signal.c
-@@ -673,6 +673,9 @@ static void do_signal(struct pt_regs *re
- 	if (!user_mode(regs))
- 		return;
- 
-+	local_irq_enable();
-+	preempt_check_resched();
-+
- 	/*
- 	 * If we were from a system call, check for system call restarting...
- 	 */
 Index: linux-2.6/arch/x86/kernel/apic/io_apic.c
 ===================================================================
 --- linux-2.6.orig/arch/x86/kernel/apic/io_apic.c
@@ -11077,7 +11750,7 @@ Index: linux-2.6/arch/x86/kernel/entry_32.S
  	jmp resume_userspace_sig
  
  	ALIGN
-@@ -638,7 +642,11 @@ work_notifysig_v86:
+@@ -638,7 +642,11 @@ work_notifysig:				# deal with pending s
  	movl %esp, %eax
  #endif
  	xorl %edx, %edx
@@ -11142,7 +11815,7 @@ Index: linux-2.6/kernel/rcutree.c
  /*
   * Queue an RCU for invocation after a quicker grace period.
   */
-@@ -1587,6 +1592,7 @@ void call_rcu_bh(struct rcu_head *head, 
+@@ -1587,6 +1592,7 @@ void call_rcu_bh(struct rcu_head *head,
  	__call_rcu(head, func, &rcu_bh_state);
  }
  EXPORT_SYMBOL_GPL(call_rcu_bh);
@@ -11250,6 +11923,19 @@ Index: linux-2.6/kernel/rcutree_plugin.h
  }
  
  #endif /* #ifdef CONFIG_HOTPLUG_CPU */
+Index: linux-2.6/drivers/usb/gadget/ci13xxx_udc.c
+===================================================================
+--- linux-2.6.orig/drivers/usb/gadget/ci13xxx_udc.c
++++ linux-2.6/drivers/usb/gadget/ci13xxx_udc.c
+@@ -816,7 +816,7 @@ static struct {
+ } dbg_data = {
+ 	.idx = 0,
+ 	.tty = 0,
+-	.lck = __RW_LOCK_UNLOCKED(lck)
++	.lck = __RW_LOCK_UNLOCKED(dbg_data.lck)
+ };
+ 
+ /**
 Index: linux-2.6/fs/file.c
 ===================================================================
 --- linux-2.6.orig/fs/file.c
@@ -11305,19 +11991,6 @@ Index: linux-2.6/kernel/cred.c
 +	.lock	= __SPIN_LOCK_UNLOCKED(init_tgcred.lock),
  };
  #endif
- 
-Index: linux-2.6/drivers/rtc/rtc-tegra.c
-===================================================================
---- linux-2.6.orig/drivers/rtc/rtc-tegra.c
-+++ linux-2.6/drivers/rtc/rtc-tegra.c
-@@ -343,7 +343,7 @@ static int __devinit tegra_rtc_probe(str
- 
- 	/* set context info. */
- 	info->pdev = pdev;
--	info->tegra_rtc_lock = __SPIN_LOCK_UNLOCKED(info->tegra_rtc_lock);
-+	spin_lock_init(&info->tegra_rtc_lock);
- 
- 	platform_set_drvdata(pdev, info);
  
 Index: linux-2.6/include/linux/seqlock.h
 ===================================================================
@@ -12386,7 +13059,7 @@ Index: linux-2.6/arch/sh/include/asm/rwsem.h
  {
  	atomic_add(delta, (atomic_t *)(&sem->count));
  }
-@@ -104,7 +104,7 @@ static inline void rwsem_atomic_add(int 
+@@ -104,7 +104,7 @@ static inline void rwsem_atomic_add(int
  /*
   * downgrade write lock to read lock
   */
@@ -12664,7 +13337,7 @@ Index: linux-2.6/arch/xtensa/include/asm/rwsem.h
  {
  	atomic_add(delta, (atomic_t *)(&sem->count));
  }
-@@ -109,7 +109,7 @@ static inline void rwsem_atomic_add(int 
+@@ -109,7 +109,7 @@ static inline void rwsem_atomic_add(int
  /*
   * downgrade write lock to read lock
   */
@@ -13001,7 +13674,7 @@ Index: linux-2.6/fs/ocfs2/file.c
  		have_alloc_sem = 1;
  		/* communicate with ocfs2_dio_end_io */
  		ocfs2_iocb_set_sem_locked(iocb);
-@@ -2290,7 +2290,7 @@ relock:
+@@ -2290,7 +2290,7 @@ static ssize_t ocfs2_file_aio_write(stru
  	 */
  	if (direct_io && !can_do_direct) {
  		ocfs2_rw_unlock(inode, rw_level);
@@ -13010,7 +13683,7 @@ Index: linux-2.6/fs/ocfs2/file.c
  
  		have_alloc_sem = 0;
  		rw_level = -1;
-@@ -2379,7 +2379,7 @@ out:
+@@ -2379,7 +2379,7 @@ static ssize_t ocfs2_file_aio_write(stru
  
  out_sems:
  	if (have_alloc_sem) {
@@ -13646,15 +14319,13 @@ Index: linux-2.6/kernel/hrtimer.c
  	timerqueue_init(&timer->node);
  
  #ifdef CONFIG_TIMER_STATS
-@@ -1232,6 +1294,118 @@ static void __run_hrtimer(struct hrtimer
+@@ -1232,6 +1294,116 @@ static void __run_hrtimer(struct hrtimer
  	timer->state &= ~HRTIMER_STATE_CALLBACK;
  }
  
-+
-+#ifdef CONFIG_PREEMPT_RT_BASE
-+
 +static enum hrtimer_restart hrtimer_wakeup(struct hrtimer *timer);
 +
++#ifdef CONFIG_PREEMPT_RT_BASE
 +static void hrtimer_rt_reprogram(int restart, struct hrtimer *timer,
 +				 struct hrtimer_clock_base *base)
 +{
@@ -13765,7 +14436,7 @@ Index: linux-2.6/kernel/hrtimer.c
  #ifdef CONFIG_HIGH_RES_TIMERS
  
  /*
-@@ -1242,7 +1416,7 @@ void hrtimer_interrupt(struct clock_even
+@@ -1242,7 +1414,7 @@ void hrtimer_interrupt(struct clock_even
  {
  	struct hrtimer_cpu_base *cpu_base = &__get_cpu_var(hrtimer_bases);
  	ktime_t expires_next, now, entry_time, delta;
@@ -13774,7 +14445,7 @@ Index: linux-2.6/kernel/hrtimer.c
  
  	BUG_ON(!cpu_base->hres_active);
  	cpu_base->nr_events++;
-@@ -1278,6 +1452,14 @@ retry:
+@@ -1278,6 +1450,14 @@ void hrtimer_interrupt(struct clock_even
  
  			timer = container_of(node, struct hrtimer, node);
  
@@ -13789,7 +14460,7 @@ Index: linux-2.6/kernel/hrtimer.c
  			/*
  			 * The immediate goal for using the softexpires is
  			 * minimizing wakeups, not running timers at the
-@@ -1301,7 +1483,10 @@ retry:
+@@ -1301,7 +1481,10 @@ void hrtimer_interrupt(struct clock_even
  				break;
  			}
  
@@ -13801,7 +14472,7 @@ Index: linux-2.6/kernel/hrtimer.c
  		}
  	}
  
-@@ -1316,6 +1501,10 @@ retry:
+@@ -1316,6 +1499,10 @@ void hrtimer_interrupt(struct clock_even
  	if (expires_next.tv64 == KTIME_MAX ||
  	    !tick_program_event(expires_next, 0)) {
  		cpu_base->hang_detected = 0;
@@ -13812,7 +14483,7 @@ Index: linux-2.6/kernel/hrtimer.c
  		return;
  	}
  
-@@ -1391,17 +1580,17 @@ void hrtimer_peek_ahead_timers(void)
+@@ -1391,17 +1578,17 @@ void hrtimer_peek_ahead_timers(void)
  	local_irq_restore(flags);
  }
  
@@ -13835,7 +14506,7 @@ Index: linux-2.6/kernel/hrtimer.c
  /*
   * Called from timer softirq every jiffy, expire hrtimers:
   *
-@@ -1434,7 +1623,7 @@ void hrtimer_run_queues(void)
+@@ -1434,7 +1621,7 @@ void hrtimer_run_queues(void)
  	struct timerqueue_node *node;
  	struct hrtimer_cpu_base *cpu_base = &__get_cpu_var(hrtimer_bases);
  	struct hrtimer_clock_base *base;
@@ -13844,7 +14515,7 @@ Index: linux-2.6/kernel/hrtimer.c
  
  	if (hrtimer_hres_active())
  		return;
-@@ -1459,10 +1648,16 @@ void hrtimer_run_queues(void)
+@@ -1459,10 +1646,16 @@ void hrtimer_run_queues(void)
  					hrtimer_get_expires_tv64(timer))
  				break;
  
@@ -13862,7 +14533,7 @@ Index: linux-2.6/kernel/hrtimer.c
  }
  
  /*
-@@ -1484,6 +1679,7 @@ static enum hrtimer_restart hrtimer_wake
+@@ -1484,6 +1677,7 @@ static enum hrtimer_restart hrtimer_wake
  void hrtimer_init_sleeper(struct hrtimer_sleeper *sl, struct task_struct *task)
  {
  	sl->timer.function = hrtimer_wakeup;
@@ -13870,7 +14541,7 @@ Index: linux-2.6/kernel/hrtimer.c
  	sl->task = task;
  }
  EXPORT_SYMBOL_GPL(hrtimer_init_sleeper);
-@@ -1622,9 +1818,13 @@ static void __cpuinit init_hrtimers_cpu(
+@@ -1622,9 +1816,13 @@ static void __cpuinit init_hrtimers_cpu(
  	for (i = 0; i < HRTIMER_MAX_CLOCK_BASES; i++) {
  		cpu_base->clock_base[i].cpu_base = cpu_base;
  		timerqueue_init_head(&cpu_base->clock_base[i].active);
@@ -13884,7 +14555,7 @@ Index: linux-2.6/kernel/hrtimer.c
  }
  
  #ifdef CONFIG_HOTPLUG_CPU
-@@ -1737,9 +1937,7 @@ void __init hrtimers_init(void)
+@@ -1737,9 +1935,7 @@ void __init hrtimers_init(void)
  	hrtimer_cpu_notify(&hrtimers_nb, (unsigned long)CPU_UP_PREPARE,
  			  (void *)(long)smp_processor_id());
  	register_cpu_notifier(&hrtimers_nb);
@@ -14042,7 +14713,7 @@ Index: linux-2.6/kernel/trace/latency_hist.c
 ===================================================================
 --- /dev/null
 +++ linux-2.6/kernel/trace/latency_hist.c
-@@ -0,0 +1,1166 @@
+@@ -0,0 +1,1170 @@
 +/*
 + * kernel/trace/latency_hist.c
 + *
@@ -14129,7 +14800,7 @@ Index: linux-2.6/kernel/trace/latency_hist.c
 +#endif
 +
 +#if defined(CONFIG_PREEMPT_OFF_HIST) || defined(CONFIG_INTERRUPT_OFF_HIST)
-+static notrace void probe_preemptirqsoff_hist(int reason, int start);
++static notrace void probe_preemptirqsoff_hist(void *v, int reason, int start);
 +static struct enable_data preemptirqsoff_enabled_data = {
 +	.latency_type = PREEMPTIRQSOFF_LATENCY,
 +	.enabled = 0,
@@ -14403,6 +15074,8 @@ Index: linux-2.6/kernel/trace/latency_hist.c
 +	.release = seq_release,
 +};
 +
++#if defined(CONFIG_WAKEUP_LATENCY_HIST) || \
++    defined(CONFIG_MISSED_TIMER_OFFSETS_HIST)
 +static void clear_maxlatprocdata(struct maxlatproc_data *mp)
 +{
 +	mp->comm[0] = mp->current_comm[0] = '\0';
@@ -14410,6 +15083,7 @@ Index: linux-2.6/kernel/trace/latency_hist.c
 +	    mp->latency = mp->timeroffset = -1;
 +	mp->timestamp = 0;
 +}
++#endif
 +
 +static void hist_reset(struct hist_data *hist)
 +{
@@ -14780,7 +15454,8 @@ Index: linux-2.6/kernel/trace/latency_hist.c
 +#endif
 +
 +#if defined(CONFIG_INTERRUPT_OFF_HIST) || defined(CONFIG_PREEMPT_OFF_HIST)
-+static notrace void probe_preemptirqsoff_hist(int reason, int starthist)
++static notrace void probe_preemptirqsoff_hist(void *v, int reason,
++    int starthist)
 +{
 +	int cpu = raw_smp_processor_id();
 +	int time_set = 0;
@@ -16848,7 +17523,7 @@ Index: linux-2.6/arch/unicore32/kernel/early_printk.c
 ===================================================================
 --- linux-2.6.orig/arch/unicore32/kernel/early_printk.c
 +++ linux-2.6/arch/unicore32/kernel/early_printk.c
-@@ -33,21 +33,17 @@ static struct console early_ocd_console 
+@@ -33,21 +33,17 @@ static struct console early_ocd_console
  	.index =	-1,
  };
  
@@ -16878,7 +17553,7 @@ Index: linux-2.6/arch/x86/kernel/early_printk.c
 ===================================================================
 --- linux-2.6.orig/arch/x86/kernel/early_printk.c
 +++ linux-2.6/arch/x86/kernel/early_printk.c
-@@ -169,22 +169,6 @@ static struct console early_serial_conso
+@@ -169,25 +169,9 @@ static struct console early_serial_conso
  	.index =	-1,
  };
  
@@ -16900,7 +17575,11 @@ Index: linux-2.6/arch/x86/kernel/early_printk.c
 -
  static inline void early_console_register(struct console *con, int keep_early)
  {
- 	if (early_console->index != -1) {
+-	if (early_console->index != -1) {
++	if (con->index != -1) {
+ 		printk(KERN_CRIT "ERROR: earlyprintk= %s already used\n",
+ 		       con->name);
+ 		return;
 @@ -207,9 +191,8 @@ static int __init setup_early_printk(cha
  	if (!buf)
  		return 0;
@@ -17122,7 +17801,7 @@ Index: linux-2.6/drivers/ata/libata-sff.c
  	} else {
  		buf = page_address(page);
  		ap->ops->sff_data_xfer(qc->dev, buf + offset, qc->sect_size,
-@@ -863,7 +863,7 @@ next_sg:
+@@ -863,7 +863,7 @@ static int __atapi_pio_bytes(struct ata_
  		unsigned long flags;
  
  		/* FIXME: use bounce buffer */
@@ -17131,7 +17810,7 @@ Index: linux-2.6/drivers/ata/libata-sff.c
  		buf = kmap_atomic(page, KM_IRQ0);
  
  		/* do the actual data transfer */
-@@ -871,7 +871,7 @@ next_sg:
+@@ -871,7 +871,7 @@ static int __atapi_pio_bytes(struct ata_
  								count, rw);
  
  		kunmap_atomic(buf, KM_IRQ0);
@@ -17153,7 +17832,7 @@ Index: linux-2.6/drivers/ide/alim15x3.c
  
  	if (m5229_revision < 0xC2) {
  		/*
-@@ -325,7 +325,7 @@ out:
+@@ -325,7 +325,7 @@ static int init_chipset_ali15x3(struct p
  	}
  	pci_dev_put(north);
  	pci_dev_put(isa_dev);
@@ -17188,7 +17867,7 @@ Index: linux-2.6/drivers/ide/ide-io-std.c
 ===================================================================
 --- linux-2.6.orig/drivers/ide/ide-io-std.c
 +++ linux-2.6/drivers/ide/ide-io-std.c
-@@ -174,7 +174,7 @@ void ide_input_data(ide_drive_t *drive, 
+@@ -174,7 +174,7 @@ void ide_input_data(ide_drive_t *drive,
  		unsigned long uninitialized_var(flags);
  
  		if ((io_32bit & 2) && !mmio) {
@@ -17197,7 +17876,7 @@ Index: linux-2.6/drivers/ide/ide-io-std.c
  			ata_vlb_sync(io_ports->nsect_addr);
  		}
  
-@@ -185,7 +185,7 @@ void ide_input_data(ide_drive_t *drive, 
+@@ -185,7 +185,7 @@ void ide_input_data(ide_drive_t *drive,
  			insl(data_addr, buf, words);
  
  		if ((io_32bit & 2) && !mmio)
@@ -17241,7 +17920,7 @@ Index: linux-2.6/drivers/ide/ide-iops.c
 ===================================================================
 --- linux-2.6.orig/drivers/ide/ide-iops.c
 +++ linux-2.6/drivers/ide/ide-iops.c
-@@ -129,12 +129,12 @@ int __ide_wait_stat(ide_drive_t *drive, 
+@@ -129,12 +129,12 @@ int __ide_wait_stat(ide_drive_t *drive,
  				if ((stat & ATA_BUSY) == 0)
  					break;
  
@@ -17405,7 +18084,7 @@ Index: linux-2.6/kernel/res_counter.c
  	for (c = counter; c != NULL; c = c->parent) {
  		spin_lock(&c->lock);
  		ret = res_counter_charge_locked(c, val);
-@@ -62,7 +62,7 @@ undo:
+@@ -62,7 +62,7 @@ int res_counter_charge(struct res_counte
  		spin_unlock(&u->lock);
  	}
  done:
@@ -17796,7 +18475,7 @@ Index: linux-2.6/kernel/irq/handle.c
 ===================================================================
 --- linux-2.6.orig/kernel/irq/handle.c
 +++ linux-2.6/kernel/irq/handle.c
-@@ -156,8 +156,11 @@ handle_irq_event_percpu(struct irq_desc 
+@@ -156,8 +156,11 @@ handle_irq_event_percpu(struct irq_desc
  		action = action->next;
  	} while (action);
  
@@ -18600,7 +19279,7 @@ Index: linux-2.6/include/linux/mm.h
 ===================================================================
 --- linux-2.6.orig/include/linux/mm.h
 +++ linux-2.6/include/linux/mm.h
-@@ -1220,27 +1220,59 @@ static inline pmd_t *pmd_alloc(struct mm
+@@ -1222,27 +1222,59 @@ static inline pmd_t *pmd_alloc(struct mm
   * overflow into the next struct page (as it might with DEBUG_SPINLOCK).
   * When freeing, reset page->mapping so free_pages_check won't complain.
   */
@@ -18801,7 +19480,7 @@ Index: linux-2.6/lib/radix-tree.c
  /*
   * Load up this CPU's radix_tree_node buffer with sufficient objects to
   * ensure that the addition of a single element in the tree cannot fail.  On
-@@ -240,6 +242,7 @@ out:
+@@ -240,6 +242,7 @@ int radix_tree_preload(gfp_t gfp_mask)
  	return ret;
  }
  EXPORT_SYMBOL(radix_tree_preload);
@@ -18894,7 +19573,7 @@ Index: linux-2.6/ipc/msg.c
  	}
  }
  
-@@ -611,6 +619,12 @@ static inline int pipelined_send(struct 
+@@ -611,6 +619,12 @@ static inline int pipelined_send(struct
  		    !security_msg_queue_msgrcv(msq, msg, msr->r_tsk,
  					       msr->r_msgtype, msr->r_mode)) {
  
@@ -18907,7 +19586,7 @@ Index: linux-2.6/ipc/msg.c
  			list_del(&msr->r_list);
  			if (msr->r_maxsize < msg->m_ts) {
  				msr->r_msg = NULL;
-@@ -624,9 +638,11 @@ static inline int pipelined_send(struct 
+@@ -624,9 +638,11 @@ static inline int pipelined_send(struct
  				wake_up_process(msr->r_tsk);
  				smp_mb();
  				msr->r_msg = msg;
@@ -18975,7 +19654,7 @@ Index: linux-2.6/include/linux/timer.h
 ===================================================================
 --- linux-2.6.orig/include/linux/timer.h
 +++ linux-2.6/include/linux/timer.h
-@@ -276,7 +276,7 @@ extern void add_timer(struct timer_list 
+@@ -276,7 +276,7 @@ extern void add_timer(struct timer_list
  
  extern int try_to_del_timer_sync(struct timer_list *timer);
  
@@ -19096,7 +19775,7 @@ Index: linux-2.6/kernel/timer.c
  /**
   * del_timer - deactive a timer.
   * @timer: the timer to be deactivated
-@@ -953,7 +1004,7 @@ out:
+@@ -953,7 +1004,7 @@ int try_to_del_timer_sync(struct timer_l
  }
  EXPORT_SYMBOL(try_to_del_timer_sync);
  
@@ -19279,7 +19958,7 @@ Index: linux-2.6/kernel/itimer.c
 ===================================================================
 --- linux-2.6.orig/kernel/itimer.c
 +++ linux-2.6/kernel/itimer.c
-@@ -214,6 +214,7 @@ again:
+@@ -214,6 +214,7 @@ int do_setitimer(int which, struct itime
  		/* We are sharing ->siglock with it_real_fn() */
  		if (hrtimer_try_to_cancel(timer) < 0) {
  			spin_unlock_irq(&tsk->sighand->siglock);
@@ -19425,7 +20104,7 @@ Index: linux-2.6/kernel/stop_machine.c
  }
  
  /* signal completion unless @done is NULL */
-@@ -55,8 +55,10 @@ static void cpu_stop_signal_done(struct 
+@@ -55,8 +55,10 @@ static void cpu_stop_signal_done(struct
  	if (done) {
  		if (executed)
  			done->executed = true;
@@ -19512,7 +20191,7 @@ Index: linux-2.6/kernel/stop_machine.c
  	return done.executed ? done.ret : -ENOENT;
  }
  
-@@ -250,13 +268,13 @@ repeat:
+@@ -250,13 +268,13 @@ static int cpu_stopper_thread(void *data
  	}
  
  	work = NULL;
@@ -19528,7 +20207,7 @@ Index: linux-2.6/kernel/stop_machine.c
  
  	if (work) {
  		cpu_stop_fn_t fn = work->fn;
-@@ -266,6 +284,16 @@ repeat:
+@@ -266,6 +284,16 @@ static int cpu_stopper_thread(void *data
  
  		__set_current_state(TASK_RUNNING);
  
@@ -19545,7 +20224,7 @@ Index: linux-2.6/kernel/stop_machine.c
  		/* cpu stop callbacks are not allowed to sleep */
  		preempt_disable();
  
-@@ -280,7 +308,13 @@ repeat:
+@@ -280,7 +308,13 @@ static int cpu_stopper_thread(void *data
  			  kallsyms_lookup((unsigned long)fn, NULL, NULL, NULL,
  					  ksym_buf), arg);
  
@@ -19628,7 +20307,7 @@ Index: linux-2.6/kernel/cpu.c
 ===================================================================
 --- linux-2.6.orig/kernel/cpu.c
 +++ linux-2.6/kernel/cpu.c
-@@ -57,6 +57,102 @@ static struct {
+@@ -57,6 +57,104 @@ static struct {
  	.refcount = 0,
  };
  
@@ -19650,9 +20329,11 @@ Index: linux-2.6/kernel/cpu.c
 + */
 +void pin_current_cpu(void)
 +{
-+	struct hotplug_pcp *hp = &__get_cpu_var(hotplug_pcp);
++	struct hotplug_pcp *hp;
 +
 +retry:
++	hp = &__get_cpu_var(hotplug_pcp);
++
 +	if (!hp->unplug || hp->refcount || preempt_count() > 1 ||
 +	    hp->unplug == current || (current->flags & PF_STOMPER)) {
 +		hp->refcount++;
@@ -19731,7 +20412,7 @@ Index: linux-2.6/kernel/cpu.c
  void get_online_cpus(void)
  {
  	might_sleep();
-@@ -210,13 +306,14 @@ static int __ref take_cpu_down(void *_pa
+@@ -210,13 +308,14 @@ static int __ref take_cpu_down(void *_pa
  /* Requires cpu_add_remove_lock to be held */
  static int __ref _cpu_down(unsigned int cpu, int tasks_frozen)
  {
@@ -19747,7 +20428,7 @@ Index: linux-2.6/kernel/cpu.c
  
  	if (num_online_cpus() == 1)
  		return -EBUSY;
-@@ -224,7 +321,19 @@ static int __ref _cpu_down(unsigned int 
+@@ -224,7 +323,19 @@ static int __ref _cpu_down(unsigned int
  	if (!cpu_online(cpu))
  		return -EINVAL;
  
@@ -19768,7 +20449,7 @@ Index: linux-2.6/kernel/cpu.c
  
  	err = __cpu_notify(CPU_DOWN_PREPARE | mod, hcpu, -1, &nr_calls);
  	if (err) {
-@@ -232,7 +341,16 @@ static int __ref _cpu_down(unsigned int 
+@@ -232,7 +343,16 @@ static int __ref _cpu_down(unsigned int
  		__cpu_notify(CPU_DOWN_FAILED | mod, hcpu, nr_calls, NULL);
  		printk("%s: attempt to take down CPU %u failed\n",
  				__func__, cpu);
@@ -19786,7 +20467,7 @@ Index: linux-2.6/kernel/cpu.c
  	}
  
  	err = __stop_machine(take_cpu_down, &tcd_param, cpumask_of(cpu));
-@@ -263,6 +381,9 @@ static int __ref _cpu_down(unsigned int 
+@@ -263,6 +383,9 @@ static int __ref _cpu_down(unsigned int
  	check_for_tasks(cpu);
  
  out_release:
@@ -19842,7 +20523,19 @@ Index: linux-2.6/kernel/lockdep.c
 ===================================================================
 --- linux-2.6.orig/kernel/lockdep.c
 +++ linux-2.6/kernel/lockdep.c
-@@ -3341,6 +3341,7 @@ static void check_flags(unsigned long fl
+@@ -2859,10 +2859,7 @@ static int mark_lock(struct task_struct
+ void lockdep_init_map(struct lockdep_map *lock, const char *name,
+ 		      struct lock_class_key *key, int subclass)
+ {
+-	int i;
+-
+-	for (i = 0; i < NR_LOCKDEP_CACHING_CLASSES; i++)
+-		lock->class_cache[i] = NULL;
++	memset(lock, 0, sizeof(*lock));
+ 
+ #ifdef CONFIG_LOCK_STAT
+ 	lock->cpu = raw_smp_processor_id();
+@@ -3341,6 +3338,7 @@ static void check_flags(unsigned long fl
  		}
  	}
  
@@ -19850,7 +20543,7 @@ Index: linux-2.6/kernel/lockdep.c
  	/*
  	 * We dont accurately track softirq state in e.g.
  	 * hardirq contexts (such as on 4KSTACKS), so only
-@@ -3352,6 +3353,7 @@ static void check_flags(unsigned long fl
+@@ -3352,6 +3350,7 @@ static void check_flags(unsigned long fl
  		else
  			DEBUG_LOCKS_WARN_ON(!current->softirqs_enabled);
  	}
@@ -19897,7 +20590,7 @@ Index: linux-2.6/include/linux/hardirq.h
 +# define softirq_count()	(preempt_count() & SOFTIRQ_MASK)
 +# define in_serving_softirq()	(softirq_count() & SOFTIRQ_OFFSET)
 +#else
-+# define softirq_count()	(0)
++# define softirq_count()	(0U)
 +extern int in_serving_softirq(void);
 +#endif
 +
@@ -20237,7 +20930,7 @@ Index: linux-2.6/kernel/rtmutex.c
  /*
   * Calculate task priority from the waiter list priority
   *
-@@ -136,6 +153,14 @@ static void rt_mutex_adjust_prio(struct 
+@@ -136,6 +153,14 @@ static void rt_mutex_adjust_prio(struct
  	raw_spin_unlock_irqrestore(&task->pi_lock, flags);
  }
  
@@ -20817,11 +21510,20 @@ Index: linux-2.6/kernel/rtmutex.c
  	plist_head_init_raw(&lock->wait_list, &lock->wait_lock);
  
  	debug_rt_mutex_init(lock, name);
+@@ -909,7 +1296,7 @@ EXPORT_SYMBOL_GPL(__rt_mutex_init);
+ void rt_mutex_init_proxy_locked(struct rt_mutex *lock,
+ 				struct task_struct *proxy_owner)
+ {
+-	__rt_mutex_init(lock, NULL);
++	rt_mutex_init(lock);
+ 	debug_rt_mutex_proxy_lock(lock, proxy_owner);
+ 	rt_mutex_set_owner(lock, proxy_owner);
+ 	rt_mutex_deadlock_account_lock(lock, proxy_owner);
 Index: linux-2.6/kernel/futex.c
 ===================================================================
 --- linux-2.6.orig/kernel/futex.c
 +++ linux-2.6/kernel/futex.c
-@@ -1380,6 +1380,16 @@ retry_private:
+@@ -1380,6 +1380,16 @@ static int futex_requeue(u32 __user *uad
  				requeue_pi_wake_futex(this, &key2, hb2);
  				drop_count++;
  				continue;
@@ -22640,7 +23342,15 @@ Index: linux-2.6/drivers/tty/serial/8250.c
 ===================================================================
 --- linux-2.6.orig/drivers/tty/serial/8250.c
 +++ linux-2.6/drivers/tty/serial/8250.c
-@@ -1678,12 +1678,14 @@ static irqreturn_t serial8250_interrupt(
+@@ -38,6 +38,7 @@
+ #include <linux/nmi.h>
+ #include <linux/mutex.h>
+ #include <linux/slab.h>
++#include <linux/kdb.h>
+ 
+ #include <asm/io.h>
+ #include <asm/irq.h>
+@@ -1678,12 +1679,14 @@ static irqreturn_t serial8250_interrupt(
  
  		l = l->next;
  
@@ -22655,26 +23365,29 @@ Index: linux-2.6/drivers/tty/serial/8250.c
  	} while (l != end);
  
  	spin_unlock(&i->lock);
-@@ -2892,14 +2894,10 @@ serial8250_console_write(struct console 
+@@ -2892,14 +2895,14 @@ serial8250_console_write(struct console
  
  	touch_nmi_watchdog();
  
 -	local_irq_save(flags);
 -	if (up->port.sysrq) {
 -		/* serial8250_handle_port() already took the lock */
--		locked = 0;
++	if (unlikely(in_kdb_printk())) {
+ 		locked = 0;
 -	} else if (oops_in_progress) {
 -		locked = spin_trylock(&up->port.lock);
 -	} else
 -		spin_lock(&up->port.lock);
-+	if (up->port.sysrq || oops_in_progress)
-+		locked = spin_trylock_irqsave(&up->port.lock, flags);
-+	else
-+		spin_lock_irqsave(&up->port.lock, flags);
++	} else {
++		if (up->port.sysrq || oops_in_progress)
++			locked = spin_trylock_irqsave(&up->port.lock, flags);
++		else
++			spin_lock_irqsave(&up->port.lock, flags);
++	}
  
  	/*
  	 *	First save the IER then disable the interrupts
-@@ -2931,8 +2929,7 @@ serial8250_console_write(struct console 
+@@ -2931,8 +2934,7 @@ serial8250_console_write(struct console
  		check_modem_status(up);
  
  	if (locked)
@@ -22703,6 +23416,36 @@ Index: linux-2.6/drivers/tty/tty_buffer.c
  }
  EXPORT_SYMBOL(tty_flip_buffer_push);
  
+Index: linux-2.6/drivers/tty/serial/omap-serial.c
+===================================================================
+--- linux-2.6.orig/drivers/tty/serial/omap-serial.c
++++ linux-2.6/drivers/tty/serial/omap-serial.c
+@@ -947,13 +947,12 @@ serial_omap_console_write(struct console
+ 	unsigned int ier;
+ 	int locked = 1;
+ 
+-	local_irq_save(flags);
+ 	if (up->port.sysrq)
+ 		locked = 0;
+ 	else if (oops_in_progress)
+-		locked = spin_trylock(&up->port.lock);
++		locked = spin_trylock_irqsave(&up->port.lock, flags);
+ 	else
+-		spin_lock(&up->port.lock);
++		spin_lock_irqsave(&up->port.lock, flags);
+ 
+ 	/*
+ 	 * First save the IER then disable the interrupts
+@@ -980,8 +979,7 @@ serial_omap_console_write(struct console
+ 		check_modem_status(up);
+ 
+ 	if (locked)
+-		spin_unlock(&up->port.lock);
+-	local_irq_restore(flags);
++		spin_unlock_irqrestore(&up->port.lock, flags);
+ }
+ 
+ static int __init
 Index: linux-2.6/fs/namespace.c
 ===================================================================
 --- linux-2.6.orig/fs/namespace.c
@@ -22980,42 +23723,6 @@ Index: linux-2.6/arch/x86/Kconfig
  
  config ARCH_HAS_CPU_IDLE_WAIT
  	def_bool y
-@@ -429,7 +429,7 @@ config X86_32_NON_STANDARD
- 
- config X86_NUMAQ
- 	bool "NUMAQ (IBM/Sequent)"
--	depends on X86_32_NON_STANDARD
-+	depends on X86_32_NON_STANDARD && !PREEMPT_RT_FULL
- 	depends on PCI
- 	select NUMA
- 	select X86_MPPARSE
-@@ -1013,7 +1013,8 @@ config X86_CPUID
- choice
- 	prompt "High Memory Support"
- 	default HIGHMEM64G if X86_NUMAQ
--	default HIGHMEM4G
-+	default HIGHMEM4G if !PREEMPT_RT_FULL
-+	default NOHIGHMEM if PREEMPT_RT_FULL
- 	depends on X86_32
- 
- config NOHIGHMEM
-@@ -1055,14 +1056,14 @@ config NOHIGHMEM
- 
- config HIGHMEM4G
- 	bool "4GB"
--	depends on !X86_NUMAQ
-+	depends on !X86_NUMAQ && !PREEMPT_RT_FULL
- 	---help---
- 	  Select this if you have a 32-bit processor and between 1 and 4
- 	  gigabytes of physical RAM.
- 
- config HIGHMEM64G
- 	bool "64GB"
--	depends on !M386 && !M486
-+	depends on !M386 && !M486 && !PREEMPT_RT_FULL
- 	select X86_PAE
- 	---help---
- 	  Select this if you have a 32-bit processor and more than 4
 Index: linux-2.6/arch/x86/include/asm/page_64_types.h
 ===================================================================
 --- linux-2.6.orig/arch/x86/include/asm/page_64_types.h
@@ -23052,7 +23759,7 @@ Index: linux-2.6/arch/x86/kernel/cpu/common.c
 ===================================================================
 --- linux-2.6.orig/arch/x86/kernel/cpu/common.c
 +++ linux-2.6/arch/x86/kernel/cpu/common.c
-@@ -1050,7 +1050,9 @@ DEFINE_PER_CPU(unsigned int, irq_count) 
+@@ -1050,7 +1050,9 @@ DEFINE_PER_CPU(unsigned int, irq_count)
   */
  static const unsigned int exception_stack_sizes[N_EXCEPTION_STACKS] = {
  	  [0 ... N_EXCEPTION_STACKS - 1]	= EXCEPTION_STKSZ,
@@ -23211,7 +23918,7 @@ Index: linux-2.6/mm/vmalloc.c
  	list_for_each_entry_rcu(vb, &vbq->free, free_list) {
  		int i;
  
-@@ -958,7 +960,7 @@ next:
+@@ -958,7 +960,7 @@ static void *vb_alloc(unsigned long size
  	if (purge)
  		purge_fragmented_blocks_thiscpu();
  
@@ -23264,7 +23971,7 @@ Index: linux-2.6/include/linux/netdevice.h
 ===================================================================
 --- linux-2.6.orig/include/linux/netdevice.h
 +++ linux-2.6/include/linux/netdevice.h
-@@ -1761,6 +1761,7 @@ struct softnet_data {
+@@ -1764,6 +1764,7 @@ struct softnet_data {
  	unsigned		dropped;
  	struct sk_buff_head	input_pkt_queue;
  	struct napi_struct	backlog;
@@ -23398,7 +24105,7 @@ Index: linux-2.6/net/ipv4/icmp.c
  #include <linux/socket.h>
  #include <linux/in.h>
  #include <linux/inet.h>
-@@ -799,6 +800,30 @@ out_err:
+@@ -799,6 +800,30 @@ static void icmp_redirect(struct sk_buff
  }
  
  /*
@@ -23459,11 +24166,120 @@ Index: linux-2.6/net/ipv4/sysctl_net_ipv4.c
  		.procname	= "icmp_ignore_bogus_error_responses",
  		.data		= &init_net.ipv4.sysctl_icmp_ignore_bogus_error_responses,
  		.maxlen		= sizeof(int),
+Index: linux-2.6/include/linux/kdb.h
+===================================================================
+--- linux-2.6.orig/include/linux/kdb.h
++++ linux-2.6/include/linux/kdb.h
+@@ -153,12 +153,14 @@ extern int kdb_register(char *, kdb_func
+ extern int kdb_register_repeat(char *, kdb_func_t, char *, char *,
+ 			       short, kdb_repeat_t);
+ extern int kdb_unregister(char *);
++#define in_kdb_printk() (kdb_trap_printk)
+ #else /* ! CONFIG_KGDB_KDB */
+ #define kdb_printf(...)
+ #define kdb_init(x)
+ #define kdb_register(...)
+ #define kdb_register_repeat(...)
+ #define kdb_uregister(x)
++#define in_kdb_printk() (0)
+ #endif	/* CONFIG_KGDB_KDB */
+ enum {
+ 	KDB_NOT_INITIALIZED,
+Index: linux-2.6/kernel/debug/kdb/kdb_io.c
+===================================================================
+--- linux-2.6.orig/kernel/debug/kdb/kdb_io.c
++++ linux-2.6/kernel/debug/kdb/kdb_io.c
+@@ -539,7 +539,6 @@ int vkdb_printf(const char *fmt, va_list
+ 	int diag;
+ 	int linecount;
+ 	int logging, saved_loglevel = 0;
+-	int saved_trap_printk;
+ 	int got_printf_lock = 0;
+ 	int retlen = 0;
+ 	int fnd, len;
+@@ -550,8 +549,6 @@ int vkdb_printf(const char *fmt, va_list
+ 	unsigned long uninitialized_var(flags);
+ 
+ 	preempt_disable();
+-	saved_trap_printk = kdb_trap_printk;
+-	kdb_trap_printk = 0;
+ 
+ 	/* Serialize kdb_printf if multiple cpus try to write at once.
+ 	 * But if any cpu goes recursive in kdb, just print the output,
+@@ -807,7 +804,6 @@ int vkdb_printf(const char *fmt, va_list
+ 	} else {
+ 		__release(kdb_printf_lock);
+ 	}
+-	kdb_trap_printk = saved_trap_printk;
+ 	preempt_enable();
+ 	return retlen;
+ }
+@@ -817,9 +813,11 @@ int kdb_printf(const char *fmt, ...)
+ 	va_list ap;
+ 	int r;
+ 
++	kdb_trap_printk++;
+ 	va_start(ap, fmt);
+ 	r = vkdb_printf(fmt, ap);
+ 	va_end(ap);
++	kdb_trap_printk--;
+ 
+ 	return r;
+ }
+Index: linux-2.6/arch/Kconfig
+===================================================================
+--- linux-2.6.orig/arch/Kconfig
++++ linux-2.6/arch/Kconfig
+@@ -6,6 +6,7 @@ config OPROFILE
+ 	tristate "OProfile system profiling"
+ 	depends on PROFILING
+ 	depends on HAVE_OPROFILE
++	depends on !PREEMPT_RT_FULL
+ 	select RING_BUFFER
+ 	select RING_BUFFER_ALLOW_SWAP
+ 	help
+Index: linux-2.6/drivers/net/Kconfig
+===================================================================
+--- linux-2.6.orig/drivers/net/Kconfig
++++ linux-2.6/drivers/net/Kconfig
+@@ -3410,6 +3410,7 @@ config NET_FC
+ 
+ config NETCONSOLE
+ 	tristate "Network console logging support"
++	depends on !PREEMPT_RT_FULL
+ 	---help---
+ 	If you want to log kernel messages over the network, enable this.
+ 	See <file:Documentation/networking/netconsole.txt> for details.
+Index: linux-2.6/kernel/time/Kconfig
+===================================================================
+--- linux-2.6.orig/kernel/time/Kconfig
++++ linux-2.6/kernel/time/Kconfig
+@@ -7,6 +7,7 @@ config TICK_ONESHOT
+ config NO_HZ
+ 	bool "Tickless System (Dynamic Ticks)"
+ 	depends on !ARCH_USES_GETTIMEOFFSET && GENERIC_CLOCKEVENTS
++	depends on !PREEMPT_RT_FULL
+ 	select TICK_ONESHOT
+ 	help
+ 	  This option enables a tickless system: timer interrupts will
+Index: linux-2.6/mm/Kconfig
+===================================================================
+--- linux-2.6.orig/mm/Kconfig
++++ linux-2.6/mm/Kconfig
+@@ -304,7 +304,7 @@ config NOMMU_INITIAL_TRIM_EXCESS
+ 
+ config TRANSPARENT_HUGEPAGE
+ 	bool "Transparent Hugepage Support"
+-	depends on X86 && MMU
++	depends on X86 && MMU && !PREEMPT_RT_FULL
+ 	select COMPACTION
+ 	help
+ 	  Transparent Hugepages allows the kernel to use huge pages and
 Index: linux-2.6/init/Makefile
 ===================================================================
 --- linux-2.6.orig/init/Makefile
 +++ linux-2.6/init/Makefile
-@@ -29,4 +29,4 @@ silent_chk_compile.h = :
+@@ -29,4 +29,4 @@ $(obj)/version.o: include/generated/comp
  include/generated/compile.h: FORCE
  	@$($(quiet)chk_compile.h)
  	$(Q)$(CONFIG_SHELL) $(srctree)/scripts/mkcompile_h $@ \
@@ -23491,3 +24307,368 @@ Index: linux-2.6/scripts/mkcompile_h
  UTS_VERSION="$UTS_VERSION $CONFIG_FLAGS $TIMESTAMP"
  
  # Truncate to maximum length
+Index: linux-2.6/kernel/sched_cpupri.c
+===================================================================
+--- linux-2.6.orig/kernel/sched_cpupri.c
++++ linux-2.6/kernel/sched_cpupri.c
+@@ -47,9 +47,6 @@ static int convert_prio(int prio)
+ 	return cpupri;
+ }
+ 
+-#define for_each_cpupri_active(array, idx)                    \
+-	for_each_set_bit(idx, array, CPUPRI_NR_PRIORITIES)
+-
+ /**
+  * cpupri_find - find the best (lowest-pri) CPU in the system
+  * @cp: The cpupri context
+@@ -71,11 +68,38 @@ int cpupri_find(struct cpupri *cp, struc
+ 	int                  idx      = 0;
+ 	int                  task_pri = convert_prio(p->prio);
+ 
+-	for_each_cpupri_active(cp->pri_active, idx) {
++	if (task_pri >= MAX_RT_PRIO)
++		return 0;
++
++	for (idx = 0; idx < task_pri; idx++) {
+ 		struct cpupri_vec *vec  = &cp->pri_to_cpu[idx];
++		int skip = 0;
+ 
+-		if (idx >= task_pri)
+-			break;
++		if (!atomic_read(&(vec)->count))
++			skip = 1;
++		/*
++		 * When looking at the vector, we need to read the counter,
++		 * do a memory barrier, then read the mask.
++		 *
++		 * Note: This is still all racey, but we can deal with it.
++		 *  Ideally, we only want to look at masks that are set.
++		 *
++		 *  If a mask is not set, then the only thing wrong is that we
++		 *  did a little more work than necessary.
++		 *
++		 *  If we read a zero count but the mask is set, because of the
++		 *  memory barriers, that can only happen when the highest prio
++		 *  task for a run queue has left the run queue, in which case,
++		 *  it will be followed by a pull. If the task we are processing
++		 *  fails to find a proper place to go, that pull request will
++		 *  pull this task if the run queue is running at a lower
++		 *  priority.
++		 */
++		smp_rmb();
++
++		/* Need to do the rmb for every iteration */
++		if (skip)
++			continue;
+ 
+ 		if (cpumask_any_and(&p->cpus_allowed, vec->mask) >= nr_cpu_ids)
+ 			continue;
+@@ -115,7 +139,7 @@ void cpupri_set(struct cpupri *cp, int c
+ {
+ 	int                 *currpri = &cp->cpu_to_pri[cpu];
+ 	int                  oldpri  = *currpri;
+-	unsigned long        flags;
++	int                  do_mb = 0;
+ 
+ 	newpri = convert_prio(newpri);
+ 
+@@ -134,26 +158,41 @@ void cpupri_set(struct cpupri *cp, int c
+ 	if (likely(newpri != CPUPRI_INVALID)) {
+ 		struct cpupri_vec *vec = &cp->pri_to_cpu[newpri];
+ 
+-		raw_spin_lock_irqsave(&vec->lock, flags);
+-
+ 		cpumask_set_cpu(cpu, vec->mask);
+-		vec->count++;
+-		if (vec->count == 1)
+-			set_bit(newpri, cp->pri_active);
+-
+-		raw_spin_unlock_irqrestore(&vec->lock, flags);
++		/*
++		 * When adding a new vector, we update the mask first,
++		 * do a write memory barrier, and then update the count, to
++		 * make sure the vector is visible when count is set.
++		 */
++		smp_mb__before_atomic_inc();
++		atomic_inc(&(vec)->count);
++		do_mb = 1;
+ 	}
+ 	if (likely(oldpri != CPUPRI_INVALID)) {
+ 		struct cpupri_vec *vec  = &cp->pri_to_cpu[oldpri];
+ 
+-		raw_spin_lock_irqsave(&vec->lock, flags);
+-
+-		vec->count--;
+-		if (!vec->count)
+-			clear_bit(oldpri, cp->pri_active);
++		/*
++		 * Because the order of modification of the vec->count
++		 * is important, we must make sure that the update
++		 * of the new prio is seen before we decrement the
++		 * old prio. This makes sure that the loop sees
++		 * one or the other when we raise the priority of
++		 * the run queue. We don't care about when we lower the
++		 * priority, as that will trigger an rt pull anyway.
++		 *
++		 * We only need to do a memory barrier if we updated
++		 * the new priority vec.
++		 */
++		if (do_mb)
++			smp_mb__after_atomic_inc();
++
++		/*
++		 * When removing from the vector, we decrement the counter first
++		 * do a memory barrier and then clear the mask.
++		 */
++		atomic_dec(&(vec)->count);
++		smp_mb__after_atomic_inc();
+ 		cpumask_clear_cpu(cpu, vec->mask);
+-
+-		raw_spin_unlock_irqrestore(&vec->lock, flags);
+ 	}
+ 
+ 	*currpri = newpri;
+@@ -175,8 +214,7 @@ int cpupri_init(struct cpupri *cp)
+ 	for (i = 0; i < CPUPRI_NR_PRIORITIES; i++) {
+ 		struct cpupri_vec *vec = &cp->pri_to_cpu[i];
+ 
+-		raw_spin_lock_init(&vec->lock);
+-		vec->count = 0;
++		atomic_set(&vec->count, 0);
+ 		if (!zalloc_cpumask_var(&vec->mask, GFP_KERNEL))
+ 			goto cleanup;
+ 	}
+Index: linux-2.6/kernel/sched_cpupri.h
+===================================================================
+--- linux-2.6.orig/kernel/sched_cpupri.h
++++ linux-2.6/kernel/sched_cpupri.h
+@@ -12,9 +12,8 @@
+ /* values 2-101 are RT priorities 0-99 */
+ 
+ struct cpupri_vec {
+-	raw_spinlock_t lock;
+-	int        count;
+-	cpumask_var_t mask;
++	atomic_t	count;
++	cpumask_var_t	mask;
+ };
+ 
+ struct cpupri {
+Index: linux-2.6/kernel/ksysfs.c
+===================================================================
+--- linux-2.6.orig/kernel/ksysfs.c
++++ linux-2.6/kernel/ksysfs.c
+@@ -132,6 +132,15 @@ KERNEL_ATTR_RO(vmcoreinfo);
+ 
+ #endif /* CONFIG_KEXEC */
+ 
++#if defined(CONFIG_PREEMPT_RT_FULL)
++static ssize_t  realtime_show(struct kobject *kobj,
++			      struct kobj_attribute *attr, char *buf)
++{
++	return sprintf(buf, "%d\n", 1);
++}
++KERNEL_ATTR_RO(realtime);
++#endif
++
+ /* whether file capabilities are enabled */
+ static ssize_t fscaps_show(struct kobject *kobj,
+ 				  struct kobj_attribute *attr, char *buf)
+@@ -181,6 +190,9 @@ static struct attribute * kernel_attrs[]
+ 	&kexec_crash_size_attr.attr,
+ 	&vmcoreinfo_attr.attr,
+ #endif
++#ifdef CONFIG_PREEMPT_RT_FULL
++	&realtime_attr.attr,
++#endif
+ 	NULL
+ };
+ 
+Index: linux-2.6/drivers/cpufreq/cpufreq.c
+===================================================================
+--- linux-2.6.orig/drivers/cpufreq/cpufreq.c
++++ linux-2.6/drivers/cpufreq/cpufreq.c
+@@ -43,7 +43,7 @@ static DEFINE_PER_CPU(struct cpufreq_pol
+ /* This one keeps track of the previously set governor of a removed CPU */
+ static DEFINE_PER_CPU(char[CPUFREQ_NAME_LEN], cpufreq_cpu_governor);
+ #endif
+-static DEFINE_SPINLOCK(cpufreq_driver_lock);
++static DEFINE_RAW_SPINLOCK(cpufreq_driver_lock);
+ 
+ /*
+  * cpu_policy_rwsem is a per CPU reader-writer semaphore designed to cure
+@@ -138,7 +138,7 @@ struct cpufreq_policy *cpufreq_cpu_get(u
+ 		goto err_out;
+ 
+ 	/* get the cpufreq driver */
+-	spin_lock_irqsave(&cpufreq_driver_lock, flags);
++	raw_spin_lock_irqsave(&cpufreq_driver_lock, flags);
+ 
+ 	if (!cpufreq_driver)
+ 		goto err_out_unlock;
+@@ -156,13 +156,13 @@ struct cpufreq_policy *cpufreq_cpu_get(u
+ 	if (!kobject_get(&data->kobj))
+ 		goto err_out_put_module;
+ 
+-	spin_unlock_irqrestore(&cpufreq_driver_lock, flags);
++	raw_spin_unlock_irqrestore(&cpufreq_driver_lock, flags);
+ 	return data;
+ 
+ err_out_put_module:
+ 	module_put(cpufreq_driver->owner);
+ err_out_unlock:
+-	spin_unlock_irqrestore(&cpufreq_driver_lock, flags);
++	raw_spin_unlock_irqrestore(&cpufreq_driver_lock, flags);
+ err_out:
+ 	return NULL;
+ }
+@@ -722,10 +722,10 @@ static int cpufreq_add_dev_policy(unsign
+ 				return -EBUSY;
+ 			}
+ 
+-			spin_lock_irqsave(&cpufreq_driver_lock, flags);
++			raw_spin_lock_irqsave(&cpufreq_driver_lock, flags);
+ 			cpumask_copy(managed_policy->cpus, policy->cpus);
+ 			per_cpu(cpufreq_cpu_data, cpu) = managed_policy;
+-			spin_unlock_irqrestore(&cpufreq_driver_lock, flags);
++			raw_spin_unlock_irqrestore(&cpufreq_driver_lock, flags);
+ 
+ 			pr_debug("CPU already managed, adding link\n");
+ 			ret = sysfs_create_link(&sys_dev->kobj,
+@@ -821,14 +821,16 @@ static int cpufreq_add_dev_interface(uns
+ 			goto err_out_kobj_put;
+ 	}
+ 
+-	spin_lock_irqsave(&cpufreq_driver_lock, flags);
++	get_online_cpus();
+ 	for_each_cpu(j, policy->cpus) {
+ 		if (!cpu_online(j))
+ 			continue;
++		raw_spin_lock_irqsave(&cpufreq_driver_lock, flags);
+ 		per_cpu(cpufreq_cpu_data, j) = policy;
+ 		per_cpu(cpufreq_policy_cpu, j) = policy->cpu;
++		raw_spin_unlock_irqrestore(&cpufreq_driver_lock, flags);
+ 	}
+-	spin_unlock_irqrestore(&cpufreq_driver_lock, flags);
++	put_online_cpus();
+ 
+ 	ret = cpufreq_add_dev_symlink(cpu, policy);
+ 	if (ret)
+@@ -970,10 +972,13 @@ static int cpufreq_add_dev(struct sys_de
+ 
+ 
+ err_out_unregister:
+-	spin_lock_irqsave(&cpufreq_driver_lock, flags);
+-	for_each_cpu(j, policy->cpus)
++	get_online_cpus();
++	for_each_cpu(j, policy->cpus) {
++		raw_spin_lock_irqsave(&cpufreq_driver_lock, flags);
+ 		per_cpu(cpufreq_cpu_data, j) = NULL;
+-	spin_unlock_irqrestore(&cpufreq_driver_lock, flags);
++		raw_spin_unlock_irqrestore(&cpufreq_driver_lock, flags);
++	}
++	put_online_cpus();
+ 
+ 	kobject_put(&policy->kobj);
+ 	wait_for_completion(&policy->kobj_unregister);
+@@ -1013,11 +1018,11 @@ static int __cpufreq_remove_dev(struct s
+ 
+ 	pr_debug("unregistering CPU %u\n", cpu);
+ 
+-	spin_lock_irqsave(&cpufreq_driver_lock, flags);
++	raw_spin_lock_irqsave(&cpufreq_driver_lock, flags);
+ 	data = per_cpu(cpufreq_cpu_data, cpu);
+ 
+ 	if (!data) {
+-		spin_unlock_irqrestore(&cpufreq_driver_lock, flags);
++		raw_spin_unlock_irqrestore(&cpufreq_driver_lock, flags);
+ 		unlock_policy_rwsem_write(cpu);
+ 		return -EINVAL;
+ 	}
+@@ -1031,7 +1036,7 @@ static int __cpufreq_remove_dev(struct s
+ 	if (unlikely(cpu != data->cpu)) {
+ 		pr_debug("removing link\n");
+ 		cpumask_clear_cpu(cpu, data->cpus);
+-		spin_unlock_irqrestore(&cpufreq_driver_lock, flags);
++		raw_spin_unlock_irqrestore(&cpufreq_driver_lock, flags);
+ 		kobj = &sys_dev->kobj;
+ 		cpufreq_cpu_put(data);
+ 		unlock_policy_rwsem_write(cpu);
+@@ -1040,6 +1045,7 @@ static int __cpufreq_remove_dev(struct s
+ 	}
+ #endif
+ 
++	raw_spin_unlock_irqrestore(&cpufreq_driver_lock, flags);
+ #ifdef CONFIG_SMP
+ 
+ #ifdef CONFIG_HOTPLUG_CPU
+@@ -1052,15 +1058,17 @@ static int __cpufreq_remove_dev(struct s
+ 	 * per_cpu(cpufreq_cpu_data) while holding the lock, and remove
+ 	 * the sysfs links afterwards.
+ 	 */
++	get_online_cpus();
+ 	if (unlikely(cpumask_weight(data->cpus) > 1)) {
+ 		for_each_cpu(j, data->cpus) {
+ 			if (j == cpu)
+ 				continue;
++			raw_spin_lock_irqsave(&cpufreq_driver_lock, flags);
+ 			per_cpu(cpufreq_cpu_data, j) = NULL;
++			raw_spin_unlock_irqrestore(&cpufreq_driver_lock, flags);
+ 		}
+ 	}
+-
+-	spin_unlock_irqrestore(&cpufreq_driver_lock, flags);
++	put_online_cpus();
+ 
+ 	if (unlikely(cpumask_weight(data->cpus) > 1)) {
+ 		for_each_cpu(j, data->cpus) {
+@@ -1079,8 +1087,6 @@ static int __cpufreq_remove_dev(struct s
+ 			cpufreq_cpu_put(data);
+ 		}
+ 	}
+-#else
+-	spin_unlock_irqrestore(&cpufreq_driver_lock, flags);
+ #endif
+ 
+ 	if (cpufreq_driver->target)
+@@ -1802,13 +1808,13 @@ int cpufreq_register_driver(struct cpufr
+ 	if (driver_data->setpolicy)
+ 		driver_data->flags |= CPUFREQ_CONST_LOOPS;
+ 
+-	spin_lock_irqsave(&cpufreq_driver_lock, flags);
++	raw_spin_lock_irqsave(&cpufreq_driver_lock, flags);
+ 	if (cpufreq_driver) {
+-		spin_unlock_irqrestore(&cpufreq_driver_lock, flags);
++		raw_spin_unlock_irqrestore(&cpufreq_driver_lock, flags);
+ 		return -EBUSY;
+ 	}
+ 	cpufreq_driver = driver_data;
+-	spin_unlock_irqrestore(&cpufreq_driver_lock, flags);
++	raw_spin_unlock_irqrestore(&cpufreq_driver_lock, flags);
+ 
+ 	ret = sysdev_driver_register(&cpu_sysdev_class,
+ 					&cpufreq_sysdev_driver);
+@@ -1842,9 +1848,9 @@ int cpufreq_register_driver(struct cpufr
+ 	sysdev_driver_unregister(&cpu_sysdev_class,
+ 			&cpufreq_sysdev_driver);
+ err_null_driver:
+-	spin_lock_irqsave(&cpufreq_driver_lock, flags);
++	raw_spin_lock_irqsave(&cpufreq_driver_lock, flags);
+ 	cpufreq_driver = NULL;
+-	spin_unlock_irqrestore(&cpufreq_driver_lock, flags);
++	raw_spin_unlock_irqrestore(&cpufreq_driver_lock, flags);
+ 	return ret;
+ }
+ EXPORT_SYMBOL_GPL(cpufreq_register_driver);
+@@ -1870,9 +1876,9 @@ int cpufreq_unregister_driver(struct cpu
+ 	sysdev_driver_unregister(&cpu_sysdev_class, &cpufreq_sysdev_driver);
+ 	unregister_hotcpu_notifier(&cpufreq_cpu_notifier);
+ 
+-	spin_lock_irqsave(&cpufreq_driver_lock, flags);
++	raw_spin_lock_irqsave(&cpufreq_driver_lock, flags);
+ 	cpufreq_driver = NULL;
+-	spin_unlock_irqrestore(&cpufreq_driver_lock, flags);
++	raw_spin_unlock_irqrestore(&cpufreq_driver_lock, flags);
+ 
+ 	return 0;
+ }
