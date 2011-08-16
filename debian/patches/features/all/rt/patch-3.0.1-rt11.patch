@@ -664,7 +664,7 @@ Index: linux-2.6/kernel/sched.c
 -		p->sched_class->set_cpus_allowed(p, new_mask);
 -	else {
 -		cpumask_copy(&p->cpus_allowed, new_mask);
-+	if (!p->migrate_disable) {
++	if (!__migrate_disabled(p)) {
 +		if (p->sched_class && p->sched_class->set_cpus_allowed)
 +			p->sched_class->set_cpus_allowed(p, new_mask);
  		p->rt.nr_cpus_allowed = cpumask_weight(new_mask);
@@ -678,14 +678,15 @@ Index: linux-2.6/kernel/sched.c
  
  	/* Can the task run on the task's current CPU? If so, we're done */
 -	if (cpumask_test_cpu(task_cpu(p), new_mask))
-+	if (cpumask_test_cpu(task_cpu(p), new_mask) || p->migrate_disable)
++	if (cpumask_test_cpu(task_cpu(p), new_mask) || __migrate_disabled(p))
  		goto out;
  
  	dest_cpu = cpumask_any_and(cpu_active_mask, new_mask);
-@@ -6072,6 +6127,83 @@ int set_cpus_allowed_ptr(struct task_str
+@@ -6072,6 +6127,101 @@ int set_cpus_allowed_ptr(struct task_str
  }
  EXPORT_SYMBOL_GPL(set_cpus_allowed_ptr);
  
++#ifdef CONFIG_PREEMPT_RT_FULL
 +void migrate_disable(void)
 +{
 +	struct task_struct *p = current;
@@ -706,7 +707,19 @@ Index: linux-2.6/kernel/sched.c
 +		preempt_enable();
 +		return;
 +	}
-+	rq = task_rq_lock(p, &flags);
++
++	/*
++	 * Since this is always current we can get away with only locking
++	 * rq->lock, the ->cpus_allowed value can normally only be changed
++	 * while holding both p->pi_lock and rq->lock, but seeing that this
++	 * it current, we cannot actually be waking up, so all code that
++	 * relies on serialization against p->pi_lock is out of scope.
++	 *
++	 * Taking rq->lock serializes us against things like
++	 * set_cpus_allowed_ptr() that can still happen concurrently.
++	 */
++	rq = this_rq();
++	raw_spin_lock_irqsave(&rq->lock, flags);
 +	p->migrate_disable = 1;
 +	mask = tsk_cpus_allowed(p);
 +
@@ -717,7 +730,7 @@ Index: linux-2.6/kernel/sched.c
 +			p->sched_class->set_cpus_allowed(p, mask);
 +		p->rt.nr_cpus_allowed = cpumask_weight(mask);
 +	}
-+	task_rq_unlock(rq, p, &flags);
++	raw_spin_unlock_irqrestore(&rq->lock, flags);
 +	preempt_enable();
 +}
 +EXPORT_SYMBOL_GPL(migrate_disable);
@@ -745,7 +758,11 @@ Index: linux-2.6/kernel/sched.c
 +		return;
 +	}
 +
-+	rq = task_rq_lock(p, &flags);
++	/*
++	 * See comment in migrate_disable().
++	 */
++	rq = this_rq();
++	raw_spin_lock_irqsave(&rq->lock, flags);
 +	p->migrate_disable = 0;
 +	mask = tsk_cpus_allowed(p);
 +
@@ -757,16 +774,17 @@ Index: linux-2.6/kernel/sched.c
 +		p->rt.nr_cpus_allowed = cpumask_weight(mask);
 +	}
 +
-+	task_rq_unlock(rq, p, &flags);
++	raw_spin_unlock_irqrestore(&rq->lock, flags);
 +	unpin_current_cpu();
 +	preempt_enable();
 +}
 +EXPORT_SYMBOL_GPL(migrate_enable);
++#endif /* CONFIG_PREEMPT_RT_FULL */
 +
  /*
   * Move (not current) task off this cpu, onto dest cpu. We're doing
   * this because either it can't run here any more (set_cpus_allowed()
-@@ -6100,7 +6232,7 @@ static int __migrate_task(struct task_st
+@@ -6100,7 +6250,7 @@ static int __migrate_task(struct task_st
  	if (task_cpu(p) != src_cpu)
  		goto done;
  	/* Affinity changed (again). */
@@ -775,7 +793,7 @@ Index: linux-2.6/kernel/sched.c
  		goto fail;
  
  	/*
-@@ -6142,6 +6274,8 @@ static int migration_cpu_stop(void *data
+@@ -6142,6 +6292,8 @@ static int migration_cpu_stop(void *data
  
  #ifdef CONFIG_HOTPLUG_CPU
  
@@ -784,7 +802,7 @@ Index: linux-2.6/kernel/sched.c
  /*
   * Ensures that the idle task is using init_mm right before its cpu goes
   * offline.
-@@ -6154,7 +6288,12 @@ void idle_task_exit(void)
+@@ -6154,7 +6306,12 @@ void idle_task_exit(void)
  
  	if (mm != &init_mm)
  		switch_mm(mm, &init_mm, current);
@@ -798,7 +816,7 @@ Index: linux-2.6/kernel/sched.c
  }
  
  /*
-@@ -6472,6 +6611,12 @@ migration_call(struct notifier_block *nf
+@@ -6472,6 +6629,12 @@ migration_call(struct notifier_block *nf
  		migrate_nr_uninterruptible(rq);
  		calc_global_load_remove(rq);
  		break;
@@ -811,7 +829,7 @@ Index: linux-2.6/kernel/sched.c
  #endif
  	}
  
-@@ -8188,7 +8333,8 @@ void __init sched_init(void)
+@@ -8188,7 +8351,8 @@ void __init sched_init(void)
  #ifdef CONFIG_DEBUG_SPINLOCK_SLEEP
  static inline int preempt_count_equals(int preempt_offset)
  {
@@ -2181,7 +2199,23 @@ Index: linux-2.6/include/linux/sched.h
 ===================================================================
 --- linux-2.6.orig/include/linux/sched.h
 +++ linux-2.6/include/linux/sched.h
-@@ -359,6 +359,7 @@ extern signed long schedule_timeout_inte
+@@ -63,6 +63,7 @@ struct sched_param {
+ #include <linux/nodemask.h>
+ #include <linux/mm_types.h>
+ 
++#include <asm/kmap_types.h>
+ #include <asm/system.h>
+ #include <asm/page.h>
+ #include <asm/ptrace.h>
+@@ -90,6 +91,7 @@ struct sched_param {
+ #include <linux/task_io_accounting.h>
+ #include <linux/latencytop.h>
+ #include <linux/cred.h>
++#include <linux/hardirq.h>
+ 
+ #include <asm/processor.h>
+ 
+@@ -359,6 +361,7 @@ extern signed long schedule_timeout_inte
  extern signed long schedule_timeout_killable(signed long timeout);
  extern signed long schedule_timeout_uninterruptible(signed long timeout);
  asmlinkage void schedule(void);
@@ -2189,7 +2223,7 @@ Index: linux-2.6/include/linux/sched.h
  extern int mutex_spin_on_owner(struct mutex *lock, struct task_struct *owner);
  
  struct nsproxy;
-@@ -510,7 +511,7 @@ struct task_cputime {
+@@ -510,7 +513,7 @@ struct task_cputime {
  struct thread_group_cputimer {
  	struct task_cputime cputime;
  	int running;
@@ -2198,7 +2232,7 @@ Index: linux-2.6/include/linux/sched.h
  };
  
  #include <linux/rwsem.h>
-@@ -1070,6 +1071,7 @@ struct sched_domain;
+@@ -1070,6 +1073,7 @@ struct sched_domain;
  #define WF_SYNC		0x01		/* waker goes to sleep after wakup */
  #define WF_FORK		0x02		/* child wakeup after fork */
  #define WF_MIGRATED	0x04		/* internal use, task got migrated */
@@ -2206,7 +2240,7 @@ Index: linux-2.6/include/linux/sched.h
  
  #define ENQUEUE_WAKEUP		1
  #define ENQUEUE_HEAD		2
-@@ -1219,6 +1221,7 @@ enum perf_event_task_context {
+@@ -1219,6 +1223,7 @@ enum perf_event_task_context {
  
  struct task_struct {
  	volatile long state;	/* -1 unrunnable, 0 runnable, >0 stopped */
@@ -2214,23 +2248,35 @@ Index: linux-2.6/include/linux/sched.h
  	void *stack;
  	atomic_t usage;
  	unsigned int flags;	/* per process flags, defined below */
-@@ -1255,6 +1258,7 @@ struct task_struct {
+@@ -1255,14 +1260,14 @@ struct task_struct {
  #endif
  
  	unsigned int policy;
++#ifdef CONFIG_PREEMPT_RT_FULL
 +	int migrate_disable;
++#endif
  	cpumask_t cpus_allowed;
  
  #ifdef CONFIG_PREEMPT_RCU
-@@ -1356,6 +1360,7 @@ struct task_struct {
+ 	int rcu_read_lock_nesting;
+ 	char rcu_read_unlock_special;
+-#if defined(CONFIG_RCU_BOOST) && defined(CONFIG_TREE_PREEMPT_RCU)
+-	int rcu_boosted;
+-#endif /* #if defined(CONFIG_RCU_BOOST) && defined(CONFIG_TREE_PREEMPT_RCU) */
+ 	struct list_head rcu_node_entry;
+ #endif /* #ifdef CONFIG_PREEMPT_RCU */
+ #ifdef CONFIG_TREE_PREEMPT_RCU
+@@ -1356,6 +1361,9 @@ struct task_struct {
  
  	struct task_cputime cputime_expires;
  	struct list_head cpu_timers[3];
++#ifdef CONFIG_PREEMPT_RT_BASE
 +	struct task_struct *posix_timer_list;
++#endif
  
  /* process credentials */
  	const struct cred __rcu *real_cred; /* objective and real subjective task
-@@ -1389,6 +1394,7 @@ struct task_struct {
+@@ -1389,6 +1397,7 @@ struct task_struct {
  /* signal handlers */
  	struct signal_struct *signal;
  	struct sighand_struct *sighand;
@@ -2238,15 +2284,17 @@ Index: linux-2.6/include/linux/sched.h
  
  	sigset_t blocked, real_blocked;
  	sigset_t saved_sigmask;	/* restored if set_restore_sigmask() was used */
-@@ -1432,6 +1438,7 @@ struct task_struct {
+@@ -1432,6 +1441,9 @@ struct task_struct {
  	/* mutex deadlock detection */
  	struct mutex_waiter *blocked_on;
  #endif
++#ifdef CONFIG_PREEMPT_RT_FULL
 +	int pagefault_disabled;
++#endif
  #ifdef CONFIG_TRACE_IRQFLAGS
  	unsigned int irq_events;
  	unsigned long hardirq_enable_ip;
-@@ -1558,6 +1565,12 @@ struct task_struct {
+@@ -1558,6 +1570,12 @@ struct task_struct {
  	unsigned long trace;
  	/* bitmask and counter of trace recursion */
  	unsigned long trace_recursion;
@@ -2259,7 +2307,7 @@ Index: linux-2.6/include/linux/sched.h
  #endif /* CONFIG_TRACING */
  #ifdef CONFIG_CGROUP_MEM_RES_CTLR /* memcg uses this to do batch job */
  	struct memcg_batch_info {
-@@ -1570,11 +1583,16 @@ struct task_struct {
+@@ -1570,10 +1588,24 @@ struct task_struct {
  #ifdef CONFIG_HAVE_HW_BREAKPOINT
  	atomic_t ptrace_bp_refcnt;
  #endif
@@ -2275,11 +2323,18 @@ Index: linux-2.6/include/linux/sched.h
  
 -/* Future-safe accessor for struct task_struct's cpus_allowed. */
 -#define tsk_cpus_allowed(tsk) (&(tsk)->cpus_allowed)
--
++static inline bool pagefault_disabled(void)
++{
++	return in_atomic()
++#ifdef CONFIG_PREEMPT_RT_FULL
++		|| current->pagefault_disabled
++#endif
++		;
++}
+ 
  /*
   * Priority of a process goes from 0..MAX_PRIO-1, valid RT
-  * priority is 0..MAX_RT_PRIO-1, and SCHED_NORMAL/SCHED_BATCH
-@@ -1743,6 +1761,15 @@ extern struct pid *cad_pid;
+@@ -1743,6 +1775,15 @@ extern struct pid *cad_pid;
  extern void free_task(struct task_struct *tsk);
  #define get_task_struct(tsk) do { atomic_inc(&(tsk)->usage); } while(0)
  
@@ -2295,7 +2350,7 @@ Index: linux-2.6/include/linux/sched.h
  extern void __put_task_struct(struct task_struct *t);
  
  static inline void put_task_struct(struct task_struct *t)
-@@ -1750,6 +1777,7 @@ static inline void put_task_struct(struc
+@@ -1750,6 +1791,7 @@ static inline void put_task_struct(struc
  	if (atomic_dec_and_test(&t->usage))
  		__put_task_struct(t);
  }
@@ -2303,7 +2358,7 @@ Index: linux-2.6/include/linux/sched.h
  
  extern void task_times(struct task_struct *p, cputime_t *ut, cputime_t *st);
  extern void thread_group_times(struct task_struct *p, cputime_t *ut, cputime_t *st);
-@@ -1774,6 +1802,7 @@ extern void thread_group_times(struct ta
+@@ -1774,6 +1816,7 @@ extern void thread_group_times(struct ta
  #define PF_FROZEN	0x00010000	/* frozen for system suspend */
  #define PF_FSTRANS	0x00020000	/* inside a filesystem transaction */
  #define PF_KSWAPD	0x00040000	/* I am kswapd */
@@ -2311,7 +2366,7 @@ Index: linux-2.6/include/linux/sched.h
  #define PF_LESS_THROTTLE 0x00100000	/* Throttle me less: I clean memory */
  #define PF_KTHREAD	0x00200000	/* I am a kernel thread */
  #define PF_RANDOMIZE	0x00400000	/* randomize virtual address space */
-@@ -2022,15 +2051,27 @@ static inline void sched_autogroup_exit(
+@@ -2022,15 +2065,27 @@ static inline void sched_autogroup_exit(
  #endif
  
  #ifdef CONFIG_RT_MUTEXES
@@ -2340,7 +2395,7 @@ Index: linux-2.6/include/linux/sched.h
  #endif
  
  extern bool yield_to(struct task_struct *p, bool preempt);
-@@ -2110,6 +2151,7 @@ extern void xtime_update(unsigned long t
+@@ -2110,6 +2165,7 @@ extern void xtime_update(unsigned long t
  
  extern int wake_up_state(struct task_struct *tsk, unsigned int state);
  extern int wake_up_process(struct task_struct *tsk);
@@ -2348,7 +2403,7 @@ Index: linux-2.6/include/linux/sched.h
  extern void wake_up_new_task(struct task_struct *tsk);
  #ifdef CONFIG_SMP
   extern void kick_process(struct task_struct *tsk);
-@@ -2199,12 +2241,24 @@ extern struct mm_struct * mm_alloc(void)
+@@ -2199,12 +2255,24 @@ extern struct mm_struct * mm_alloc(void)
  
  /* mmdrop drops the mm and the page tables */
  extern void __mmdrop(struct mm_struct *);
@@ -2373,7 +2428,7 @@ Index: linux-2.6/include/linux/sched.h
  /* mmput gets rid of the mappings and all user-space */
  extern void mmput(struct mm_struct *);
  /* Grab a reference to a task's mm, if it is not already going away */
-@@ -2510,7 +2564,7 @@ extern int _cond_resched(void);
+@@ -2510,7 +2578,7 @@ extern int _cond_resched(void);
  
  extern int __cond_resched_lock(spinlock_t *lock);
  
@@ -2382,7 +2437,7 @@ Index: linux-2.6/include/linux/sched.h
  #define PREEMPT_LOCK_OFFSET	PREEMPT_OFFSET
  #else
  #define PREEMPT_LOCK_OFFSET	0
-@@ -2521,12 +2575,16 @@ extern int __cond_resched_lock(spinlock_
+@@ -2521,12 +2589,16 @@ extern int __cond_resched_lock(spinlock_
  	__cond_resched_lock(lock);				\
  })
  
@@ -2399,7 +2454,7 @@ Index: linux-2.6/include/linux/sched.h
  
  /*
   * Does a critical section need to be broken due to another
-@@ -2550,7 +2608,7 @@ void thread_group_cputimer(struct task_s
+@@ -2550,7 +2622,7 @@ void thread_group_cputimer(struct task_s
  
  static inline void thread_group_cputime_init(struct signal_struct *sig)
  {
@@ -2408,15 +2463,26 @@ Index: linux-2.6/include/linux/sched.h
  }
  
  /*
-@@ -2589,6 +2647,15 @@ static inline void set_task_cpu(struct t
+@@ -2589,6 +2661,26 @@ static inline void set_task_cpu(struct t
  
  #endif /* CONFIG_SMP */
  
++static inline int __migrate_disabled(struct task_struct *p)
++{
++#ifdef CONFIG_PREEMPT_RT_FULL
++	return p->migrate_disable;
++#else
++	return 0;
++#endif
++}
++
 +/* Future-safe accessor for struct task_struct's cpus_allowed. */
 +static inline const struct cpumask *tsk_cpus_allowed(struct task_struct *p)
 +{
++#ifdef CONFIG_PREEMPT_RT_FULL
 +	if (p->migrate_disable)
 +		return cpumask_of(task_cpu(p));
++#endif
 +
 +	return &p->cpus_allowed;
 +}
@@ -4043,7 +4109,7 @@ Index: linux-2.6/kernel/trace/trace.c
  		((pc & SOFTIRQ_MASK) ? TRACE_FLAG_SOFTIRQ : 0) |
  		(need_resched() ? TRACE_FLAG_NEED_RESCHED : 0);
 +
-+	entry->migrate_disable	= (tsk) ? tsk->migrate_disable & 0xFF : 0;
++	entry->migrate_disable	= (tsk) ? __migrate_disabled(tsk) & 0xFF : 0;
  }
  EXPORT_SYMBOL_GPL(tracing_generic_entry_update);
  
@@ -4535,11 +4601,24 @@ Index: linux-2.6/include/linux/init_task.h
  	},								\
  	.cred_guard_mutex =						\
  		 __MUTEX_INITIALIZER(sig.cred_guard_mutex),		\
-@@ -179,6 +179,7 @@ extern struct cred init_cred;
+@@ -126,6 +126,12 @@ extern struct cred init_cred;
+ # define INIT_PERF_EVENTS(tsk)
+ #endif
+ 
++#ifdef CONFIG_PREEMPT_RT_BASE
++# define INIT_TIMER_LIST		.posix_timer_list = NULL,
++#else
++# define INIT_TIMER_LIST
++#endif
++
+ /*
+  *  INIT_TASK is used to set up the first task table, touch at
+  * your own risk!. Base=0, limit=0x1fffff (=2MB)
+@@ -179,6 +185,7 @@ extern struct cred init_cred;
  	.fs_excl	= ATOMIC_INIT(0),				\
  	.pi_lock	= __RAW_SPIN_LOCK_UNLOCKED(tsk.pi_lock),	\
  	.timer_slack_ns = 50000, /* 50 usec default slack */		\
-+	.posix_timer_list = NULL,					\
++	INIT_TIMER_LIST							\
  	.pids = {							\
  		[PIDTYPE_PID]  = INIT_PID_LINK(PIDTYPE_PID),		\
  		[PIDTYPE_PGID] = INIT_PID_LINK(PIDTYPE_PGID),		\
@@ -4614,7 +4693,7 @@ Index: linux-2.6/kernel/posix-cpu-timers.c
   * Interrupts are disabled.
   */
 -void run_posix_cpu_timers(struct task_struct *tsk)
-+void __run_posix_cpu_timers(struct task_struct *tsk)
++static void __run_posix_cpu_timers(struct task_struct *tsk)
  {
  	LIST_HEAD(firing);
  	struct k_itimer *timer, *next;
@@ -4625,10 +4704,11 @@ Index: linux-2.6/kernel/posix-cpu-timers.c
  
  	/*
  	 * The fast path checks that there are no expired thread or thread
-@@ -1369,6 +1370,177 @@ void run_posix_cpu_timers(struct task_st
+@@ -1369,6 +1370,190 @@ void run_posix_cpu_timers(struct task_st
  	}
  }
  
++#ifdef CONFIG_PREEMPT_RT_BASE
 +#include <linux/kthread.h>
 +#include <linux/cpu.h>
 +DEFINE_PER_CPU(struct task_struct *, posix_timer_task);
@@ -4791,30 +4871,30 @@ Index: linux-2.6/kernel/posix-cpu-timers.c
 +
 +static int __init posix_cpu_thread_init(void)
 +{
-+	void *cpu = (void *)(long)smp_processor_id();
++	void *hcpu = (void *)(long)smp_processor_id();
 +	/* Start one for boot CPU. */
-+	posix_cpu_thread_call(&posix_cpu_thread_notifier, CPU_UP_PREPARE, cpu);
-+	posix_cpu_thread_call(&posix_cpu_thread_notifier, CPU_ONLINE, cpu);
-+	register_cpu_notifier(&posix_cpu_thread_notifier);
-+	return 0;
-+}
-+early_initcall(posix_cpu_thread_init);
-+
- /*
-  * Set one of the process-wide special case CPU timers or RLIMIT_CPU.
-  * The tsk->sighand->siglock must be held by the caller.
-@@ -1617,6 +1789,11 @@ static __init int init_posix_cpu_timers(
- 		.timer_create	= thread_cpu_timer_create,
- 	};
- 	struct timespec ts;
 +	unsigned long cpu;
 +
 +	/* init the per-cpu posix_timer_tasklets */
 +	for_each_cpu_mask(cpu, cpu_possible_map)
 +		per_cpu(posix_timer_tasklist, cpu) = NULL;
- 
- 	posix_timers_register_clock(CLOCK_PROCESS_CPUTIME_ID, &process);
- 	posix_timers_register_clock(CLOCK_THREAD_CPUTIME_ID, &thread);
++
++	posix_cpu_thread_call(&posix_cpu_thread_notifier, CPU_UP_PREPARE, hcpu);
++	posix_cpu_thread_call(&posix_cpu_thread_notifier, CPU_ONLINE, hcpu);
++	register_cpu_notifier(&posix_cpu_thread_notifier);
++	return 0;
++}
++early_initcall(posix_cpu_thread_init);
++#else /* CONFIG_PREEMPT_RT_BASE */
++void run_posix_cpu_timers(struct task_struct *tsk)
++{
++	__run_posix_cpu_timers(tsk);
++}
++#endif /* CONFIG_PREEMPT_RT_BASE */
++
+ /*
+  * Set one of the process-wide special case CPU timers or RLIMIT_CPU.
+  * The tsk->sighand->siglock must be held by the caller.
 Index: linux-2.6/kernel/sched_stats.h
 ===================================================================
 --- linux-2.6.orig/kernel/sched_stats.h
@@ -8417,15 +8497,17 @@ Index: linux-2.6/kernel/fork.c
  /*
   * Decrement the use count and release all resources for an mm.
   */
-@@ -1030,6 +1054,7 @@ void mm_init_owner(struct mm_struct *mm,
+@@ -1030,6 +1054,9 @@ void mm_init_owner(struct mm_struct *mm,
   */
  static void posix_cpu_timers_init(struct task_struct *tsk)
  {
++#ifdef CONFIG_PREEMPT_RT_BASE
 +	tsk->posix_timer_list = NULL;
++#endif
  	tsk->cputime_expires.prof_exp = cputime_zero;
  	tsk->cputime_expires.virt_exp = cputime_zero;
  	tsk->cputime_expires.sched_exp = 0;
-@@ -1137,6 +1162,7 @@ static struct task_struct *copy_process(
+@@ -1137,6 +1164,7 @@ static struct task_struct *copy_process(
  	spin_lock_init(&p->alloc_lock);
  
  	init_sigpending(&p->pending);
@@ -8433,11 +8515,13 @@ Index: linux-2.6/kernel/fork.c
  
  	p->utime = cputime_zero;
  	p->stime = cputime_zero;
-@@ -1194,6 +1220,7 @@ static struct task_struct *copy_process(
+@@ -1194,6 +1222,9 @@ static struct task_struct *copy_process(
  	p->hardirq_context = 0;
  	p->softirq_context = 0;
  #endif
++#ifdef CONFIG_PREEMPT_RT_FULL
 +	p->pagefault_disabled = 0;
++#endif
  #ifdef CONFIG_LOCKDEP
  	p->lockdep_depth = 0; /* no locks held yet */
  	p->curr_chain_key = 0;
@@ -8979,32 +9063,29 @@ Index: linux-2.6/include/linux/preempt.h
  #define preempt_enable_no_resched()	do { } while (0)
  #define preempt_enable()		do { } while (0)
  #define preempt_check_resched()		do { } while (0)
-@@ -93,6 +100,30 @@ do { \
+@@ -93,6 +100,27 @@ do { \
  
  #endif
  
-+#ifdef CONFIG_SMP
-+extern void migrate_disable(void);
-+extern void migrate_enable(void);
-+#else
-+# define migrate_disable()		do { } while (0)
-+# define migrate_enable()		do { } while (0)
-+#endif
-+
 +#ifdef CONFIG_PREEMPT_RT_FULL
 +# define preempt_disable_rt()		preempt_disable()
 +# define preempt_enable_rt()		preempt_enable()
 +# define preempt_disable_nort()		do { } while (0)
 +# define preempt_enable_nort()		do { } while (0)
-+# define migrate_disable_rt()		migrate_disable()
-+# define migrate_enable_rt()		migrate_enable()
++#ifdef CONFIG_SMP
++extern void migrate_disable(void);
++extern void migrate_enable(void);
++#else /* CONFIG_SMP */
++# define migrate_disable()		do { } while (0)
++# define migrate_enable()		do { } while (0)
++#endif /* CONFIG_SMP */
 +#else
 +# define preempt_disable_rt()		do { } while (0)
 +# define preempt_enable_rt()		do { } while (0)
 +# define preempt_disable_nort()		preempt_disable()
 +# define preempt_enable_nort()		preempt_enable()
-+# define migrate_disable_rt()		do { } while (0)
-+# define migrate_enable_rt()		do { } while (0)
++# define migrate_disable()		preempt_disable()
++# define migrate_enable()		preempt_enable()
 +#endif
 +
  #ifdef CONFIG_PREEMPT_NOTIFIERS
@@ -9181,7 +9262,7 @@ Index: linux-2.6/arch/alpha/mm/fault.c
  	/* If we're in an interrupt context, or have no user context,
  	   we must not take the fault.  */
 -	if (!mm || in_atomic())
-+	if (!mm || in_atomic() || current->pagefault_disabled)
++	if (!mm || pagefault_disabled())
  		goto no_context;
  
  #ifdef CONFIG_ALPHA_LARGE_VMALLOC
@@ -9194,7 +9275,7 @@ Index: linux-2.6/arch/arm/mm/fault.c
  	 * context, we must not take the fault..
  	 */
 -	if (in_atomic() || !mm)
-+	if (in_atomic() || !mm || current->pagefault_disabled)
++	if (!mm || pagefault_disabled())
  		goto no_context;
  
  	/*
@@ -9202,13 +9283,12 @@ Index: linux-2.6/arch/avr32/mm/fault.c
 ===================================================================
 --- linux-2.6.orig/arch/avr32/mm/fault.c
 +++ linux-2.6/arch/avr32/mm/fault.c
-@@ -81,7 +81,8 @@ asmlinkage void do_page_fault(unsigned l
+@@ -81,7 +81,7 @@ asmlinkage void do_page_fault(unsigned l
  	 * If we're in an interrupt or have no user context, we must
  	 * not take the fault...
  	 */
 -	if (in_atomic() || !mm || regs->sr & SYSREG_BIT(GM))
-+	if (in_atomic() || !mm || regs->sr & SYSREG_BIT(GM) ||
-+	    current->pagefault_disabled)
++	if (!mm || regs->sr & SYSREG_BIT(GM) || pagefault_disabled())
  		goto no_context;
  
  	local_irq_enable();
@@ -9221,7 +9301,7 @@ Index: linux-2.6/arch/cris/mm/fault.c
  	 */
  
 -	if (in_atomic() || !mm)
-+	if (in_atomic() || !mm || current->pagefault_disabled)
++	if (!mm || pagefault_disabled())
  		goto no_context;
  
  	down_read(&mm->mmap_sem);
@@ -9234,7 +9314,7 @@ Index: linux-2.6/arch/frv/mm/fault.c
  	 * context, we must not take the fault..
  	 */
 -	if (in_atomic() || !mm)
-+	if (in_atomic() || !mm || current->pagefault_disabled)
++	if (!mm || pagefault_disabled())
  		goto no_context;
  
  	down_read(&mm->mmap_sem);
@@ -9247,7 +9327,7 @@ Index: linux-2.6/arch/ia64/mm/fault.c
  	 * If we're in an interrupt or have no user context, we must not take the fault..
  	 */
 -	if (in_atomic() || !mm)
-+	if (in_atomic() || !mm || current->pagefault_disabled)
++	if (!mm || pagefault_disabled())
  		goto no_context;
  
  #ifdef CONFIG_VIRTUAL_MEM_MAP
@@ -9260,7 +9340,7 @@ Index: linux-2.6/arch/m32r/mm/fault.c
  	 * atomic region then we must not take the fault..
  	 */
 -	if (in_atomic() || !mm)
-+	if (in_atomic() || !mm || current->pagefault_disabled)
++	if (!mm || pagefault_disabled())
  		goto bad_area_nosemaphore;
  
  	/* When running in the kernel we expect faults to occur only to
@@ -9273,7 +9353,7 @@ Index: linux-2.6/arch/m68k/mm/fault.c
  	 * context, we must not take the fault..
  	 */
 -	if (in_atomic() || !mm)
-+	if (in_atomic() || !mm || current->pagefault_disabled)
++	if (!mm || pagefault_disabled())
  		goto no_context;
  
  	down_read(&mm->mmap_sem);
@@ -9286,7 +9366,7 @@ Index: linux-2.6/arch/microblaze/mm/fault.c
  		is_write = 0;
  
 -	if (unlikely(in_atomic() || !mm)) {
-+	if (unlikely(in_atomic() || !mm || current->pagefault_disabled)) {
++	if (unlikely(!mm || pagefault_disabled())) {
  		if (kernel_mode(regs))
  			goto bad_area_nosemaphore;
  
@@ -9299,7 +9379,7 @@ Index: linux-2.6/arch/mips/mm/fault.c
  	 * context, we must not take the fault..
  	 */
 -	if (in_atomic() || !mm)
-+	if (in_atomic() || !mm || current->pagefault_disabled)
++	if (!mm || pagefault_disabled())
  		goto bad_area_nosemaphore;
  
  	down_read(&mm->mmap_sem);
@@ -9312,7 +9392,7 @@ Index: linux-2.6/arch/mn10300/mm/fault.c
  	 * context, we must not take the fault..
  	 */
 -	if (in_atomic() || !mm)
-+	if (in_atomic() || !mm || current->pagefault_disabled)
++	if (!mm || pagefault_disabled())
  		goto no_context;
  
  	down_read(&mm->mmap_sem);
@@ -9325,7 +9405,7 @@ Index: linux-2.6/arch/parisc/mm/fault.c
  	int fault;
  
 -	if (in_atomic() || !mm)
-+	if (in_atomic() || !mm || current->pagefault_disabled)
++	if (!mm || pagefault_disabled())
  		goto no_context;
  
  	down_read(&mm->mmap_sem);
@@ -9338,7 +9418,7 @@ Index: linux-2.6/arch/powerpc/mm/fault.c
  #endif
  
 -	if (in_atomic() || mm == NULL) {
-+	if (in_atomic() || mm == NULL || current->pagefault_disabled) {
++	if (!mm || pagefault_disabled()) {
  		if (!user_mode(regs))
  			return SIGSEGV;
  		/* in_atomic() in user mode is really bad,
@@ -9351,8 +9431,8 @@ Index: linux-2.6/arch/s390/mm/fault.c
  	 */
  	fault = VM_FAULT_BADCONTEXT;
 -	if (unlikely(!user_space_fault(trans_exc_code) || in_atomic() || !mm))
-+	if (unlikely(!user_space_fault(trans_exc_code) || in_atomic() || !mm ||
-+		    tsk->pagefault_disabled))
++	if (unlikely(!user_space_fault(trans_exc_code) ||
++		     !mm || pagefault_disabled()))
  		goto out;
  
  	address = trans_exc_code & __FAIL_ADDR_MASK;
@@ -9361,8 +9441,8 @@ Index: linux-2.6/arch/s390/mm/fault.c
  	struct vm_area_struct *vma;
  
 -	if (unlikely(!user_space_fault(trans_exc_code) || in_atomic() || !mm))
-+	if (unlikely(!user_space_fault(trans_exc_code) || in_atomic() || !mm ||
-+		     current->pagefault_disabled))
++	if (unlikely(!user_space_fault(trans_exc_code) ||
++		     !mm || pagefault_disabled()))
  		goto no_context;
  
  	down_read(&mm->mmap_sem);
@@ -9375,7 +9455,7 @@ Index: linux-2.6/arch/score/mm/fault.c
  	* context, we must not take the fault..
  	*/
 -	if (in_atomic() || !mm)
-+	if (in_atomic() || !mm || current->pagefault_disabled)
++	if (!mm || pagefault_disabled())
  		goto bad_area_nosemaphore;
  
  	down_read(&mm->mmap_sem);
@@ -9388,7 +9468,7 @@ Index: linux-2.6/arch/sh/mm/fault_32.c
  	 * in an atomic region then we must not take the fault:
  	 */
 -	if (in_atomic() || !mm)
-+	if (in_atomic() || !mm || current->pagefault_disabled)
++	if (!mm || pagefault_disabled())
  		goto no_context;
  
  	down_read(&mm->mmap_sem);
@@ -9402,7 +9482,7 @@ Index: linux-2.6/arch/sparc/mm/fault_32.c
  	 */
 -        if (in_atomic() || !mm)
 -                goto no_context;
-+	if (in_atomic() || !mm || current->pagefault_disabled)
++	if (!mm || pagefault_disabled())
 +		goto no_context;
  
  	perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS, 1, 0, regs, address);
@@ -9416,7 +9496,7 @@ Index: linux-2.6/arch/sparc/mm/fault_64.c
  	 * context, we must not take the fault..
  	 */
 -	if (in_atomic() || !mm)
-+	if (in_atomic() || !mm || current->pagefault_disabled)
++	if (!mm || pagefault_disabled())
  		goto intr_or_no_mm;
  
  	perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS, 1, 0, regs, address);
@@ -9429,7 +9509,7 @@ Index: linux-2.6/arch/tile/mm/fault.c
  	 * atomic region then we must not take the fault.
  	 */
 -	if (in_atomic() || !mm) {
-+	if (in_atomic() || !mm || current->pagefault_disabled) {
++	if (!mm || pagefault_disabled()) {
  		vma = NULL;  /* happy compiler */
  		goto bad_area_nosemaphore;
  	}
@@ -9442,7 +9522,7 @@ Index: linux-2.6/arch/um/kernel/trap.c
  	 * fail.
  	 */
 -	if (in_atomic())
-+	if (in_atomic() || !mm || current->pagefault_disabled)
++	if (!mm || pagefault_disabled())
  		goto out_nosemaphore;
  
  	down_read(&mm->mmap_sem);
@@ -9455,7 +9535,7 @@ Index: linux-2.6/arch/x86/mm/fault.c
  	 * in an atomic region then we must not take the fault:
  	 */
 -	if (unlikely(in_atomic() || !mm)) {
-+	if (unlikely(in_atomic() || !mm || current->pagefault_disabled)) {
++	if (unlikely(!mm || pagefault_disabled())) {
  		bad_area_nosemaphore(regs, error_code, address);
  		return;
  	}
@@ -9468,7 +9548,7 @@ Index: linux-2.6/arch/xtensa/mm/fault.c
  	 * context, we must not take the fault..
  	 */
 -	if (in_atomic() || !mm) {
-+	if (in_atomic() || !mm || current->pagefault_disabled) {
++	if (!mm || pagefault_disabled()) {
  		bad_page_fault(regs, address, SIGSEGV);
  		return;
  	}
@@ -9481,7 +9561,7 @@ Index: linux-2.6/mm/filemap.c
  	size_t copied;
  
 -	BUG_ON(!in_atomic());
-+	BUG_ON(!current->pagefault_disabled);
++	BUG_ON(!pagefault_disabled());
  	kaddr = kmap_atomic(page, KM_USER0);
  	if (likely(i->nr_segs == 1)) {
  		int left;
@@ -9618,15 +9698,14 @@ Index: linux-2.6/drivers/of/base.c
  	for (pp = np->properties; pp != 0; pp = pp->next) {
  		if (of_prop_cmp(pp->name, name) == 0) {
  			if (lenp != 0)
-@@ -155,11 +153,23 @@ struct property *of_find_property(const
+@@ -155,7 +153,20 @@ struct property *of_find_property(const
  			break;
  		}
  	}
 -	read_unlock(&devtree_lock);
- 
- 	return pp;
- }
--EXPORT_SYMBOL(of_find_property);
++
++	return pp;
++}
 +
 +struct property *of_find_property(const struct device_node *np,
 +				  const char *name,
@@ -9638,13 +9717,10 @@ Index: linux-2.6/drivers/of/base.c
 +	raw_spin_lock_irqsave(&devtree_lock, flags);
 +	pp = __of_find_property(np, name, lenp);
 +	raw_spin_unlock_irqrestore(&devtree_lock, flags);
-+
-+	return pp;
-+}
  
- /**
-  * of_find_all_nodes - Get next node in global list
-@@ -173,13 +183,13 @@ struct device_node *of_find_all_nodes(st
+ 	return pp;
+ }
+@@ -173,13 +184,13 @@ struct device_node *of_find_all_nodes(st
  {
  	struct device_node *np;
  
@@ -9660,7 +9736,7 @@ Index: linux-2.6/drivers/of/base.c
  	return np;
  }
  EXPORT_SYMBOL(of_find_all_nodes);
-@@ -188,8 +198,20 @@ EXPORT_SYMBOL(of_find_all_nodes);
+@@ -188,8 +199,20 @@ EXPORT_SYMBOL(of_find_all_nodes);
   * Find a property with a given name for a given node
   * and return the value.
   */
@@ -9682,7 +9758,7 @@ Index: linux-2.6/drivers/of/base.c
  {
  	struct property *pp = of_find_property(np, name, lenp);
  
-@@ -200,13 +222,13 @@ EXPORT_SYMBOL(of_get_property);
+@@ -200,13 +223,13 @@ EXPORT_SYMBOL(of_get_property);
  /** Checks if the given "compat" string matches one of the strings in
   * the device's "compatible" property
   */
@@ -9700,7 +9776,7 @@ Index: linux-2.6/drivers/of/base.c
  	if (cp == NULL)
  		return 0;
  	while (cplen > 0) {
-@@ -219,6 +241,21 @@ int of_device_is_compatible(const struct
+@@ -219,6 +242,21 @@ int of_device_is_compatible(const struct
  
  	return 0;
  }
@@ -9722,7 +9798,7 @@ Index: linux-2.6/drivers/of/base.c
  EXPORT_SYMBOL(of_device_is_compatible);
  
  /**
-@@ -278,13 +315,14 @@ EXPORT_SYMBOL(of_device_is_available);
+@@ -278,13 +316,14 @@ EXPORT_SYMBOL(of_device_is_available);
  struct device_node *of_get_parent(const struct device_node *node)
  {
  	struct device_node *np;
@@ -9739,7 +9815,7 @@ Index: linux-2.6/drivers/of/base.c
  	return np;
  }
  EXPORT_SYMBOL(of_get_parent);
-@@ -303,14 +341,15 @@ EXPORT_SYMBOL(of_get_parent);
+@@ -303,14 +342,15 @@ EXPORT_SYMBOL(of_get_parent);
  struct device_node *of_get_next_parent(struct device_node *node)
  {
  	struct device_node *parent;
@@ -9757,7 +9833,7 @@ Index: linux-2.6/drivers/of/base.c
  	return parent;
  }
  
-@@ -326,14 +365,15 @@ struct device_node *of_get_next_child(co
+@@ -326,14 +366,15 @@ struct device_node *of_get_next_child(co
  	struct device_node *prev)
  {
  	struct device_node *next;
@@ -9775,7 +9851,7 @@ Index: linux-2.6/drivers/of/base.c
  	return next;
  }
  EXPORT_SYMBOL(of_get_next_child);
-@@ -348,14 +388,15 @@ EXPORT_SYMBOL(of_get_next_child);
+@@ -348,14 +389,15 @@ EXPORT_SYMBOL(of_get_next_child);
  struct device_node *of_find_node_by_path(const char *path)
  {
  	struct device_node *np = allnodes;
@@ -9793,7 +9869,7 @@ Index: linux-2.6/drivers/of/base.c
  	return np;
  }
  EXPORT_SYMBOL(of_find_node_by_path);
-@@ -375,15 +416,16 @@ struct device_node *of_find_node_by_name
+@@ -375,15 +417,16 @@ struct device_node *of_find_node_by_name
  	const char *name)
  {
  	struct device_node *np;
@@ -9812,7 +9888,7 @@ Index: linux-2.6/drivers/of/base.c
  	return np;
  }
  EXPORT_SYMBOL(of_find_node_by_name);
-@@ -404,15 +446,16 @@ struct device_node *of_find_node_by_type
+@@ -404,15 +447,16 @@ struct device_node *of_find_node_by_type
  	const char *type)
  {
  	struct device_node *np;
@@ -9831,7 +9907,7 @@ Index: linux-2.6/drivers/of/base.c
  	return np;
  }
  EXPORT_SYMBOL(of_find_node_by_type);
-@@ -435,18 +478,20 @@ struct device_node *of_find_compatible_n
+@@ -435,18 +479,20 @@ struct device_node *of_find_compatible_n
  	const char *type, const char *compatible)
  {
  	struct device_node *np;
@@ -9855,7 +9931,7 @@ Index: linux-2.6/drivers/of/base.c
  	return np;
  }
  EXPORT_SYMBOL(of_find_compatible_node);
-@@ -468,8 +513,9 @@ struct device_node *of_find_node_with_pr
+@@ -468,8 +514,9 @@ struct device_node *of_find_node_with_pr
  {
  	struct device_node *np;
  	struct property *pp;
@@ -9866,7 +9942,7 @@ Index: linux-2.6/drivers/of/base.c
  	np = from ? from->allnext : allnodes;
  	for (; np; np = np->allnext) {
  		for (pp = np->properties; pp != 0; pp = pp->next) {
-@@ -481,20 +527,14 @@ struct device_node *of_find_node_with_pr
+@@ -481,20 +528,14 @@ struct device_node *of_find_node_with_pr
  	}
  out:
  	of_node_put(from);
@@ -9891,7 +9967,7 @@ Index: linux-2.6/drivers/of/base.c
  {
  	if (!matches)
  		return NULL;
-@@ -508,14 +548,33 @@ const struct of_device_id *of_match_node
+@@ -508,14 +549,33 @@ const struct of_device_id *of_match_node
  			match &= node->type
  				&& !strcmp(matches->type, node->type);
  		if (matches->compatible[0])
@@ -9927,7 +10003,7 @@ Index: linux-2.6/drivers/of/base.c
  EXPORT_SYMBOL(of_match_node);
  
  /**
-@@ -534,15 +593,16 @@ struct device_node *of_find_matching_nod
+@@ -534,15 +594,16 @@ struct device_node *of_find_matching_nod
  					  const struct of_device_id *matches)
  {
  	struct device_node *np;
@@ -9947,7 +10023,7 @@ Index: linux-2.6/drivers/of/base.c
  	return np;
  }
  EXPORT_SYMBOL(of_find_matching_node);
-@@ -585,12 +645,12 @@ struct device_node *of_find_node_by_phan
+@@ -585,12 +646,12 @@ struct device_node *of_find_node_by_phan
  {
  	struct device_node *np;
  
@@ -9962,7 +10038,7 @@ Index: linux-2.6/drivers/of/base.c
  	return np;
  }
  EXPORT_SYMBOL(of_find_node_by_phandle);
-@@ -745,18 +805,18 @@ int prom_add_property(struct device_node
+@@ -745,18 +806,18 @@ int prom_add_property(struct device_node
  	unsigned long flags;
  
  	prop->next = NULL;
@@ -9984,7 +10060,7 @@ Index: linux-2.6/drivers/of/base.c
  
  #ifdef CONFIG_PROC_DEVICETREE
  	/* try to add to proc as well if it was initialized */
-@@ -781,7 +841,7 @@ int prom_remove_property(struct device_n
+@@ -781,7 +842,7 @@ int prom_remove_property(struct device_n
  	unsigned long flags;
  	int found = 0;
  
@@ -9993,7 +10069,7 @@ Index: linux-2.6/drivers/of/base.c
  	next = &np->properties;
  	while (*next) {
  		if (*next == prop) {
-@@ -794,7 +854,7 @@ int prom_remove_property(struct device_n
+@@ -794,7 +855,7 @@ int prom_remove_property(struct device_n
  		}
  		next = &(*next)->next;
  	}
@@ -10002,7 +10078,7 @@ Index: linux-2.6/drivers/of/base.c
  
  	if (!found)
  		return -ENODEV;
-@@ -824,7 +884,7 @@ int prom_update_property(struct device_n
+@@ -824,7 +885,7 @@ int prom_update_property(struct device_n
  	unsigned long flags;
  	int found = 0;
  
@@ -10011,7 +10087,7 @@ Index: linux-2.6/drivers/of/base.c
  	next = &np->properties;
  	while (*next) {
  		if (*next == oldprop) {
-@@ -838,7 +898,7 @@ int prom_update_property(struct device_n
+@@ -838,7 +899,7 @@ int prom_update_property(struct device_n
  		}
  		next = &(*next)->next;
  	}
@@ -10020,7 +10096,7 @@ Index: linux-2.6/drivers/of/base.c
  
  	if (!found)
  		return -ENODEV;
-@@ -868,12 +928,12 @@ void of_attach_node(struct device_node *
+@@ -868,12 +929,12 @@ void of_attach_node(struct device_node *
  {
  	unsigned long flags;
  
@@ -10035,7 +10111,7 @@ Index: linux-2.6/drivers/of/base.c
  }
  
  /**
-@@ -887,7 +947,7 @@ void of_detach_node(struct device_node *
+@@ -887,7 +948,7 @@ void of_detach_node(struct device_node *
  	struct device_node *parent;
  	unsigned long flags;
  
@@ -10044,7 +10120,7 @@ Index: linux-2.6/drivers/of/base.c
  
  	parent = np->parent;
  	if (!parent)
-@@ -918,7 +978,7 @@ void of_detach_node(struct device_node *
+@@ -918,7 +979,7 @@ void of_detach_node(struct device_node *
  	of_node_set_flag(np, OF_DETACHED);
  
  out_unlock:
@@ -11245,7 +11321,7 @@ Index: linux-2.6/lib/smp_processor_id.c
 -			preempt_count() - 1, current->comm, current->pid);
 +	printk(KERN_ERR "BUG: using smp_processor_id() in preemptible [%08x %08x] "
 +	       "code: %s/%d\n", preempt_count() - 1,
-+	       current->migrate_disable, current->comm, current->pid);
++	       __migrate_disabled(current), current->comm, current->pid);
  	print_symbol("caller is %s\n", (long)__builtin_return_address(0));
  	dump_stack();
  
@@ -11641,24 +11717,22 @@ Index: linux-2.6/net/core/dev.c
  #endif
  }
  
-@@ -2902,11 +2902,13 @@ int netif_rx_ni(struct sk_buff *skb)
+@@ -2902,11 +2902,11 @@ int netif_rx_ni(struct sk_buff *skb)
  {
  	int err;
  
 -	preempt_disable();
-+	preempt_disable_nort();
-+	migrate_disable_rt();
++	migrate_disable();
  	err = netif_rx(skb);
  	if (local_softirq_pending())
 -		do_softirq();
 -	preempt_enable();
 +		thread_do_softirq();
-+	migrate_enable_rt();
-+	preempt_enable_nort();
++	migrate_enable();
  
  	return err;
  }
-@@ -3276,7 +3278,7 @@ static void flush_backlog(void *arg)
+@@ -3276,7 +3276,7 @@ static void flush_backlog(void *arg)
  	skb_queue_walk_safe(&sd->input_pkt_queue, skb, tmp) {
  		if (skb->dev == dev) {
  			__skb_unlink(skb, &sd->input_pkt_queue);
@@ -11667,7 +11741,7 @@ Index: linux-2.6/net/core/dev.c
  			input_queue_head_incr(sd);
  		}
  	}
-@@ -3285,10 +3287,13 @@ static void flush_backlog(void *arg)
+@@ -3285,10 +3285,13 @@ static void flush_backlog(void *arg)
  	skb_queue_walk_safe(&sd->process_queue, skb, tmp) {
  		if (skb->dev == dev) {
  			__skb_unlink(skb, &sd->process_queue);
@@ -11682,7 +11756,7 @@ Index: linux-2.6/net/core/dev.c
  }
  
  static int napi_gro_complete(struct sk_buff *skb)
-@@ -3766,10 +3771,17 @@ static void net_rx_action(struct softirq
+@@ -3766,10 +3769,17 @@ static void net_rx_action(struct softirq
  	struct softnet_data *sd = &__get_cpu_var(softnet_data);
  	unsigned long time_limit = jiffies + 2;
  	int budget = netdev_budget;
@@ -11700,7 +11774,7 @@ Index: linux-2.6/net/core/dev.c
  	while (!list_empty(&sd->poll_list)) {
  		struct napi_struct *n;
  		int work, weight;
-@@ -6196,6 +6208,9 @@ static int dev_cpu_callback(struct notif
+@@ -6196,6 +6206,9 @@ static int dev_cpu_callback(struct notif
  		netif_rx(skb);
  		input_queue_head_incr(oldsd);
  	}
@@ -11710,7 +11784,7 @@ Index: linux-2.6/net/core/dev.c
  
  	return NOTIFY_OK;
  }
-@@ -6461,8 +6476,9 @@ static int __init net_dev_init(void)
+@@ -6461,8 +6474,9 @@ static int __init net_dev_init(void)
  		struct softnet_data *sd = &per_cpu(softnet_data, i);
  
  		memset(sd, 0, sizeof(*sd));
@@ -11875,7 +11949,65 @@ Index: linux-2.6/kernel/rcutree_plugin.h
 ===================================================================
 --- linux-2.6.orig/kernel/rcutree_plugin.h
 +++ linux-2.6/kernel/rcutree_plugin.h
-@@ -382,7 +382,7 @@ static noinline void rcu_read_unlock_spe
+@@ -299,6 +299,9 @@ static noinline void rcu_read_unlock_spe
+ 	int empty_exp;
+ 	unsigned long flags;
+ 	struct list_head *np;
++#ifdef CONFIG_RCU_BOOST
++	struct rt_mutex *rbmp = NULL;
++#endif /* #ifdef CONFIG_RCU_BOOST */
+ 	struct rcu_node *rnp;
+ 	int special;
+ 
+@@ -318,7 +321,7 @@ static noinline void rcu_read_unlock_spe
+ 	}
+ 
+ 	/* Hardware IRQ handlers cannot block. */
+-	if (in_irq() || in_serving_softirq()) {
++	if (preempt_count() & (HARDIRQ_MASK | SOFTIRQ_OFFSET)) {
+ 		local_irq_restore(flags);
+ 		return;
+ 	}
+@@ -344,6 +347,7 @@ static noinline void rcu_read_unlock_spe
+ 		smp_mb(); /* ensure expedited fastpath sees end of RCU c-s. */
+ 		np = rcu_next_node_entry(t, rnp);
+ 		list_del_init(&t->rcu_node_entry);
++		t->rcu_blocked_node = NULL;
+ 		if (&t->rcu_node_entry == rnp->gp_tasks)
+ 			rnp->gp_tasks = np;
+ 		if (&t->rcu_node_entry == rnp->exp_tasks)
+@@ -351,13 +355,12 @@ static noinline void rcu_read_unlock_spe
+ #ifdef CONFIG_RCU_BOOST
+ 		if (&t->rcu_node_entry == rnp->boost_tasks)
+ 			rnp->boost_tasks = np;
+-		/* Snapshot and clear ->rcu_boosted with rcu_node lock held. */
+-		if (t->rcu_boosted) {
+-			special |= RCU_READ_UNLOCK_BOOSTED;
+-			t->rcu_boosted = 0;
++		/* Snapshot/clear ->rcu_boost_mutex with rcu_node lock held. */
++		if (t->rcu_boost_mutex) {
++			rbmp = t->rcu_boost_mutex;
++			t->rcu_boost_mutex = NULL;
+ 		}
+ #endif /* #ifdef CONFIG_RCU_BOOST */
+-		t->rcu_blocked_node = NULL;
+ 
+ 		/*
+ 		 * If this was the last task on the current list, and if
+@@ -371,10 +374,8 @@ static noinline void rcu_read_unlock_spe
+ 
+ #ifdef CONFIG_RCU_BOOST
+ 		/* Unboost if we were boosted. */
+-		if (special & RCU_READ_UNLOCK_BOOSTED) {
+-			rt_mutex_unlock(t->rcu_boost_mutex);
+-			t->rcu_boost_mutex = NULL;
+-		}
++		if (rbmp)
++			rt_mutex_unlock(rbmp);
+ #endif /* #ifdef CONFIG_RCU_BOOST */
+ 
+ 		/*
+@@ -382,7 +383,7 @@ static noinline void rcu_read_unlock_spe
  		 * then we need to report up the rcu_node hierarchy.
  		 */
  		if (!empty_exp && !rcu_preempted_readers_exp(rnp))
@@ -11884,7 +12016,7 @@ Index: linux-2.6/kernel/rcutree_plugin.h
  	} else {
  		local_irq_restore(flags);
  	}
-@@ -711,7 +711,8 @@ static int sync_rcu_preempt_exp_done(str
+@@ -711,7 +712,8 @@ static int sync_rcu_preempt_exp_done(str
   *
   * Caller must hold sync_rcu_preempt_exp_mutex.
   */
@@ -11894,7 +12026,7 @@ Index: linux-2.6/kernel/rcutree_plugin.h
  {
  	unsigned long flags;
  	unsigned long mask;
-@@ -724,7 +725,8 @@ static void rcu_report_exp_rnp(struct rc
+@@ -724,7 +726,8 @@ static void rcu_report_exp_rnp(struct rc
  		}
  		if (rnp->parent == NULL) {
  			raw_spin_unlock_irqrestore(&rnp->lock, flags);
@@ -11904,7 +12036,7 @@ Index: linux-2.6/kernel/rcutree_plugin.h
  			break;
  		}
  		mask = rnp->grpmask;
-@@ -757,7 +759,7 @@ sync_rcu_preempt_exp_init(struct rcu_sta
+@@ -757,7 +760,7 @@ sync_rcu_preempt_exp_init(struct rcu_sta
  		must_wait = 1;
  	}
  	if (!must_wait)
@@ -11913,7 +12045,7 @@ Index: linux-2.6/kernel/rcutree_plugin.h
  }
  
  /*
-@@ -1048,9 +1050,9 @@ EXPORT_SYMBOL_GPL(synchronize_rcu_expedi
+@@ -1048,9 +1051,9 @@ EXPORT_SYMBOL_GPL(synchronize_rcu_expedi
   * report on tasks preempted in RCU read-side critical sections during
   * expedited RCU grace periods.
   */
@@ -11925,6 +12057,14 @@ Index: linux-2.6/kernel/rcutree_plugin.h
  }
  
  #endif /* #ifdef CONFIG_HOTPLUG_CPU */
+@@ -1199,7 +1202,6 @@ static int rcu_boost(struct rcu_node *rn
+ 	t = container_of(tb, struct task_struct, rcu_node_entry);
+ 	rt_mutex_init_proxy_locked(&mtx, t);
+ 	t->rcu_boost_mutex = &mtx;
+-	t->rcu_boosted = 1;
+ 	raw_spin_unlock_irqrestore(&rnp->lock, flags);
+ 	rt_mutex_lock(&mtx);  /* Side effect: boosts task t's priority. */
+ 	rt_mutex_unlock(&mtx);  /* Keep lockdep happy. */
 Index: linux-2.6/drivers/usb/gadget/ci13xxx_udc.c
 ===================================================================
 --- linux-2.6.orig/drivers/usb/gadget/ci13xxx_udc.c
@@ -14217,37 +14357,38 @@ Index: linux-2.6/kernel/hrtimer.c
  /*
   * Initialize the high resolution related parts of cpu_base
   */
-@@ -643,7 +646,29 @@ static inline int hrtimer_enqueue_reprog
- 					    struct hrtimer_clock_base *base,
+@@ -644,14 +647,23 @@ static inline int hrtimer_enqueue_reprog
  					    int wakeup)
  {
-+#ifdef CONFIG_PREEMPT_RT_BASE
-+again:
  	if (base->cpu_base->hres_active && hrtimer_reprogram(timer, base)) {
+-		if (wakeup) {
+-			raw_spin_unlock(&base->cpu_base->lock);
+-			raise_softirq_irqoff(HRTIMER_SOFTIRQ);
+-			raw_spin_lock(&base->cpu_base->lock);
+-		} else
+-			__raise_softirq_irqoff(HRTIMER_SOFTIRQ);
++		if (!wakeup)
++			return -ETIME;
+ 
+-		return 1;
++#ifdef CONFIG_PREEMPT_RT_BASE
 +		/*
 +		 * Move softirq based timers away from the rbtree in
 +		 * case it expired already. Otherwise we would have a
 +		 * stale base->first entry until the softirq runs.
 +		 */
-+		if (!hrtimer_rt_defer(timer)) {
-+			ktime_t now = ktime_get();
-+
-+			__run_hrtimer(timer, &now);
-+			/*
-+			 * __run_hrtimer might have requeued timer and
-+			 * it could be base->first again.
-+			 */
-+			if (&timer->node == base->active.next)
-+				goto again;
-+			return 1;
-+		}
-+#else
-+	if (base->cpu_base->hres_active && hrtimer_reprogram(timer, base)) {
++		if (!hrtimer_rt_defer(timer))
++			return -ETIME;
 +#endif
- 		if (wakeup) {
- 			raw_spin_unlock(&base->cpu_base->lock);
- 			raise_softirq_irqoff(HRTIMER_SOFTIRQ);
-@@ -732,6 +757,11 @@ static inline int hrtimer_enqueue_reprog
++		raw_spin_unlock(&base->cpu_base->lock);
++		raise_softirq_irqoff(HRTIMER_SOFTIRQ);
++		raw_spin_lock(&base->cpu_base->lock);
++
++		return 0;
+ 	}
+ 
+ 	return 0;
+@@ -732,6 +744,11 @@ static inline int hrtimer_enqueue_reprog
  }
  static inline void hrtimer_init_hres(struct hrtimer_cpu_base *base) { }
  static inline void retrigger_next_event(void *arg) { }
@@ -14259,7 +14400,7 @@ Index: linux-2.6/kernel/hrtimer.c
  
  #endif /* CONFIG_HIGH_RES_TIMERS */
  
-@@ -846,6 +876,32 @@ u64 hrtimer_forward(struct hrtimer *time
+@@ -846,6 +863,32 @@ u64 hrtimer_forward(struct hrtimer *time
  }
  EXPORT_SYMBOL_GPL(hrtimer_forward);
  
@@ -14292,7 +14433,7 @@ Index: linux-2.6/kernel/hrtimer.c
  /*
   * enqueue_hrtimer - internal function to (re)start a timer
   *
-@@ -888,6 +944,11 @@ static void __remove_hrtimer(struct hrti
+@@ -888,6 +931,11 @@ static void __remove_hrtimer(struct hrti
  	if (!(timer->state & HRTIMER_STATE_ENQUEUED))
  		goto out;
  
@@ -14304,7 +14445,29 @@ Index: linux-2.6/kernel/hrtimer.c
  	if (&timer->node == timerqueue_getnext(&base->active)) {
  #ifdef CONFIG_HIGH_RES_TIMERS
  		/* Reprogram the clock event device. if enabled */
-@@ -1070,7 +1131,7 @@ int hrtimer_cancel(struct hrtimer *timer
+@@ -983,8 +1031,19 @@ int __hrtimer_start_range_ns(struct hrti
+ 	 *
+ 	 * XXX send_remote_softirq() ?
+ 	 */
+-	if (leftmost && new_base->cpu_base == &__get_cpu_var(hrtimer_bases))
+-		hrtimer_enqueue_reprogram(timer, new_base, wakeup);
++	if (leftmost && new_base->cpu_base == &__get_cpu_var(hrtimer_bases)) {
++		ret = hrtimer_enqueue_reprogram(timer, new_base, wakeup);
++		if (ret) {
++			/*
++			 * In case we failed to reprogram the timer (mostly
++			 * because out current timer is already elapsed),
++			 * remove it again and report a failure. This avoids
++			 * stale base->first entries.
++			 */
++			__remove_hrtimer(timer, new_base,
++					timer->state & HRTIMER_STATE_CALLBACK, 0);
++		}
++	}
+ 
+ 	unlock_hrtimer_base(timer, &flags);
+ 
+@@ -1070,7 +1129,7 @@ int hrtimer_cancel(struct hrtimer *timer
  
  		if (ret >= 0)
  			return ret;
@@ -14313,7 +14476,7 @@ Index: linux-2.6/kernel/hrtimer.c
  	}
  }
  EXPORT_SYMBOL_GPL(hrtimer_cancel);
-@@ -1149,6 +1210,7 @@ static void __hrtimer_init(struct hrtime
+@@ -1149,6 +1208,7 @@ static void __hrtimer_init(struct hrtime
  
  	base = hrtimer_clockid_to_base(clock_id);
  	timer->base = &cpu_base->clock_base[base];
@@ -14321,7 +14484,7 @@ Index: linux-2.6/kernel/hrtimer.c
  	timerqueue_init(&timer->node);
  
  #ifdef CONFIG_TIMER_STATS
-@@ -1232,6 +1294,116 @@ static void __run_hrtimer(struct hrtimer
+@@ -1232,6 +1292,116 @@ static void __run_hrtimer(struct hrtimer
  	timer->state &= ~HRTIMER_STATE_CALLBACK;
  }
  
@@ -14438,7 +14601,7 @@ Index: linux-2.6/kernel/hrtimer.c
  #ifdef CONFIG_HIGH_RES_TIMERS
  
  /*
-@@ -1242,7 +1414,7 @@ void hrtimer_interrupt(struct clock_even
+@@ -1242,7 +1412,7 @@ void hrtimer_interrupt(struct clock_even
  {
  	struct hrtimer_cpu_base *cpu_base = &__get_cpu_var(hrtimer_bases);
  	ktime_t expires_next, now, entry_time, delta;
@@ -14447,7 +14610,7 @@ Index: linux-2.6/kernel/hrtimer.c
  
  	BUG_ON(!cpu_base->hres_active);
  	cpu_base->nr_events++;
-@@ -1278,6 +1450,14 @@ void hrtimer_interrupt(struct clock_even
+@@ -1278,6 +1448,14 @@ void hrtimer_interrupt(struct clock_even
  
  			timer = container_of(node, struct hrtimer, node);
  
@@ -14462,7 +14625,7 @@ Index: linux-2.6/kernel/hrtimer.c
  			/*
  			 * The immediate goal for using the softexpires is
  			 * minimizing wakeups, not running timers at the
-@@ -1301,7 +1481,10 @@ void hrtimer_interrupt(struct clock_even
+@@ -1301,7 +1479,10 @@ void hrtimer_interrupt(struct clock_even
  				break;
  			}
  
@@ -14474,7 +14637,7 @@ Index: linux-2.6/kernel/hrtimer.c
  		}
  	}
  
-@@ -1316,6 +1499,10 @@ void hrtimer_interrupt(struct clock_even
+@@ -1316,6 +1497,10 @@ void hrtimer_interrupt(struct clock_even
  	if (expires_next.tv64 == KTIME_MAX ||
  	    !tick_program_event(expires_next, 0)) {
  		cpu_base->hang_detected = 0;
@@ -14485,7 +14648,7 @@ Index: linux-2.6/kernel/hrtimer.c
  		return;
  	}
  
-@@ -1391,17 +1578,17 @@ void hrtimer_peek_ahead_timers(void)
+@@ -1391,17 +1576,17 @@ void hrtimer_peek_ahead_timers(void)
  	local_irq_restore(flags);
  }
  
@@ -14508,7 +14671,7 @@ Index: linux-2.6/kernel/hrtimer.c
  /*
   * Called from timer softirq every jiffy, expire hrtimers:
   *
-@@ -1434,7 +1621,7 @@ void hrtimer_run_queues(void)
+@@ -1434,7 +1619,7 @@ void hrtimer_run_queues(void)
  	struct timerqueue_node *node;
  	struct hrtimer_cpu_base *cpu_base = &__get_cpu_var(hrtimer_bases);
  	struct hrtimer_clock_base *base;
@@ -14517,7 +14680,7 @@ Index: linux-2.6/kernel/hrtimer.c
  
  	if (hrtimer_hres_active())
  		return;
-@@ -1459,10 +1646,16 @@ void hrtimer_run_queues(void)
+@@ -1459,10 +1644,16 @@ void hrtimer_run_queues(void)
  					hrtimer_get_expires_tv64(timer))
  				break;
  
@@ -14535,7 +14698,7 @@ Index: linux-2.6/kernel/hrtimer.c
  }
  
  /*
-@@ -1484,6 +1677,7 @@ static enum hrtimer_restart hrtimer_wake
+@@ -1484,6 +1675,7 @@ static enum hrtimer_restart hrtimer_wake
  void hrtimer_init_sleeper(struct hrtimer_sleeper *sl, struct task_struct *task)
  {
  	sl->timer.function = hrtimer_wakeup;
@@ -14543,7 +14706,7 @@ Index: linux-2.6/kernel/hrtimer.c
  	sl->task = task;
  }
  EXPORT_SYMBOL_GPL(hrtimer_init_sleeper);
-@@ -1622,9 +1816,13 @@ static void __cpuinit init_hrtimers_cpu(
+@@ -1622,9 +1814,13 @@ static void __cpuinit init_hrtimers_cpu(
  	for (i = 0; i < HRTIMER_MAX_CLOCK_BASES; i++) {
  		cpu_base->clock_base[i].cpu_base = cpu_base;
  		timerqueue_init_head(&cpu_base->clock_base[i].active);
@@ -14557,7 +14720,7 @@ Index: linux-2.6/kernel/hrtimer.c
  }
  
  #ifdef CONFIG_HOTPLUG_CPU
-@@ -1737,9 +1935,7 @@ void __init hrtimers_init(void)
+@@ -1737,9 +1933,7 @@ void __init hrtimers_init(void)
  	hrtimer_cpu_notify(&hrtimers_nb, (unsigned long)CPU_UP_PREPARE,
  			  (void *)(long)smp_processor_id());
  	register_cpu_notifier(&hrtimers_nb);
@@ -19030,17 +19193,12 @@ Index: linux-2.6/include/linux/smp.h
  /*
   * Generic and arch helpers
   */
-@@ -173,6 +172,14 @@ smp_call_function_any(const struct cpuma
+@@ -173,6 +172,9 @@ smp_call_function_any(const struct cpuma
  #define get_cpu()		({ preempt_disable(); smp_processor_id(); })
  #define put_cpu()		preempt_enable()
  
-+#ifndef CONFIG_PREEMPT_RT_FULL
-+# define get_cpu_light()	get_cpu()
-+# define put_cpu_light()	put_cpu()
-+#else
-+# define get_cpu_light()	({ migrate_disable(); smp_processor_id(); })
-+# define put_cpu_light()	migrate_enable()
-+#endif
++#define get_cpu_light()		({ migrate_disable(); smp_processor_id(); })
++#define put_cpu_light()		migrate_enable()
 +
  /*
   * Callback to arch code if there's nosmp or maxcpus=0 on the
@@ -19404,15 +19562,7 @@ Index: linux-2.6/init/Kconfig
  	help
  	  This option selects the RCU implementation that is designed
  	  for real-time UP systems.  This option greatly reduces the
-@@ -719,6 +719,7 @@ config RT_GROUP_SCHED
- 	bool "Group scheduling for SCHED_RR/FIFO"
- 	depends on EXPERIMENTAL
- 	depends on CGROUP_SCHED
-+	depends on !PREEMPT_RT_FULL
- 	default n
- 	help
- 	  This feature lets you explicitly allocate real CPU bandwidth
-@@ -1220,6 +1221,7 @@ config SLAB
+@@ -1220,6 +1220,7 @@ config SLAB
  
  config SLUB
  	bool "SLUB (Unqueued Allocator)"
@@ -19420,7 +19570,7 @@ Index: linux-2.6/init/Kconfig
  	help
  	   SLUB is a slab allocator that minimizes cache line usage
  	   instead of managing queues of cached objects (SLAB approach).
-@@ -1231,6 +1233,7 @@ config SLUB
+@@ -1231,6 +1232,7 @@ config SLUB
  config SLOB
  	depends on EXPERT
  	bool "SLOB (Simple Allocator)"
