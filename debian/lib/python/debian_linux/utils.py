@@ -71,14 +71,16 @@ def read_control(f):
     from .debian import Package
 
     entries = []
+    eof = False
 
-    while True:
+    while not eof:
         e = Package()
         last = None
         lines = []
         while True:
             line = f.readline()
             if not line:
+                eof = True
                 break
             line = line.strip('\n')
             if not line:
@@ -97,10 +99,8 @@ def read_control(f):
             lines = [line[i+1:].lstrip()]
         if last:
             e[last] = '\n'.join(lines)
-        if not e:
-            break
-
-        entries.append(e)
+        if e:
+            entries.append(e)
 
     return entries
 
