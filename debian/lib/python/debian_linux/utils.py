@@ -55,45 +55,8 @@ class Templates(object):
             if os.path.exists(filename):
                 f = file(filename)
                 if prefix == 'control':
-                    return self._read_control(f)
+                    return read_control(f)
                 return f.read()
-
-    def _read_control(self, f):
-        from .debian import Package
-
-        entries = []
-
-        while True:
-            e = Package()
-            last = None
-            lines = []
-            while True:
-                line = f.readline()
-                if not line:
-                    break
-                line = line.strip('\n')
-                if not line:
-                    break
-                if line[0] in ' \t':
-                    if not last:
-                        raise ValueError('Continuation line seen before first header')
-                    lines.append(line.lstrip())
-                    continue
-                if last:
-                    e[last] = '\n'.join(lines)
-                i = line.find(':')
-                if i < 0:
-                    raise ValueError("Not a header, not a continuation: ``%s''" % line)
-                last = line[:i]
-                lines = [line[i+1:].lstrip()]
-            if last:
-                e[last] = '\n'.join(lines)
-            if not e:
-                break
-
-            entries.append(e)
-
-        return entries
 
     def get(self, key, default=None):
         if key in self._cache:
@@ -103,6 +66,43 @@ class Templates(object):
         if value is None:
             return default
         return value
+
+def read_control(f):
+    from .debian import Package
+
+    entries = []
+
+    while True:
+        e = Package()
+        last = None
+        lines = []
+        while True:
+            line = f.readline()
+            if not line:
+                break
+            line = line.strip('\n')
+            if not line:
+                break
+            if line[0] in ' \t':
+                if not last:
+                    raise ValueError('Continuation line seen before first header')
+                lines.append(line.lstrip())
+                continue
+            if last:
+                e[last] = '\n'.join(lines)
+            i = line.find(':')
+            if i < 0:
+                raise ValueError("Not a header, not a continuation: ``%s''" % line)
+            last = line[:i]
+            lines = [line[i+1:].lstrip()]
+        if last:
+            e[last] = '\n'.join(lines)
+        if not e:
+            break
+
+        entries.append(e)
+
+    return entries
 
 class TextWrapper(textwrap.TextWrapper):
     wordsep_re = re.compile(
