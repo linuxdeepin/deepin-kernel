@@ -2,17 +2,11 @@ PROGS = genksyms
 
 OUTDIR = scripts/genksyms
 
-top_srcdir = ../..
+include ../../Makefile.inc
 
-VPATH = $(top_srcdir)/$(OUTDIR)
+genksyms: genksyms.o parse.tab.o lex.lex.o
 
-include $(top_srcdir)/debian/build/Makefile.inc
-
-CFLAGS += -I$(VPATH)
-
-genksyms: genksyms.o parse.o lex.o
-
-lex.o: keywords.c parse.h
+lex.lex.o: keywords.hash.c parse.tab.h
 
 %.c: %.c_shipped
 	ln -s $< $@
@@ -21,4 +15,4 @@ lex.o: keywords.c parse.h
 	ln -s $< $@
 
 clean:
-	rm -f keywords.c parse.h
+	rm -f keywords.hash.c parse.tab.c parse.tab.h

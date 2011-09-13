@@ -43,8 +43,4 @@ SUBDIRS = \
 
 OUTDIR = scripts
 
-top_srcdir = ..
-
-VPATH = $(top_srcdir)/scripts
-
-include $(top_srcdir)/debian/build/Makefile.inc
+include ..//Makefile.inc

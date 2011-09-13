@@ -7,9 +7,7 @@ PROGS = \
 
 OUTDIR = scripts/mod
 
-top_srcdir = ../..
-
-include $(top_srcdir)/debian/build/Makefile.inc
+include ../../Makefile.inc
 
 modpost.real-%:
 	$(MAKE) -f Makefile.real TYPE=$* SOURCEDIR=$(top_srcdir)/scripts/mod

@@ -8,6 +8,4 @@ SUBDIRS = \
 
 OUTDIR = .
 
-top_srcdir = .
-
-include $(top_srcdir)/debian/build/Makefile.inc
+include Makefile.inc

@@ -2,17 +2,11 @@ PROGS = conf
 
 OUTDIR = scripts/kconfig
 
-top_srcdir = ../..
-
-VPATH = $(top_srcdir)/$(OUTDIR)
-
-include $(top_srcdir)/debian/build/Makefile.inc
-
-CFLAGS += -I$(VPATH)
+include ../../Makefile.inc
 
 conf: conf.o zconf.tab.o
 
-zconf.tab.c: zconf.hash.c lex.zconf.c
+zconf.tab.c: zconf.hash.c zconf.lex.c
 
 %.c: %.c_shipped
 	ln -sf $< $@
@@ -21,4 +15,4 @@ zconf.tab.c: zconf.hash.c lex.zconf.c
 	ln -sf $< $@
 
 clean:
-	rm -f zconf.tab.c zconf.hash.c lex.zconf.c
+	rm -f zconf.tab.c zconf.hash.c zconf.lex.c

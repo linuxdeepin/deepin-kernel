@@ -1,8 +1,13 @@
+top_srcdir = $(dir $(lastword $(MAKEFILE_LIST)))/../..
+
+VPATH = $(top_srcdir)/$(OUTDIR)
+
 SHELL = /bin/sh -e
 
 CC = gcc
 CXX = g++
 CFLAGS ?= -O2 -Wall
+CPPFLAGS = -I$(top_srcdir)/$(OUTDIR) -I$(top_srcdir)/debian/build/$(OUTDIR)
 CXXFLAGS = $(CFLAGS)
 
 all: all-local all-recursive
