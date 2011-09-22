@@ -11,6 +11,41 @@ import subprocess
 
 from debian_linux.debian import Changelog, VersionLinux
 
+
+class FileGlob(object):
+    def __init__(self, root):
+        self.root = root or os.curdir
+
+    def __call__(self, pathname):
+        dirname, basename = os.path.split(pathname)
+        if dirname:
+            dirs = self(dirname)
+        else:
+            dirs = ('', )
+        for d in dirs:
+            if basename:
+                for name in self.glob(d, basename):
+                    yield os.path.join(d, name)
+            elif self.isdir(d):
+                yield os.path.join(d, '')
+
+    def glob(self, dirname, pattern):
+        import fnmatch
+        try:
+            names = self.listdir(dirname)
+        except os.error:
+            return ()
+        if pattern[0] != '.':
+            names = filter(lambda x: x[0] != '.', names)
+        return fnmatch.filter(names, pattern)
+
+    def isdir(self, dirname):
+        return os.path.isdir(os.path.join(self.root, dirname))
+
+    def listdir(self, dirname):
+        return os.listdir(os.path.join(self.root, dirname))
+
+
 class Main(object):
     def __init__(self, input_files, override_version, override_tag):
         self.log = sys.stdout.write
@@ -100,22 +135,32 @@ class Main(object):
         self.log("Generate orig\n")
         orig = os.path.join(self.dir, self.orig)
         temp = os.path.join(self.dir, 'temp')
-        # TODO: move this informations somewhere else
-        os.mkdir(os.path.join(orig))
-        for i in 'COPYING', 'Kbuild', 'Makefile':
-            shutil.copyfile(os.path.join(temp, i), os.path.join(orig, i))
-        for i in 's390', 'x86':
-            os.makedirs(os.path.join(orig, 'arch', i, 'include'))
-            shutil.copyfile(os.path.join(temp, 'arch', i, 'Makefile'), os.path.join(orig, 'arch', i, 'Makefile'))
-            shutil.copytree(os.path.join(temp, 'arch', i, 'include', 'asm'), os.path.join(orig, 'arch', i, 'include', 'asm'))
-        os.mkdir(os.path.join(orig, 'arch', 'x86', 'lib'))
-        shutil.copyfile(os.path.join(temp, 'arch', 'x86', 'lib', 'memcpy_64.S'), os.path.join(orig, 'arch', 'x86', 'lib', 'memcpy_64.S'))
-        os.mkdir(os.path.join(orig, 'include'))
-        shutil.copytree(os.path.join(temp, 'include', 'linux'), os.path.join(orig, 'include', 'linux'))
-        os.mkdir(os.path.join(orig, 'lib'))
-        shutil.copyfile(os.path.join(temp, 'lib', 'rbtree.c'), os.path.join(orig, 'lib', 'rbtree.c'))
-        shutil.copytree(os.path.join(temp, 'scripts'), os.path.join(orig, 'scripts'))
-        shutil.copytree(os.path.join(temp, 'tools'), os.path.join(orig, 'tools'))
+
+        to_copy = (
+                'COPYING',
+                'Kbuild',
+                'Makefile',
+                'arch/*/include/',
+                'arch/*/Makefile',
+                'arch/x86/lib/memcpy_64.S',
+                'include/',
+                'lib/rbtree.c',
+                'scripts/',
+                'tools/',
+        )
+
+        glob = FileGlob(temp)
+        for i in to_copy:
+            for j in glob(i):
+                temp_j = os.path.join(temp, j)
+                orig_j = os.path.join(orig, j)
+                if j.endswith('/'):
+                    shutil.copytree(temp_j, orig_j)
+                else:
+                    d = os.path.dirname(orig_j)
+                    if not os.path.exists(d):
+                        os.makedirs(d)
+                    shutil.copyfile(temp_j, orig_j)
 
     def tar(self):
         out = os.path.join("../orig", self.orig_tar)
