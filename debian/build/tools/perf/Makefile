@@ -26,7 +26,7 @@ else ifeq ($(DEB_HOST_ARCH_CPU),sparc64)
   KERNEL_ARCH_PERF = sparc
 endif
 
-MAKE_PERF := $(MAKE) -C $(top_srcdir)/tools/perf O=$(CURDIR)/out prefix=/usr perfexecdir=share/perf_$(VERSION)-core NO_PERL=1 V=2 HAVE_CPLUS_DEMANGLE=1 ARCH=$(KERNEL_ARCH_PERF) EXTRA_WARNINGS=-Wno-error
+MAKE_PERF := $(MAKE) prefix=/usr perfexecdir=share/perf_$(VERSION)-core NO_PERL=1 V=2 HAVE_CPLUS_DEMANGLE=1 ARCH=$(KERNEL_ARCH_PERF) EXTRA_WARNINGS=-Wno-error
 
 $(warning $(KERNEL_ARCH_PERF))
 $(warning $(DEB_HOST_ARCH_CPU))
@@ -34,13 +34,17 @@ $(warning $(DEB_HOST_ARCH_CPU))
 all:
 ifdef KERNEL_ARCH_PERF
 	-mkdir out
-	+$(MAKE_PERF) all man VERSION=$(VERSION)
+	# upstream makefile is broken
+	cp -al $(top_srcdir)/tools/perf/Documentation doc
+	+$(MAKE_PERF) -C $(top_srcdir)/tools/perf O=$(CURDIR)/out all VERSION=$(VERSION)
+	+$(MAKE_PERF) -C doc man VERSION=$(VERSION)
 endif
 
 install:
 ifdef KERNEL_ARCH_PERF
-	+$(MAKE_PERF) install install-man VERSION=$(VERSION)
+	+$(MAKE_PERF) -C $(top_srcdir)/tools/perf O=$(CURDIR)/out install VERSION=$(VERSION)
+	+$(MAKE_PERF) -C doc install-man VERSION=$(VERSION)
 endif
 
 clean:
-	rm -rf out
+	rm -rf doc out
