@@ -34,12 +34,12 @@ $(warning $(DEB_HOST_ARCH_CPU))
 all:
 ifdef KERNEL_ARCH_PERF
 	-mkdir out
-	+$(MAKE_PERF)
+	+$(MAKE_PERF) all man VERSION=$(VERSION)
 endif
 
 install:
 ifdef KERNEL_ARCH_PERF
-	+$(MAKE_PERF) install install-man
+	+$(MAKE_PERF) install install-man VERSION=$(VERSION)
 endif
 
 clean:
