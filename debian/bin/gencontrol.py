@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 
-import os, sys
+import os, os.path, subprocess, sys
 sys.path.append("debian/lib/python")
 
 from debian_linux.config import ConfigCoreHierarchy
 from debian_linux.debian import *
 from debian_linux.gencontrol import Gencontrol as Base
-from debian_linux.utils import Templates
+from debian_linux.utils import Templates, read_control
 
 class Gencontrol(Base):
     def __init__(self, config_dirs = ["debian/config"], template_dirs = ["debian/templates"]):
@@ -68,6 +68,33 @@ class Gencontrol(Base):
                      ['source_%s_real' % arch],
                      ["$(MAKE) -f debian/rules.real install-libc-dev_%s %s" %
                       (arch, makeflags)])
+
+        # Add udebs using kernel-wedge
+        installer_dir = 'debian/installer/' + arch
+        if os.path.isdir(installer_dir):
+            kw_env = os.environ.copy()
+            kw_env['KW_CONFIG_DIR'] = installer_dir
+            kw_proc = subprocess.Popen(
+                ['kernel-wedge', 'gen-control',
+                 self.version.linux_upstream + vars['abiname']],
+                stdout=subprocess.PIPE,
+                env=kw_env)
+            udeb_packages = read_control(kw_proc.stdout)
+            kw_proc.wait()
+            if kw_proc.returncode != 0:
+                raise RuntimeError('kernel-wedge exited with code %d' %
+                                   kw_proc.returncode)
+
+            self.merge_packages(packages, udeb_packages, arch)
+
+            # These packages must be built after the per-flavour/
+            # per-featureset packages.
+            makefile.add(
+                'binary-arch_%s' % arch,
+                cmds = ["$(MAKE) -f debian/rules.real install-udeb_%s %s "
+                        "PACKAGE_NAMES='%s'" %
+                        (arch, makeflags,
+                         ' '.join(p['Package'] for p in udeb_packages))])
 
     def do_featureset_setup(self, vars, makeflags, arch, featureset, extra):
         config_base = self.config.merge('base', arch, featureset)
