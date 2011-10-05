@@ -1,7 +1,3 @@
-[bwh: Dropped fixes to arch/arm/plat-mxc/include/mach/iomux-v3.h,
-drivers/pci/dmar.c, drivers/block/floppy.c, kernel/sched.c that were
-also included in 3.0.5.]
-
 Index: linux-2.6/mm/memory.c
 ===================================================================
 --- linux-2.6.orig/mm/memory.c
@@ -969,189 +965,281 @@ Index: linux-2.6/kernel/lockdep.c
  
  	if (!debug_locks)
  		print_irqtrace_events(current);
-Index: linux-2.6/drivers/pci/dmar.c
+Index: linux-2.6/arch/x86/kernel/apic/apic.c
 ===================================================================
---- linux-2.6.orig/drivers/pci/dmar.c
-+++ linux-2.6/drivers/pci/dmar.c
-@@ -800,7 +800,7 @@ int alloc_iommu(struct dmar_drhd_unit *d
- 		(unsigned long long)iommu->cap,
- 		(unsigned long long)iommu->ecap);
+--- linux-2.6.orig/arch/x86/kernel/apic/apic.c
++++ linux-2.6/arch/x86/kernel/apic/apic.c
+@@ -856,8 +856,8 @@ void __irq_entry smp_apic_timer_interrup
+ 	 * Besides, if we don't timer interrupts ignore the global
+ 	 * interrupt lock, which is the WrongThing (tm) to do.
+ 	 */
+-	exit_idle();
+ 	irq_enter();
++	exit_idle();
+ 	local_apic_timer_interrupt();
+ 	irq_exit();
  
--	spin_lock_init(&iommu->register_lock);
-+	raw_spin_lock_init(&iommu->register_lock);
+@@ -1790,8 +1790,8 @@ void smp_spurious_interrupt(struct pt_re
+ {
+ 	u32 v;
  
- 	drhd->iommu = iommu;
- 	return 0;
-@@ -921,11 +921,11 @@ int qi_submit_sync(struct qi_desc *desc,
- restart:
- 	rc = 0;
+-	exit_idle();
+ 	irq_enter();
++	exit_idle();
+ 	/*
+ 	 * Check if this really is a spurious interrupt and ACK it
+ 	 * if it is a vectored one.  Just in case...
+@@ -1827,8 +1827,8 @@ void smp_error_interrupt(struct pt_regs 
+ 		"Illegal register address",	/* APIC Error Bit 7 */
+ 	};
  
--	spin_lock_irqsave(&qi->q_lock, flags);
-+	raw_spin_lock_irqsave(&qi->q_lock, flags);
- 	while (qi->free_cnt < 3) {
--		spin_unlock_irqrestore(&qi->q_lock, flags);
-+		raw_spin_unlock_irqrestore(&qi->q_lock, flags);
- 		cpu_relax();
--		spin_lock_irqsave(&qi->q_lock, flags);
-+		raw_spin_lock_irqsave(&qi->q_lock, flags);
+-	exit_idle();
+ 	irq_enter();
++	exit_idle();
+ 	/* First tickle the hardware, only then report what went on. -- REW */
+ 	v0 = apic_read(APIC_ESR);
+ 	apic_write(APIC_ESR, 0);
+Index: linux-2.6/arch/x86/kernel/apic/io_apic.c
+===================================================================
+--- linux-2.6.orig/arch/x86/kernel/apic/io_apic.c
++++ linux-2.6/arch/x86/kernel/apic/io_apic.c
+@@ -2275,8 +2275,8 @@ asmlinkage void smp_irq_move_cleanup_int
+ 	unsigned vector, me;
+ 
+ 	ack_APIC_irq();
+-	exit_idle();
+ 	irq_enter();
++	exit_idle();
+ 
+ 	me = smp_processor_id();
+ 	for (vector = FIRST_EXTERNAL_VECTOR; vector < NR_VECTORS; vector++) {
+@@ -2417,7 +2417,8 @@ static void ack_apic_level(struct irq_da
+ 	irq_complete_move(cfg);
+ #ifdef CONFIG_GENERIC_PENDING_IRQ
+ 	/* If we are moving the irq we need to mask it */
+-	if (unlikely(irqd_is_setaffinity_pending(data))) {
++	if (unlikely(irqd_is_setaffinity_pending(data) &&
++		     !irqd_irq_inprogress(data))) {
+ 		do_unmask_irq = 1;
+ 		mask_ioapic(cfg);
  	}
+Index: linux-2.6/arch/x86/kernel/cpu/mcheck/mce.c
+===================================================================
+--- linux-2.6.orig/arch/x86/kernel/cpu/mcheck/mce.c
++++ linux-2.6/arch/x86/kernel/cpu/mcheck/mce.c
+@@ -38,6 +38,7 @@
+ #include <linux/mm.h>
+ #include <linux/debugfs.h>
+ #include <linux/edac_mce.h>
++#include <linux/jiffies.h>
  
- 	index = qi->free_head;
-@@ -965,15 +965,15 @@ restart:
- 		if (rc)
- 			break;
+ #include <asm/processor.h>
+ #include <asm/hw_irq.h>
+@@ -470,8 +471,8 @@ static inline void mce_get_rip(struct mc
+ asmlinkage void smp_mce_self_interrupt(struct pt_regs *regs)
+ {
+ 	ack_APIC_irq();
+-	exit_idle();
+ 	irq_enter();
++	exit_idle();
+ 	mce_notify_irq();
+ 	mce_schedule_work();
+ 	irq_exit();
+@@ -1139,17 +1140,14 @@ void mce_log_therm_throt_event(__u64 sta
+  * poller finds an MCE, poll 2x faster.  When the poller finds no more
+  * errors, poll 2x slower (up to check_interval seconds).
+  */
+-static int check_interval = 5 * 60; /* 5 minutes */
++static unsigned long check_interval = 5 * 60; /* 5 minutes */
  
--		spin_unlock(&qi->q_lock);
-+		raw_spin_unlock(&qi->q_lock);
- 		cpu_relax();
--		spin_lock(&qi->q_lock);
-+		raw_spin_lock(&qi->q_lock);
- 	}
+-static DEFINE_PER_CPU(int, mce_next_interval); /* in jiffies */
+-static DEFINE_PER_CPU(struct timer_list, mce_timer);
++static DEFINE_PER_CPU(unsigned long, mce_next_interval); /* in jiffies */
++static DEFINE_PER_CPU(struct hrtimer, mce_timer);
  
- 	qi->desc_status[index] = QI_DONE;
+-static void mce_start_timer(unsigned long data)
++static enum hrtimer_restart mce_start_timer(struct hrtimer *timer)
+ {
+-	struct timer_list *t = &per_cpu(mce_timer, data);
+-	int *n;
+-
+-	WARN_ON(smp_processor_id() != data);
++	unsigned long *n;
  
- 	reclaim_free_desc(qi);
--	spin_unlock_irqrestore(&qi->q_lock, flags);
-+	raw_spin_unlock_irqrestore(&qi->q_lock, flags);
+ 	if (mce_available(__this_cpu_ptr(&cpu_info))) {
+ 		machine_check_poll(MCP_TIMESTAMP,
+@@ -1162,12 +1160,13 @@ static void mce_start_timer(unsigned lon
+ 	 */
+ 	n = &__get_cpu_var(mce_next_interval);
+ 	if (mce_notify_irq())
+-		*n = max(*n/2, HZ/100);
++		*n = max(*n/2, HZ/100UL);
+ 	else
+-		*n = min(*n*2, (int)round_jiffies_relative(check_interval*HZ));
++		*n = min(*n*2, round_jiffies_relative(check_interval*HZ));
  
- 	if (rc == -EAGAIN)
- 		goto restart;
-@@ -1062,7 +1062,7 @@ void dmar_disable_qi(struct intel_iommu 
- 	if (!ecap_qis(iommu->ecap))
+-	t->expires = jiffies + *n;
+-	add_timer_on(t, smp_processor_id());
++	hrtimer_forward(timer, timer->base->get_time(),
++			ns_to_ktime(jiffies_to_usecs(*n) * 1000));
++	return HRTIMER_RESTART;
+ }
+ 
+ static void mce_do_trigger(struct work_struct *work)
+@@ -1393,10 +1392,11 @@ static void __mcheck_cpu_init_vendor(str
+ 
+ static void __mcheck_cpu_init_timer(void)
+ {
+-	struct timer_list *t = &__get_cpu_var(mce_timer);
+-	int *n = &__get_cpu_var(mce_next_interval);
++	struct hrtimer *t = &__get_cpu_var(mce_timer);
++	unsigned long *n = &__get_cpu_var(mce_next_interval);
+ 
+-	setup_timer(t, mce_start_timer, smp_processor_id());
++	hrtimer_init(t, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
++	t->function = mce_start_timer;
+ 
+ 	if (mce_ignore_ce)
+ 		return;
+@@ -1404,8 +1404,9 @@ static void __mcheck_cpu_init_timer(void
+ 	*n = check_interval * HZ;
+ 	if (!*n)
+ 		return;
+-	t->expires = round_jiffies(jiffies + *n);
+-	add_timer_on(t, smp_processor_id());
++
++	hrtimer_start_range_ns(t, ns_to_ktime(jiffies_to_usecs(*n) * 1000),
++			       0 , HRTIMER_MODE_REL_PINNED);
+ }
+ 
+ /* Handle unconfigured int18 (should never happen) */
+@@ -1768,7 +1769,7 @@ static struct syscore_ops mce_syscore_op
+ 
+ static void mce_cpu_restart(void *data)
+ {
+-	del_timer_sync(&__get_cpu_var(mce_timer));
++	hrtimer_cancel(&__get_cpu_var(mce_timer));
+ 	if (!mce_available(__this_cpu_ptr(&cpu_info)))
+ 		return;
+ 	__mcheck_cpu_init_generic();
+@@ -1787,7 +1788,7 @@ static void mce_disable_ce(void *all)
+ 	if (!mce_available(__this_cpu_ptr(&cpu_info)))
+ 		return;
+ 	if (all)
+-		del_timer_sync(&__get_cpu_var(mce_timer));
++		hrtimer_cancel(&__get_cpu_var(mce_timer));
+ 	cmci_clear();
+ }
+ 
+@@ -2016,6 +2017,8 @@ static void __cpuinit mce_disable_cpu(vo
+ 	if (!mce_available(__this_cpu_ptr(&cpu_info)))
  		return;
  
--	spin_lock_irqsave(&iommu->register_lock, flags);
-+	raw_spin_lock_irqsave(&iommu->register_lock, flags);
- 
- 	sts =  dmar_readq(iommu->reg + DMAR_GSTS_REG);
- 	if (!(sts & DMA_GSTS_QIES))
-@@ -1082,7 +1082,7 @@ void dmar_disable_qi(struct intel_iommu 
- 	IOMMU_WAIT_OP(iommu, DMAR_GSTS_REG, readl,
- 		      !(sts & DMA_GSTS_QIES), sts);
- end:
--	spin_unlock_irqrestore(&iommu->register_lock, flags);
-+	raw_spin_unlock_irqrestore(&iommu->register_lock, flags);
- }
- 
- /*
-@@ -1097,7 +1097,7 @@ static void __dmar_enable_qi(struct inte
- 	qi->free_head = qi->free_tail = 0;
- 	qi->free_cnt = QI_LENGTH;
- 
--	spin_lock_irqsave(&iommu->register_lock, flags);
-+	raw_spin_lock_irqsave(&iommu->register_lock, flags);
- 
- 	/* write zero to the tail reg */
- 	writel(0, iommu->reg + DMAR_IQT_REG);
-@@ -1110,7 +1110,7 @@ static void __dmar_enable_qi(struct inte
- 	/* Make sure hardware complete it */
- 	IOMMU_WAIT_OP(iommu, DMAR_GSTS_REG, readl, (sts & DMA_GSTS_QIES), sts);
- 
--	spin_unlock_irqrestore(&iommu->register_lock, flags);
-+	raw_spin_unlock_irqrestore(&iommu->register_lock, flags);
- }
- 
- /*
-@@ -1159,7 +1159,7 @@ int dmar_enable_qi(struct intel_iommu *i
- 	qi->free_head = qi->free_tail = 0;
- 	qi->free_cnt = QI_LENGTH;
- 
--	spin_lock_init(&qi->q_lock);
-+	raw_spin_lock_init(&qi->q_lock);
- 
- 	__dmar_enable_qi(iommu);
- 
-@@ -1225,11 +1225,11 @@ void dmar_msi_unmask(struct irq_data *da
- 	unsigned long flag;
- 
- 	/* unmask it */
--	spin_lock_irqsave(&iommu->register_lock, flag);
-+	raw_spin_lock_irqsave(&iommu->register_lock, flag);
- 	writel(0, iommu->reg + DMAR_FECTL_REG);
- 	/* Read a reg to force flush the post write */
- 	readl(iommu->reg + DMAR_FECTL_REG);
--	spin_unlock_irqrestore(&iommu->register_lock, flag);
-+	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
- }
- 
- void dmar_msi_mask(struct irq_data *data)
-@@ -1238,11 +1238,11 @@ void dmar_msi_mask(struct irq_data *data
- 	struct intel_iommu *iommu = irq_data_get_irq_handler_data(data);
- 
- 	/* mask it */
--	spin_lock_irqsave(&iommu->register_lock, flag);
-+	raw_spin_lock_irqsave(&iommu->register_lock, flag);
- 	writel(DMA_FECTL_IM, iommu->reg + DMAR_FECTL_REG);
- 	/* Read a reg to force flush the post write */
- 	readl(iommu->reg + DMAR_FECTL_REG);
--	spin_unlock_irqrestore(&iommu->register_lock, flag);
-+	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
- }
- 
- void dmar_msi_write(int irq, struct msi_msg *msg)
-@@ -1250,11 +1250,11 @@ void dmar_msi_write(int irq, struct msi_
- 	struct intel_iommu *iommu = irq_get_handler_data(irq);
- 	unsigned long flag;
- 
--	spin_lock_irqsave(&iommu->register_lock, flag);
-+	raw_spin_lock_irqsave(&iommu->register_lock, flag);
- 	writel(msg->data, iommu->reg + DMAR_FEDATA_REG);
- 	writel(msg->address_lo, iommu->reg + DMAR_FEADDR_REG);
- 	writel(msg->address_hi, iommu->reg + DMAR_FEUADDR_REG);
--	spin_unlock_irqrestore(&iommu->register_lock, flag);
-+	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
- }
- 
- void dmar_msi_read(int irq, struct msi_msg *msg)
-@@ -1262,11 +1262,11 @@ void dmar_msi_read(int irq, struct msi_m
- 	struct intel_iommu *iommu = irq_get_handler_data(irq);
- 	unsigned long flag;
- 
--	spin_lock_irqsave(&iommu->register_lock, flag);
-+	raw_spin_lock_irqsave(&iommu->register_lock, flag);
- 	msg->data = readl(iommu->reg + DMAR_FEDATA_REG);
- 	msg->address_lo = readl(iommu->reg + DMAR_FEADDR_REG);
- 	msg->address_hi = readl(iommu->reg + DMAR_FEUADDR_REG);
--	spin_unlock_irqrestore(&iommu->register_lock, flag);
-+	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
- }
- 
- static int dmar_fault_do_one(struct intel_iommu *iommu, int type,
-@@ -1303,7 +1303,7 @@ irqreturn_t dmar_fault(int irq, void *de
- 	u32 fault_status;
- 	unsigned long flag;
- 
--	spin_lock_irqsave(&iommu->register_lock, flag);
-+	raw_spin_lock_irqsave(&iommu->register_lock, flag);
- 	fault_status = readl(iommu->reg + DMAR_FSTS_REG);
- 	if (fault_status)
- 		printk(KERN_ERR "DRHD: handling fault status reg %x\n",
-@@ -1342,7 +1342,7 @@ irqreturn_t dmar_fault(int irq, void *de
- 		writel(DMA_FRCD_F, iommu->reg + reg +
- 			fault_index * PRIMARY_FAULT_REG_LEN + 12);
- 
--		spin_unlock_irqrestore(&iommu->register_lock, flag);
-+		raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
- 
- 		dmar_fault_do_one(iommu, type, fault_reason,
- 				source_id, guest_addr);
-@@ -1350,14 +1350,14 @@ irqreturn_t dmar_fault(int irq, void *de
- 		fault_index++;
- 		if (fault_index >= cap_num_fault_regs(iommu->cap))
- 			fault_index = 0;
--		spin_lock_irqsave(&iommu->register_lock, flag);
-+		raw_spin_lock_irqsave(&iommu->register_lock, flag);
++	hrtimer_cancel(&__get_cpu_var(mce_timer));
++
+ 	if (!(action & CPU_TASKS_FROZEN))
+ 		cmci_clear();
+ 	for (i = 0; i < banks; i++) {
+@@ -2042,6 +2045,7 @@ static void __cpuinit mce_reenable_cpu(v
+ 		if (b->init)
+ 			wrmsrl(MSR_IA32_MCx_CTL(i), b->ctl);
  	}
- clear_rest:
- 	/* clear all the other faults */
- 	fault_status = readl(iommu->reg + DMAR_FSTS_REG);
- 	writel(fault_status, iommu->reg + DMAR_FSTS_REG);
- 
--	spin_unlock_irqrestore(&iommu->register_lock, flag);
-+	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
- 	return IRQ_HANDLED;
++	__mcheck_cpu_init_timer();
  }
  
+ /* Get notified when a cpu comes on/off. Be hotplug friendly. */
+@@ -2049,7 +2053,6 @@ static int __cpuinit
+ mce_cpu_callback(struct notifier_block *nfb, unsigned long action, void *hcpu)
+ {
+ 	unsigned int cpu = (unsigned long)hcpu;
+-	struct timer_list *t = &per_cpu(mce_timer, cpu);
+ 
+ 	switch (action) {
+ 	case CPU_ONLINE:
+@@ -2066,16 +2069,10 @@ mce_cpu_callback(struct notifier_block *
+ 		break;
+ 	case CPU_DOWN_PREPARE:
+ 	case CPU_DOWN_PREPARE_FROZEN:
+-		del_timer_sync(t);
+ 		smp_call_function_single(cpu, mce_disable_cpu, &action, 1);
+ 		break;
+ 	case CPU_DOWN_FAILED:
+ 	case CPU_DOWN_FAILED_FROZEN:
+-		if (!mce_ignore_ce && check_interval) {
+-			t->expires = round_jiffies(jiffies +
+-					   __get_cpu_var(mce_next_interval));
+-			add_timer_on(t, cpu);
+-		}
+ 		smp_call_function_single(cpu, mce_reenable_cpu, &action, 1);
+ 		break;
+ 	case CPU_POST_DEAD:
+Index: linux-2.6/arch/x86/kernel/cpu/mcheck/therm_throt.c
+===================================================================
+--- linux-2.6.orig/arch/x86/kernel/cpu/mcheck/therm_throt.c
++++ linux-2.6/arch/x86/kernel/cpu/mcheck/therm_throt.c
+@@ -396,8 +396,8 @@ static void (*smp_thermal_vector)(void) 
+ 
+ asmlinkage void smp_thermal_interrupt(struct pt_regs *regs)
+ {
+-	exit_idle();
+ 	irq_enter();
++	exit_idle();
+ 	inc_irq_stat(irq_thermal_count);
+ 	smp_thermal_vector();
+ 	irq_exit();
+Index: linux-2.6/arch/x86/kernel/cpu/mcheck/threshold.c
+===================================================================
+--- linux-2.6.orig/arch/x86/kernel/cpu/mcheck/threshold.c
++++ linux-2.6/arch/x86/kernel/cpu/mcheck/threshold.c
+@@ -19,8 +19,8 @@ void (*mce_threshold_vector)(void) = def
+ 
+ asmlinkage void smp_threshold_interrupt(void)
+ {
+-	exit_idle();
+ 	irq_enter();
++	exit_idle();
+ 	inc_irq_stat(irq_threshold_count);
+ 	mce_threshold_vector();
+ 	irq_exit();
+Index: linux-2.6/arch/x86/kernel/irq.c
+===================================================================
+--- linux-2.6.orig/arch/x86/kernel/irq.c
++++ linux-2.6/arch/x86/kernel/irq.c
+@@ -180,8 +180,8 @@ unsigned int __irq_entry do_IRQ(struct p
+ 	unsigned vector = ~regs->orig_ax;
+ 	unsigned irq;
+ 
+-	exit_idle();
+ 	irq_enter();
++	exit_idle();
+ 
+ 	irq = __this_cpu_read(vector_irq[vector]);
+ 
+@@ -208,10 +208,10 @@ void smp_x86_platform_ipi(struct pt_regs
+ 
+ 	ack_APIC_irq();
+ 
+-	exit_idle();
+-
+ 	irq_enter();
+ 
++	exit_idle();
++
+ 	inc_irq_stat(x86_platform_ipis);
+ 
+ 	if (x86_platform_ipi_callback)
+Index: linux-2.6/kernel/taskstats.c
+===================================================================
+--- linux-2.6.orig/kernel/taskstats.c
++++ linux-2.6/kernel/taskstats.c
+@@ -657,6 +657,7 @@ static struct genl_ops taskstats_ops = {
+ 	.cmd		= TASKSTATS_CMD_GET,
+ 	.doit		= taskstats_user_cmd,
+ 	.policy		= taskstats_cmd_get_policy,
++	.flags		= GENL_ADMIN_PERM,
+ };
+ 
+ static struct genl_ops cgroupstats_ops = {
 Index: linux-2.6/kernel/trace/ftrace.c
 ===================================================================
 --- linux-2.6.orig/kernel/trace/ftrace.c
@@ -1320,6 +1408,135 @@ Index: linux-2.6/drivers/ide/ide_platform.c
  	if (mmio)
  		d.host_flags |= IDE_HFLAG_MMIO;
  
+Index: linux-2.6/arch/x86/kernel/hpet.c
+===================================================================
+--- linux-2.6.orig/arch/x86/kernel/hpet.c
++++ linux-2.6/arch/x86/kernel/hpet.c
+@@ -7,6 +7,7 @@
+ #include <linux/slab.h>
+ #include <linux/hpet.h>
+ #include <linux/init.h>
++#include <linux/dmi.h>
+ #include <linux/cpu.h>
+ #include <linux/pm.h>
+ #include <linux/io.h>
+@@ -566,6 +567,29 @@ static void init_one_hpet_msi_clockevent
+ #define RESERVE_TIMERS 0
+ #endif
+ 
++static int __init dmi_disable_hpet_msi(const struct dmi_system_id *d)
++{
++	hpet_msi_disable = 1;
++}
++
++static struct dmi_system_id __initdata dmi_hpet_table[] = {
++	/*
++	 * MSI based per cpu timers lose interrupts when intel_idle()
++	 * is enabled - independent of the c-state. With idle=poll the
++	 * problem cannot be observed. We have no idea yet, whether
++	 * this is a W510 specific issue or a general chipset oddity.
++	 */
++	{
++	 .callback = dmi_disable_hpet_msi,
++	 .ident = "Lenovo W510",
++	 .matches = {
++		     DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
++		     DMI_MATCH(DMI_PRODUCT_VERSION, "ThinkPad W510"),
++		     },
++	 },
++	{}
++};
++
+ static void hpet_msi_capability_lookup(unsigned int start_timer)
+ {
+ 	unsigned int id;
+@@ -573,6 +597,8 @@ static void hpet_msi_capability_lookup(u
+ 	unsigned int num_timers_used = 0;
+ 	int i;
+ 
++	dmi_check_system(dmi_hpet_table);
++
+ 	if (hpet_msi_disable)
+ 		return;
+ 
+Index: linux-2.6/block/blk-core.c
+===================================================================
+--- linux-2.6.orig/block/blk-core.c
++++ linux-2.6/block/blk-core.c
+@@ -236,7 +236,7 @@ EXPORT_SYMBOL(blk_delay_queue);
+  **/
+ void blk_start_queue(struct request_queue *q)
+ {
+-	WARN_ON(!irqs_disabled());
++	WARN_ON_NONRT(!irqs_disabled());
+ 
+ 	queue_flag_clear(QUEUE_FLAG_STOPPED, q);
+ 	__blk_run_queue(q);
+@@ -301,7 +301,11 @@ void __blk_run_queue(struct request_queu
+ {
+ 	if (unlikely(blk_queue_stopped(q)))
+ 		return;
+-
++	/*
++	 * q->request_fn() can drop q->queue_lock and reenable
++	 * interrupts, but must return with q->queue_lock held and
++	 * interrupts disabled.
++	 */
+ 	q->request_fn(q);
+ }
+ EXPORT_SYMBOL(__blk_run_queue);
+@@ -2669,11 +2673,11 @@ static void queue_unplugged(struct reque
+ 	 * this lock).
+ 	 */
+ 	if (from_schedule) {
+-		spin_unlock(q->queue_lock);
++		spin_unlock_irq(q->queue_lock);
+ 		blk_run_queue_async(q);
+ 	} else {
+ 		__blk_run_queue(q);
+-		spin_unlock(q->queue_lock);
++		spin_unlock_irq(q->queue_lock);
+ 	}
+ 
+ }
+@@ -2699,7 +2703,6 @@ static void flush_plug_callbacks(struct 
+ void blk_flush_plug_list(struct blk_plug *plug, bool from_schedule)
+ {
+ 	struct request_queue *q;
+-	unsigned long flags;
+ 	struct request *rq;
+ 	LIST_HEAD(list);
+ 	unsigned int depth;
+@@ -2720,11 +2723,6 @@ void blk_flush_plug_list(struct blk_plug
+ 	q = NULL;
+ 	depth = 0;
+ 
+-	/*
+-	 * Save and disable interrupts here, to avoid doing it for every
+-	 * queue lock we have to take.
+-	 */
+-	local_irq_save(flags);
+ 	while (!list_empty(&list)) {
+ 		rq = list_entry_rq(list.next);
+ 		list_del_init(&rq->queuelist);
+@@ -2737,7 +2735,7 @@ void blk_flush_plug_list(struct blk_plug
+ 				queue_unplugged(q, depth, from_schedule);
+ 			q = rq->q;
+ 			depth = 0;
+-			spin_lock(q->queue_lock);
++			spin_lock_irq(q->queue_lock);
+ 		}
+ 		/*
+ 		 * rq is already accounted, so use raw insert
+@@ -2755,8 +2753,6 @@ void blk_flush_plug_list(struct blk_plug
+ 	 */
+ 	if (q)
+ 		queue_unplugged(q, depth, from_schedule);
+-
+-	local_irq_restore(flags);
+ }
+ 
+ void blk_finish_plug(struct blk_plug *plug)
 Index: linux-2.6/kernel/sched.c
 ===================================================================
 --- linux-2.6.orig/kernel/sched.c
@@ -1524,7 +1741,143 @@ Index: linux-2.6/kernel/sched.c
  	if (unlikely(prev_state == TASK_DEAD)) {
  		/*
  		 * Remove function-return probe instances associated with this
-@@ -4272,19 +4273,6 @@ need_resched:
+@@ -4206,6 +4207,126 @@ static inline void schedule_debug(struct
+ 	schedstat_inc(this_rq(), sched_count);
+ }
+ 
++#ifdef CONFIG_PREEMPT_RT_FULL
++#define MIGRATE_DISABLE_SET_AFFIN	(1<<30) /* Can't make a negative */
++#define migrate_disabled_updated(p)	((p)->migrate_disable & MIGRATE_DISABLE_SET_AFFIN)
++#define migrate_disable_count(p)	((p)->migrate_disable & ~MIGRATE_DISABLE_SET_AFFIN)
++
++static inline void update_migrate_disable(struct task_struct *p)
++{
++	const struct cpumask *mask;
++
++	if (likely(!p->migrate_disable))
++		return;
++
++	/* Did we already update affinity? */
++	if (unlikely(migrate_disabled_updated(p)))
++		return;
++
++	/*
++	 * Since this is always current we can get away with only locking
++	 * rq->lock, the ->cpus_allowed value can normally only be changed
++	 * while holding both p->pi_lock and rq->lock, but seeing that this
++	 * is current, we cannot actually be waking up, so all code that
++	 * relies on serialization against p->pi_lock is out of scope.
++	 *
++	 * Having rq->lock serializes us against things like
++	 * set_cpus_allowed_ptr() that can still happen concurrently.
++	 */
++	mask = tsk_cpus_allowed(p);
++
++	if (p->sched_class->set_cpus_allowed)
++		p->sched_class->set_cpus_allowed(p, mask);
++	p->rt.nr_cpus_allowed = cpumask_weight(mask);
++
++	/* Let migrate_enable know to fix things back up */
++	p->migrate_disable |= MIGRATE_DISABLE_SET_AFFIN;
++}
++
++void migrate_disable(void)
++{
++	struct task_struct *p = current;
++
++	if (in_atomic() || p->flags & PF_THREAD_BOUND) {
++#ifdef CONFIG_SCHED_DEBUG
++		p->migrate_disable_atomic++;
++#endif
++		return;
++	}
++
++#ifdef CONFIG_SCHED_DEBUG
++	WARN_ON_ONCE(p->migrate_disable_atomic);
++#endif
++
++	preempt_disable();
++	if (p->migrate_disable) {
++		p->migrate_disable++;
++		preempt_enable();
++		return;
++	}
++
++	pin_current_cpu();
++	p->migrate_disable = 1;
++	preempt_enable();
++}
++EXPORT_SYMBOL_GPL(migrate_disable);
++
++void migrate_enable(void)
++{
++	struct task_struct *p = current;
++	const struct cpumask *mask;
++	unsigned long flags;
++	struct rq *rq;
++
++	if (in_atomic() || p->flags & PF_THREAD_BOUND) {
++#ifdef CONFIG_SCHED_DEBUG
++		p->migrate_disable_atomic--;
++#endif
++		return;
++	}
++
++#ifdef CONFIG_SCHED_DEBUG
++	WARN_ON_ONCE(p->migrate_disable_atomic);
++#endif
++	WARN_ON_ONCE(p->migrate_disable <= 0);
++
++	preempt_disable();
++	if (migrate_disable_count(p) > 1) {
++		p->migrate_disable--;
++		preempt_enable();
++		return;
++	}
++
++	if (unlikely(migrate_disabled_updated(p))) {
++		/*
++		 * Undo whatever update_migrate_disable() did, also see there
++		 * about locking.
++		 */
++		rq = this_rq();
++		raw_spin_lock_irqsave(&rq->lock, flags);
++
++		/*
++		 * Clearing migrate_disable causes tsk_cpus_allowed to
++		 * show the tasks original cpu affinity.
++		 */
++		p->migrate_disable = 0;
++		mask = tsk_cpus_allowed(p);
++		if (p->sched_class->set_cpus_allowed)
++			p->sched_class->set_cpus_allowed(p, mask);
++		p->rt.nr_cpus_allowed = cpumask_weight(mask);
++		raw_spin_unlock_irqrestore(&rq->lock, flags);
++	} else
++		p->migrate_disable = 0;
++
++	unpin_current_cpu();
++	preempt_enable();
++}
++EXPORT_SYMBOL_GPL(migrate_enable);
++#else
++static inline void update_migrate_disable(struct task_struct *p) { }
++#define migrate_disabled_updated(p)		0
++#endif
++
+ static void put_prev_task(struct rq *rq, struct task_struct *prev)
+ {
+ 	if (prev->on_rq || rq->skip_clock_update < 0)
+@@ -4265,6 +4386,8 @@ need_resched:
+ 
+ 	raw_spin_lock_irq(&rq->lock);
+ 
++	update_migrate_disable(prev);
++
+ 	switch_count = &prev->nivcsw;
+ 	if (prev->state && !(preempt_count() & PREEMPT_ACTIVE)) {
+ 		if (unlikely(signal_pending_state(prev->state, prev))) {
+@@ -4272,19 +4395,6 @@ need_resched:
  		} else {
  			deactivate_task(rq, prev, DEQUEUE_SLEEP);
  			prev->on_rq = 0;
@@ -1544,7 +1897,7 @@ Index: linux-2.6/kernel/sched.c
  		}
  		switch_count = &prev->nvcsw;
  	}
-@@ -4328,32 +4306,62 @@ need_resched:
+@@ -4318,15 +4428,23 @@ need_resched:
  
  	post_schedule(rq);
  
@@ -1570,8 +1923,7 @@ Index: linux-2.6/kernel/sched.c
  	/*
  	 * If we are going to sleep and we have plugged IO queued,
  	 * make sure to submit it to avoid deadlocks.
- 	 */
- 	if (blk_needs_flush_plug(tsk))
+@@ -4335,15 +4453,37 @@ static inline void sched_submit_work(str
  		blk_schedule_flush_plug(tsk);
  }
  
@@ -1609,7 +1961,24 @@ Index: linux-2.6/kernel/sched.c
  #ifdef CONFIG_MUTEX_SPIN_ON_OWNER
  
  static inline bool owner_running(struct mutex *lock, struct task_struct *owner)
-@@ -4828,9 +4856,8 @@ long __sched sleep_on_timeout(wait_queue
+@@ -4415,7 +4555,16 @@ asmlinkage void __sched notrace preempt_
+ 
+ 	do {
+ 		add_preempt_count_notrace(PREEMPT_ACTIVE);
++		/*
++		 * The add/subtract must not be traced by the function
++		 * tracer. But we still want to account for the
++		 * preempt off latency tracer. Since the _notrace versions
++		 * of add/subtract skip the accounting for latency tracer
++		 * we must force it manually.
++		 */
++		start_critical_timings();
+ 		__schedule();
++		stop_critical_timings();
+ 		sub_preempt_count_notrace(PREEMPT_ACTIVE);
+ 
+ 		/*
+@@ -4838,9 +4987,8 @@ long __sched sleep_on_timeout(wait_queue
  EXPORT_SYMBOL(sleep_on_timeout);
  
  #ifdef CONFIG_RT_MUTEXES
@@ -1620,7 +1989,7 @@ Index: linux-2.6/kernel/sched.c
   * @p: task
   * @prio: prio value (kernel-internal form)
   *
-@@ -4839,7 +4866,7 @@ EXPORT_SYMBOL(sleep_on_timeout);
+@@ -4849,7 +4997,7 @@ EXPORT_SYMBOL(sleep_on_timeout);
   *
   * Used by the rt_mutex code to implement priority inheritance logic.
   */
@@ -1629,7 +1998,7 @@ Index: linux-2.6/kernel/sched.c
  {
  	int oldprio, on_rq, running;
  	struct rq *rq;
-@@ -4849,6 +4876,24 @@ void rt_mutex_setprio(struct task_struct
+@@ -4859,6 +5007,24 @@ void rt_mutex_setprio(struct task_struct
  
  	rq = __task_rq_lock(p);
  
@@ -1654,7 +2023,7 @@ Index: linux-2.6/kernel/sched.c
  	trace_sched_pi_setprio(p, prio);
  	oldprio = p->prio;
  	prev_class = p->sched_class;
-@@ -4872,9 +4917,9 @@ void rt_mutex_setprio(struct task_struct
+@@ -4882,9 +5048,9 @@ void rt_mutex_setprio(struct task_struct
  		enqueue_task(rq, p, oldprio < prio ? ENQUEUE_HEAD : 0);
  
  	check_class_changed(rq, p, prev_class, oldprio);
@@ -1665,7 +2034,7 @@ Index: linux-2.6/kernel/sched.c
  #endif
  
  void set_user_nice(struct task_struct *p, long nice)
-@@ -5009,7 +5054,13 @@ EXPORT_SYMBOL(task_nice);
+@@ -5019,7 +5185,13 @@ EXPORT_SYMBOL(task_nice);
   */
  int idle_cpu(int cpu)
  {
@@ -1680,7 +2049,7 @@ Index: linux-2.6/kernel/sched.c
  }
  
  /**
-@@ -5543,7 +5594,7 @@ SYSCALL_DEFINE0(sched_yield)
+@@ -5553,7 +5725,7 @@ SYSCALL_DEFINE0(sched_yield)
  	__release(rq->lock);
  	spin_release(&rq->lock.dep_map, 1, _THIS_IP_);
  	do_raw_spin_unlock(&rq->lock);
@@ -1689,7 +2058,7 @@ Index: linux-2.6/kernel/sched.c
  
  	schedule();
  
-@@ -5557,9 +5608,17 @@ static inline int should_resched(void)
+@@ -5567,9 +5739,17 @@ static inline int should_resched(void)
  
  static void __cond_resched(void)
  {
@@ -1710,7 +2079,7 @@ Index: linux-2.6/kernel/sched.c
  }
  
  int __sched _cond_resched(void)
-@@ -5600,6 +5659,7 @@ int __cond_resched_lock(spinlock_t *lock
+@@ -5610,6 +5790,7 @@ int __cond_resched_lock(spinlock_t *lock
  }
  EXPORT_SYMBOL(__cond_resched_lock);
  
@@ -1718,7 +2087,7 @@ Index: linux-2.6/kernel/sched.c
  int __sched __cond_resched_softirq(void)
  {
  	BUG_ON(!in_softirq());
-@@ -5613,6 +5673,7 @@ int __sched __cond_resched_softirq(void)
+@@ -5623,6 +5804,7 @@ int __sched __cond_resched_softirq(void)
  	return 0;
  }
  EXPORT_SYMBOL(__cond_resched_softirq);
@@ -1726,7 +2095,7 @@ Index: linux-2.6/kernel/sched.c
  
  /**
   * yield - yield the current processor to other threads.
-@@ -5859,7 +5920,7 @@ void show_state_filter(unsigned long sta
+@@ -5869,7 +6051,7 @@ void show_state_filter(unsigned long sta
  	printk(KERN_INFO
  		"  task                        PC stack   pid father\n");
  #endif
@@ -1735,7 +2104,7 @@ Index: linux-2.6/kernel/sched.c
  	do_each_thread(g, p) {
  		/*
  		 * reset the NMI-timeout, listing all files on a slow
-@@ -5875,7 +5936,7 @@ void show_state_filter(unsigned long sta
+@@ -5885,7 +6067,7 @@ void show_state_filter(unsigned long sta
  #ifdef CONFIG_SCHED_DEBUG
  	sysrq_sched_debug_show();
  #endif
@@ -1744,7 +2113,7 @@ Index: linux-2.6/kernel/sched.c
  	/*
  	 * Only show locks if all tasks are dumped:
  	 */
-@@ -5997,12 +6058,12 @@ static inline void sched_init_granularit
+@@ -6007,12 +6189,12 @@ static inline void sched_init_granularit
  #ifdef CONFIG_SMP
  void do_set_cpus_allowed(struct task_struct *p, const struct cpumask *new_mask)
  {
@@ -1752,7 +2121,7 @@ Index: linux-2.6/kernel/sched.c
 -		p->sched_class->set_cpus_allowed(p, new_mask);
 -	else {
 -		cpumask_copy(&p->cpus_allowed, new_mask);
-+	if (!__migrate_disabled(p)) {
++	if (!migrate_disabled_updated(p)) {
 +		if (p->sched_class && p->sched_class->set_cpus_allowed)
 +			p->sched_class->set_cpus_allowed(p, new_mask);
  		p->rt.nr_cpus_allowed = cpumask_weight(new_mask);
@@ -1761,7 +2130,7 @@ Index: linux-2.6/kernel/sched.c
  }
  
  /*
-@@ -6053,7 +6114,7 @@ int set_cpus_allowed_ptr(struct task_str
+@@ -6063,7 +6245,7 @@ int set_cpus_allowed_ptr(struct task_str
  	do_set_cpus_allowed(p, new_mask);
  
  	/* Can the task run on the task's current CPU? If so, we're done */
@@ -1770,132 +2139,7 @@ Index: linux-2.6/kernel/sched.c
  		goto out;
  
  	dest_cpu = cpumask_any_and(cpu_active_mask, new_mask);
-@@ -6072,6 +6133,124 @@ out:
- }
- EXPORT_SYMBOL_GPL(set_cpus_allowed_ptr);
- 
-+#ifdef CONFIG_PREEMPT_RT_FULL
-+void migrate_disable(void)
-+{
-+	struct task_struct *p = current;
-+	const struct cpumask *mask;
-+	unsigned long flags;
-+	struct rq *rq;
-+
-+	if (in_atomic()) {
-+#ifdef CONFIG_SCHED_DEBUG
-+		p->migrate_disable_atomic++;
-+#endif
-+		return;
-+	}
-+
-+#ifdef CONFIG_SCHED_DEBUG
-+	WARN_ON_ONCE(p->migrate_disable_atomic);
-+#endif
-+
-+	preempt_disable();
-+	if (p->migrate_disable) {
-+		p->migrate_disable++;
-+		preempt_enable();
-+		return;
-+	}
-+
-+	pin_current_cpu();
-+	if (unlikely(!scheduler_running)) {
-+		p->migrate_disable = 1;
-+		preempt_enable();
-+		return;
-+	}
-+
-+	/*
-+	 * Since this is always current we can get away with only locking
-+	 * rq->lock, the ->cpus_allowed value can normally only be changed
-+	 * while holding both p->pi_lock and rq->lock, but seeing that this
-+	 * it current, we cannot actually be waking up, so all code that
-+	 * relies on serialization against p->pi_lock is out of scope.
-+	 *
-+	 * Taking rq->lock serializes us against things like
-+	 * set_cpus_allowed_ptr() that can still happen concurrently.
-+	 */
-+	rq = this_rq();
-+	raw_spin_lock_irqsave(&rq->lock, flags);
-+	p->migrate_disable = 1;
-+	mask = tsk_cpus_allowed(p);
-+
-+	WARN_ON(!cpumask_test_cpu(smp_processor_id(), mask));
-+
-+	if (!cpumask_equal(&p->cpus_allowed, mask)) {
-+		if (p->sched_class->set_cpus_allowed)
-+			p->sched_class->set_cpus_allowed(p, mask);
-+		p->rt.nr_cpus_allowed = cpumask_weight(mask);
-+	}
-+	raw_spin_unlock_irqrestore(&rq->lock, flags);
-+	preempt_enable();
-+}
-+EXPORT_SYMBOL_GPL(migrate_disable);
-+
-+void migrate_enable(void)
-+{
-+	struct task_struct *p = current;
-+	const struct cpumask *mask;
-+	unsigned long flags;
-+	struct rq *rq;
-+
-+	if (in_atomic()) {
-+#ifdef CONFIG_SCHED_DEBUG
-+		p->migrate_disable_atomic--;
-+#endif
-+		return;
-+	}
-+
-+#ifdef CONFIG_SCHED_DEBUG
-+	WARN_ON_ONCE(p->migrate_disable_atomic);
-+#endif
-+	WARN_ON_ONCE(p->migrate_disable <= 0);
-+
-+	preempt_disable();
-+	if (p->migrate_disable > 1) {
-+		p->migrate_disable--;
-+		preempt_enable();
-+		return;
-+	}
-+
-+	if (unlikely(!scheduler_running)) {
-+		p->migrate_disable = 0;
-+		unpin_current_cpu();
-+		preempt_enable();
-+		return;
-+	}
-+
-+	/*
-+	 * See comment in migrate_disable().
-+	 */
-+	rq = this_rq();
-+	raw_spin_lock_irqsave(&rq->lock, flags);
-+	mask = tsk_cpus_allowed(p);
-+	p->migrate_disable = 0;
-+
-+	WARN_ON(!cpumask_test_cpu(smp_processor_id(), mask));
-+
-+	if (!cpumask_equal(&p->cpus_allowed, mask)) {
-+		/* Get the mask now that migration is enabled */
-+		mask = tsk_cpus_allowed(p);
-+		if (p->sched_class->set_cpus_allowed)
-+			p->sched_class->set_cpus_allowed(p, mask);
-+		p->rt.nr_cpus_allowed = cpumask_weight(mask);
-+	}
-+
-+	raw_spin_unlock_irqrestore(&rq->lock, flags);
-+	unpin_current_cpu();
-+	preempt_enable();
-+}
-+EXPORT_SYMBOL_GPL(migrate_enable);
-+#endif /* CONFIG_PREEMPT_RT_FULL */
-+
- /*
-  * Move (not current) task off this cpu, onto dest cpu. We're doing
-  * this because either it can't run here any more (set_cpus_allowed()
-@@ -6100,7 +6279,7 @@ static int __migrate_task(struct task_st
+@@ -6110,7 +6292,7 @@ static int __migrate_task(struct task_st
  	if (task_cpu(p) != src_cpu)
  		goto done;
  	/* Affinity changed (again). */
@@ -1904,7 +2148,7 @@ Index: linux-2.6/kernel/sched.c
  		goto fail;
  
  	/*
-@@ -6142,6 +6321,8 @@ static int migration_cpu_stop(void *data
+@@ -6152,6 +6334,8 @@ static int migration_cpu_stop(void *data
  
  #ifdef CONFIG_HOTPLUG_CPU
  
@@ -1913,7 +2157,7 @@ Index: linux-2.6/kernel/sched.c
  /*
   * Ensures that the idle task is using init_mm right before its cpu goes
   * offline.
-@@ -6154,7 +6335,12 @@ void idle_task_exit(void)
+@@ -6164,7 +6348,12 @@ void idle_task_exit(void)
  
  	if (mm != &init_mm)
  		switch_mm(mm, &init_mm, current);
@@ -1927,7 +2171,7 @@ Index: linux-2.6/kernel/sched.c
  }
  
  /*
-@@ -6472,6 +6658,12 @@ migration_call(struct notifier_block *nf
+@@ -6482,6 +6671,12 @@ migration_call(struct notifier_block *nf
  		migrate_nr_uninterruptible(rq);
  		calc_global_load_remove(rq);
  		break;
@@ -1940,7 +2184,7 @@ Index: linux-2.6/kernel/sched.c
  #endif
  	}
  
-@@ -8188,7 +8380,8 @@ void __init sched_init(void)
+@@ -8199,7 +8394,8 @@ void __init sched_init(void)
  #ifdef CONFIG_DEBUG_SPINLOCK_SLEEP
  static inline int preempt_count_equals(int preempt_offset)
  {
@@ -1950,109 +2194,85 @@ Index: linux-2.6/kernel/sched.c
  
  	return (nested == preempt_offset);
  }
-Index: linux-2.6/block/blk-core.c
-===================================================================
---- linux-2.6.orig/block/blk-core.c
-+++ linux-2.6/block/blk-core.c
-@@ -236,7 +236,7 @@ EXPORT_SYMBOL(blk_delay_queue);
-  **/
- void blk_start_queue(struct request_queue *q)
- {
--	WARN_ON(!irqs_disabled());
-+	WARN_ON_NONRT(!irqs_disabled());
- 
- 	queue_flag_clear(QUEUE_FLAG_STOPPED, q);
- 	__blk_run_queue(q);
-@@ -301,7 +301,11 @@ void __blk_run_queue(struct request_queu
- {
- 	if (unlikely(blk_queue_stopped(q)))
- 		return;
--
-+	/*
-+	 * q->request_fn() can drop q->queue_lock and reenable
-+	 * interrupts, but must return with q->queue_lock held and
-+	 * interrupts disabled.
-+	 */
- 	q->request_fn(q);
- }
- EXPORT_SYMBOL(__blk_run_queue);
-@@ -2670,11 +2674,11 @@ static void queue_unplugged(struct reque
- 	 * this lock).
- 	 */
- 	if (from_schedule) {
--		spin_unlock(q->queue_lock);
-+		spin_unlock_irq(q->queue_lock);
- 		blk_run_queue_async(q);
- 	} else {
- 		__blk_run_queue(q);
--		spin_unlock(q->queue_lock);
-+		spin_unlock_irq(q->queue_lock);
- 	}
- 
- }
-@@ -2700,7 +2704,6 @@ static void flush_plug_callbacks(struct 
- void blk_flush_plug_list(struct blk_plug *plug, bool from_schedule)
- {
- 	struct request_queue *q;
--	unsigned long flags;
- 	struct request *rq;
- 	LIST_HEAD(list);
- 	unsigned int depth;
-@@ -2721,11 +2724,6 @@ void blk_flush_plug_list(struct blk_plug
- 	q = NULL;
- 	depth = 0;
- 
--	/*
--	 * Save and disable interrupts here, to avoid doing it for every
--	 * queue lock we have to take.
--	 */
--	local_irq_save(flags);
- 	while (!list_empty(&list)) {
- 		rq = list_entry_rq(list.next);
- 		list_del_init(&rq->queuelist);
-@@ -2738,7 +2736,7 @@ void blk_flush_plug_list(struct blk_plug
- 				queue_unplugged(q, depth, from_schedule);
- 			q = rq->q;
- 			depth = 0;
--			spin_lock(q->queue_lock);
-+			spin_lock_irq(q->queue_lock);
- 		}
- 		/*
- 		 * rq is already accounted, so use raw insert
-@@ -2756,8 +2754,6 @@ void blk_flush_plug_list(struct blk_plug
- 	 */
- 	if (q)
- 		queue_unplugged(q, depth, from_schedule);
--
--	local_irq_restore(flags);
- }
- 
- void blk_finish_plug(struct blk_plug *plug)
 Index: linux-2.6/kernel/workqueue.c
 ===================================================================
 --- linux-2.6.orig/kernel/workqueue.c
 +++ linux-2.6/kernel/workqueue.c
-@@ -137,6 +137,7 @@ struct worker {
+@@ -41,6 +41,7 @@
+ #include <linux/debug_locks.h>
+ #include <linux/lockdep.h>
+ #include <linux/idr.h>
++#include <linux/delay.h>
+ 
+ #include "workqueue_sched.h"
+ 
+@@ -57,20 +58,10 @@ enum {
+ 	WORKER_DIE		= 1 << 1,	/* die die die */
+ 	WORKER_IDLE		= 1 << 2,	/* is idle */
+ 	WORKER_PREP		= 1 << 3,	/* preparing to run works */
+-	WORKER_ROGUE		= 1 << 4,	/* not bound to any cpu */
+-	WORKER_REBIND		= 1 << 5,	/* mom is home, come back */
+-	WORKER_CPU_INTENSIVE	= 1 << 6,	/* cpu intensive */
+-	WORKER_UNBOUND		= 1 << 7,	/* worker is unbound */
+-
+-	WORKER_NOT_RUNNING	= WORKER_PREP | WORKER_ROGUE | WORKER_REBIND |
+-				  WORKER_CPU_INTENSIVE | WORKER_UNBOUND,
+-
+-	/* gcwq->trustee_state */
+-	TRUSTEE_START		= 0,		/* start */
+-	TRUSTEE_IN_CHARGE	= 1,		/* trustee in charge of gcwq */
+-	TRUSTEE_BUTCHER		= 2,		/* butcher workers */
+-	TRUSTEE_RELEASE		= 3,		/* release workers */
+-	TRUSTEE_DONE		= 4,		/* trustee is done */
++	WORKER_CPU_INTENSIVE	= 1 << 4,	/* cpu intensive */
++	WORKER_UNBOUND		= 1 << 5,	/* worker is unbound */
++
++	WORKER_NOT_RUNNING	= WORKER_PREP | WORKER_CPU_INTENSIVE | WORKER_UNBOUND,
+ 
+ 	BUSY_WORKER_HASH_ORDER	= 6,		/* 64 pointers */
+ 	BUSY_WORKER_HASH_SIZE	= 1 << BUSY_WORKER_HASH_ORDER,
+@@ -84,7 +75,6 @@ enum {
+ 						   (min two ticks) */
+ 	MAYDAY_INTERVAL		= HZ / 10,	/* and then every 100ms */
+ 	CREATE_COOLDOWN		= HZ,		/* time to breath after fail */
+-	TRUSTEE_COOLDOWN	= HZ / 10,	/* for trustee draining */
+ 
+ 	/*
+ 	 * Rescue workers are used only on emergencies and shared by
+@@ -136,7 +126,7 @@ struct worker {
+ 	unsigned long		last_active;	/* L: last active timestamp */
  	unsigned int		flags;		/* X: flags */
  	int			id;		/* I: worker id */
- 	struct work_struct	rebind_work;	/* L: rebind worker to cpu */
+-	struct work_struct	rebind_work;	/* L: rebind worker to cpu */
 +	int			sleeping;	/* None */
  };
  
  /*
-@@ -657,66 +658,58 @@ static void wake_up_worker(struct global
+@@ -163,10 +153,8 @@ struct global_cwq {
+ 
+ 	struct ida		worker_ida;	/* L: for worker IDs */
+ 
+-	struct task_struct	*trustee;	/* L: for gcwq shutdown */
+-	unsigned int		trustee_state;	/* L: trustee state */
+-	wait_queue_head_t	trustee_wait;	/* trustee wait */
+ 	struct worker		*first_idle;	/* L: first idle worker */
++	wait_queue_head_t	idle_wait;
+ } ____cacheline_aligned_in_smp;
+ 
+ /*
+@@ -657,66 +645,58 @@ static void wake_up_worker(struct global
  }
  
  /**
 - * wq_worker_waking_up - a worker is waking up
 - * @task: task waking up
 - * @cpu: CPU @task is waking up to
+- *
+- * This function is called during try_to_wake_up() when a worker is
+- * being awoken.
 + * wq_worker_running - a worker is running again
 + * @task: task returning from sleep
   *
-- * This function is called during try_to_wake_up() when a worker is
-- * being awoken.
-- *
 - * CONTEXT:
 - * spin_lock_irq(rq->lock)
 + * This function is called when a worker returns from schedule()
@@ -2078,10 +2298,10 @@ Index: linux-2.6/kernel/workqueue.c
 - * This function is called during schedule() when a busy worker is
 - * going to sleep.  Worker on the same cpu can be woken up by
 - * returning pointer to its task.
-- *
+  *
 - * CONTEXT:
 - * spin_lock_irq(rq->lock)
-  *
+- *
 - * RETURNS:
 - * Worker task on @cpu to wake up, %NULL if none.
 + * This function is called from schedule() when a busy worker is
@@ -2101,12 +2321,12 @@ Index: linux-2.6/kernel/workqueue.c
  	if (worker->flags & WORKER_NOT_RUNNING)
 -		return NULL;
 +		return;
-+
-+	if (WARN_ON_ONCE(worker->sleeping))
-+		return;
  
 -	/* this can only happen on the local cpu */
 -	BUG_ON(cpu != raw_smp_processor_id());
++	if (WARN_ON_ONCE(worker->sleeping))
++		return;
++
 +	worker->sleeping = 1;
  
 +	cpu = smp_processor_id();
@@ -2137,47 +2357,652 @@ Index: linux-2.6/kernel/workqueue.c
  }
  
  /**
-@@ -1067,8 +1060,8 @@ int queue_work(struct workqueue_struct *
+@@ -978,13 +958,38 @@ static bool is_chained_work(struct workq
+ 	return false;
+ }
+ 
+-static void __queue_work(unsigned int cpu, struct workqueue_struct *wq,
+-			 struct work_struct *work)
++static void ___queue_work(struct workqueue_struct *wq, struct global_cwq *gcwq,
++			  struct work_struct *work)
+ {
+-	struct global_cwq *gcwq;
+ 	struct cpu_workqueue_struct *cwq;
+ 	struct list_head *worklist;
+ 	unsigned int work_flags;
++
++	/* gcwq determined, get cwq and queue */
++	cwq = get_cwq(gcwq->cpu, wq);
++	trace_workqueue_queue_work(gcwq->cpu, cwq, work);
++
++	BUG_ON(!list_empty(&work->entry));
++
++	cwq->nr_in_flight[cwq->work_color]++;
++	work_flags = work_color_to_flags(cwq->work_color);
++
++	if (likely(cwq->nr_active < cwq->max_active)) {
++		trace_workqueue_activate_work(work);
++		cwq->nr_active++;
++		worklist = gcwq_determine_ins_pos(gcwq, cwq);
++	} else {
++		work_flags |= WORK_STRUCT_DELAYED;
++		worklist = &cwq->delayed_works;
++	}
++
++	insert_work(cwq, work, worklist, work_flags);
++}
++
++static void __queue_work(unsigned int cpu, struct workqueue_struct *wq,
++			 struct work_struct *work)
++{
++	struct global_cwq *gcwq;
+ 	unsigned long flags;
+ 
+ 	debug_work_activate(work);
+@@ -1030,27 +1035,32 @@ static void __queue_work(unsigned int cp
+ 		spin_lock_irqsave(&gcwq->lock, flags);
+ 	}
+ 
+-	/* gcwq determined, get cwq and queue */
+-	cwq = get_cwq(gcwq->cpu, wq);
+-	trace_workqueue_queue_work(cpu, cwq, work);
++	___queue_work(wq, gcwq, work);
+ 
+-	BUG_ON(!list_empty(&work->entry));
++	spin_unlock_irqrestore(&gcwq->lock, flags);
++}
+ 
+-	cwq->nr_in_flight[cwq->work_color]++;
+-	work_flags = work_color_to_flags(cwq->work_color);
++/**
++ * queue_work_on - queue work on specific cpu
++ * @cpu: CPU number to execute work on
++ * @wq: workqueue to use
++ * @work: work to queue
++ *
++ * Returns 0 if @work was already on a queue, non-zero otherwise.
++ *
++ * We queue the work to a specific CPU, the caller must ensure it
++ * can't go away.
++ */
++static int
++__queue_work_on(int cpu, struct workqueue_struct *wq, struct work_struct *work)
++{
++	int ret = 0;
+ 
+-	if (likely(cwq->nr_active < cwq->max_active)) {
+-		trace_workqueue_activate_work(work);
+-		cwq->nr_active++;
+-		worklist = gcwq_determine_ins_pos(gcwq, cwq);
+-	} else {
+-		work_flags |= WORK_STRUCT_DELAYED;
+-		worklist = &cwq->delayed_works;
++	if (!test_and_set_bit(WORK_STRUCT_PENDING_BIT, work_data_bits(work))) {
++		__queue_work(cpu, wq, work);
++		ret = 1;
+ 	}
+-
+-	insert_work(cwq, work, worklist, work_flags);
+-
+-	spin_unlock_irqrestore(&gcwq->lock, flags);
++	return ret;
+ }
+ 
+ /**
+@@ -1067,34 +1077,19 @@ int queue_work(struct workqueue_struct *
  {
  	int ret;
  
 -	ret = queue_work_on(get_cpu(), wq, work);
 -	put_cpu();
-+	ret = queue_work_on(get_cpu_light(), wq, work);
++	ret = __queue_work_on(get_cpu_light(), wq, work);
 +	put_cpu_light();
  
  	return ret;
  }
-@@ -3484,6 +3477,25 @@ static int __devinit workqueue_cpu_callb
- 				kthread_stop(new_trustee);
- 			return NOTIFY_BAD;
- 		}
-+		break;
-+	case CPU_POST_DEAD:
-+	case CPU_UP_CANCELED:
-+	case CPU_DOWN_FAILED:
-+	case CPU_ONLINE:
-+		break;
-+	case CPU_DYING:
-+		/*
-+		 * We access this lockless. We are on the dying CPU
-+		 * and called from stomp machine.
-+		 *
-+		 * Before this, the trustee and all workers except for
-+		 * the ones which are still executing works from
-+		 * before the last CPU down must be on the cpu.  After
-+		 * this, they'll all be diasporas.
-+		 */
-+		gcwq->flags |= GCWQ_DISASSOCIATED;
-+	default:
-+		goto out;
+ EXPORT_SYMBOL_GPL(queue_work);
+ 
+-/**
+- * queue_work_on - queue work on specific cpu
+- * @cpu: CPU number to execute work on
+- * @wq: workqueue to use
+- * @work: work to queue
+- *
+- * Returns 0 if @work was already on a queue, non-zero otherwise.
+- *
+- * We queue the work to a specific CPU, the caller must ensure it
+- * can't go away.
+- */
+ int
+ queue_work_on(int cpu, struct workqueue_struct *wq, struct work_struct *work)
+ {
+-	int ret = 0;
++	WARN_ON(wq->flags & WQ_NON_AFFINE);
+ 
+-	if (!test_and_set_bit(WORK_STRUCT_PENDING_BIT, work_data_bits(work))) {
+-		__queue_work(cpu, wq, work);
+-		ret = 1;
+-	}
+-	return ret;
++	return __queue_work_on(cpu, wq, work);
+ }
+ EXPORT_SYMBOL_GPL(queue_work_on);
+ 
+@@ -1140,6 +1135,8 @@ int queue_delayed_work_on(int cpu, struc
+ 	struct timer_list *timer = &dwork->timer;
+ 	struct work_struct *work = &dwork->work;
+ 
++	WARN_ON((wq->flags & WQ_NON_AFFINE) && cpu != -1);
++
+ 	if (!test_and_set_bit(WORK_STRUCT_PENDING_BIT, work_data_bits(work))) {
+ 		unsigned int lcpu;
+ 
+@@ -1205,12 +1202,13 @@ static void worker_enter_idle(struct wor
+ 	/* idle_list is LIFO */
+ 	list_add(&worker->entry, &gcwq->idle_list);
+ 
+-	if (likely(!(worker->flags & WORKER_ROGUE))) {
+-		if (too_many_workers(gcwq) && !timer_pending(&gcwq->idle_timer))
+-			mod_timer(&gcwq->idle_timer,
+-				  jiffies + IDLE_WORKER_TIMEOUT);
+-	} else
+-		wake_up_all(&gcwq->trustee_wait);
++	if (gcwq->nr_idle == gcwq->nr_workers)
++		wake_up_all(&gcwq->idle_wait);
++
++	if (too_many_workers(gcwq) && !timer_pending(&gcwq->idle_timer)) {
++		mod_timer(&gcwq->idle_timer,
++				jiffies + IDLE_WORKER_TIMEOUT);
++	}
+ 
+ 	/* sanity check nr_running */
+ 	WARN_ON_ONCE(gcwq->nr_workers == gcwq->nr_idle &&
+@@ -1279,8 +1277,14 @@ __acquires(&gcwq->lock)
+ 		 * it races with cpu hotunplug operation.  Verify
+ 		 * against GCWQ_DISASSOCIATED.
+ 		 */
+-		if (!(gcwq->flags & GCWQ_DISASSOCIATED))
++		if (!(gcwq->flags & GCWQ_DISASSOCIATED)) {
++			/*
++			 * Since we're binding to a particular cpu and need to
++			 * stay there for correctness, mark us PF_THREAD_BOUND.
++			 */
++			task->flags |= PF_THREAD_BOUND;
+ 			set_cpus_allowed_ptr(task, get_cpu_mask(gcwq->cpu));
++		}
+ 
+ 		spin_lock_irq(&gcwq->lock);
+ 		if (gcwq->flags & GCWQ_DISASSOCIATED)
+@@ -1302,20 +1306,15 @@ __acquires(&gcwq->lock)
+ 	}
+ }
+ 
+-/*
+- * Function for worker->rebind_work used to rebind rogue busy workers
+- * to the associated cpu which is coming back online.  This is
+- * scheduled by cpu up but can race with other cpu hotplug operations
+- * and may be executed twice without intervening cpu down.
+- */
+-static void worker_rebind_fn(struct work_struct *work)
++static void worker_unbind_and_unlock(struct worker *worker)
+ {
+-	struct worker *worker = container_of(work, struct worker, rebind_work);
+ 	struct global_cwq *gcwq = worker->gcwq;
++	struct task_struct *task = worker->task;
+ 
+-	if (worker_maybe_bind_and_lock(worker))
+-		worker_clr_flags(worker, WORKER_REBIND);
+-
++	/*
++	 * Its no longer required we're PF_THREAD_BOUND, the work is done.
++	 */
++	task->flags &= ~PF_THREAD_BOUND;
+ 	spin_unlock_irq(&gcwq->lock);
+ }
+ 
+@@ -1327,7 +1326,6 @@ static struct worker *alloc_worker(void)
+ 	if (worker) {
+ 		INIT_LIST_HEAD(&worker->entry);
+ 		INIT_LIST_HEAD(&worker->scheduled);
+-		INIT_WORK(&worker->rebind_work, worker_rebind_fn);
+ 		/* on creation a worker is in !idle && prep state */
+ 		worker->flags = WORKER_PREP;
+ 	}
+@@ -1382,15 +1380,9 @@ static struct worker *create_worker(stru
+ 	if (IS_ERR(worker->task))
+ 		goto fail;
+ 
+-	/*
+-	 * A rogue worker will become a regular one if CPU comes
+-	 * online later on.  Make sure every worker has
+-	 * PF_THREAD_BOUND set.
+-	 */
+ 	if (bind && !on_unbound_cpu)
+ 		kthread_bind(worker->task, gcwq->cpu);
+ 	else {
+-		worker->task->flags |= PF_THREAD_BOUND;
+ 		if (on_unbound_cpu)
+ 			worker->flags |= WORKER_UNBOUND;
+ 	}
+@@ -1667,13 +1659,6 @@ static bool manage_workers(struct worker
+ 
+ 	gcwq->flags &= ~GCWQ_MANAGING_WORKERS;
+ 
+-	/*
+-	 * The trustee might be waiting to take over the manager
+-	 * position, tell it we're done.
+-	 */
+-	if (unlikely(gcwq->trustee))
+-		wake_up_all(&gcwq->trustee_wait);
+-
+ 	return ret;
+ }
+ 
+@@ -2074,7 +2059,7 @@ repeat:
+ 		if (keep_working(gcwq))
+ 			wake_up_worker(gcwq);
+ 
+-		spin_unlock_irq(&gcwq->lock);
++		worker_unbind_and_unlock(rescuer);
  	}
  
- 	/* some are called w/ irq disabled, don't disturb irq status */
-@@ -3503,16 +3515,6 @@ static int __devinit workqueue_cpu_callb
- 		gcwq->first_idle = new_worker;
- 		break;
+ 	schedule();
+@@ -2970,7 +2955,6 @@ struct workqueue_struct *__alloc_workque
+ 		if (IS_ERR(rescuer->task))
+ 			goto err;
  
+-		rescuer->task->flags |= PF_THREAD_BOUND;
+ 		wake_up_process(rescuer->task);
+ 	}
+ 
+@@ -3189,171 +3173,71 @@ EXPORT_SYMBOL_GPL(work_busy);
+  * gcwqs serve mix of short, long and very long running works making
+  * blocked draining impractical.
+  *
+- * This is solved by allowing a gcwq to be detached from CPU, running
+- * it with unbound (rogue) workers and allowing it to be reattached
+- * later if the cpu comes back online.  A separate thread is created
+- * to govern a gcwq in such state and is called the trustee of the
+- * gcwq.
+- *
+- * Trustee states and their descriptions.
+- *
+- * START	Command state used on startup.  On CPU_DOWN_PREPARE, a
+- *		new trustee is started with this state.
+- *
+- * IN_CHARGE	Once started, trustee will enter this state after
+- *		assuming the manager role and making all existing
+- *		workers rogue.  DOWN_PREPARE waits for trustee to
+- *		enter this state.  After reaching IN_CHARGE, trustee
+- *		tries to execute the pending worklist until it's empty
+- *		and the state is set to BUTCHER, or the state is set
+- *		to RELEASE.
+- *
+- * BUTCHER	Command state which is set by the cpu callback after
+- *		the cpu has went down.  Once this state is set trustee
+- *		knows that there will be no new works on the worklist
+- *		and once the worklist is empty it can proceed to
+- *		killing idle workers.
+- *
+- * RELEASE	Command state which is set by the cpu callback if the
+- *		cpu down has been canceled or it has come online
+- *		again.  After recognizing this state, trustee stops
+- *		trying to drain or butcher and clears ROGUE, rebinds
+- *		all remaining workers back to the cpu and releases
+- *		manager role.
+- *
+- * DONE		Trustee will enter this state after BUTCHER or RELEASE
+- *		is complete.
+- *
+- *          trustee                 CPU                draining
+- *         took over                down               complete
+- * START -----------> IN_CHARGE -----------> BUTCHER -----------> DONE
+- *                        |                     |                  ^
+- *                        | CPU is back online  v   return workers |
+- *                         ----------------> RELEASE --------------
+  */
+ 
+-/**
+- * trustee_wait_event_timeout - timed event wait for trustee
+- * @cond: condition to wait for
+- * @timeout: timeout in jiffies
+- *
+- * wait_event_timeout() for trustee to use.  Handles locking and
+- * checks for RELEASE request.
+- *
+- * CONTEXT:
+- * spin_lock_irq(gcwq->lock) which may be released and regrabbed
+- * multiple times.  To be used by trustee.
+- *
+- * RETURNS:
+- * Positive indicating left time if @cond is satisfied, 0 if timed
+- * out, -1 if canceled.
+- */
+-#define trustee_wait_event_timeout(cond, timeout) ({			\
+-	long __ret = (timeout);						\
+-	while (!((cond) || (gcwq->trustee_state == TRUSTEE_RELEASE)) &&	\
+-	       __ret) {							\
+-		spin_unlock_irq(&gcwq->lock);				\
+-		__wait_event_timeout(gcwq->trustee_wait, (cond) ||	\
+-			(gcwq->trustee_state == TRUSTEE_RELEASE),	\
+-			__ret);						\
+-		spin_lock_irq(&gcwq->lock);				\
+-	}								\
+-	gcwq->trustee_state == TRUSTEE_RELEASE ? -1 : (__ret);		\
+-})
++static int __devinit workqueue_cpu_up_callback(struct notifier_block *nfb,
++						unsigned long action,
++						void *hcpu)
++{
++	unsigned int cpu = (unsigned long)hcpu;
++	struct global_cwq *gcwq = get_gcwq(cpu);
++	struct worker *uninitialized_var(new_worker);
++	unsigned long flags;
+ 
+-/**
+- * trustee_wait_event - event wait for trustee
+- * @cond: condition to wait for
+- *
+- * wait_event() for trustee to use.  Automatically handles locking and
+- * checks for CANCEL request.
+- *
+- * CONTEXT:
+- * spin_lock_irq(gcwq->lock) which may be released and regrabbed
+- * multiple times.  To be used by trustee.
+- *
+- * RETURNS:
+- * 0 if @cond is satisfied, -1 if canceled.
+- */
+-#define trustee_wait_event(cond) ({					\
+-	long __ret1;							\
+-	__ret1 = trustee_wait_event_timeout(cond, MAX_SCHEDULE_TIMEOUT);\
+-	__ret1 < 0 ? -1 : 0;						\
+-})
++	action &= ~CPU_TASKS_FROZEN;
+ 
+-static int __cpuinit trustee_thread(void *__gcwq)
+-{
+-	struct global_cwq *gcwq = __gcwq;
+-	struct worker *worker;
+-	struct work_struct *work;
+-	struct hlist_node *pos;
+-	long rc;
+-	int i;
++	switch (action) {
++	case CPU_UP_PREPARE:
++		BUG_ON(gcwq->first_idle);
++		new_worker = create_worker(gcwq, false);
++		if (!new_worker)
++			return NOTIFY_BAD;
++	}
+ 
+-	BUG_ON(gcwq->cpu != smp_processor_id());
++	/* some are called w/ irq disabled, don't disturb irq status */
++	spin_lock_irqsave(&gcwq->lock, flags);
+ 
+-	spin_lock_irq(&gcwq->lock);
+-	/*
+-	 * Claim the manager position and make all workers rogue.
+-	 * Trustee must be bound to the target cpu and can't be
+-	 * cancelled.
+-	 */
+-	BUG_ON(gcwq->cpu != smp_processor_id());
+-	rc = trustee_wait_event(!(gcwq->flags & GCWQ_MANAGING_WORKERS));
+-	BUG_ON(rc < 0);
++	switch (action) {
++	case CPU_UP_PREPARE:
++		BUG_ON(gcwq->first_idle);
++		gcwq->first_idle = new_worker;
++		break;
+ 
+-	gcwq->flags |= GCWQ_MANAGING_WORKERS;
++	case CPU_UP_CANCELED:
++		destroy_worker(gcwq->first_idle);
++		gcwq->first_idle = NULL;
++		break;
+ 
+-	list_for_each_entry(worker, &gcwq->idle_list, entry)
+-		worker->flags |= WORKER_ROGUE;
++	case CPU_ONLINE:
++		spin_unlock_irq(&gcwq->lock);
++		kthread_bind(gcwq->first_idle->task, cpu);
++		spin_lock_irq(&gcwq->lock);
++		gcwq->flags |= GCWQ_MANAGE_WORKERS;
++		start_worker(gcwq->first_idle);
++		gcwq->first_idle = NULL;
++		break;
++	}
+ 
+-	for_each_busy_worker(worker, i, pos, gcwq)
+-		worker->flags |= WORKER_ROGUE;
++	spin_unlock_irqrestore(&gcwq->lock, flags);
+ 
+-	/*
+-	 * Call schedule() so that we cross rq->lock and thus can
+-	 * guarantee sched callbacks see the rogue flag.  This is
+-	 * necessary as scheduler callbacks may be invoked from other
+-	 * cpus.
+-	 */
+-	spin_unlock_irq(&gcwq->lock);
+-	schedule();
+-	spin_lock_irq(&gcwq->lock);
++	return notifier_from_errno(0);
++}
+ 
+-	/*
+-	 * Sched callbacks are disabled now.  Zap nr_running.  After
+-	 * this, nr_running stays zero and need_more_worker() and
+-	 * keep_working() are always true as long as the worklist is
+-	 * not empty.
+-	 */
+-	atomic_set(get_gcwq_nr_running(gcwq->cpu), 0);
++static void flush_gcwq(struct global_cwq *gcwq)
++{
++	struct work_struct *work, *nw;
++	struct worker *worker, *n;
++	LIST_HEAD(non_affine_works);
+ 
+-	spin_unlock_irq(&gcwq->lock);
+-	del_timer_sync(&gcwq->idle_timer);
+ 	spin_lock_irq(&gcwq->lock);
++	list_for_each_entry_safe(work, nw, &gcwq->worklist, entry) {
++		struct workqueue_struct *wq = get_work_cwq(work)->wq;
+ 
+-	/*
+-	 * We're now in charge.  Notify and proceed to drain.  We need
+-	 * to keep the gcwq running during the whole CPU down
+-	 * procedure as other cpu hotunplug callbacks may need to
+-	 * flush currently running tasks.
+-	 */
+-	gcwq->trustee_state = TRUSTEE_IN_CHARGE;
+-	wake_up_all(&gcwq->trustee_wait);
+-
+-	/*
+-	 * The original cpu is in the process of dying and may go away
+-	 * anytime now.  When that happens, we and all workers would
+-	 * be migrated to other cpus.  Try draining any left work.  We
+-	 * want to get it over with ASAP - spam rescuers, wake up as
+-	 * many idlers as necessary and create new ones till the
+-	 * worklist is empty.  Note that if the gcwq is frozen, there
+-	 * may be frozen works in freezable cwqs.  Don't declare
+-	 * completion while frozen.
+-	 */
+-	while (gcwq->nr_workers != gcwq->nr_idle ||
+-	       gcwq->flags & GCWQ_FREEZING ||
+-	       gcwq->trustee_state == TRUSTEE_IN_CHARGE) {
++		if (wq->flags & WQ_NON_AFFINE)
++			list_move(&work->entry, &non_affine_works);
++	}
++
++	while (!list_empty(&gcwq->worklist)) {
+ 		int nr_works = 0;
+ 
+ 		list_for_each_entry(work, &gcwq->worklist, entry) {
+@@ -3367,189 +3251,54 @@ static int __cpuinit trustee_thread(void
+ 			wake_up_process(worker->task);
+ 		}
+ 
++		spin_unlock_irq(&gcwq->lock);
++
+ 		if (need_to_create_worker(gcwq)) {
+-			spin_unlock_irq(&gcwq->lock);
+-			worker = create_worker(gcwq, false);
+-			spin_lock_irq(&gcwq->lock);
+-			if (worker) {
+-				worker->flags |= WORKER_ROGUE;
++			worker = create_worker(gcwq, true);
++			if (worker)
+ 				start_worker(worker);
+-			}
+ 		}
+ 
+-		/* give a breather */
+-		if (trustee_wait_event_timeout(false, TRUSTEE_COOLDOWN) < 0)
+-			break;
+-	}
+-
+-	/*
+-	 * Either all works have been scheduled and cpu is down, or
+-	 * cpu down has already been canceled.  Wait for and butcher
+-	 * all workers till we're canceled.
+-	 */
+-	do {
+-		rc = trustee_wait_event(!list_empty(&gcwq->idle_list));
+-		while (!list_empty(&gcwq->idle_list))
+-			destroy_worker(list_first_entry(&gcwq->idle_list,
+-							struct worker, entry));
+-	} while (gcwq->nr_workers && rc >= 0);
+-
+-	/*
+-	 * At this point, either draining has completed and no worker
+-	 * is left, or cpu down has been canceled or the cpu is being
+-	 * brought back up.  There shouldn't be any idle one left.
+-	 * Tell the remaining busy ones to rebind once it finishes the
+-	 * currently scheduled works by scheduling the rebind_work.
+-	 */
+-	WARN_ON(!list_empty(&gcwq->idle_list));
+-
+-	for_each_busy_worker(worker, i, pos, gcwq) {
+-		struct work_struct *rebind_work = &worker->rebind_work;
++		wait_event_timeout(gcwq->idle_wait,
++				gcwq->nr_idle == gcwq->nr_workers, HZ/10);
+ 
+-		/*
+-		 * Rebind_work may race with future cpu hotplug
+-		 * operations.  Use a separate flag to mark that
+-		 * rebinding is scheduled.
+-		 */
+-		worker->flags |= WORKER_REBIND;
+-		worker->flags &= ~WORKER_ROGUE;
++		spin_lock_irq(&gcwq->lock);
++	}
+ 
+-		/* queue rebind_work, wq doesn't matter, use the default one */
+-		if (test_and_set_bit(WORK_STRUCT_PENDING_BIT,
+-				     work_data_bits(rebind_work)))
+-			continue;
++	WARN_ON(gcwq->nr_workers != gcwq->nr_idle);
+ 
+-		debug_work_activate(rebind_work);
+-		insert_work(get_cwq(gcwq->cpu, system_wq), rebind_work,
+-			    worker->scheduled.next,
+-			    work_color_to_flags(WORK_NO_COLOR));
+-	}
++	list_for_each_entry_safe(worker, n, &gcwq->idle_list, entry)
++		destroy_worker(worker);
+ 
+-	/* relinquish manager role */
+-	gcwq->flags &= ~GCWQ_MANAGING_WORKERS;
++	WARN_ON(gcwq->nr_workers || gcwq->nr_idle);
+ 
+-	/* notify completion */
+-	gcwq->trustee = NULL;
+-	gcwq->trustee_state = TRUSTEE_DONE;
+-	wake_up_all(&gcwq->trustee_wait);
+ 	spin_unlock_irq(&gcwq->lock);
+-	return 0;
+-}
+ 
+-/**
+- * wait_trustee_state - wait for trustee to enter the specified state
+- * @gcwq: gcwq the trustee of interest belongs to
+- * @state: target state to wait for
+- *
+- * Wait for the trustee to reach @state.  DONE is already matched.
+- *
+- * CONTEXT:
+- * spin_lock_irq(gcwq->lock) which may be released and regrabbed
+- * multiple times.  To be used by cpu_callback.
+- */
+-static void __cpuinit wait_trustee_state(struct global_cwq *gcwq, int state)
+-__releases(&gcwq->lock)
+-__acquires(&gcwq->lock)
+-{
+-	if (!(gcwq->trustee_state == state ||
+-	      gcwq->trustee_state == TRUSTEE_DONE)) {
+-		spin_unlock_irq(&gcwq->lock);
+-		__wait_event(gcwq->trustee_wait,
+-			     gcwq->trustee_state == state ||
+-			     gcwq->trustee_state == TRUSTEE_DONE);
+-		spin_lock_irq(&gcwq->lock);
++	gcwq = get_gcwq(get_cpu());
++	spin_lock_irq(&gcwq->lock);
++	list_for_each_entry_safe(work, nw, &non_affine_works, entry) {
++		list_del_init(&work->entry);
++		___queue_work(get_work_cwq(work)->wq, gcwq, work);
+ 	}
++	spin_unlock_irq(&gcwq->lock);
++	put_cpu();
+ }
+ 
+-static int __devinit workqueue_cpu_callback(struct notifier_block *nfb,
++static int __devinit workqueue_cpu_down_callback(struct notifier_block *nfb,
+ 						unsigned long action,
+ 						void *hcpu)
+ {
+ 	unsigned int cpu = (unsigned long)hcpu;
+ 	struct global_cwq *gcwq = get_gcwq(cpu);
+-	struct task_struct *new_trustee = NULL;
+-	struct worker *uninitialized_var(new_worker);
+-	unsigned long flags;
+ 
+ 	action &= ~CPU_TASKS_FROZEN;
+ 
+-	switch (action) {
+-	case CPU_DOWN_PREPARE:
+-		new_trustee = kthread_create(trustee_thread, gcwq,
+-					     "workqueue_trustee/%d\n", cpu);
+-		if (IS_ERR(new_trustee))
+-			return notifier_from_errno(PTR_ERR(new_trustee));
+-		kthread_bind(new_trustee, cpu);
+-		/* fall through */
+-	case CPU_UP_PREPARE:
+-		BUG_ON(gcwq->first_idle);
+-		new_worker = create_worker(gcwq, false);
+-		if (!new_worker) {
+-			if (new_trustee)
+-				kthread_stop(new_trustee);
+-			return NOTIFY_BAD;
+-		}
+-	}
+-
+-	/* some are called w/ irq disabled, don't disturb irq status */
+-	spin_lock_irqsave(&gcwq->lock, flags);
+-
+-	switch (action) {
+-	case CPU_DOWN_PREPARE:
+-		/* initialize trustee and tell it to acquire the gcwq */
+-		BUG_ON(gcwq->trustee || gcwq->trustee_state != TRUSTEE_DONE);
+-		gcwq->trustee = new_trustee;
+-		gcwq->trustee_state = TRUSTEE_START;
+-		wake_up_process(gcwq->trustee);
+-		wait_trustee_state(gcwq, TRUSTEE_IN_CHARGE);
+-		/* fall through */
+-	case CPU_UP_PREPARE:
+-		BUG_ON(gcwq->first_idle);
+-		gcwq->first_idle = new_worker;
+-		break;
+-
 -	case CPU_DYING:
 -		/*
 -		 * Before this, the trustee and all workers except for
@@ -2188,17 +3013,67 @@ Index: linux-2.6/kernel/workqueue.c
 -		gcwq->flags |= GCWQ_DISASSOCIATED;
 -		break;
 -
- 	case CPU_POST_DEAD:
- 		gcwq->trustee_state = TRUSTEE_BUTCHER;
- 		/* fall through */
-@@ -3546,6 +3548,7 @@ static int __devinit workqueue_cpu_callb
+-	case CPU_POST_DEAD:
+-		gcwq->trustee_state = TRUSTEE_BUTCHER;
+-		/* fall through */
+-	case CPU_UP_CANCELED:
+-		destroy_worker(gcwq->first_idle);
+-		gcwq->first_idle = NULL;
+-		break;
++        switch (action) {
++        case CPU_DOWN_PREPARE:
++                flush_gcwq(gcwq);
++                break;
++        }
  
- 	spin_unlock_irqrestore(&gcwq->lock, flags);
+-	case CPU_DOWN_FAILED:
+-	case CPU_ONLINE:
+-		gcwq->flags &= ~GCWQ_DISASSOCIATED;
+-		if (gcwq->trustee_state != TRUSTEE_DONE) {
+-			gcwq->trustee_state = TRUSTEE_RELEASE;
+-			wake_up_process(gcwq->trustee);
+-			wait_trustee_state(gcwq, TRUSTEE_DONE);
+-		}
+-
+-		/*
+-		 * Trustee is done and there might be no worker left.
+-		 * Put the first_idle in and request a real manager to
+-		 * take a look.
+-		 */
+-		spin_unlock_irq(&gcwq->lock);
+-		kthread_bind(gcwq->first_idle->task, cpu);
+-		spin_lock_irq(&gcwq->lock);
+-		gcwq->flags |= GCWQ_MANAGE_WORKERS;
+-		start_worker(gcwq->first_idle);
+-		gcwq->first_idle = NULL;
+-		break;
+-	}
+-
+-	spin_unlock_irqrestore(&gcwq->lock, flags);
  
-+out:
  	return notifier_from_errno(0);
  }
+@@ -3747,7 +3496,8 @@ static int __init init_workqueues(void)
+ 	unsigned int cpu;
+ 	int i;
  
+-	cpu_notifier(workqueue_cpu_callback, CPU_PRI_WORKQUEUE);
++	cpu_notifier(workqueue_cpu_up_callback, CPU_PRI_WORKQUEUE_ACTIVE);
++ 	hotcpu_notifier(workqueue_cpu_down_callback, CPU_PRI_WORKQUEUE_INACTIVE);
+ 
+ 	/* initialize gcwqs */
+ 	for_each_gcwq_cpu(cpu) {
+@@ -3770,9 +3520,7 @@ static int __init init_workqueues(void)
+ 			    (unsigned long)gcwq);
+ 
+ 		ida_init(&gcwq->worker_ida);
+-
+-		gcwq->trustee_state = TRUSTEE_DONE;
+-		init_waitqueue_head(&gcwq->trustee_wait);
++		init_waitqueue_head(&gcwq->idle_wait);
+ 	}
+ 
+ 	/* create the initial worker */
 Index: linux-2.6/kernel/workqueue_sched.h
 ===================================================================
 --- linux-2.6.orig/kernel/workqueue_sched.h
@@ -2608,6 +3483,35 @@ Index: linux-2.6/arch/mips/kernel/i8259.c
  };
  
  static struct resource pic1_io_resource = {
+Index: linux-2.6/drivers/watchdog/octeon-wdt-main.c
+===================================================================
+--- linux-2.6.orig/drivers/watchdog/octeon-wdt-main.c
++++ linux-2.6/drivers/watchdog/octeon-wdt-main.c
+@@ -402,7 +402,7 @@ static void octeon_wdt_setup_interrupt(i
+ 	irq = OCTEON_IRQ_WDOG0 + core;
+ 
+ 	if (request_irq(irq, octeon_wdt_poke_irq,
+-			IRQF_DISABLED, "octeon_wdt", octeon_wdt_poke_irq))
++			IRQF_NO_THREAD, "octeon_wdt", octeon_wdt_poke_irq))
+ 		panic("octeon_wdt: Couldn't obtain irq %d", irq);
+ 
+ 	cpumask_set_cpu(cpu, &irq_enabled_cpus);
+Index: linux-2.6/arch/mips/cavium-octeon/smp.c
+===================================================================
+--- linux-2.6.orig/arch/mips/cavium-octeon/smp.c
++++ linux-2.6/arch/mips/cavium-octeon/smp.c
+@@ -207,8 +207,9 @@ void octeon_prepare_cpus(unsigned int ma
+ 	 * the other bits alone.
+ 	 */
+ 	cvmx_write_csr(CVMX_CIU_MBOX_CLRX(cvmx_get_core_num()), 0xffff);
+-	if (request_irq(OCTEON_IRQ_MBOX0, mailbox_interrupt, IRQF_DISABLED,
+-			"SMP-IPI", mailbox_interrupt)) {
++	if (request_irq(OCTEON_IRQ_MBOX0, mailbox_interrupt,
++			IRQF_PERCPU | IRQF_NO_THREAD, "SMP-IPI",
++			mailbox_interrupt)) {
+ 		panic("Cannot request_irq(OCTEON_IRQ_MBOX0)\n");
+ 	}
+ }
 Index: linux-2.6/arch/arm/kernel/signal.c
 ===================================================================
 --- linux-2.6.orig/arch/arm/kernel/signal.c
@@ -2930,17 +3834,19 @@ Index: linux-2.6/kernel/rtmutex-debug.c
  		return;
  
  	rcu_read_lock();
-@@ -149,7 +94,8 @@ void debug_rt_mutex_print_deadlock(struc
+@@ -149,7 +94,10 @@ void debug_rt_mutex_print_deadlock(struc
  		return;
  	}
  
 -	TRACE_OFF_NOLOCK();
-+	if (!debug_locks_off())
++	if (!debug_locks_off()) {
++		rcu_read_unlock();
 +		return;
++	}
  
  	printk("\n============================================\n");
  	printk(  "[ BUG: circular locking deadlock detected! ]\n");
-@@ -180,7 +126,6 @@ void debug_rt_mutex_print_deadlock(struc
+@@ -180,7 +128,6 @@ void debug_rt_mutex_print_deadlock(struc
  
  	printk("[ turning off deadlock detection."
  	       "Please report this trace. ]\n\n");
@@ -2948,7 +3854,7 @@ Index: linux-2.6/kernel/rtmutex-debug.c
  }
  
  void debug_rt_mutex_lock(struct rt_mutex *lock)
-@@ -189,7 +134,7 @@ void debug_rt_mutex_lock(struct rt_mutex
+@@ -189,7 +136,7 @@ void debug_rt_mutex_lock(struct rt_mutex
  
  void debug_rt_mutex_unlock(struct rt_mutex *lock)
  {
@@ -2957,7 +3863,7 @@ Index: linux-2.6/kernel/rtmutex-debug.c
  }
  
  void
-@@ -199,7 +144,7 @@ debug_rt_mutex_proxy_lock(struct rt_mute
+@@ -199,7 +146,7 @@ debug_rt_mutex_proxy_lock(struct rt_mute
  
  void debug_rt_mutex_proxy_unlock(struct rt_mutex *lock)
  {
@@ -2966,7 +3872,7 @@ Index: linux-2.6/kernel/rtmutex-debug.c
  }
  
  void debug_rt_mutex_init_waiter(struct rt_mutex_waiter *waiter)
-@@ -213,8 +158,8 @@ void debug_rt_mutex_init_waiter(struct r
+@@ -213,8 +160,8 @@ void debug_rt_mutex_init_waiter(struct r
  void debug_rt_mutex_free_waiter(struct rt_mutex_waiter *waiter)
  {
  	put_pid(waiter->deadlock_task_pid);
@@ -3355,208 +4261,352 @@ Index: linux-2.6/kernel/trace/ring_buffer.c
 ===================================================================
 --- linux-2.6.orig/kernel/trace/ring_buffer.c
 +++ linux-2.6/kernel/trace/ring_buffer.c
-@@ -478,7 +478,7 @@ struct ring_buffer_per_cpu {
- 	int				cpu;
- 	atomic_t			record_disabled;
- 	struct ring_buffer		*buffer;
--	spinlock_t			reader_lock;	/* serialize readers */
-+	raw_spinlock_t			reader_lock;	/* serialize readers */
- 	arch_spinlock_t			lock;
- 	struct lock_class_key		lock_key;
- 	struct list_head		*pages;
-@@ -1055,7 +1055,7 @@ rb_allocate_cpu_buffer(struct ring_buffe
+@@ -1040,6 +1040,44 @@ static int rb_allocate_pages(struct ring
+ 	return -ENOMEM;
+ }
  
- 	cpu_buffer->cpu = cpu;
- 	cpu_buffer->buffer = buffer;
--	spin_lock_init(&cpu_buffer->reader_lock);
-+	raw_spin_lock_init(&cpu_buffer->reader_lock);
- 	lockdep_set_class(&cpu_buffer->reader_lock, buffer->reader_lock_key);
- 	cpu_buffer->lock = (arch_spinlock_t)__ARCH_SPIN_LOCK_UNLOCKED;
- 
-@@ -1252,7 +1252,7 @@ rb_remove_pages(struct ring_buffer_per_c
++static inline int ok_to_lock(void)
++{
++	if (in_nmi())
++		return 0;
++#ifdef CONFIG_PREEMPT_RT_FULL
++	if (in_atomic())
++		return 0;
++#endif
++	return 1;
++}
++
++static int
++read_buffer_lock(struct ring_buffer_per_cpu *cpu_buffer,
++		 unsigned long *flags)
++{
++	/*
++	 * If an NMI die dumps out the content of the ring buffer
++	 * do not grab locks. We also permanently disable the ring
++	 * buffer too. A one time deal is all you get from reading
++	 * the ring buffer from an NMI.
++	 */
++	if (!ok_to_lock()) {
++		if (spin_trylock_irqsave(&cpu_buffer->reader_lock, *flags))
++			return 1;
++		tracing_off_permanent();
++		return 0;
++	}
++	spin_lock_irqsave(&cpu_buffer->reader_lock, *flags);
++	return 1;
++}
++
++static void
++read_buffer_unlock(struct ring_buffer_per_cpu *cpu_buffer,
++		   unsigned long flags, int locked)
++{
++	if (locked)
++		spin_unlock_irqrestore(&cpu_buffer->reader_lock, flags);
++}
+ static struct ring_buffer_per_cpu *
+ rb_allocate_cpu_buffer(struct ring_buffer *buffer, int cpu)
+ {
+@@ -1250,9 +1288,11 @@ rb_remove_pages(struct ring_buffer_per_c
+ {
+ 	struct buffer_page *bpage;
  	struct list_head *p;
++	unsigned long flags;
  	unsigned i;
++	int locked;
  
 -	spin_lock_irq(&cpu_buffer->reader_lock);
-+	raw_spin_lock_irq(&cpu_buffer->reader_lock);
++	locked = read_buffer_lock(cpu_buffer, &flags);
  	rb_head_page_deactivate(cpu_buffer);
  
  	for (i = 0; i < nr_pages; i++) {
-@@ -1270,7 +1270,7 @@ rb_remove_pages(struct ring_buffer_per_c
+@@ -1270,7 +1310,7 @@ rb_remove_pages(struct ring_buffer_per_c
  	rb_check_pages(cpu_buffer);
  
  out:
 -	spin_unlock_irq(&cpu_buffer->reader_lock);
-+	raw_spin_unlock_irq(&cpu_buffer->reader_lock);
++	read_buffer_unlock(cpu_buffer, flags, locked);
  }
  
  static void
-@@ -1281,7 +1281,7 @@ rb_insert_pages(struct ring_buffer_per_c
+@@ -1279,9 +1319,11 @@ rb_insert_pages(struct ring_buffer_per_c
+ {
+ 	struct buffer_page *bpage;
  	struct list_head *p;
++	unsigned long flags;
  	unsigned i;
++	int locked;
  
 -	spin_lock_irq(&cpu_buffer->reader_lock);
-+	raw_spin_lock_irq(&cpu_buffer->reader_lock);
++	locked = read_buffer_lock(cpu_buffer, &flags);
  	rb_head_page_deactivate(cpu_buffer);
  
  	for (i = 0; i < nr_pages; i++) {
-@@ -1296,7 +1296,7 @@ rb_insert_pages(struct ring_buffer_per_c
+@@ -1296,7 +1338,7 @@ rb_insert_pages(struct ring_buffer_per_c
  	rb_check_pages(cpu_buffer);
  
  out:
 -	spin_unlock_irq(&cpu_buffer->reader_lock);
-+	raw_spin_unlock_irq(&cpu_buffer->reader_lock);
++	read_buffer_unlock(cpu_buffer, flags, locked);
  }
  
  /**
-@@ -2790,9 +2790,9 @@ void ring_buffer_iter_reset(struct ring_
+@@ -2784,15 +2826,16 @@ void ring_buffer_iter_reset(struct ring_
+ {
+ 	struct ring_buffer_per_cpu *cpu_buffer;
+ 	unsigned long flags;
++	int locked;
+ 
+ 	if (!iter)
+ 		return;
  
  	cpu_buffer = iter->cpu_buffer;
  
 -	spin_lock_irqsave(&cpu_buffer->reader_lock, flags);
-+	raw_spin_lock_irqsave(&cpu_buffer->reader_lock, flags);
++	locked = read_buffer_lock(cpu_buffer, &flags);
  	rb_iter_reset(iter);
 -	spin_unlock_irqrestore(&cpu_buffer->reader_lock, flags);
-+	raw_spin_unlock_irqrestore(&cpu_buffer->reader_lock, flags);
++	read_buffer_unlock(cpu_buffer, flags, locked);
  }
  EXPORT_SYMBOL_GPL(ring_buffer_iter_reset);
  
-@@ -3251,12 +3251,12 @@ ring_buffer_peek(struct ring_buffer *buf
+@@ -3210,21 +3253,6 @@ rb_iter_peek(struct ring_buffer_iter *it
+ }
+ EXPORT_SYMBOL_GPL(ring_buffer_iter_peek);
+ 
+-static inline int rb_ok_to_lock(void)
+-{
+-	/*
+-	 * If an NMI die dumps out the content of the ring buffer
+-	 * do not grab locks. We also permanently disable the ring
+-	 * buffer too. A one time deal is all you get from reading
+-	 * the ring buffer from an NMI.
+-	 */
+-	if (likely(!in_nmi()))
+-		return 1;
+-
+-	tracing_off_permanent();
+-	return 0;
+-}
+-
+ /**
+  * ring_buffer_peek - peek at the next event to be read
+  * @buffer: The ring buffer to read
+@@ -3242,22 +3270,17 @@ ring_buffer_peek(struct ring_buffer *buf
+ 	struct ring_buffer_per_cpu *cpu_buffer = buffer->buffers[cpu];
+ 	struct ring_buffer_event *event;
+ 	unsigned long flags;
+-	int dolock;
++	int locked;
+ 
+ 	if (!cpumask_test_cpu(cpu, buffer->cpumask))
+ 		return NULL;
+ 
+-	dolock = rb_ok_to_lock();
   again:
- 	local_irq_save(flags);
- 	if (dolock)
+-	local_irq_save(flags);
+-	if (dolock)
 -		spin_lock(&cpu_buffer->reader_lock);
-+		raw_spin_lock(&cpu_buffer->reader_lock);
++	locked = read_buffer_lock(cpu_buffer, &flags);
  	event = rb_buffer_peek(cpu_buffer, ts, lost_events);
  	if (event && event->type_len == RINGBUF_TYPE_PADDING)
  		rb_advance_reader(cpu_buffer);
- 	if (dolock)
+-	if (dolock)
 -		spin_unlock(&cpu_buffer->reader_lock);
-+		raw_spin_unlock(&cpu_buffer->reader_lock);
- 	local_irq_restore(flags);
- 
- 	if (event && event->type_len == RINGBUF_TYPE_PADDING)
-@@ -3281,9 +3281,9 @@ ring_buffer_iter_peek(struct ring_buffer
- 	unsigned long flags;
- 
-  again:
--	spin_lock_irqsave(&cpu_buffer->reader_lock, flags);
-+	raw_spin_lock_irqsave(&cpu_buffer->reader_lock, flags);
- 	event = rb_iter_peek(iter, ts);
--	spin_unlock_irqrestore(&cpu_buffer->reader_lock, flags);
-+	raw_spin_unlock_irqrestore(&cpu_buffer->reader_lock, flags);
+-	local_irq_restore(flags);
++	read_buffer_unlock(cpu_buffer, flags, locked);
  
  	if (event && event->type_len == RINGBUF_TYPE_PADDING)
  		goto again;
-@@ -3323,7 +3323,7 @@ ring_buffer_consume(struct ring_buffer *
+@@ -3279,11 +3302,12 @@ ring_buffer_iter_peek(struct ring_buffer
+ 	struct ring_buffer_per_cpu *cpu_buffer = iter->cpu_buffer;
+ 	struct ring_buffer_event *event;
+ 	unsigned long flags;
++	int locked;
+ 
+  again:
+-	spin_lock_irqsave(&cpu_buffer->reader_lock, flags);
++	locked = read_buffer_lock(cpu_buffer, &flags);
+ 	event = rb_iter_peek(iter, ts);
+-	spin_unlock_irqrestore(&cpu_buffer->reader_lock, flags);
++	read_buffer_unlock(cpu_buffer, flags, locked);
+ 
+ 	if (event && event->type_len == RINGBUF_TYPE_PADDING)
+ 		goto again;
+@@ -3309,9 +3333,7 @@ ring_buffer_consume(struct ring_buffer *
+ 	struct ring_buffer_per_cpu *cpu_buffer;
+ 	struct ring_buffer_event *event = NULL;
+ 	unsigned long flags;
+-	int dolock;
+-
+-	dolock = rb_ok_to_lock();
++	int locked;
+ 
+  again:
+ 	/* might be called in atomic */
+@@ -3321,9 +3343,7 @@ ring_buffer_consume(struct ring_buffer *
+ 		goto out;
+ 
  	cpu_buffer = buffer->buffers[cpu];
- 	local_irq_save(flags);
- 	if (dolock)
+-	local_irq_save(flags);
+-	if (dolock)
 -		spin_lock(&cpu_buffer->reader_lock);
-+		raw_spin_lock(&cpu_buffer->reader_lock);
++	locked = read_buffer_lock(cpu_buffer, &flags);
  
  	event = rb_buffer_peek(cpu_buffer, ts, lost_events);
  	if (event) {
-@@ -3332,7 +3332,7 @@ ring_buffer_consume(struct ring_buffer *
+@@ -3331,9 +3351,8 @@ ring_buffer_consume(struct ring_buffer *
+ 		rb_advance_reader(cpu_buffer);
  	}
  
- 	if (dolock)
+-	if (dolock)
 -		spin_unlock(&cpu_buffer->reader_lock);
-+		raw_spin_unlock(&cpu_buffer->reader_lock);
- 	local_irq_restore(flags);
+-	local_irq_restore(flags);
++	read_buffer_unlock(cpu_buffer, flags, locked);
++
  
   out:
-@@ -3424,11 +3424,11 @@ ring_buffer_read_start(struct ring_buffe
+ 	preempt_enable();
+@@ -3418,17 +3437,18 @@ ring_buffer_read_start(struct ring_buffe
+ {
+ 	struct ring_buffer_per_cpu *cpu_buffer;
+ 	unsigned long flags;
++	int locked;
+ 
+ 	if (!iter)
+ 		return;
  
  	cpu_buffer = iter->cpu_buffer;
  
 -	spin_lock_irqsave(&cpu_buffer->reader_lock, flags);
-+	raw_spin_lock_irqsave(&cpu_buffer->reader_lock, flags);
++	locked = read_buffer_lock(cpu_buffer, &flags);
  	arch_spin_lock(&cpu_buffer->lock);
  	rb_iter_reset(iter);
  	arch_spin_unlock(&cpu_buffer->lock);
 -	spin_unlock_irqrestore(&cpu_buffer->reader_lock, flags);
-+	raw_spin_unlock_irqrestore(&cpu_buffer->reader_lock, flags);
++	read_buffer_unlock(cpu_buffer, flags, locked);
  }
  EXPORT_SYMBOL_GPL(ring_buffer_read_start);
  
-@@ -3463,7 +3463,7 @@ ring_buffer_read(struct ring_buffer_iter
+@@ -3462,8 +3482,9 @@ ring_buffer_read(struct ring_buffer_iter
+ 	struct ring_buffer_event *event;
  	struct ring_buffer_per_cpu *cpu_buffer = iter->cpu_buffer;
  	unsigned long flags;
++	int locked;
  
 -	spin_lock_irqsave(&cpu_buffer->reader_lock, flags);
-+	raw_spin_lock_irqsave(&cpu_buffer->reader_lock, flags);
++	locked = read_buffer_lock(cpu_buffer, &flags);
   again:
  	event = rb_iter_peek(iter, ts);
  	if (!event)
-@@ -3474,7 +3474,7 @@ ring_buffer_read(struct ring_buffer_iter
+@@ -3474,7 +3495,7 @@ ring_buffer_read(struct ring_buffer_iter
  
  	rb_advance_iter(iter);
   out:
 -	spin_unlock_irqrestore(&cpu_buffer->reader_lock, flags);
-+	raw_spin_unlock_irqrestore(&cpu_buffer->reader_lock, flags);
++	read_buffer_unlock(cpu_buffer, flags, locked);
  
  	return event;
  }
-@@ -3543,7 +3543,7 @@ void ring_buffer_reset_cpu(struct ring_b
+@@ -3537,13 +3558,14 @@ void ring_buffer_reset_cpu(struct ring_b
+ {
+ 	struct ring_buffer_per_cpu *cpu_buffer = buffer->buffers[cpu];
+ 	unsigned long flags;
++	int locked;
+ 
+ 	if (!cpumask_test_cpu(cpu, buffer->cpumask))
+ 		return;
  
  	atomic_inc(&cpu_buffer->record_disabled);
  
 -	spin_lock_irqsave(&cpu_buffer->reader_lock, flags);
-+	raw_spin_lock_irqsave(&cpu_buffer->reader_lock, flags);
++	locked = read_buffer_lock(cpu_buffer, &flags);
  
  	if (RB_WARN_ON(cpu_buffer, local_read(&cpu_buffer->committing)))
  		goto out;
-@@ -3555,7 +3555,7 @@ void ring_buffer_reset_cpu(struct ring_b
+@@ -3555,7 +3577,7 @@ void ring_buffer_reset_cpu(struct ring_b
  	arch_spin_unlock(&cpu_buffer->lock);
  
   out:
 -	spin_unlock_irqrestore(&cpu_buffer->reader_lock, flags);
-+	raw_spin_unlock_irqrestore(&cpu_buffer->reader_lock, flags);
++	read_buffer_unlock(cpu_buffer, flags, locked);
  
  	atomic_dec(&cpu_buffer->record_disabled);
  }
-@@ -3593,10 +3593,10 @@ int ring_buffer_empty(struct ring_buffer
+@@ -3582,22 +3604,16 @@ int ring_buffer_empty(struct ring_buffer
+ {
+ 	struct ring_buffer_per_cpu *cpu_buffer;
+ 	unsigned long flags;
+-	int dolock;
++	int locked;
+ 	int cpu;
+ 	int ret;
+ 
+-	dolock = rb_ok_to_lock();
+-
+ 	/* yes this is racy, but if you don't like the race, lock the buffer */
+ 	for_each_buffer_cpu(buffer, cpu) {
  		cpu_buffer = buffer->buffers[cpu];
- 		local_irq_save(flags);
- 		if (dolock)
+-		local_irq_save(flags);
+-		if (dolock)
 -			spin_lock(&cpu_buffer->reader_lock);
-+			raw_spin_lock(&cpu_buffer->reader_lock);
++		locked = read_buffer_lock(cpu_buffer, &flags);
  		ret = rb_per_cpu_empty(cpu_buffer);
- 		if (dolock)
+-		if (dolock)
 -			spin_unlock(&cpu_buffer->reader_lock);
-+			raw_spin_unlock(&cpu_buffer->reader_lock);
- 		local_irq_restore(flags);
+-		local_irq_restore(flags);
++		read_buffer_unlock(cpu_buffer, flags, locked);
  
  		if (!ret)
-@@ -3627,10 +3627,10 @@ int ring_buffer_empty_cpu(struct ring_bu
+ 			return 0;
+@@ -3616,22 +3632,16 @@ int ring_buffer_empty_cpu(struct ring_bu
+ {
+ 	struct ring_buffer_per_cpu *cpu_buffer;
+ 	unsigned long flags;
+-	int dolock;
++	int locked;
+ 	int ret;
+ 
+ 	if (!cpumask_test_cpu(cpu, buffer->cpumask))
+ 		return 1;
+ 
+-	dolock = rb_ok_to_lock();
+-
  	cpu_buffer = buffer->buffers[cpu];
- 	local_irq_save(flags);
- 	if (dolock)
+-	local_irq_save(flags);
+-	if (dolock)
 -		spin_lock(&cpu_buffer->reader_lock);
-+		raw_spin_lock(&cpu_buffer->reader_lock);
++	locked = read_buffer_lock(cpu_buffer, &flags);
  	ret = rb_per_cpu_empty(cpu_buffer);
- 	if (dolock)
+-	if (dolock)
 -		spin_unlock(&cpu_buffer->reader_lock);
-+		raw_spin_unlock(&cpu_buffer->reader_lock);
- 	local_irq_restore(flags);
+-	local_irq_restore(flags);
++	read_buffer_unlock(cpu_buffer, flags, locked);
  
  	return ret;
-@@ -3826,7 +3826,7 @@ int ring_buffer_read_page(struct ring_bu
+ }
+@@ -3805,6 +3815,7 @@ int ring_buffer_read_page(struct ring_bu
+ 	unsigned int commit;
+ 	unsigned int read;
+ 	u64 save_timestamp;
++	int locked;
+ 	int ret = -1;
+ 
+ 	if (!cpumask_test_cpu(cpu, buffer->cpumask))
+@@ -3826,7 +3837,7 @@ int ring_buffer_read_page(struct ring_bu
  	if (!bpage)
  		goto out;
  
 -	spin_lock_irqsave(&cpu_buffer->reader_lock, flags);
-+	raw_spin_lock_irqsave(&cpu_buffer->reader_lock, flags);
++	locked = read_buffer_lock(cpu_buffer, &flags);
  
  	reader = rb_get_reader_page(cpu_buffer);
  	if (!reader)
-@@ -3949,7 +3949,7 @@ int ring_buffer_read_page(struct ring_bu
+@@ -3949,7 +3960,7 @@ int ring_buffer_read_page(struct ring_bu
  		memset(&bpage->data[commit], 0, BUF_PAGE_SIZE - commit);
  
   out_unlock:
 -	spin_unlock_irqrestore(&cpu_buffer->reader_lock, flags);
-+	raw_spin_unlock_irqrestore(&cpu_buffer->reader_lock, flags);
++	read_buffer_unlock(cpu_buffer, flags, locked);
  
   out:
  	return ret;
@@ -3798,21 +4848,24 @@ Index: linux-2.6/kernel/trace/trace_irqsoff.c
  }
  EXPORT_SYMBOL(trace_hardirqs_off_caller);
  
-@@ -503,12 +512,14 @@ EXPORT_SYMBOL(trace_hardirqs_off_caller)
+@@ -503,13 +512,15 @@ EXPORT_SYMBOL(trace_hardirqs_off_caller)
  #ifdef CONFIG_PREEMPT_TRACER
  void trace_preempt_on(unsigned long a0, unsigned long a1)
  {
+-	if (preempt_trace())
 +	trace_preemptirqsoff_hist(PREEMPT_ON, 0);
- 	if (preempt_trace())
++	if (preempt_trace() && !irq_trace())
  		stop_critical_timing(a0, a1);
  }
  
  void trace_preempt_off(unsigned long a0, unsigned long a1)
  {
-+	trace_preemptirqsoff_hist(PREEMPT_OFF, 1);
- 	if (preempt_trace())
+-	if (preempt_trace())
++	trace_preemptirqsoff_hist(PREEMPT_ON, 1);
++	if (preempt_trace() && !irq_trace())
  		start_critical_timing(a0, a1);
  }
+ #endif /* CONFIG_PREEMPT_TRACER */
 Index: linux-2.6/include/linux/ratelimit.h
 ===================================================================
 --- linux-2.6.orig/include/linux/ratelimit.h
@@ -3848,7 +4901,15 @@ Index: linux-2.6/kernel/printk.c
 ===================================================================
 --- linux-2.6.orig/kernel/printk.c
 +++ linux-2.6/kernel/printk.c
-@@ -44,13 +44,6 @@
+@@ -21,6 +21,7 @@
+ #include <linux/tty.h>
+ #include <linux/tty_driver.h>
+ #include <linux/console.h>
++#include <linux/sysrq.h>
+ #include <linux/init.h>
+ #include <linux/jiffies.h>
+ #include <linux/nmi.h>
+@@ -44,13 +45,6 @@
  
  #include <asm/uaccess.h>
  
@@ -3862,7 +4923,7 @@ Index: linux-2.6/kernel/printk.c
  #define __LOG_BUF_LEN	(1 << CONFIG_LOG_BUF_SHIFT)
  
  /* printk's without a loglevel use this.. */
-@@ -100,7 +93,7 @@ static int console_locked, console_suspe
+@@ -100,7 +94,7 @@ static int console_locked, console_suspe
   * It is also used in interesting ways to provide interlocking in
   * console_unlock();.
   */
@@ -3871,7 +4932,7 @@ Index: linux-2.6/kernel/printk.c
  
  #define LOG_BUF_MASK (log_buf_len-1)
  #define LOG_BUF(idx) (log_buf[(idx) & LOG_BUF_MASK])
-@@ -212,7 +205,7 @@ void __init setup_log_buf(int early)
+@@ -212,7 +206,7 @@ void __init setup_log_buf(int early)
  		return;
  	}
  
@@ -3880,7 +4941,7 @@ Index: linux-2.6/kernel/printk.c
  	log_buf_len = new_log_buf_len;
  	log_buf = new_log_buf;
  	new_log_buf_len = 0;
-@@ -230,7 +223,7 @@ void __init setup_log_buf(int early)
+@@ -230,7 +224,7 @@ void __init setup_log_buf(int early)
  	log_start -= offset;
  	con_start -= offset;
  	log_end -= offset;
@@ -3889,7 +4950,7 @@ Index: linux-2.6/kernel/printk.c
  
  	pr_info("log_buf_len: %d\n", log_buf_len);
  	pr_info("early log buf free: %d(%d%%)\n",
-@@ -363,18 +356,18 @@ int do_syslog(int type, char __user *buf
+@@ -363,18 +357,18 @@ int do_syslog(int type, char __user *buf
  		if (error)
  			goto out;
  		i = 0;
@@ -3912,7 +4973,7 @@ Index: linux-2.6/kernel/printk.c
  		if (!error)
  			error = i;
  		break;
-@@ -397,7 +390,7 @@ int do_syslog(int type, char __user *buf
+@@ -397,7 +391,7 @@ int do_syslog(int type, char __user *buf
  		count = len;
  		if (count > log_buf_len)
  			count = log_buf_len;
@@ -3921,7 +4982,7 @@ Index: linux-2.6/kernel/printk.c
  		if (count > logged_chars)
  			count = logged_chars;
  		if (do_clear)
-@@ -414,12 +407,12 @@ int do_syslog(int type, char __user *buf
+@@ -414,12 +408,12 @@ int do_syslog(int type, char __user *buf
  			if (j + log_buf_len < log_end)
  				break;
  			c = LOG_BUF(j);
@@ -3937,7 +4998,7 @@ Index: linux-2.6/kernel/printk.c
  		if (error)
  			break;
  		error = i;
-@@ -509,6 +502,7 @@ static void __call_console_drivers(unsig
+@@ -509,6 +503,7 @@ static void __call_console_drivers(unsig
  {
  	struct console *con;
  
@@ -3945,7 +5006,7 @@ Index: linux-2.6/kernel/printk.c
  	for_each_console(con) {
  		if (exclusive_console && con != exclusive_console)
  			continue;
-@@ -517,8 +511,62 @@ static void __call_console_drivers(unsig
+@@ -517,8 +512,62 @@ static void __call_console_drivers(unsig
  				(con->flags & CON_ANYTIME)))
  			con->write(con, &LOG_BUF(start), end - start);
  	}
@@ -4008,7 +5069,7 @@ Index: linux-2.6/kernel/printk.c
  static int __read_mostly ignore_loglevel;
  
  static int __init ignore_loglevel_setup(char *str)
-@@ -687,7 +735,7 @@ static void zap_locks(void)
+@@ -687,7 +736,7 @@ static void zap_locks(void)
  	oops_timestamp = jiffies;
  
  	/* If a crash is occurring, make sure we can't deadlock */
@@ -4017,7 +5078,7 @@ Index: linux-2.6/kernel/printk.c
  	/* And make sure that we print immediately */
  	sema_init(&console_sem, 1);
  }
-@@ -779,12 +827,18 @@ static inline int can_use_console(unsign
+@@ -779,12 +828,18 @@ static inline int can_use_console(unsign
   * interrupts disabled. It should return with 'lockbuf_lock'
   * released but interrupts still disabled.
   */
@@ -4026,8 +5087,8 @@ Index: linux-2.6/kernel/printk.c
  	__releases(&logbuf_lock)
  {
 +#ifdef CONFIG_PREEMPT_RT_FULL
-+	int lock = !early_boot_irqs_disabled && !irqs_disabled_flags(flags) &&
-+		!preempt_count();
++	int lock = (!early_boot_irqs_disabled && !irqs_disabled_flags(flags) &&
++		!preempt_count()) || sysrq_in_progress;
 +#else
 +	int lock = 1;
 +#endif
@@ -4038,7 +5099,7 @@ Index: linux-2.6/kernel/printk.c
  		retval = 1;
  
  		/*
-@@ -800,7 +854,7 @@ static int console_trylock_for_printk(un
+@@ -800,7 +855,7 @@ static int console_trylock_for_printk(un
  		}
  	}
  	printk_cpu = UINT_MAX;
@@ -4047,7 +5108,7 @@ Index: linux-2.6/kernel/printk.c
  	return retval;
  }
  static const char recursion_bug_msg [] =
-@@ -833,6 +887,13 @@ asmlinkage int vprintk(const char *fmt, 
+@@ -833,6 +888,13 @@ asmlinkage int vprintk(const char *fmt, 
  	size_t plen;
  	char special;
  
@@ -4061,7 +5122,7 @@ Index: linux-2.6/kernel/printk.c
  	boot_delay_msec();
  	printk_delay();
  
-@@ -860,7 +921,7 @@ asmlinkage int vprintk(const char *fmt, 
+@@ -860,7 +922,7 @@ asmlinkage int vprintk(const char *fmt, 
  	}
  
  	lockdep_off();
@@ -4070,7 +5131,7 @@ Index: linux-2.6/kernel/printk.c
  	printk_cpu = this_cpu;
  
  	if (recursion_bug) {
-@@ -953,8 +1014,15 @@ asmlinkage int vprintk(const char *fmt, 
+@@ -953,8 +1015,15 @@ asmlinkage int vprintk(const char *fmt, 
  	 * will release 'logbuf_lock' regardless of whether it
  	 * actually gets the semaphore or not.
  	 */
@@ -4087,7 +5148,7 @@ Index: linux-2.6/kernel/printk.c
  
  	lockdep_on();
  out_restore_irqs:
-@@ -1252,18 +1320,23 @@ void console_unlock(void)
+@@ -1252,18 +1321,23 @@ void console_unlock(void)
  	console_may_schedule = 0;
  
  	for ( ; ; ) {
@@ -4113,7 +5174,7 @@ Index: linux-2.6/kernel/printk.c
  	}
  	console_locked = 0;
  
-@@ -1272,7 +1345,7 @@ void console_unlock(void)
+@@ -1272,7 +1346,7 @@ void console_unlock(void)
  		exclusive_console = NULL;
  
  	up(&console_sem);
@@ -4122,7 +5183,7 @@ Index: linux-2.6/kernel/printk.c
  	if (wake_klogd)
  		wake_up_klogd();
  }
-@@ -1502,9 +1575,9 @@ void register_console(struct console *ne
+@@ -1502,9 +1576,9 @@ void register_console(struct console *ne
  		 * console_unlock(); will print out the buffered messages
  		 * for us.
  		 */
@@ -4134,7 +5195,7 @@ Index: linux-2.6/kernel/printk.c
  		/*
  		 * We're about to replay the log buffer.  Only do this to the
  		 * just-registered console to avoid excessive message spam to
-@@ -1711,10 +1784,10 @@ void kmsg_dump(enum kmsg_dump_reason rea
+@@ -1711,10 +1785,10 @@ void kmsg_dump(enum kmsg_dump_reason rea
  	/* Theoretically, the log could move on after we do this, but
  	   there's not a lot we can do about that. The new messages
  	   will overwrite the start of what we dump. */
@@ -7440,6 +8501,189 @@ Index: linux-2.6/drivers/dma/ipu/ipu_irq.c
  
  			if (!map) {
  				pr_err("IPU: Interrupt on unmapped source %u bank %d\n",
+Index: linux-2.6/drivers/pci/dmar.c
+===================================================================
+--- linux-2.6.orig/drivers/pci/dmar.c
++++ linux-2.6/drivers/pci/dmar.c
+@@ -800,7 +800,7 @@ int alloc_iommu(struct dmar_drhd_unit *d
+ 		(unsigned long long)iommu->cap,
+ 		(unsigned long long)iommu->ecap);
+ 
+-	spin_lock_init(&iommu->register_lock);
++	raw_spin_lock_init(&iommu->register_lock);
+ 
+ 	drhd->iommu = iommu;
+ 	return 0;
+@@ -921,11 +921,11 @@ int qi_submit_sync(struct qi_desc *desc,
+ restart:
+ 	rc = 0;
+ 
+-	spin_lock_irqsave(&qi->q_lock, flags);
++	raw_spin_lock_irqsave(&qi->q_lock, flags);
+ 	while (qi->free_cnt < 3) {
+-		spin_unlock_irqrestore(&qi->q_lock, flags);
++		raw_spin_unlock_irqrestore(&qi->q_lock, flags);
+ 		cpu_relax();
+-		spin_lock_irqsave(&qi->q_lock, flags);
++		raw_spin_lock_irqsave(&qi->q_lock, flags);
+ 	}
+ 
+ 	index = qi->free_head;
+@@ -965,15 +965,15 @@ restart:
+ 		if (rc)
+ 			break;
+ 
+-		spin_unlock(&qi->q_lock);
++		raw_spin_unlock(&qi->q_lock);
+ 		cpu_relax();
+-		spin_lock(&qi->q_lock);
++		raw_spin_lock(&qi->q_lock);
+ 	}
+ 
+ 	qi->desc_status[index] = QI_DONE;
+ 
+ 	reclaim_free_desc(qi);
+-	spin_unlock_irqrestore(&qi->q_lock, flags);
++	raw_spin_unlock_irqrestore(&qi->q_lock, flags);
+ 
+ 	if (rc == -EAGAIN)
+ 		goto restart;
+@@ -1062,7 +1062,7 @@ void dmar_disable_qi(struct intel_iommu 
+ 	if (!ecap_qis(iommu->ecap))
+ 		return;
+ 
+-	spin_lock_irqsave(&iommu->register_lock, flags);
++	raw_spin_lock_irqsave(&iommu->register_lock, flags);
+ 
+ 	sts =  dmar_readq(iommu->reg + DMAR_GSTS_REG);
+ 	if (!(sts & DMA_GSTS_QIES))
+@@ -1082,7 +1082,7 @@ void dmar_disable_qi(struct intel_iommu 
+ 	IOMMU_WAIT_OP(iommu, DMAR_GSTS_REG, readl,
+ 		      !(sts & DMA_GSTS_QIES), sts);
+ end:
+-	spin_unlock_irqrestore(&iommu->register_lock, flags);
++	raw_spin_unlock_irqrestore(&iommu->register_lock, flags);
+ }
+ 
+ /*
+@@ -1097,7 +1097,7 @@ static void __dmar_enable_qi(struct inte
+ 	qi->free_head = qi->free_tail = 0;
+ 	qi->free_cnt = QI_LENGTH;
+ 
+-	spin_lock_irqsave(&iommu->register_lock, flags);
++	raw_spin_lock_irqsave(&iommu->register_lock, flags);
+ 
+ 	/* write zero to the tail reg */
+ 	writel(0, iommu->reg + DMAR_IQT_REG);
+@@ -1110,7 +1110,7 @@ static void __dmar_enable_qi(struct inte
+ 	/* Make sure hardware complete it */
+ 	IOMMU_WAIT_OP(iommu, DMAR_GSTS_REG, readl, (sts & DMA_GSTS_QIES), sts);
+ 
+-	spin_unlock_irqrestore(&iommu->register_lock, flags);
++	raw_spin_unlock_irqrestore(&iommu->register_lock, flags);
+ }
+ 
+ /*
+@@ -1159,7 +1159,7 @@ int dmar_enable_qi(struct intel_iommu *i
+ 	qi->free_head = qi->free_tail = 0;
+ 	qi->free_cnt = QI_LENGTH;
+ 
+-	spin_lock_init(&qi->q_lock);
++	raw_spin_lock_init(&qi->q_lock);
+ 
+ 	__dmar_enable_qi(iommu);
+ 
+@@ -1225,11 +1225,11 @@ void dmar_msi_unmask(struct irq_data *da
+ 	unsigned long flag;
+ 
+ 	/* unmask it */
+-	spin_lock_irqsave(&iommu->register_lock, flag);
++	raw_spin_lock_irqsave(&iommu->register_lock, flag);
+ 	writel(0, iommu->reg + DMAR_FECTL_REG);
+ 	/* Read a reg to force flush the post write */
+ 	readl(iommu->reg + DMAR_FECTL_REG);
+-	spin_unlock_irqrestore(&iommu->register_lock, flag);
++	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
+ }
+ 
+ void dmar_msi_mask(struct irq_data *data)
+@@ -1238,11 +1238,11 @@ void dmar_msi_mask(struct irq_data *data
+ 	struct intel_iommu *iommu = irq_data_get_irq_handler_data(data);
+ 
+ 	/* mask it */
+-	spin_lock_irqsave(&iommu->register_lock, flag);
++	raw_spin_lock_irqsave(&iommu->register_lock, flag);
+ 	writel(DMA_FECTL_IM, iommu->reg + DMAR_FECTL_REG);
+ 	/* Read a reg to force flush the post write */
+ 	readl(iommu->reg + DMAR_FECTL_REG);
+-	spin_unlock_irqrestore(&iommu->register_lock, flag);
++	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
+ }
+ 
+ void dmar_msi_write(int irq, struct msi_msg *msg)
+@@ -1250,11 +1250,11 @@ void dmar_msi_write(int irq, struct msi_
+ 	struct intel_iommu *iommu = irq_get_handler_data(irq);
+ 	unsigned long flag;
+ 
+-	spin_lock_irqsave(&iommu->register_lock, flag);
++	raw_spin_lock_irqsave(&iommu->register_lock, flag);
+ 	writel(msg->data, iommu->reg + DMAR_FEDATA_REG);
+ 	writel(msg->address_lo, iommu->reg + DMAR_FEADDR_REG);
+ 	writel(msg->address_hi, iommu->reg + DMAR_FEUADDR_REG);
+-	spin_unlock_irqrestore(&iommu->register_lock, flag);
++	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
+ }
+ 
+ void dmar_msi_read(int irq, struct msi_msg *msg)
+@@ -1262,11 +1262,11 @@ void dmar_msi_read(int irq, struct msi_m
+ 	struct intel_iommu *iommu = irq_get_handler_data(irq);
+ 	unsigned long flag;
+ 
+-	spin_lock_irqsave(&iommu->register_lock, flag);
++	raw_spin_lock_irqsave(&iommu->register_lock, flag);
+ 	msg->data = readl(iommu->reg + DMAR_FEDATA_REG);
+ 	msg->address_lo = readl(iommu->reg + DMAR_FEADDR_REG);
+ 	msg->address_hi = readl(iommu->reg + DMAR_FEUADDR_REG);
+-	spin_unlock_irqrestore(&iommu->register_lock, flag);
++	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
+ }
+ 
+ static int dmar_fault_do_one(struct intel_iommu *iommu, int type,
+@@ -1303,7 +1303,7 @@ irqreturn_t dmar_fault(int irq, void *de
+ 	u32 fault_status;
+ 	unsigned long flag;
+ 
+-	spin_lock_irqsave(&iommu->register_lock, flag);
++	raw_spin_lock_irqsave(&iommu->register_lock, flag);
+ 	fault_status = readl(iommu->reg + DMAR_FSTS_REG);
+ 	if (fault_status)
+ 		printk(KERN_ERR "DRHD: handling fault status reg %x\n",
+@@ -1342,7 +1342,7 @@ irqreturn_t dmar_fault(int irq, void *de
+ 		writel(DMA_FRCD_F, iommu->reg + reg +
+ 			fault_index * PRIMARY_FAULT_REG_LEN + 12);
+ 
+-		spin_unlock_irqrestore(&iommu->register_lock, flag);
++		raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
+ 
+ 		dmar_fault_do_one(iommu, type, fault_reason,
+ 				source_id, guest_addr);
+@@ -1350,14 +1350,14 @@ irqreturn_t dmar_fault(int irq, void *de
+ 		fault_index++;
+ 		if (fault_index >= cap_num_fault_regs(iommu->cap))
+ 			fault_index = 0;
+-		spin_lock_irqsave(&iommu->register_lock, flag);
++		raw_spin_lock_irqsave(&iommu->register_lock, flag);
+ 	}
+ clear_rest:
+ 	/* clear all the other faults */
+ 	fault_status = readl(iommu->reg + DMAR_FSTS_REG);
+ 	writel(fault_status, iommu->reg + DMAR_FSTS_REG);
+ 
+-	spin_unlock_irqrestore(&iommu->register_lock, flag);
++	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
+ 	return IRQ_HANDLED;
+ }
+ 
 Index: linux-2.6/drivers/pci/intel-iommu.c
 ===================================================================
 --- linux-2.6.orig/drivers/pci/intel-iommu.c
@@ -8311,6 +9555,247 @@ Index: linux-2.6/arch/x86/include/asm/amd_nb.h
  };
  
  struct amd_northbridge_info {
+Index: linux-2.6/arch/x86/include/asm/irqflags.h
+===================================================================
+--- linux-2.6.orig/arch/x86/include/asm/irqflags.h
++++ linux-2.6/arch/x86/include/asm/irqflags.h
+@@ -60,23 +60,24 @@ static inline void native_halt(void)
+ #include <asm/paravirt.h>
+ #else
+ #ifndef __ASSEMBLY__
++#include <linux/types.h>
+ 
+-static inline unsigned long arch_local_save_flags(void)
++static inline notrace unsigned long arch_local_save_flags(void)
+ {
+ 	return native_save_fl();
+ }
+ 
+-static inline void arch_local_irq_restore(unsigned long flags)
++static inline notrace void arch_local_irq_restore(unsigned long flags)
+ {
+ 	native_restore_fl(flags);
+ }
+ 
+-static inline void arch_local_irq_disable(void)
++static inline notrace void arch_local_irq_disable(void)
+ {
+ 	native_irq_disable();
+ }
+ 
+-static inline void arch_local_irq_enable(void)
++static inline notrace void arch_local_irq_enable(void)
+ {
+ 	native_irq_enable();
+ }
+@@ -102,7 +103,7 @@ static inline void halt(void)
+ /*
+  * For spinlocks, etc:
+  */
+-static inline unsigned long arch_local_irq_save(void)
++static inline notrace unsigned long arch_local_irq_save(void)
+ {
+ 	unsigned long flags = arch_local_save_flags();
+ 	arch_local_irq_disable();
+Index: linux-2.6/kernel/signal.c
+===================================================================
+--- linux-2.6.orig/kernel/signal.c
++++ linux-2.6/kernel/signal.c
+@@ -300,13 +300,45 @@ static bool task_participate_group_stop(
+ 	return false;
+ }
+ 
++#ifdef __HAVE_ARCH_CMPXCHG
++static inline struct sigqueue *get_task_cache(struct task_struct *t)
++{
++	struct sigqueue *q = t->sigqueue_cache;
++
++	if (cmpxchg(&t->sigqueue_cache, q, NULL) != q)
++		return NULL;
++	return q;
++}
++
++static inline int put_task_cache(struct task_struct *t, struct sigqueue *q)
++{
++	if (cmpxchg(&t->sigqueue_cache, NULL, q) == NULL)
++		return 0;
++	return 1;
++}
++
++#else
++
++static inline struct sigqueue *get_task_cache(struct task_struct *t)
++{
++	return NULL;
++}
++
++static inline int put_task_cache(struct task_struct *t, struct sigqueue *q)
++{
++	return 1;
++}
++
++#endif
++
+ /*
+  * allocate a new signal queue record
+  * - this may be called without locks if and only if t == current, otherwise an
+  *   appropriate lock must be held to stop the target task from exiting
+  */
+ static struct sigqueue *
+-__sigqueue_alloc(int sig, struct task_struct *t, gfp_t flags, int override_rlimit)
++__sigqueue_do_alloc(int sig, struct task_struct *t, gfp_t flags,
++		    int override_rlimit, int fromslab)
+ {
+ 	struct sigqueue *q = NULL;
+ 	struct user_struct *user;
+@@ -323,7 +355,10 @@ __sigqueue_alloc(int sig, struct task_st
+ 	if (override_rlimit ||
+ 	    atomic_read(&user->sigpending) <=
+ 			task_rlimit(t, RLIMIT_SIGPENDING)) {
+-		q = kmem_cache_alloc(sigqueue_cachep, flags);
++		if (!fromslab)
++			q = get_task_cache(t);
++		if (!q)
++			q = kmem_cache_alloc(sigqueue_cachep, flags);
+ 	} else {
+ 		print_dropped_signal(sig);
+ 	}
+@@ -340,6 +375,13 @@ __sigqueue_alloc(int sig, struct task_st
+ 	return q;
+ }
+ 
++static struct sigqueue *
++__sigqueue_alloc(int sig, struct task_struct *t, gfp_t flags,
++		 int override_rlimit)
++{
++	return __sigqueue_do_alloc(sig, t, flags, override_rlimit, 0);
++}
++
+ static void __sigqueue_free(struct sigqueue *q)
+ {
+ 	if (q->flags & SIGQUEUE_PREALLOC)
+@@ -349,6 +391,21 @@ static void __sigqueue_free(struct sigqu
+ 	kmem_cache_free(sigqueue_cachep, q);
+ }
+ 
++static void sigqueue_free_current(struct sigqueue *q)
++{
++	struct user_struct *up;
++
++	if (q->flags & SIGQUEUE_PREALLOC)
++		return;
++
++	up = q->user;
++	if (rt_prio(current->normal_prio) && !put_task_cache(current, q)) {
++		atomic_dec(&up->sigpending);
++		free_uid(up);
++	} else
++		  __sigqueue_free(q);
++}
++
+ void flush_sigqueue(struct sigpending *queue)
+ {
+ 	struct sigqueue *q;
+@@ -362,6 +419,21 @@ void flush_sigqueue(struct sigpending *q
+ }
+ 
+ /*
++ * Called from __exit_signal. Flush tsk->pending and
++ * tsk->sigqueue_cache
++ */
++void flush_task_sigqueue(struct task_struct *tsk)
++{
++	struct sigqueue *q;
++
++	flush_sigqueue(&tsk->pending);
++
++	q = get_task_cache(tsk);
++	if (q)
++		kmem_cache_free(sigqueue_cachep, q);
++}
++
++/*
+  * Flush all pending signals for a task.
+  */
+ void __flush_signals(struct task_struct *t)
+@@ -509,7 +581,7 @@ static void collect_signal(int sig, stru
+ still_pending:
+ 		list_del_init(&first->list);
+ 		copy_siginfo(info, &first->info);
+-		__sigqueue_free(first);
++		sigqueue_free_current(first);
+ 	} else {
+ 		/*
+ 		 * Ok, it wasn't in the queue.  This must be
+@@ -555,6 +627,8 @@ int dequeue_signal(struct task_struct *t
+ {
+ 	int signr;
+ 
++	WARN_ON_ONCE(tsk != current);
++
+ 	/* We only dequeue private signals from ourselves, we don't let
+ 	 * signalfd steal them
+ 	 */
+@@ -637,6 +711,9 @@ void signal_wake_up(struct task_struct *
+ 
+ 	set_tsk_thread_flag(t, TIF_SIGPENDING);
+ 
++	if (unlikely(t == current))
++		return;
++
+ 	/*
+ 	 * For SIGKILL, we want to wake it up in the stopped/traced/killable
+ 	 * case. We don't check t->state here because there is a race with it
+@@ -1179,12 +1256,12 @@ struct sighand_struct *__lock_task_sigha
+ 	struct sighand_struct *sighand;
+ 
+ 	for (;;) {
+-		local_irq_save(*flags);
++		local_irq_save_nort(*flags);
+ 		rcu_read_lock();
+ 		sighand = rcu_dereference(tsk->sighand);
+ 		if (unlikely(sighand == NULL)) {
+ 			rcu_read_unlock();
+-			local_irq_restore(*flags);
++			local_irq_restore_nort(*flags);
+ 			break;
+ 		}
+ 
+@@ -1195,7 +1272,7 @@ struct sighand_struct *__lock_task_sigha
+ 		}
+ 		spin_unlock(&sighand->siglock);
+ 		rcu_read_unlock();
+-		local_irq_restore(*flags);
++		local_irq_restore_nort(*flags);
+ 	}
+ 
+ 	return sighand;
+@@ -1434,7 +1511,8 @@ EXPORT_SYMBOL(kill_pid);
+  */
+ struct sigqueue *sigqueue_alloc(void)
+ {
+-	struct sigqueue *q = __sigqueue_alloc(-1, current, GFP_KERNEL, 0);
++	/* Preallocated sigqueue objects always from the slabcache ! */
++	struct sigqueue *q = __sigqueue_do_alloc(-1, current, GFP_KERNEL, 0, 1);
+ 
+ 	if (q)
+ 		q->flags |= SIGQUEUE_PREALLOC;
+@@ -1782,15 +1860,7 @@ static void ptrace_stop(int exit_code, i
+ 		if (gstop_done && !real_parent_is_ptracer(current))
+ 			do_notify_parent_cldstop(current, false, why);
+ 
+-		/*
+-		 * Don't want to allow preemption here, because
+-		 * sys_ptrace() needs this task to be inactive.
+-		 *
+-		 * XXX: implement read_unlock_no_resched().
+-		 */
+-		preempt_disable();
+ 		read_unlock(&tasklist_lock);
+-		preempt_enable_no_resched();
+ 		schedule();
+ 	} else {
+ 		/*
 Index: linux-2.6/arch/arm/kernel/perf_event.c
 ===================================================================
 --- linux-2.6.orig/arch/arm/kernel/perf_event.c
@@ -8336,7 +9821,7 @@ Index: linux-2.6/arch/arm/Kconfig
  	help
  	  The ARM series is a line of low-power-consumption RISC chip designs
  	  licensed by ARM Ltd and targeted at embedded applications and
-@@ -1510,7 +1511,7 @@ config HAVE_ARCH_PFN_VALID
+@@ -1524,7 +1525,7 @@ config HAVE_ARCH_PFN_VALID
  
  config HIGHMEM
  	bool "High Memory Support"
@@ -8345,6 +9830,258 @@ Index: linux-2.6/arch/arm/Kconfig
  	help
  	  The address space of ARM processors is only 4 Gigabytes large
  	  and it has to accommodate user address space, kernel address
+Index: linux-2.6/arch/arm/plat-versatile/platsmp.c
+===================================================================
+--- linux-2.6.orig/arch/arm/plat-versatile/platsmp.c
++++ linux-2.6/arch/arm/plat-versatile/platsmp.c
+@@ -37,7 +37,7 @@ static void __cpuinit write_pen_release(
+ 	outer_clean_range(__pa(&pen_release), __pa(&pen_release + 1));
+ }
+ 
+-static DEFINE_SPINLOCK(boot_lock);
++static DEFINE_RAW_SPINLOCK(boot_lock);
+ 
+ void __cpuinit platform_secondary_init(unsigned int cpu)
+ {
+@@ -57,8 +57,8 @@ void __cpuinit platform_secondary_init(u
+ 	/*
+ 	 * Synchronise with the boot thread.
+ 	 */
+-	spin_lock(&boot_lock);
+-	spin_unlock(&boot_lock);
++	raw_spin_lock(&boot_lock);
++	raw_spin_unlock(&boot_lock);
+ }
+ 
+ int __cpuinit boot_secondary(unsigned int cpu, struct task_struct *idle)
+@@ -69,7 +69,7 @@ int __cpuinit boot_secondary(unsigned in
+ 	 * Set synchronisation state between this boot processor
+ 	 * and the secondary one
+ 	 */
+-	spin_lock(&boot_lock);
++	raw_spin_lock(&boot_lock);
+ 
+ 	/*
+ 	 * This is really belt and braces; we hold unintended secondary
+@@ -99,7 +99,7 @@ int __cpuinit boot_secondary(unsigned in
+ 	 * now the secondary core is starting up let it run its
+ 	 * calibrations, then wait for it to finish
+ 	 */
+-	spin_unlock(&boot_lock);
++	raw_spin_unlock(&boot_lock);
+ 
+ 	return pen_release != -1 ? -ENOSYS : 0;
+ }
+Index: linux-2.6/arch/arm/mach-exynos4/platsmp.c
+===================================================================
+--- linux-2.6.orig/arch/arm/mach-exynos4/platsmp.c
++++ linux-2.6/arch/arm/mach-exynos4/platsmp.c
+@@ -56,7 +56,7 @@ static void __iomem *scu_base_addr(void)
+ 	return (void __iomem *)(S5P_VA_SCU);
+ }
+ 
+-static DEFINE_SPINLOCK(boot_lock);
++static DEFINE_RAW_SPINLOCK(boot_lock);
+ 
+ void __cpuinit platform_secondary_init(unsigned int cpu)
+ {
+@@ -76,8 +76,8 @@ void __cpuinit platform_secondary_init(u
+ 	/*
+ 	 * Synchronise with the boot thread.
+ 	 */
+-	spin_lock(&boot_lock);
+-	spin_unlock(&boot_lock);
++	raw_spin_lock(&boot_lock);
++	raw_spin_unlock(&boot_lock);
+ }
+ 
+ int __cpuinit boot_secondary(unsigned int cpu, struct task_struct *idle)
+@@ -88,7 +88,7 @@ int __cpuinit boot_secondary(unsigned in
+ 	 * Set synchronisation state between this boot processor
+ 	 * and the secondary one
+ 	 */
+-	spin_lock(&boot_lock);
++	raw_spin_lock(&boot_lock);
+ 
+ 	/*
+ 	 * The secondary processor is waiting to be released from
+@@ -120,7 +120,7 @@ int __cpuinit boot_secondary(unsigned in
+ 	 * now the secondary core is starting up let it run its
+ 	 * calibrations, then wait for it to finish
+ 	 */
+-	spin_unlock(&boot_lock);
++	raw_spin_unlock(&boot_lock);
+ 
+ 	return pen_release != -1 ? -ENOSYS : 0;
+ }
+Index: linux-2.6/arch/arm/mach-msm/platsmp.c
+===================================================================
+--- linux-2.6.orig/arch/arm/mach-msm/platsmp.c
++++ linux-2.6/arch/arm/mach-msm/platsmp.c
+@@ -38,7 +38,7 @@ extern void msm_secondary_startup(void);
+  */
+ volatile int pen_release = -1;
+ 
+-static DEFINE_SPINLOCK(boot_lock);
++static DEFINE_RAW_SPINLOCK(boot_lock);
+ 
+ void __cpuinit platform_secondary_init(unsigned int cpu)
+ {
+@@ -62,8 +62,8 @@ void __cpuinit platform_secondary_init(u
+ 	/*
+ 	 * Synchronise with the boot thread.
+ 	 */
+-	spin_lock(&boot_lock);
+-	spin_unlock(&boot_lock);
++	raw_spin_lock(&boot_lock);
++	raw_spin_unlock(&boot_lock);
+ }
+ 
+ static __cpuinit void prepare_cold_cpu(unsigned int cpu)
+@@ -100,7 +100,7 @@ int __cpuinit boot_secondary(unsigned in
+ 	 * set synchronisation state between this boot processor
+ 	 * and the secondary one
+ 	 */
+-	spin_lock(&boot_lock);
++	raw_spin_lock(&boot_lock);
+ 
+ 	/*
+ 	 * The secondary processor is waiting to be released from
+@@ -134,7 +134,7 @@ int __cpuinit boot_secondary(unsigned in
+ 	 * now the secondary core is starting up let it run its
+ 	 * calibrations, then wait for it to finish
+ 	 */
+-	spin_unlock(&boot_lock);
++	raw_spin_unlock(&boot_lock);
+ 
+ 	return pen_release != -1 ? -ENOSYS : 0;
+ }
+Index: linux-2.6/arch/arm/mach-omap2/omap-smp.c
+===================================================================
+--- linux-2.6.orig/arch/arm/mach-omap2/omap-smp.c
++++ linux-2.6/arch/arm/mach-omap2/omap-smp.c
+@@ -29,7 +29,7 @@
+ /* SCU base address */
+ static void __iomem *scu_base;
+ 
+-static DEFINE_SPINLOCK(boot_lock);
++static DEFINE_RAW_SPINLOCK(boot_lock);
+ 
+ void __cpuinit platform_secondary_init(unsigned int cpu)
+ {
+@@ -43,8 +43,8 @@ void __cpuinit platform_secondary_init(u
+ 	/*
+ 	 * Synchronise with the boot thread.
+ 	 */
+-	spin_lock(&boot_lock);
+-	spin_unlock(&boot_lock);
++	raw_spin_lock(&boot_lock);
++	raw_spin_unlock(&boot_lock);
+ }
+ 
+ int __cpuinit boot_secondary(unsigned int cpu, struct task_struct *idle)
+@@ -53,7 +53,7 @@ int __cpuinit boot_secondary(unsigned in
+ 	 * Set synchronisation state between this boot processor
+ 	 * and the secondary one
+ 	 */
+-	spin_lock(&boot_lock);
++	raw_spin_lock(&boot_lock);
+ 
+ 	/*
+ 	 * Update the AuxCoreBoot0 with boot state for secondary core.
+@@ -70,7 +70,7 @@ int __cpuinit boot_secondary(unsigned in
+ 	 * Now the secondary core is starting up let it run its
+ 	 * calibrations, then wait for it to finish
+ 	 */
+-	spin_unlock(&boot_lock);
++	raw_spin_unlock(&boot_lock);
+ 
+ 	return 0;
+ }
+Index: linux-2.6/arch/arm/mach-tegra/platsmp.c
+===================================================================
+--- linux-2.6.orig/arch/arm/mach-tegra/platsmp.c
++++ linux-2.6/arch/arm/mach-tegra/platsmp.c
+@@ -29,7 +29,7 @@
+ 
+ extern void tegra_secondary_startup(void);
+ 
+-static DEFINE_SPINLOCK(boot_lock);
++static DEFINE_RAW_SPINLOCK(boot_lock);
+ static void __iomem *scu_base = IO_ADDRESS(TEGRA_ARM_PERIF_BASE);
+ 
+ #define EVP_CPU_RESET_VECTOR \
+@@ -51,8 +51,8 @@ void __cpuinit platform_secondary_init(u
+ 	/*
+ 	 * Synchronise with the boot thread.
+ 	 */
+-	spin_lock(&boot_lock);
+-	spin_unlock(&boot_lock);
++	raw_spin_lock(&boot_lock);
++	raw_spin_unlock(&boot_lock);
+ }
+ 
+ int __cpuinit boot_secondary(unsigned int cpu, struct task_struct *idle)
+@@ -66,7 +66,7 @@ int __cpuinit boot_secondary(unsigned in
+ 	 * set synchronisation state between this boot processor
+ 	 * and the secondary one
+ 	 */
+-	spin_lock(&boot_lock);
++	raw_spin_lock(&boot_lock);
+ 
+ 
+ 	/* set the reset vector to point to the secondary_startup routine */
+@@ -102,7 +102,7 @@ int __cpuinit boot_secondary(unsigned in
+ 	 * now the secondary core is starting up let it run its
+ 	 * calibrations, then wait for it to finish
+ 	 */
+-	spin_unlock(&boot_lock);
++	raw_spin_unlock(&boot_lock);
+ 
+ 	return 0;
+ }
+Index: linux-2.6/arch/arm/mach-ux500/platsmp.c
+===================================================================
+--- linux-2.6.orig/arch/arm/mach-ux500/platsmp.c
++++ linux-2.6/arch/arm/mach-ux500/platsmp.c
+@@ -57,7 +57,7 @@ static void __iomem *scu_base_addr(void)
+ 	return NULL;
+ }
+ 
+-static DEFINE_SPINLOCK(boot_lock);
++static DEFINE_RAW_SPINLOCK(boot_lock);
+ 
+ void __cpuinit platform_secondary_init(unsigned int cpu)
+ {
+@@ -77,8 +77,8 @@ void __cpuinit platform_secondary_init(u
+ 	/*
+ 	 * Synchronise with the boot thread.
+ 	 */
+-	spin_lock(&boot_lock);
+-	spin_unlock(&boot_lock);
++	raw_spin_lock(&boot_lock);
++	raw_spin_unlock(&boot_lock);
+ }
+ 
+ int __cpuinit boot_secondary(unsigned int cpu, struct task_struct *idle)
+@@ -89,7 +89,7 @@ int __cpuinit boot_secondary(unsigned in
+ 	 * set synchronisation state between this boot processor
+ 	 * and the secondary one
+ 	 */
+-	spin_lock(&boot_lock);
++	raw_spin_lock(&boot_lock);
+ 
+ 	/*
+ 	 * The secondary processor is waiting to be released from
+@@ -110,7 +110,7 @@ int __cpuinit boot_secondary(unsigned in
+ 	 * now the secondary core is starting up let it run its
+ 	 * calibrations, then wait for it to finish
+ 	 */
+-	spin_unlock(&boot_lock);
++	raw_spin_unlock(&boot_lock);
+ 
+ 	return pen_release != -1 ? -ENOSYS : 0;
+ }
 Index: linux-2.6/arch/powerpc/platforms/85xx/mpc85xx_cds.c
 ===================================================================
 --- linux-2.6.orig/arch/powerpc/platforms/85xx/mpc85xx_cds.c
@@ -8407,6 +10144,38 @@ Index: linux-2.6/arch/arm/kernel/process.c
  	}
  }
  
+@@ -486,6 +484,31 @@ unsigned long arch_randomize_brk(struct 
+ }
+ 
+ #ifdef CONFIG_MMU
++
++/*
++ * CONFIG_SPLIT_PTLOCK_CPUS results in a page->ptl lock.  If the lock is not
++ * initialized by pgtable_page_ctor() then a coredump of the vector page will
++ * fail.
++ */
++static int __init vectors_user_mapping_init_page(void)
++{
++	struct page *page;
++	unsigned long addr = 0xffff0000;
++	pgd_t *pgd;
++	pud_t *pud;
++	pmd_t *pmd;
++
++	pgd = pgd_offset_k(addr);
++	pud = pud_offset(pgd, addr);
++	pmd = pmd_offset(pud, addr);
++	page = pmd_page(*(pmd));
++
++	pgtable_page_ctor(page);
++
++	return 0;
++}
++late_initcall(vectors_user_mapping_init_page);
++
+ /*
+  * The vectors page is always readable from user space for the
+  * atomic helpers and the signal restart code.  Let's declare a mapping
 Index: linux-2.6/arch/avr32/kernel/process.c
 ===================================================================
 --- linux-2.6.orig/arch/avr32/kernel/process.c
@@ -9374,198 +11143,38 @@ Index: linux-2.6/kernel/softirq.c
  	/* Wait for kthread_stop */
  	set_current_state(TASK_INTERRUPTIBLE);
  	while (!kthread_should_stop()) {
-Index: linux-2.6/kernel/signal.c
-===================================================================
---- linux-2.6.orig/kernel/signal.c
-+++ linux-2.6/kernel/signal.c
-@@ -300,13 +300,45 @@ static bool task_participate_group_stop(
- 	return false;
- }
+@@ -850,9 +1104,8 @@ static int __cpuinit cpu_callback(struct
+ 	int hotcpu = (unsigned long)hcpu;
+ 	struct task_struct *p;
  
-+#ifdef __HAVE_ARCH_CMPXCHG
-+static inline struct sigqueue *get_task_cache(struct task_struct *t)
-+{
-+	struct sigqueue *q = t->sigqueue_cache;
-+
-+	if (cmpxchg(&t->sigqueue_cache, q, NULL) != q)
-+		return NULL;
-+	return q;
-+}
-+
-+static inline int put_task_cache(struct task_struct *t, struct sigqueue *q)
-+{
-+	if (cmpxchg(&t->sigqueue_cache, NULL, q) == NULL)
-+		return 0;
-+	return 1;
-+}
-+
-+#else
-+
-+static inline struct sigqueue *get_task_cache(struct task_struct *t)
-+{
-+	return NULL;
-+}
-+
-+static inline int put_task_cache(struct task_struct *t, struct sigqueue *q)
-+{
-+	return 1;
-+}
-+
-+#endif
-+
- /*
-  * allocate a new signal queue record
-  * - this may be called without locks if and only if t == current, otherwise an
-  *   appropriate lock must be held to stop the target task from exiting
-  */
- static struct sigqueue *
--__sigqueue_alloc(int sig, struct task_struct *t, gfp_t flags, int override_rlimit)
-+__sigqueue_do_alloc(int sig, struct task_struct *t, gfp_t flags,
-+		    int override_rlimit, int fromslab)
- {
- 	struct sigqueue *q = NULL;
- 	struct user_struct *user;
-@@ -323,7 +355,10 @@ __sigqueue_alloc(int sig, struct task_st
- 	if (override_rlimit ||
- 	    atomic_read(&user->sigpending) <=
- 			task_rlimit(t, RLIMIT_SIGPENDING)) {
--		q = kmem_cache_alloc(sigqueue_cachep, flags);
-+		if (!fromslab)
-+			q = get_task_cache(t);
-+		if (!q)
-+			q = kmem_cache_alloc(sigqueue_cachep, flags);
- 	} else {
- 		print_dropped_signal(sig);
- 	}
-@@ -340,6 +375,13 @@ __sigqueue_alloc(int sig, struct task_st
- 	return q;
- }
- 
-+static struct sigqueue *
-+__sigqueue_alloc(int sig, struct task_struct *t, gfp_t flags,
-+		 int override_rlimit)
-+{
-+	return __sigqueue_do_alloc(sig, t, flags, override_rlimit, 0);
-+}
-+
- static void __sigqueue_free(struct sigqueue *q)
- {
- 	if (q->flags & SIGQUEUE_PREALLOC)
-@@ -349,6 +391,21 @@ static void __sigqueue_free(struct sigqu
- 	kmem_cache_free(sigqueue_cachep, q);
- }
- 
-+static void sigqueue_free_current(struct sigqueue *q)
-+{
-+	struct user_struct *up;
-+
-+	if (q->flags & SIGQUEUE_PREALLOC)
-+		return;
-+
-+	up = q->user;
-+	if (rt_prio(current->normal_prio) && !put_task_cache(current, q)) {
-+		atomic_dec(&up->sigpending);
-+		free_uid(up);
-+	} else
-+		  __sigqueue_free(q);
-+}
-+
- void flush_sigqueue(struct sigpending *queue)
- {
- 	struct sigqueue *q;
-@@ -362,6 +419,21 @@ void flush_sigqueue(struct sigpending *q
- }
- 
- /*
-+ * Called from __exit_signal. Flush tsk->pending and
-+ * tsk->sigqueue_cache
-+ */
-+void flush_task_sigqueue(struct task_struct *tsk)
-+{
-+	struct sigqueue *q;
-+
-+	flush_sigqueue(&tsk->pending);
-+
-+	q = get_task_cache(tsk);
-+	if (q)
-+		kmem_cache_free(sigqueue_cachep, q);
-+}
-+
-+/*
-  * Flush all pending signals for a task.
-  */
- void __flush_signals(struct task_struct *t)
-@@ -509,7 +581,7 @@ static void collect_signal(int sig, stru
- still_pending:
- 		list_del_init(&first->list);
- 		copy_siginfo(info, &first->info);
--		__sigqueue_free(first);
-+		sigqueue_free_current(first);
- 	} else {
- 		/*
- 		 * Ok, it wasn't in the queue.  This must be
-@@ -555,6 +627,8 @@ int dequeue_signal(struct task_struct *t
- {
- 	int signr;
- 
-+	WARN_ON_ONCE(tsk != current);
-+
- 	/* We only dequeue private signals from ourselves, we don't let
- 	 * signalfd steal them
- 	 */
-@@ -637,6 +711,9 @@ void signal_wake_up(struct task_struct *
- 
- 	set_tsk_thread_flag(t, TIF_SIGPENDING);
- 
-+	if (unlikely(t == current))
-+		return;
-+
- 	/*
- 	 * For SIGKILL, we want to wake it up in the stopped/traced/killable
- 	 * case. We don't check t->state here because there is a race with it
-@@ -1179,12 +1256,12 @@ struct sighand_struct *__lock_task_sigha
- 	struct sighand_struct *sighand;
- 
- 	for (;;) {
--		local_irq_save(*flags);
-+		local_irq_save_nort(*flags);
- 		rcu_read_lock();
- 		sighand = rcu_dereference(tsk->sighand);
- 		if (unlikely(sighand == NULL)) {
- 			rcu_read_unlock();
--			local_irq_restore(*flags);
-+			local_irq_restore_nort(*flags);
+-	switch (action) {
++	switch (action & ~CPU_TASKS_FROZEN) {
+ 	case CPU_UP_PREPARE:
+-	case CPU_UP_PREPARE_FROZEN:
+ 		p = kthread_create_on_node(run_ksoftirqd,
+ 					   hcpu,
+ 					   cpu_to_node(hotcpu),
+@@ -865,19 +1118,16 @@ static int __cpuinit cpu_callback(struct
+   		per_cpu(ksoftirqd, hotcpu) = p;
+  		break;
+ 	case CPU_ONLINE:
+-	case CPU_ONLINE_FROZEN:
+ 		wake_up_process(per_cpu(ksoftirqd, hotcpu));
+ 		break;
+ #ifdef CONFIG_HOTPLUG_CPU
+ 	case CPU_UP_CANCELED:
+-	case CPU_UP_CANCELED_FROZEN:
+ 		if (!per_cpu(ksoftirqd, hotcpu))
  			break;
- 		}
- 
-@@ -1195,7 +1272,7 @@ struct sighand_struct *__lock_task_sigha
- 		}
- 		spin_unlock(&sighand->siglock);
- 		rcu_read_unlock();
--		local_irq_restore(*flags);
-+		local_irq_restore_nort(*flags);
- 	}
- 
- 	return sighand;
-@@ -1434,7 +1511,8 @@ EXPORT_SYMBOL(kill_pid);
-  */
- struct sigqueue *sigqueue_alloc(void)
- {
--	struct sigqueue *q = __sigqueue_alloc(-1, current, GFP_KERNEL, 0);
-+	/* Preallocated sigqueue objects always from the slabcache ! */
-+	struct sigqueue *q = __sigqueue_do_alloc(-1, current, GFP_KERNEL, 0, 1);
- 
- 	if (q)
- 		q->flags |= SIGQUEUE_PREALLOC;
-@@ -1790,7 +1868,7 @@ static void ptrace_stop(int exit_code, i
- 		 */
- 		preempt_disable();
- 		read_unlock(&tasklist_lock);
--		preempt_enable_no_resched();
-+		__preempt_enable_no_resched();
- 		schedule();
- 	} else {
- 		/*
+ 		/* Unbind so it can run.  Fall thru. */
+ 		kthread_bind(per_cpu(ksoftirqd, hotcpu),
+ 			     cpumask_any(cpu_online_mask));
+-	case CPU_DEAD:
+-	case CPU_DEAD_FROZEN: {
++	case CPU_POST_DEAD: {
+ 		static const struct sched_param param = {
+ 			.sched_priority = MAX_RT_PRIO-1
+ 		};
 Index: linux-2.6/kernel/posix-timers.c
 ===================================================================
 --- linux-2.6.orig/kernel/posix-timers.c
@@ -9694,6 +11303,15 @@ Index: linux-2.6/kernel/fork.c
 ===================================================================
 --- linux-2.6.orig/kernel/fork.c
 +++ linux-2.6/kernel/fork.c
+@@ -87,7 +87,7 @@ int max_threads;		/* tunable limit on nr
+ 
+ DEFINE_PER_CPU(unsigned long, process_counts) = 0;
+ 
+-__cacheline_aligned DEFINE_RWLOCK(tasklist_lock);  /* outer */
++DEFINE_RWLOCK(tasklist_lock);  /* outer */
+ 
+ #ifdef CONFIG_PROVE_RCU
+ int lockdep_tasklist_lock_is_held(void)
 @@ -198,7 +198,18 @@ void __put_task_struct(struct task_struc
  	if (!profile_handoff_task(tsk))
  		free_task(tsk);
@@ -11634,7 +13252,7 @@ Index: linux-2.6/mm/page_alloc.c
  	return NULL;
  }
  
-@@ -1884,8 +1943,8 @@ __alloc_pages_direct_compact(gfp_t gfp_m
+@@ -1912,8 +1971,8 @@ __alloc_pages_direct_compact(gfp_t gfp_m
  	if (*did_some_progress != COMPACT_SKIPPED) {
  
  		/* Page migration frees to the PCP lists but we want merging */
@@ -11645,7 +13263,7 @@ Index: linux-2.6/mm/page_alloc.c
  
  		page = get_page_from_freelist(gfp_mask, nodemask,
  				order, zonelist, high_zoneidx,
-@@ -3653,14 +3712,16 @@ static int __zone_pcp_update(void *data)
+@@ -3685,14 +3744,16 @@ static int __zone_pcp_update(void *data)
  	for_each_possible_cpu(cpu) {
  		struct per_cpu_pageset *pset;
  		struct per_cpu_pages *pcp;
@@ -11665,7 +13283,7 @@ Index: linux-2.6/mm/page_alloc.c
  	}
  	return 0;
  }
-@@ -4972,6 +5033,7 @@ static int page_alloc_cpu_notify(struct 
+@@ -5004,6 +5065,7 @@ static int page_alloc_cpu_notify(struct 
  void __init page_alloc_init(void)
  {
  	hotcpu_notifier(page_alloc_cpu_notify, 0);
@@ -12260,20 +13878,6 @@ Index: linux-2.6/net/core/dev.c
  		sd->completion_queue = NULL;
  		INIT_LIST_HEAD(&sd->poll_list);
  		sd->output_queue = NULL;
-Index: linux-2.6/arch/x86/kernel/apic/io_apic.c
-===================================================================
---- linux-2.6.orig/arch/x86/kernel/apic/io_apic.c
-+++ linux-2.6/arch/x86/kernel/apic/io_apic.c
-@@ -2417,7 +2417,8 @@ static void ack_apic_level(struct irq_da
- 	irq_complete_move(cfg);
- #ifdef CONFIG_GENERIC_PENDING_IRQ
- 	/* If we are moving the irq we need to mask it */
--	if (unlikely(irqd_is_setaffinity_pending(data))) {
-+	if (unlikely(irqd_is_setaffinity_pending(data) &&
-+		     !irqd_irq_inprogress(data))) {
- 		do_unmask_irq = 1;
- 		mask_ioapic(cfg);
- 	}
 Index: linux-2.6/arch/x86/kernel/entry_32.S
 ===================================================================
 --- linux-2.6.orig/arch/x86/kernel/entry_32.S
@@ -12306,39 +13910,7 @@ Index: linux-2.6/kernel/rcutree.c
 ===================================================================
 --- linux-2.6.orig/kernel/rcutree.c
 +++ linux-2.6/kernel/rcutree.c
-@@ -166,6 +166,7 @@ void rcu_sched_qs(int cpu)
- 	rdp->passed_quiesc = 1;
- }
- 
-+#ifndef CONFIG_PREEMPT_RT_FULL
- void rcu_bh_qs(int cpu)
- {
- 	struct rcu_data *rdp = &per_cpu(rcu_bh_data, cpu);
-@@ -174,6 +175,7 @@ void rcu_bh_qs(int cpu)
- 	barrier();
- 	rdp->passed_quiesc = 1;
- }
-+#endif
- 
- /*
-  * Note a context switch.  This is a quiescent state for RCU-sched,
-@@ -216,6 +218,7 @@ long rcu_batches_completed_sched(void)
- }
- EXPORT_SYMBOL_GPL(rcu_batches_completed_sched);
- 
-+#ifndef CONFIG_PREEMPT_RT_FULL
- /*
-  * Return the number of RCU BH batches processed thus far for debug & stats.
-  */
-@@ -233,6 +236,7 @@ void rcu_bh_force_quiescent_state(void)
- 	force_quiescent_state(&rcu_bh_state, 0);
- }
- EXPORT_SYMBOL_GPL(rcu_bh_force_quiescent_state);
-+#endif
- 
- /*
-  * Record the number of times rcutorture tests have been initiated and
-@@ -1153,7 +1157,7 @@ static void __rcu_offline_cpu(int cpu, s
+@@ -1153,7 +1153,7 @@ static void __rcu_offline_cpu(int cpu, s
  	else
  		raw_spin_unlock_irqrestore(&rnp->lock, flags);
  	if (need_report & RCU_OFL_TASKS_EXP_GP)
@@ -12347,54 +13919,6 @@ Index: linux-2.6/kernel/rcutree.c
  	rcu_node_kthread_setaffinity(rnp, -1);
  }
  
-@@ -1579,6 +1583,7 @@ void call_rcu_sched(struct rcu_head *hea
- }
- EXPORT_SYMBOL_GPL(call_rcu_sched);
- 
-+#ifndef CONFIG_PREEMPT_RT_FULL
- /*
-  * Queue an RCU for invocation after a quicker grace period.
-  */
-@@ -1587,6 +1592,7 @@ void call_rcu_bh(struct rcu_head *head, 
- 	__call_rcu(head, func, &rcu_bh_state);
- }
- EXPORT_SYMBOL_GPL(call_rcu_bh);
-+#endif
- 
- /**
-  * synchronize_sched - wait until an rcu-sched grace period has elapsed.
-@@ -1628,6 +1634,7 @@ void synchronize_sched(void)
- }
- EXPORT_SYMBOL_GPL(synchronize_sched);
- 
-+#ifndef CONFIG_PREEMPT_RT_FULL
- /**
-  * synchronize_rcu_bh - wait until an rcu_bh grace period has elapsed.
-  *
-@@ -1653,6 +1660,7 @@ void synchronize_rcu_bh(void)
- 	destroy_rcu_head_on_stack(&rcu.head);
- }
- EXPORT_SYMBOL_GPL(synchronize_rcu_bh);
-+#endif
- 
- /*
-  * Check to see if there is any immediate RCU-related work to be done
-@@ -1806,6 +1814,7 @@ static void _rcu_barrier(struct rcu_stat
- 	mutex_unlock(&rcu_barrier_mutex);
- }
- 
-+#ifndef CONFIG_PREEMPT_RT_FULL
- /**
-  * rcu_barrier_bh - Wait until all in-flight call_rcu_bh() callbacks complete.
-  */
-@@ -1814,6 +1823,7 @@ void rcu_barrier_bh(void)
- 	_rcu_barrier(&rcu_bh_state, call_rcu_bh);
- }
- EXPORT_SYMBOL_GPL(rcu_barrier_bh);
-+#endif
- 
- /**
-  * rcu_barrier_sched - Wait for in-flight call_rcu_sched() callbacks.
 Index: linux-2.6/kernel/rcutree.h
 ===================================================================
 --- linux-2.6.orig/kernel/rcutree.h
@@ -18022,6 +19546,8 @@ Index: linux-2.6/drivers/misc/hwlat_detector.c
 +
 +module_init(detector_init);
 +module_exit(detector_exit);
+Index: linux-2.6/localversion-rt
+===================================================================
 Index: linux-2.6/arch/arm/kernel/early_printk.c
 ===================================================================
 --- linux-2.6.orig/arch/arm/kernel/early_printk.c
@@ -18224,7 +19750,7 @@ Index: linux-2.6/arch/sparc/kernel/setup_64.c
 ===================================================================
 --- linux-2.6.orig/arch/sparc/kernel/setup_64.c
 +++ linux-2.6/arch/sparc/kernel/setup_64.c
-@@ -463,6 +463,12 @@ static void __init init_sparc64_elf_hwca
+@@ -469,6 +469,12 @@ static void __init init_sparc64_elf_hwca
  		popc_patch();
  }
  
@@ -18237,7 +19763,7 @@ Index: linux-2.6/arch/sparc/kernel/setup_64.c
  void __init setup_arch(char **cmdline_p)
  {
  	/* Initialize PROM console and command line. */
-@@ -474,7 +480,7 @@ void __init setup_arch(char **cmdline_p)
+@@ -480,7 +486,7 @@ void __init setup_arch(char **cmdline_p)
  #ifdef CONFIG_EARLYFB
  	if (btext_find_display())
  #endif
@@ -19283,7 +20809,36 @@ Index: linux-2.6/lib/Kconfig.debug
 ===================================================================
 --- linux-2.6.orig/lib/Kconfig.debug
 +++ linux-2.6/lib/Kconfig.debug
-@@ -151,7 +151,7 @@ config DEBUG_KERNEL
+@@ -62,6 +62,28 @@ config MAGIC_SYSRQ
+ 	  keys are documented in <file:Documentation/sysrq.txt>. Don't say Y
+ 	  unless you really know what this hack does.
+ 
++config MAGIC_SYSRQ_FORCE_PRINTK
++	bool "Force printk from Magic SysRq"
++	depends on MAGIC_SYSRQ && PREEMPT_RT_FULL
++	default n
++	help
++	  Allow the output from Magic SysRq to be output immediately, even if
++	  this causes large latencies.  This can cause performance problems
++	  for real-time processes.
++
++	  If PREEMPT_RT_FULL, printk() will not try to acquire the console lock
++	  when interrupts or preemption are disabled.  If the console lock is
++	  not acquired the printk() output will be buffered, but will not be
++	  output immediately.  Some drivers call into the Magic SysRq code
++	  with interrupts or preemption disabled, so the output of Magic SysRq
++	  will be buffered instead of printing immediately if this option is
++	  not selected.
++
++	  Even with this option selected, Magic SysRq output will be delayed
++	  if the attempt to acquire the console lock fails.
++
++	  Don't say Y unless you really know what this hack does.
++
+ config MAGIC_SYSRQ_DEFAULT_MASK
+ 	hex "Default mask for Magic SysRq keys on the console"
+ 	depends on MAGIC_SYSRQ
+@@ -159,7 +181,7 @@ config DEBUG_KERNEL
  
  config DEBUG_SHIRQ
  	bool "Debug shared IRQ handlers"
@@ -20316,7 +21871,7 @@ Index: linux-2.6/ipc/mqueue.c
 ===================================================================
 --- linux-2.6.orig/ipc/mqueue.c
 +++ linux-2.6/ipc/mqueue.c
-@@ -817,12 +817,17 @@ static inline void pipelined_send(struct
+@@ -820,12 +820,17 @@ static inline void pipelined_send(struct
  				  struct msg_msg *message,
  				  struct ext_wait_queue *receiver)
  {
@@ -20334,7 +21889,7 @@ Index: linux-2.6/ipc/mqueue.c
  }
  
  /* pipelined_receive() - if there is task waiting in sys_mq_timedsend()
-@@ -836,15 +841,19 @@ static inline void pipelined_receive(str
+@@ -839,15 +844,19 @@ static inline void pipelined_receive(str
  		wake_up_interruptible(&info->wait_q);
  		return;
  	}
@@ -20778,21 +22333,7 @@ Index: linux-2.6/include/linux/rcupdate.h
 ===================================================================
 --- linux-2.6.orig/include/linux/rcupdate.h
 +++ linux-2.6/include/linux/rcupdate.h
-@@ -78,7 +78,13 @@ struct rcu_head {
- extern void call_rcu_sched(struct rcu_head *head,
- 			   void (*func)(struct rcu_head *rcu));
- extern void synchronize_sched(void);
-+
-+#ifdef CONFIG_PREEMPT_RT_FULL
-+# define rcu_barrier_bh		rcu_barrier
-+#else
- extern void rcu_barrier_bh(void);
-+#endif
-+
- extern void rcu_barrier_sched(void);
- 
- static inline void __rcu_read_lock_bh(void)
-@@ -104,6 +110,11 @@ void synchronize_rcu(void);
+@@ -104,6 +104,11 @@ void synchronize_rcu(void);
   * types of kernel builds, the rcu_read_lock() nesting depth is unknowable.
   */
  #define rcu_preempt_depth() (current->rcu_read_lock_nesting)
@@ -20804,7 +22345,7 @@ Index: linux-2.6/include/linux/rcupdate.h
  
  #else /* #ifdef CONFIG_PREEMPT_RCU */
  
-@@ -127,11 +138,19 @@ static inline int rcu_preempt_depth(void
+@@ -127,6 +132,8 @@ static inline int rcu_preempt_depth(void
  	return 0;
  }
  
@@ -20813,77 +22354,6 @@ Index: linux-2.6/include/linux/rcupdate.h
  #endif /* #else #ifdef CONFIG_PREEMPT_RCU */
  
  /* Internal to kernel */
- extern void rcu_sched_qs(int cpu);
-+
-+#ifndef CONFIG_PREEMPT_RT_FULL
- extern void rcu_bh_qs(int cpu);
-+#else
-+static inline void rcu_bh_qs(int cpu) { }
-+#endif
-+
- extern void rcu_check_callbacks(int cpu, int user);
- struct notifier_block;
- 
-@@ -222,7 +241,14 @@ static inline int rcu_read_lock_held(voi
-  * rcu_read_lock_bh_held() is defined out of line to avoid #include-file
-  * hell.
-  */
-+#ifdef CONFIG_PREEMPT_RT_FULL
-+static inline int rcu_read_lock_bh_held(void)
-+{
-+	return rcu_read_lock_held();
-+}
-+#else
- extern int rcu_read_lock_bh_held(void);
-+#endif
- 
- /**
-  * rcu_read_lock_sched_held() - might we be in RCU-sched read-side critical section?
-@@ -631,8 +657,13 @@ static inline void rcu_read_unlock(void)
- static inline void rcu_read_lock_bh(void)
- {
- 	__rcu_read_lock_bh();
-+
-+#ifdef CONFIG_PREEMPT_RT_FULL
-+	rcu_read_lock();
-+#else
- 	__acquire(RCU_BH);
- 	rcu_read_acquire_bh();
-+#endif
- }
- 
- /*
-@@ -642,8 +673,12 @@ static inline void rcu_read_lock_bh(void
-  */
- static inline void rcu_read_unlock_bh(void)
- {
-+#ifdef CONFIG_PREEMPT_RT_FULL
-+	rcu_read_unlock();
-+#else
- 	rcu_read_release_bh();
- 	__release(RCU_BH);
-+#endif
- 	__rcu_read_unlock_bh();
- }
- 
-@@ -750,6 +785,9 @@ extern void call_rcu(struct rcu_head *he
- 
- #endif /* #else #ifdef CONFIG_PREEMPT_RCU */
- 
-+#ifdef CONFIG_PREEMPT_RT_FULL
-+#define call_rcu_bh	call_rcu
-+#else
- /**
-  * call_rcu_bh() - Queue an RCU for invocation after a quicker grace period.
-  * @head: structure to be used for queueing the RCU updates.
-@@ -770,6 +808,7 @@ extern void call_rcu(struct rcu_head *he
-  */
- extern void call_rcu_bh(struct rcu_head *head,
- 			void (*func)(struct rcu_head *head));
-+#endif
- 
- /*
-  * debug_rcu_head_queue()/debug_rcu_head_unqueue() are used internally
 Index: linux-2.6/kernel/sched_features.h
 ===================================================================
 --- linux-2.6.orig/kernel/sched_features.h
@@ -21112,7 +22582,30 @@ Index: linux-2.6/include/linux/cpu.h
 ===================================================================
 --- linux-2.6.orig/include/linux/cpu.h
 +++ linux-2.6/include/linux/cpu.h
-@@ -134,6 +134,8 @@ extern struct sysdev_class cpu_sysdev_cl
+@@ -60,14 +60,16 @@ enum {
+ 	 */
+ 	CPU_PRI_SCHED_ACTIVE	= INT_MAX,
+ 	CPU_PRI_CPUSET_ACTIVE	= INT_MAX - 1,
+-	CPU_PRI_SCHED_INACTIVE	= INT_MIN + 1,
+-	CPU_PRI_CPUSET_INACTIVE	= INT_MIN,
+ 
+ 	/* migration should happen before other stuff but after perf */
+-	CPU_PRI_PERF		= 20,
+-	CPU_PRI_MIGRATION	= 10,
+-	/* prepare workqueues for other notifiers */
+-	CPU_PRI_WORKQUEUE	= 5,
++	CPU_PRI_PERF			= 20,
++	CPU_PRI_MIGRATION		= 10,
++	CPU_PRI_WORKQUEUE_ACTIVE	= 5,  /* prepare workqueues for others */
++	CPU_PRI_NORMAL			= 0,
++	CPU_PRI_WORKQUEUE_INACTIVE	= -5, /* flush workqueues after others */
++
++	CPU_PRI_SCHED_INACTIVE	= INT_MIN + 1,
++	CPU_PRI_CPUSET_INACTIVE	= INT_MIN,
+ };
+ 
+ #ifdef CONFIG_SMP
+@@ -134,6 +136,8 @@ extern struct sysdev_class cpu_sysdev_cl
  
  extern void get_online_cpus(void);
  extern void put_online_cpus(void);
@@ -21121,7 +22614,7 @@ Index: linux-2.6/include/linux/cpu.h
  #define hotcpu_notifier(fn, pri)	cpu_notifier(fn, pri)
  #define register_hotcpu_notifier(nb)	register_cpu_notifier(nb)
  #define unregister_hotcpu_notifier(nb)	unregister_cpu_notifier(nb)
-@@ -156,6 +158,8 @@ static inline void cpu_hotplug_driver_un
+@@ -156,6 +160,8 @@ static inline void cpu_hotplug_driver_un
  
  #define get_online_cpus()	do { } while (0)
  #define put_online_cpus()	do { } while (0)
@@ -21978,7 +23471,7 @@ Index: linux-2.6/kernel/rtmutex.c
 +		slowfn(lock);
 +}
 +
-+#ifdef CONFIG_SMP_X
++#ifdef CONFIG_SMP
 +/*
 + * Note that owner is a speculative pointer and dereferencing relies
 + * on rcu_read_lock() and the check against the lock owner.
@@ -22571,6 +24064,15 @@ Index: linux-2.6/include/linux/rwlock_types.h
  /*
   * include/linux/rwlock_types.h - generic rwlock type definitions
   *				  and initializers
+@@ -43,6 +47,7 @@ typedef struct {
+ 				RW_DEP_MAP_INIT(lockname) }
+ #endif
+ 
+-#define DEFINE_RWLOCK(x)	rwlock_t x = __RW_LOCK_UNLOCKED(x)
++#define DEFINE_RWLOCK(name) \
++	rwlock_t name __cacheline_aligned_in_smp = __RW_LOCK_UNLOCKED(name)
+ 
+ #endif /* __LINUX_RWLOCK_TYPES_H */
 Index: linux-2.6/include/linux/spinlock_types.h
 ===================================================================
 --- linux-2.6.orig/include/linux/spinlock_types.h
@@ -23996,64 +25498,6 @@ Index: linux-2.6/lib/spinlock_debug.c
  }
 +
 +#endif
-Index: linux-2.6/include/linux/rcutree.h
-===================================================================
---- linux-2.6.orig/include/linux/rcutree.h
-+++ linux-2.6/include/linux/rcutree.h
-@@ -57,7 +57,11 @@ static inline void exit_rcu(void)
- 
- #endif /* #else #ifdef CONFIG_TREE_PREEMPT_RCU */
- 
-+#ifndef CONFIG_PREEMPT_RT_FULL
- extern void synchronize_rcu_bh(void);
-+#else
-+# define synchronize_rcu_bh()	synchronize_rcu()
-+#endif
- extern void synchronize_sched_expedited(void);
- extern void synchronize_rcu_expedited(void);
- 
-@@ -71,13 +75,19 @@ extern void rcu_barrier(void);
- extern unsigned long rcutorture_testseq;
- extern unsigned long rcutorture_vernum;
- extern long rcu_batches_completed(void);
--extern long rcu_batches_completed_bh(void);
- extern long rcu_batches_completed_sched(void);
- 
- extern void rcu_force_quiescent_state(void);
--extern void rcu_bh_force_quiescent_state(void);
- extern void rcu_sched_force_quiescent_state(void);
- 
-+#ifndef CONFIG_PREEMPT_RT_FULL
-+extern void rcu_bh_force_quiescent_state(void);
-+extern long rcu_batches_completed_bh(void);
-+#else
-+# define rcu_bh_force_quiescent_state	rcu_force_quiescent_state
-+# define rcu_batches_completed_bh	rcu_batches_completed
-+#endif
-+
- /* A context switch is a grace period for RCU-sched and RCU-bh. */
- static inline int rcu_blocking_is_gp(void)
- {
-Index: linux-2.6/kernel/rcupdate.c
-===================================================================
---- linux-2.6.orig/kernel/rcupdate.c
-+++ linux-2.6/kernel/rcupdate.c
-@@ -72,6 +72,7 @@ int debug_lockdep_rcu_enabled(void)
- }
- EXPORT_SYMBOL_GPL(debug_lockdep_rcu_enabled);
- 
-+#ifndef CONFIG_PREEMPT_RT_FULL
- /**
-  * rcu_read_lock_bh_held() - might we be in RCU-bh read-side critical section?
-  *
-@@ -91,6 +92,7 @@ int rcu_read_lock_bh_held(void)
- 	return in_softirq() || irqs_disabled();
- }
- EXPORT_SYMBOL_GPL(rcu_read_lock_bh_held);
-+#endif
- 
- #endif /* #ifdef CONFIG_DEBUG_LOCK_ALLOC */
- 
 Index: linux-2.6/include/linux/lglock.h
 ===================================================================
 --- linux-2.6.orig/include/linux/lglock.h
@@ -24197,7 +25641,7 @@ Index: linux-2.6/drivers/tty/serial/8250.c
  	} while (l != end);
  
  	spin_unlock(&i->lock);
-@@ -2892,14 +2895,14 @@ serial8250_console_write(struct console 
+@@ -2894,14 +2897,14 @@ serial8250_console_write(struct console 
  
  	touch_nmi_watchdog();
  
@@ -24219,7 +25663,7 @@ Index: linux-2.6/drivers/tty/serial/8250.c
  
  	/*
  	 *	First save the IER then disable the interrupts
-@@ -2931,8 +2934,7 @@ serial8250_console_write(struct console 
+@@ -2933,8 +2936,7 @@ serial8250_console_write(struct console 
  		check_modem_status(up);
  
  	if (locked)
@@ -24252,7 +25696,7 @@ Index: linux-2.6/drivers/tty/serial/omap-serial.c
 ===================================================================
 --- linux-2.6.orig/drivers/tty/serial/omap-serial.c
 +++ linux-2.6/drivers/tty/serial/omap-serial.c
-@@ -947,13 +947,12 @@ serial_omap_console_write(struct console
+@@ -946,13 +946,12 @@ serial_omap_console_write(struct console
  	unsigned int ier;
  	int locked = 1;
  
@@ -24268,7 +25712,7 @@ Index: linux-2.6/drivers/tty/serial/omap-serial.c
  
  	/*
  	 * First save the IER then disable the interrupts
-@@ -980,8 +979,7 @@ serial_omap_console_write(struct console
+@@ -979,8 +978,7 @@ serial_omap_console_write(struct console
  		check_modem_status(up);
  
  	if (locked)
@@ -24368,146 +25812,6 @@ Index: linux-2.6/mm/mmu_context.c
  	task_unlock(tsk);
  
  	if (active_mm != mm)
-Index: linux-2.6/arch/x86/kernel/cpu/mcheck/mce.c
-===================================================================
---- linux-2.6.orig/arch/x86/kernel/cpu/mcheck/mce.c
-+++ linux-2.6/arch/x86/kernel/cpu/mcheck/mce.c
-@@ -38,6 +38,7 @@
- #include <linux/mm.h>
- #include <linux/debugfs.h>
- #include <linux/edac_mce.h>
-+#include <linux/jiffies.h>
- 
- #include <asm/processor.h>
- #include <asm/hw_irq.h>
-@@ -1139,17 +1140,14 @@ void mce_log_therm_throt_event(__u64 sta
-  * poller finds an MCE, poll 2x faster.  When the poller finds no more
-  * errors, poll 2x slower (up to check_interval seconds).
-  */
--static int check_interval = 5 * 60; /* 5 minutes */
-+static unsigned long check_interval = 5 * 60; /* 5 minutes */
- 
--static DEFINE_PER_CPU(int, mce_next_interval); /* in jiffies */
--static DEFINE_PER_CPU(struct timer_list, mce_timer);
-+static DEFINE_PER_CPU(unsigned long, mce_next_interval); /* in jiffies */
-+static DEFINE_PER_CPU(struct hrtimer, mce_timer);
- 
--static void mce_start_timer(unsigned long data)
-+static enum hrtimer_restart mce_start_timer(struct hrtimer *timer)
- {
--	struct timer_list *t = &per_cpu(mce_timer, data);
--	int *n;
--
--	WARN_ON(smp_processor_id() != data);
-+	unsigned long *n;
- 
- 	if (mce_available(__this_cpu_ptr(&cpu_info))) {
- 		machine_check_poll(MCP_TIMESTAMP,
-@@ -1162,12 +1160,13 @@ static void mce_start_timer(unsigned lon
- 	 */
- 	n = &__get_cpu_var(mce_next_interval);
- 	if (mce_notify_irq())
--		*n = max(*n/2, HZ/100);
-+		*n = max(*n/2, HZ/100UL);
- 	else
--		*n = min(*n*2, (int)round_jiffies_relative(check_interval*HZ));
-+		*n = min(*n*2, round_jiffies_relative(check_interval*HZ));
- 
--	t->expires = jiffies + *n;
--	add_timer_on(t, smp_processor_id());
-+	hrtimer_forward(timer, timer->base->get_time(),
-+			ns_to_ktime(jiffies_to_usecs(*n) * 1000));
-+	return HRTIMER_RESTART;
- }
- 
- static void mce_do_trigger(struct work_struct *work)
-@@ -1393,10 +1392,11 @@ static void __mcheck_cpu_init_vendor(str
- 
- static void __mcheck_cpu_init_timer(void)
- {
--	struct timer_list *t = &__get_cpu_var(mce_timer);
--	int *n = &__get_cpu_var(mce_next_interval);
-+	struct hrtimer *t = &__get_cpu_var(mce_timer);
-+	unsigned long *n = &__get_cpu_var(mce_next_interval);
- 
--	setup_timer(t, mce_start_timer, smp_processor_id());
-+	hrtimer_init(t, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-+	t->function = mce_start_timer;
- 
- 	if (mce_ignore_ce)
- 		return;
-@@ -1404,8 +1404,9 @@ static void __mcheck_cpu_init_timer(void
- 	*n = check_interval * HZ;
- 	if (!*n)
- 		return;
--	t->expires = round_jiffies(jiffies + *n);
--	add_timer_on(t, smp_processor_id());
-+
-+	hrtimer_start_range_ns(t, ns_to_ktime(jiffies_to_usecs(*n) * 1000),
-+			       0 , HRTIMER_MODE_REL_PINNED);
- }
- 
- /* Handle unconfigured int18 (should never happen) */
-@@ -1768,7 +1769,7 @@ static struct syscore_ops mce_syscore_op
- 
- static void mce_cpu_restart(void *data)
- {
--	del_timer_sync(&__get_cpu_var(mce_timer));
-+	hrtimer_cancel(&__get_cpu_var(mce_timer));
- 	if (!mce_available(__this_cpu_ptr(&cpu_info)))
- 		return;
- 	__mcheck_cpu_init_generic();
-@@ -1787,7 +1788,7 @@ static void mce_disable_ce(void *all)
- 	if (!mce_available(__this_cpu_ptr(&cpu_info)))
- 		return;
- 	if (all)
--		del_timer_sync(&__get_cpu_var(mce_timer));
-+		hrtimer_cancel(&__get_cpu_var(mce_timer));
- 	cmci_clear();
- }
- 
-@@ -2016,6 +2017,8 @@ static void __cpuinit mce_disable_cpu(vo
- 	if (!mce_available(__this_cpu_ptr(&cpu_info)))
- 		return;
- 
-+	hrtimer_cancel(&__get_cpu_var(mce_timer));
-+
- 	if (!(action & CPU_TASKS_FROZEN))
- 		cmci_clear();
- 	for (i = 0; i < banks; i++) {
-@@ -2042,6 +2045,7 @@ static void __cpuinit mce_reenable_cpu(v
- 		if (b->init)
- 			wrmsrl(MSR_IA32_MCx_CTL(i), b->ctl);
- 	}
-+	__mcheck_cpu_init_timer();
- }
- 
- /* Get notified when a cpu comes on/off. Be hotplug friendly. */
-@@ -2049,7 +2053,6 @@ static int __cpuinit
- mce_cpu_callback(struct notifier_block *nfb, unsigned long action, void *hcpu)
- {
- 	unsigned int cpu = (unsigned long)hcpu;
--	struct timer_list *t = &per_cpu(mce_timer, cpu);
- 
- 	switch (action) {
- 	case CPU_ONLINE:
-@@ -2066,16 +2069,10 @@ mce_cpu_callback(struct notifier_block *
- 		break;
- 	case CPU_DOWN_PREPARE:
- 	case CPU_DOWN_PREPARE_FROZEN:
--		del_timer_sync(t);
- 		smp_call_function_single(cpu, mce_disable_cpu, &action, 1);
- 		break;
- 	case CPU_DOWN_FAILED:
- 	case CPU_DOWN_FAILED_FROZEN:
--		if (!mce_ignore_ce && check_interval) {
--			t->expires = round_jiffies(jiffies +
--					   __get_cpu_var(mce_next_interval));
--			add_timer_on(t, cpu);
--		}
- 		smp_call_function_single(cpu, mce_reenable_cpu, &action, 1);
- 		break;
- 	case CPU_POST_DEAD:
 Index: linux-2.6/arch/x86/include/asm/stackprotector.h
 ===================================================================
 --- linux-2.6.orig/arch/x86/include/asm/stackprotector.h
@@ -24759,6 +26063,23 @@ Index: linux-2.6/mm/vmalloc.c
  	rcu_read_unlock();
  
  	if (!addr) {
+Index: linux-2.6/include/linux/workqueue.h
+===================================================================
+--- linux-2.6.orig/include/linux/workqueue.h
++++ linux-2.6/include/linux/workqueue.h
+@@ -254,9 +254,10 @@ enum {
+ 	WQ_MEM_RECLAIM		= 1 << 3, /* may be used for memory reclaim */
+ 	WQ_HIGHPRI		= 1 << 4, /* high priority */
+ 	WQ_CPU_INTENSIVE	= 1 << 5, /* cpu instensive workqueue */
++	WQ_NON_AFFINE		= 1 << 6, /* free to move works around cpus */
+ 
+-	WQ_DYING		= 1 << 6, /* internal: workqueue is dying */
+-	WQ_RESCUER		= 1 << 7, /* internal: workqueue has rescuer */
++	WQ_DYING		= 1 << 7, /* internal: workqueue is dying */
++	WQ_RESCUER		= 1 << 8, /* internal: workqueue has rescuer */
+ 
+ 	WQ_MAX_ACTIVE		= 512,	  /* I like 512, better ideas? */
+ 	WQ_MAX_UNBOUND_PER_CPU	= 4,	  /* 4 * #cpus for unbound wq */
 Index: linux-2.6/lib/debugobjects.c
 ===================================================================
 --- linux-2.6.orig/lib/debugobjects.c
@@ -25130,6 +26451,83 @@ Index: linux-2.6/ipc/sem.c
  }
  
  static void unlink_queue(struct sem_array *sma, struct sem_queue *q)
+Index: linux-2.6/drivers/tty/serial/cpm_uart/cpm_uart_core.c
+===================================================================
+--- linux-2.6.orig/drivers/tty/serial/cpm_uart/cpm_uart_core.c
++++ linux-2.6/drivers/tty/serial/cpm_uart/cpm_uart_core.c
+@@ -1225,7 +1225,7 @@ static void cpm_uart_console_write(struc
+ {
+ 	struct uart_cpm_port *pinfo = &cpm_uart_ports[co->index];
+ 	unsigned long flags;
+-	int nolock = oops_in_progress;
++	int nolock = oops_in_progress || sysrq_in_progress;
+ 
+ 	if (unlikely(nolock)) {
+ 		local_irq_save(flags);
+Index: linux-2.6/drivers/tty/sysrq.c
+===================================================================
+--- linux-2.6.orig/drivers/tty/sysrq.c
++++ linux-2.6/drivers/tty/sysrq.c
+@@ -492,6 +492,23 @@ static void __sysrq_put_key_op(int key, 
+                 sysrq_key_table[i] = op_p;
+ }
+ 
++#ifdef CONFIG_MAGIC_SYSRQ_FORCE_PRINTK
++
++int sysrq_in_progress;
++
++static void set_sysrq_in_progress(int value)
++{
++	sysrq_in_progress = value;
++}
++
++#else
++
++static void set_sysrq_in_progress(int value)
++{
++}
++
++#endif
++
+ void __handle_sysrq(int key, bool check_mask)
+ {
+ 	struct sysrq_key_op *op_p;
+@@ -500,6 +517,9 @@ void __handle_sysrq(int key, bool check_
+ 	unsigned long flags;
+ 
+ 	spin_lock_irqsave(&sysrq_key_table_lock, flags);
++
++	set_sysrq_in_progress(1);
++
+ 	/*
+ 	 * Raise the apparent loglevel to maximum so that the sysrq header
+ 	 * is shown to provide the user with positive feedback.  We do not
+@@ -541,6 +561,9 @@ void __handle_sysrq(int key, bool check_
+ 		printk("\n");
+ 		console_loglevel = orig_log_level;
+ 	}
++
++	set_sysrq_in_progress(0);
++
+ 	spin_unlock_irqrestore(&sysrq_key_table_lock, flags);
+ }
+ 
+Index: linux-2.6/include/linux/sysrq.h
+===================================================================
+--- linux-2.6.orig/include/linux/sysrq.h
++++ linux-2.6/include/linux/sysrq.h
+@@ -38,6 +38,11 @@ struct sysrq_key_op {
+ 	int enable_mask;
+ };
+ 
++#ifdef CONFIG_MAGIC_SYSRQ_FORCE_PRINTK
++extern int sysrq_in_progress;
++#else
++#define sysrq_in_progress 0
++#endif
+ #ifdef CONFIG_MAGIC_SYSRQ
+ 
+ /* Generic SysRq interface -- you may call it from any device driver, supplying
 Index: linux-2.6/arch/Kconfig
 ===================================================================
 --- linux-2.6.orig/arch/Kconfig
@@ -25154,18 +26552,6 @@ Index: linux-2.6/drivers/net/Kconfig
  	---help---
  	If you want to log kernel messages over the network, enable this.
  	See <file:Documentation/networking/netconsole.txt> for details.
-Index: linux-2.6/kernel/time/Kconfig
-===================================================================
---- linux-2.6.orig/kernel/time/Kconfig
-+++ linux-2.6/kernel/time/Kconfig
-@@ -7,6 +7,7 @@ config TICK_ONESHOT
- config NO_HZ
- 	bool "Tickless System (Dynamic Ticks)"
- 	depends on !ARCH_USES_GETTIMEOFFSET && GENERIC_CLOCKEVENTS
-+	depends on !PREEMPT_RT_FULL
- 	select TICK_ONESHOT
- 	help
- 	  This option enables a tickless system: timer interrupts will
 Index: linux-2.6/mm/Kconfig
 ===================================================================
 --- linux-2.6.orig/mm/Kconfig
