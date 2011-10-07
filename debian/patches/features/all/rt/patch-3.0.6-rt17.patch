@@ -1681,43 +1681,6 @@ Index: linux-2.6/kernel/sched.c
  int wake_up_state(struct task_struct *p, unsigned int state)
  {
  	return try_to_wake_up(p, state, 0);
-@@ -2825,7 +2822,7 @@ static void __sched_fork(struct task_str
- void sched_fork(struct task_struct *p)
- {
- 	unsigned long flags;
--	int cpu = get_cpu();
-+	int cpu;
- 
- 	__sched_fork(p);
- 	/*
-@@ -2865,6 +2862,7 @@ void sched_fork(struct task_struct *p)
- 	if (!rt_prio(p->prio))
- 		p->sched_class = &fair_sched_class;
- 
-+	cpu = get_cpu();
- 	if (p->sched_class->task_fork)
- 		p->sched_class->task_fork(p);
- 
-@@ -2876,8 +2874,9 @@ void sched_fork(struct task_struct *p)
- 	 * Silence PROVE_RCU.
- 	 */
- 	raw_spin_lock_irqsave(&p->pi_lock, flags);
--	set_task_cpu(p, cpu);
-+	set_task_cpu(p, smp_processor_id());
- 	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
-+	put_cpu();
- 
- #if defined(CONFIG_SCHEDSTATS) || defined(CONFIG_TASK_DELAY_ACCT)
- 	if (likely(sched_info_on()))
-@@ -2893,8 +2892,6 @@ void sched_fork(struct task_struct *p)
- #ifdef CONFIG_SMP
- 	plist_node_init(&p->pushable_tasks, MAX_PRIO);
- #endif
--
--	put_cpu();
- }
- 
- /*
 @@ -3060,8 +3057,12 @@ static void finish_task_switch(struct rq
  	finish_lock_switch(rq, prev);
  
@@ -1736,7 +1699,7 @@ Index: linux-2.6/kernel/sched.c
  	schedstat_inc(this_rq(), sched_count);
  }
  
-+#ifdef CONFIG_PREEMPT_RT_FULL
++#if defined(CONFIG_PREEMPT_RT_FULL) && defined(CONFIG_SMP)
 +#define MIGRATE_DISABLE_SET_AFFIN	(1<<30) /* Can't make a negative */
 +#define migrate_disabled_updated(p)	((p)->migrate_disable & MIGRATE_DISABLE_SET_AFFIN)
 +#define migrate_disable_count(p)	((p)->migrate_disable & ~MIGRATE_DISABLE_SET_AFFIN)
@@ -2508,22 +2471,22 @@ Index: linux-2.6/kernel/workqueue.c
  
  	/* sanity check nr_running */
  	WARN_ON_ONCE(gcwq->nr_workers == gcwq->nr_idle &&
-@@ -1279,8 +1277,14 @@ __acquires(&gcwq->lock)
- 		 * it races with cpu hotunplug operation.  Verify
- 		 * against GCWQ_DISASSOCIATED.
- 		 */
--		if (!(gcwq->flags & GCWQ_DISASSOCIATED))
-+		if (!(gcwq->flags & GCWQ_DISASSOCIATED)) {
+@@ -1287,8 +1285,14 @@ __acquires(&gcwq->lock)
+ 			return false;
+ 		if (task_cpu(task) == gcwq->cpu &&
+ 		    cpumask_equal(&current->cpus_allowed,
+-				  get_cpu_mask(gcwq->cpu)))
++				  get_cpu_mask(gcwq->cpu))) {
 +			/*
 +			 * Since we're binding to a particular cpu and need to
 +			 * stay there for correctness, mark us PF_THREAD_BOUND.
 +			 */
 +			task->flags |= PF_THREAD_BOUND;
- 			set_cpus_allowed_ptr(task, get_cpu_mask(gcwq->cpu));
+ 			return true;
 +		}
+ 		spin_unlock_irq(&gcwq->lock);
  
- 		spin_lock_irq(&gcwq->lock);
- 		if (gcwq->flags & GCWQ_DISASSOCIATED)
+ 		/*
 @@ -1302,20 +1306,15 @@ __acquires(&gcwq->lock)
  	}
  }
@@ -3578,6 +3541,464 @@ Index: linux-2.6/arch/arm/kernel/smp.c
  	}
  
  	set_cpu_online(cpu, false);
+Index: linux-2.6/include/linux/jbd.h
+===================================================================
+--- linux-2.6.orig/include/linux/jbd.h
++++ linux-2.6/include/linux/jbd.h
+@@ -244,6 +244,7 @@ typedef struct journal_superblock_s
+ 
+ #include <linux/fs.h>
+ #include <linux/sched.h>
++#include <linux/jbd_common.h>
+ 
+ #define J_ASSERT(assert)	BUG_ON(!(assert))
+ 
+@@ -270,69 +271,6 @@ typedef struct journal_superblock_s
+ #define J_EXPECT_JH(jh, expr, why...)	__journal_expect(expr, ## why)
+ #endif
+ 
+-enum jbd_state_bits {
+-	BH_JBD			/* Has an attached ext3 journal_head */
+-	  = BH_PrivateStart,
+-	BH_JWrite,		/* Being written to log (@@@ DEBUGGING) */
+-	BH_Freed,		/* Has been freed (truncated) */
+-	BH_Revoked,		/* Has been revoked from the log */
+-	BH_RevokeValid,		/* Revoked flag is valid */
+-	BH_JBDDirty,		/* Is dirty but journaled */
+-	BH_State,		/* Pins most journal_head state */
+-	BH_JournalHead,		/* Pins bh->b_private and jh->b_bh */
+-	BH_Unshadow,		/* Dummy bit, for BJ_Shadow wakeup filtering */
+-};
+-
+-BUFFER_FNS(JBD, jbd)
+-BUFFER_FNS(JWrite, jwrite)
+-BUFFER_FNS(JBDDirty, jbddirty)
+-TAS_BUFFER_FNS(JBDDirty, jbddirty)
+-BUFFER_FNS(Revoked, revoked)
+-TAS_BUFFER_FNS(Revoked, revoked)
+-BUFFER_FNS(RevokeValid, revokevalid)
+-TAS_BUFFER_FNS(RevokeValid, revokevalid)
+-BUFFER_FNS(Freed, freed)
+-
+-static inline struct buffer_head *jh2bh(struct journal_head *jh)
+-{
+-	return jh->b_bh;
+-}
+-
+-static inline struct journal_head *bh2jh(struct buffer_head *bh)
+-{
+-	return bh->b_private;
+-}
+-
+-static inline void jbd_lock_bh_state(struct buffer_head *bh)
+-{
+-	bit_spin_lock(BH_State, &bh->b_state);
+-}
+-
+-static inline int jbd_trylock_bh_state(struct buffer_head *bh)
+-{
+-	return bit_spin_trylock(BH_State, &bh->b_state);
+-}
+-
+-static inline int jbd_is_locked_bh_state(struct buffer_head *bh)
+-{
+-	return bit_spin_is_locked(BH_State, &bh->b_state);
+-}
+-
+-static inline void jbd_unlock_bh_state(struct buffer_head *bh)
+-{
+-	bit_spin_unlock(BH_State, &bh->b_state);
+-}
+-
+-static inline void jbd_lock_bh_journal_head(struct buffer_head *bh)
+-{
+-	bit_spin_lock(BH_JournalHead, &bh->b_state);
+-}
+-
+-static inline void jbd_unlock_bh_journal_head(struct buffer_head *bh)
+-{
+-	bit_spin_unlock(BH_JournalHead, &bh->b_state);
+-}
+-
+ struct jbd_revoke_table_s;
+ 
+ /**
+Index: linux-2.6/include/linux/jbd2.h
+===================================================================
+--- linux-2.6.orig/include/linux/jbd2.h
++++ linux-2.6/include/linux/jbd2.h
+@@ -275,6 +275,7 @@ typedef struct journal_superblock_s
+ 
+ #include <linux/fs.h>
+ #include <linux/sched.h>
++#include <linux/jbd_common.h>
+ 
+ #define J_ASSERT(assert)	BUG_ON(!(assert))
+ 
+@@ -302,70 +303,6 @@ typedef struct journal_superblock_s
+ #define J_EXPECT_JH(jh, expr, why...)	__journal_expect(expr, ## why)
+ #endif
+ 
+-enum jbd_state_bits {
+-	BH_JBD			/* Has an attached ext3 journal_head */
+-	  = BH_PrivateStart,
+-	BH_JWrite,		/* Being written to log (@@@ DEBUGGING) */
+-	BH_Freed,		/* Has been freed (truncated) */
+-	BH_Revoked,		/* Has been revoked from the log */
+-	BH_RevokeValid,		/* Revoked flag is valid */
+-	BH_JBDDirty,		/* Is dirty but journaled */
+-	BH_State,		/* Pins most journal_head state */
+-	BH_JournalHead,		/* Pins bh->b_private and jh->b_bh */
+-	BH_Unshadow,		/* Dummy bit, for BJ_Shadow wakeup filtering */
+-	BH_JBDPrivateStart,	/* First bit available for private use by FS */
+-};
+-
+-BUFFER_FNS(JBD, jbd)
+-BUFFER_FNS(JWrite, jwrite)
+-BUFFER_FNS(JBDDirty, jbddirty)
+-TAS_BUFFER_FNS(JBDDirty, jbddirty)
+-BUFFER_FNS(Revoked, revoked)
+-TAS_BUFFER_FNS(Revoked, revoked)
+-BUFFER_FNS(RevokeValid, revokevalid)
+-TAS_BUFFER_FNS(RevokeValid, revokevalid)
+-BUFFER_FNS(Freed, freed)
+-
+-static inline struct buffer_head *jh2bh(struct journal_head *jh)
+-{
+-	return jh->b_bh;
+-}
+-
+-static inline struct journal_head *bh2jh(struct buffer_head *bh)
+-{
+-	return bh->b_private;
+-}
+-
+-static inline void jbd_lock_bh_state(struct buffer_head *bh)
+-{
+-	bit_spin_lock(BH_State, &bh->b_state);
+-}
+-
+-static inline int jbd_trylock_bh_state(struct buffer_head *bh)
+-{
+-	return bit_spin_trylock(BH_State, &bh->b_state);
+-}
+-
+-static inline int jbd_is_locked_bh_state(struct buffer_head *bh)
+-{
+-	return bit_spin_is_locked(BH_State, &bh->b_state);
+-}
+-
+-static inline void jbd_unlock_bh_state(struct buffer_head *bh)
+-{
+-	bit_spin_unlock(BH_State, &bh->b_state);
+-}
+-
+-static inline void jbd_lock_bh_journal_head(struct buffer_head *bh)
+-{
+-	bit_spin_lock(BH_JournalHead, &bh->b_state);
+-}
+-
+-static inline void jbd_unlock_bh_journal_head(struct buffer_head *bh)
+-{
+-	bit_spin_unlock(BH_JournalHead, &bh->b_state);
+-}
+-
+ /* Flags in jbd_inode->i_flags */
+ #define __JI_COMMIT_RUNNING 0
+ /* Commit of the inode data in progress. We use this flag to protect us from
+Index: linux-2.6/include/linux/jbd_common.h
+===================================================================
+--- /dev/null
++++ linux-2.6/include/linux/jbd_common.h
+@@ -0,0 +1,92 @@
++#ifndef _LINUX_JBD_STATE_H
++#define _LINUX_JBD_STATE_H
++
++enum jbd_state_bits {
++	BH_JBD			/* Has an attached ext3 journal_head */
++	  = BH_PrivateStart,
++	BH_JWrite,		/* Being written to log (@@@ DEBUGGING) */
++	BH_Freed,		/* Has been freed (truncated) */
++	BH_Revoked,		/* Has been revoked from the log */
++	BH_RevokeValid,		/* Revoked flag is valid */
++	BH_JBDDirty,		/* Is dirty but journaled */
++	BH_State,		/* Pins most journal_head state */
++	BH_JournalHead,		/* Pins bh->b_private and jh->b_bh */
++	BH_Unshadow,		/* Dummy bit, for BJ_Shadow wakeup filtering */
++	BH_JBDPrivateStart,	/* First bit available for private use by FS */
++};
++
++BUFFER_FNS(JBD, jbd)
++BUFFER_FNS(JWrite, jwrite)
++BUFFER_FNS(JBDDirty, jbddirty)
++TAS_BUFFER_FNS(JBDDirty, jbddirty)
++BUFFER_FNS(Revoked, revoked)
++TAS_BUFFER_FNS(Revoked, revoked)
++BUFFER_FNS(RevokeValid, revokevalid)
++TAS_BUFFER_FNS(RevokeValid, revokevalid)
++BUFFER_FNS(Freed, freed)
++
++static inline struct buffer_head *jh2bh(struct journal_head *jh)
++{
++	return jh->b_bh;
++}
++
++static inline struct journal_head *bh2jh(struct buffer_head *bh)
++{
++	return bh->b_private;
++}
++
++static inline void jbd_lock_bh_state(struct buffer_head *bh)
++{
++#ifndef CONFIG_PREEMPT_RT_BASE
++	bit_spin_lock(BH_State, &bh->b_state);
++#else
++	spin_lock(&bh->b_state_lock);
++#endif
++}
++
++static inline int jbd_trylock_bh_state(struct buffer_head *bh)
++{
++#ifndef CONFIG_PREEMPT_RT_BASE
++	return bit_spin_trylock(BH_State, &bh->b_state);
++#else
++	return spin_trylock(&bh->b_state_lock);
++#endif
++}
++
++static inline int jbd_is_locked_bh_state(struct buffer_head *bh)
++{
++#ifndef CONFIG_PREEMPT_RT_BASE
++	return bit_spin_is_locked(BH_State, &bh->b_state);
++#else
++	return spin_is_locked(&bh->b_state_lock);
++#endif
++}
++
++static inline void jbd_unlock_bh_state(struct buffer_head *bh)
++{
++#ifndef CONFIG_PREEMPT_RT_BASE
++	bit_spin_unlock(BH_State, &bh->b_state);
++#else
++	spin_unlock(&bh->b_state_lock);
++#endif
++}
++
++static inline void jbd_lock_bh_journal_head(struct buffer_head *bh)
++{
++#ifndef CONFIG_PREEMPT_RT_BASE
++	bit_spin_lock(BH_JournalHead, &bh->b_state);
++#else
++	spin_lock(&bh->b_journal_head_lock);
++#endif
++}
++
++static inline void jbd_unlock_bh_journal_head(struct buffer_head *bh)
++{
++#ifndef CONFIG_PREEMPT_RT_BASE
++	bit_spin_unlock(BH_JournalHead, &bh->b_state);
++#else
++	spin_unlock(&bh->b_journal_head_lock);
++#endif
++}
++
++#endif
+Index: linux-2.6/kernel/sched_rt.c
+===================================================================
+--- linux-2.6.orig/kernel/sched_rt.c
++++ linux-2.6/kernel/sched_rt.c
+@@ -536,6 +536,9 @@ static int balance_runtime(struct rt_rq 
+ {
+ 	int more = 0;
+ 
++	if (!sched_feat(RT_RUNTIME_SHARE))
++		return more;
++
+ 	if (rt_rq->rt_time > rt_rq->rt_runtime) {
+ 		raw_spin_unlock(&rt_rq->rt_runtime_lock);
+ 		more = do_balance_runtime(rt_rq);
+@@ -631,6 +634,7 @@ static int sched_rt_runtime_exceeded(str
+ 
+ 	if (rt_rq->rt_time > runtime) {
+ 		rt_rq->rt_throttled = 1;
++		printk_once(KERN_WARNING "sched: RT throttling activated\n");
+ 		if (rt_rq_throttled(rt_rq)) {
+ 			sched_rt_rq_dequeue(rt_rq);
+ 			return 1;
+@@ -1038,7 +1042,7 @@ select_task_rq_rt(struct task_struct *p,
+ 	 */
+ 	if (curr && unlikely(rt_task(curr)) &&
+ 	    (curr->rt.nr_cpus_allowed < 2 ||
+-	     curr->prio < p->prio) &&
++	     curr->prio <= p->prio) &&
+ 	    (p->rt.nr_cpus_allowed > 1)) {
+ 		int target = find_lowest_rq(p);
+ 
+@@ -1186,7 +1190,7 @@ static void deactivate_task(struct rq *r
+ static int pick_rt_task(struct rq *rq, struct task_struct *p, int cpu)
+ {
+ 	if (!task_running(rq, p) &&
+-	    (cpu < 0 || cpumask_test_cpu(cpu, &p->cpus_allowed)) &&
++	    (cpu < 0 || cpumask_test_cpu(cpu, tsk_cpus_allowed(p))) &&
+ 	    (p->rt.nr_cpus_allowed > 1))
+ 		return 1;
+ 	return 0;
+@@ -1331,7 +1335,7 @@ static struct rq *find_lock_lowest_rq(st
+ 			 */
+ 			if (unlikely(task_rq(task) != rq ||
+ 				     !cpumask_test_cpu(lowest_rq->cpu,
+-						       &task->cpus_allowed) ||
++						       tsk_cpus_allowed(task)) ||
+ 				     task_running(rq, task) ||
+ 				     !task->on_rq)) {
+ 
+@@ -1569,7 +1573,7 @@ static void task_woken_rt(struct rq *rq,
+ 	    p->rt.nr_cpus_allowed > 1 &&
+ 	    rt_task(rq->curr) &&
+ 	    (rq->curr->rt.nr_cpus_allowed < 2 ||
+-	     rq->curr->prio < p->prio))
++	     rq->curr->prio <= p->prio))
+ 		push_rt_tasks(rq);
+ }
+ 
+@@ -1614,9 +1618,6 @@ static void set_cpus_allowed_rt(struct t
+ 
+ 		update_rt_migration(&rq->rt);
+ 	}
+-
+-	cpumask_copy(&p->cpus_allowed, new_mask);
+-	p->rt.nr_cpus_allowed = weight;
+ }
+ 
+ /* Assumes rq->lock is held */
+Index: linux-2.6/arch/powerpc/platforms/85xx/mpc85xx_cds.c
+===================================================================
+--- linux-2.6.orig/arch/powerpc/platforms/85xx/mpc85xx_cds.c
++++ linux-2.6/arch/powerpc/platforms/85xx/mpc85xx_cds.c
+@@ -178,7 +178,7 @@ static irqreturn_t mpc85xx_8259_cascade_
+ 
+ static struct irqaction mpc85xxcds_8259_irqaction = {
+ 	.handler = mpc85xx_8259_cascade_action,
+-	.flags = IRQF_SHARED,
++	.flags = IRQF_SHARED | IRQF_NO_THREAD,
+ 	.name = "8259 cascade",
+ };
+ #endif /* PPC_I8259 */
+Index: linux-2.6/arch/powerpc/platforms/wsp/opb_pic.c
+===================================================================
+--- linux-2.6.orig/arch/powerpc/platforms/wsp/opb_pic.c
++++ linux-2.6/arch/powerpc/platforms/wsp/opb_pic.c
+@@ -320,7 +320,8 @@ void __init opb_pic_init(void)
+ 		}
+ 
+ 		/* Attach opb interrupt handler to new virtual IRQ */
+-		rc = request_irq(virq, opb_irq_handler, 0, "OPB LS Cascade", opb);
++		rc = request_irq(virq, opb_irq_handler, IRQF_NO_THREAD,
++				 "OPB LS Cascade", opb);
+ 		if (rc) {
+ 			printk("opb: request_irq failed: %d\n", rc);
+ 			continue;
+Index: linux-2.6/arch/powerpc/kernel/smp.c
+===================================================================
+--- linux-2.6.orig/arch/powerpc/kernel/smp.c
++++ linux-2.6/arch/powerpc/kernel/smp.c
+@@ -170,7 +170,7 @@ int smp_request_message_ipi(int virq, in
+ 		return 1;
+ 	}
+ #endif
+-	err = request_irq(virq, smp_ipi_action[msg], IRQF_DISABLED|IRQF_PERCPU,
++	err = request_irq(virq, smp_ipi_action[msg], IRQF_NO_THREAD|IRQF_PERCPU,
+ 			  smp_ipi_name[msg], 0);
+ 	WARN(err < 0, "unable to request_irq %d for %s (rc %d)\n",
+ 		virq, smp_ipi_name[msg], err);
+Index: linux-2.6/arch/powerpc/platforms/powermac/smp.c
+===================================================================
+--- linux-2.6.orig/arch/powerpc/platforms/powermac/smp.c
++++ linux-2.6/arch/powerpc/platforms/powermac/smp.c
+@@ -200,7 +200,7 @@ static int psurge_secondary_ipi_init(voi
+ 
+ 	if (psurge_secondary_virq)
+ 		rc = request_irq(psurge_secondary_virq, psurge_ipi_intr,
+-			IRQF_DISABLED|IRQF_PERCPU, "IPI", NULL);
++			IRQF_NO_THREAD|IRQF_PERCPU, "IPI", NULL);
+ 
+ 	if (rc)
+ 		pr_err("Failed to setup secondary cpu IPI\n");
+@@ -408,7 +408,7 @@ static int __init smp_psurge_kick_cpu(in
+ 
+ static struct irqaction psurge_irqaction = {
+ 	.handler = psurge_ipi_intr,
+-	.flags = IRQF_DISABLED|IRQF_PERCPU,
++	.flags = IRQF_NO_THREAD|IRQF_PERCPU,
+ 	.name = "primary IPI",
+ };
+ 
+Index: linux-2.6/arch/powerpc/sysdev/xics/xics-common.c
+===================================================================
+--- linux-2.6.orig/arch/powerpc/sysdev/xics/xics-common.c
++++ linux-2.6/arch/powerpc/sysdev/xics/xics-common.c
+@@ -134,11 +134,11 @@ static void xics_request_ipi(void)
+ 	BUG_ON(ipi == NO_IRQ);
+ 
+ 	/*
+-	 * IPIs are marked IRQF_DISABLED as they must run with irqs
+-	 * disabled, and PERCPU.  The handler was set in map.
++	 * IPIs are marked PERCPU and also IRQF_NO_THREAD as they must
++	 * run in hard interrupt context. The handler was set in map.
+ 	 */
+ 	BUG_ON(request_irq(ipi, icp_ops->ipi_action,
+-			   IRQF_DISABLED|IRQF_PERCPU, "IPI", NULL));
++			   IRQF_NO_THREAD|IRQF_PERCPU, "IPI", NULL));
+ }
+ 
+ int __init xics_smp_probe(void)
+Index: linux-2.6/arch/powerpc/Kconfig
+===================================================================
+--- linux-2.6.orig/arch/powerpc/Kconfig
++++ linux-2.6/arch/powerpc/Kconfig
+@@ -69,10 +69,11 @@ config LOCKDEP_SUPPORT
+ 
+ config RWSEM_GENERIC_SPINLOCK
+ 	bool
++	default y if PREEMPT_RT_FULL
+ 
+ config RWSEM_XCHGADD_ALGORITHM
+ 	bool
+-	default y
++	default y if !PREEMPT_RT_FULL
+ 
+ config GENERIC_LOCKBREAK
+ 	bool
+@@ -134,6 +135,7 @@ config PPC
+ 	select GENERIC_IRQ_SHOW_LEVEL
+ 	select HAVE_RCU_TABLE_FREE if SMP
+ 	select HAVE_SYSCALL_TRACEPOINTS
++	select IRQ_FORCED_THREADING
+ 
+ config EARLY_PRINTK
+ 	bool
+@@ -271,7 +273,7 @@ menu "Kernel options"
+ 
+ config HIGHMEM
+ 	bool "High memory support"
+-	depends on PPC32
++	depends on PPC32 && !PREEMPT_RT_FULL
+ 
+ source kernel/time/Kconfig
+ source kernel/Kconfig.hz
+Index: linux-2.6/net/netfilter/ipvs/ip_vs_ctl.c
+===================================================================
+--- linux-2.6.orig/net/netfilter/ipvs/ip_vs_ctl.c
++++ linux-2.6/net/netfilter/ipvs/ip_vs_ctl.c
+@@ -3679,7 +3679,7 @@ int __net_init __ip_vs_control_init(stru
+ 	int idx;
+ 	struct netns_ipvs *ipvs = net_ipvs(net);
+ 
+-	ipvs->rs_lock = __RW_LOCK_UNLOCKED(ipvs->rs_lock);
++	rwlock_init(&ipvs->rs_lock);
+ 
+ 	/* Initialize rs_table */
+ 	for (idx = 0; idx < IP_VS_RTAB_SIZE; idx++)
 Index: linux-2.6/kernel/watchdog.c
 ===================================================================
 --- linux-2.6.orig/kernel/watchdog.c
@@ -9546,6 +9967,122 @@ Index: linux-2.6/arch/x86/include/asm/amd_nb.h
  };
  
  struct amd_northbridge_info {
+Index: linux-2.6/kernel/sched_fair.c
+===================================================================
+--- linux-2.6.orig/kernel/sched_fair.c
++++ linux-2.6/kernel/sched_fair.c
+@@ -1565,7 +1565,7 @@ find_idlest_group(struct sched_domain *s
+ 
+ 		/* Skip over this group if it has no CPUs allowed */
+ 		if (!cpumask_intersects(sched_group_cpus(group),
+-					&p->cpus_allowed))
++					tsk_cpus_allowed(p)))
+ 			continue;
+ 
+ 		local_group = cpumask_test_cpu(this_cpu,
+@@ -1611,7 +1611,7 @@ find_idlest_cpu(struct sched_group *grou
+ 	int i;
+ 
+ 	/* Traverse only the allowed CPUs */
+-	for_each_cpu_and(i, sched_group_cpus(group), &p->cpus_allowed) {
++	for_each_cpu_and(i, sched_group_cpus(group), tsk_cpus_allowed(p)) {
+ 		load = weighted_cpuload(i);
+ 
+ 		if (load < min_load || (load == min_load && i == this_cpu)) {
+@@ -1655,7 +1655,7 @@ static int select_idle_sibling(struct ta
+ 		if (!(sd->flags & SD_SHARE_PKG_RESOURCES))
+ 			break;
+ 
+-		for_each_cpu_and(i, sched_domain_span(sd), &p->cpus_allowed) {
++		for_each_cpu_and(i, sched_domain_span(sd), tsk_cpus_allowed(p)) {
+ 			if (idle_cpu(i)) {
+ 				target = i;
+ 				break;
+@@ -1698,7 +1698,7 @@ select_task_rq_fair(struct task_struct *
+ 	int sync = wake_flags & WF_SYNC;
+ 
+ 	if (sd_flag & SD_BALANCE_WAKE) {
+-		if (cpumask_test_cpu(cpu, &p->cpus_allowed))
++		if (cpumask_test_cpu(cpu, tsk_cpus_allowed(p)))
+ 			want_affine = 1;
+ 		new_cpu = prev_cpu;
+ 	}
+@@ -2067,7 +2067,7 @@ int can_migrate_task(struct task_struct 
+ 	 * 2) cannot be migrated to this CPU due to cpus_allowed, or
+ 	 * 3) are cache-hot on their current CPU.
+ 	 */
+-	if (!cpumask_test_cpu(this_cpu, &p->cpus_allowed)) {
++	if (!cpumask_test_cpu(this_cpu, tsk_cpus_allowed(p))) {
+ 		schedstat_inc(p, se.statistics.nr_failed_migrations_affine);
+ 		return 0;
+ 	}
+@@ -2173,6 +2173,10 @@ balance_tasks(struct rq *this_rq, int th
+ 		 */
+ 		if (idle == CPU_NEWLY_IDLE)
+ 			break;
++
++		if (raw_spin_is_contended(&this_rq->lock) ||
++		    raw_spin_is_contended(&busiest->lock))
++			break;
+ #endif
+ 
+ 		/*
+@@ -2277,6 +2281,20 @@ load_balance_fair(struct rq *this_rq, in
+ 		rem_load_move -= moved_load;
+ 		if (rem_load_move < 0)
+ 			break;
++
++#ifdef CONFIG_PREEMPT
++		/*
++		 * NEWIDLE balancing is a source of latency, so preemptible
++		 * kernels will stop after the first task is pulled to minimize
++		 * the critical section.
++		 */
++		if (idle == CPU_NEWLY_IDLE && this_rq->nr_running)
++			break;
++
++		if (raw_spin_is_contended(&this_rq->lock) ||
++		    raw_spin_is_contended(&busiest->lock))
++			break;
++#endif
+ 	}
+ 	rcu_read_unlock();
+ 
+@@ -3418,7 +3436,7 @@ redo:
+ 			 * moved to this_cpu
+ 			 */
+ 			if (!cpumask_test_cpu(this_cpu,
+-					      &busiest->curr->cpus_allowed)) {
++					tsk_cpus_allowed(busiest->curr))) {
+ 				raw_spin_unlock_irqrestore(&busiest->lock,
+ 							    flags);
+ 				all_pinned = 1;
+Index: linux-2.6/lib/smp_processor_id.c
+===================================================================
+--- linux-2.6.orig/lib/smp_processor_id.c
++++ linux-2.6/lib/smp_processor_id.c
+@@ -22,7 +22,7 @@ notrace unsigned int debug_smp_processor
+ 	 * Kernel threads bound to a single CPU can safely use
+ 	 * smp_processor_id():
+ 	 */
+-	if (cpumask_equal(&current->cpus_allowed, cpumask_of(this_cpu)))
++	if (cpumask_equal(tsk_cpus_allowed(current), cpumask_of(this_cpu)))
+ 		goto out;
+ 
+ 	/*
+@@ -39,9 +39,9 @@ notrace unsigned int debug_smp_processor
+ 	if (!printk_ratelimit())
+ 		goto out_enable;
+ 
+-	printk(KERN_ERR "BUG: using smp_processor_id() in preemptible [%08x] "
+-			"code: %s/%d\n",
+-			preempt_count() - 1, current->comm, current->pid);
++	printk(KERN_ERR "BUG: using smp_processor_id() in preemptible [%08x %08x] "
++	       "code: %s/%d\n", preempt_count() - 1,
++	       __migrate_disabled(current), current->comm, current->pid);
+ 	print_symbol("caller is %s\n", (long)__builtin_return_address(0));
+ 	dump_stack();
+ 
 Index: linux-2.6/arch/x86/include/asm/irqflags.h
 ===================================================================
 --- linux-2.6.orig/arch/x86/include/asm/irqflags.h
@@ -10073,53 +10610,6 @@ Index: linux-2.6/arch/arm/mach-ux500/platsmp.c
  
  	return pen_release != -1 ? -ENOSYS : 0;
  }
-Index: linux-2.6/arch/powerpc/platforms/85xx/mpc85xx_cds.c
-===================================================================
---- linux-2.6.orig/arch/powerpc/platforms/85xx/mpc85xx_cds.c
-+++ linux-2.6/arch/powerpc/platforms/85xx/mpc85xx_cds.c
-@@ -178,7 +178,7 @@ static irqreturn_t mpc85xx_8259_cascade_
- 
- static struct irqaction mpc85xxcds_8259_irqaction = {
- 	.handler = mpc85xx_8259_cascade_action,
--	.flags = IRQF_SHARED,
-+	.flags = IRQF_SHARED | IRQF_NO_THREAD,
- 	.name = "8259 cascade",
- };
- #endif /* PPC_I8259 */
-Index: linux-2.6/arch/powerpc/Kconfig
-===================================================================
---- linux-2.6.orig/arch/powerpc/Kconfig
-+++ linux-2.6/arch/powerpc/Kconfig
-@@ -69,10 +69,11 @@ config LOCKDEP_SUPPORT
- 
- config RWSEM_GENERIC_SPINLOCK
- 	bool
-+	default y if PREEMPT_RT_FULL
- 
- config RWSEM_XCHGADD_ALGORITHM
- 	bool
--	default y
-+	default y if !PREEMPT_RT_FULL
- 
- config GENERIC_LOCKBREAK
- 	bool
-@@ -134,6 +135,7 @@ config PPC
- 	select GENERIC_IRQ_SHOW_LEVEL
- 	select HAVE_RCU_TABLE_FREE if SMP
- 	select HAVE_SYSCALL_TRACEPOINTS
-+	select IRQ_FORCED_THREADING
- 
- config EARLY_PRINTK
- 	bool
-@@ -271,7 +273,7 @@ menu "Kernel options"
- 
- config HIGHMEM
- 	bool "High memory support"
--	depends on PPC32
-+	depends on PPC32 && !PREEMPT_RT_FULL
- 
- source kernel/time/Kconfig
- source kernel/Kconfig.hz
 Index: linux-2.6/arch/arm/kernel/process.c
 ===================================================================
 --- linux-2.6.orig/arch/arm/kernel/process.c
@@ -10739,11 +11229,11 @@ Index: linux-2.6/kernel/softirq.c
  /*
   * we cannot loop indefinitely here to avoid userspace starvation,
   * but we also don't want to introduce a worst case 1/HZ latency
-@@ -76,6 +138,35 @@ static void wakeup_softirqd(void)
+@@ -76,6 +138,36 @@ static void wakeup_softirqd(void)
  		wake_up_process(tsk);
  }
  
-+static void handle_pending_softirqs(u32 pending, int cpu)
++static void handle_pending_softirqs(u32 pending, int cpu, int need_rcu_bh_qs)
 +{
 +	struct softirq_action *h = softirq_vec;
 +	unsigned int prev_count = preempt_count();
@@ -10766,7 +11256,8 @@ Index: linux-2.6/kernel/softirq.c
 +			       prev_count, (unsigned int) preempt_count());
 +			preempt_count() = prev_count;
 +		}
-+		rcu_bh_qs(cpu);
++		if (need_rcu_bh_qs)
++			rcu_bh_qs(cpu);
 +	}
 +	local_irq_disable();
 +}
@@ -10775,7 +11266,7 @@ Index: linux-2.6/kernel/softirq.c
  /*
   * preempt_count and SOFTIRQ_OFFSET usage:
   * - preempt_count is changed by SOFTIRQ_OFFSET on entering or leaving
-@@ -206,7 +297,6 @@ EXPORT_SYMBOL(local_bh_enable_ip);
+@@ -206,7 +298,6 @@ EXPORT_SYMBOL(local_bh_enable_ip);
  
  asmlinkage void __do_softirq(void)
  {
@@ -10783,7 +11274,7 @@ Index: linux-2.6/kernel/softirq.c
  	__u32 pending;
  	int max_restart = MAX_SOFTIRQ_RESTART;
  	int cpu;
-@@ -215,7 +305,7 @@ asmlinkage void __do_softirq(void)
+@@ -215,7 +306,7 @@ asmlinkage void __do_softirq(void)
  	account_system_vtime(current);
  
  	__local_bh_disable((unsigned long)__builtin_return_address(0),
@@ -10792,7 +11283,7 @@ Index: linux-2.6/kernel/softirq.c
  	lockdep_softirq_enter();
  
  	cpu = smp_processor_id();
-@@ -223,36 +313,7 @@ restart:
+@@ -223,36 +314,7 @@ restart:
  	/* Reset the pending bitmask before enabling irqs */
  	set_softirq_pending(0);
  
@@ -10826,11 +11317,11 @@ Index: linux-2.6/kernel/softirq.c
 -	} while (pending);
 -
 -	local_irq_disable();
-+	handle_pending_softirqs(pending, cpu);
++	handle_pending_softirqs(pending, cpu, 1);
  
  	pending = local_softirq_pending();
  	if (pending && --max_restart)
-@@ -267,6 +328,26 @@ restart:
+@@ -267,6 +329,26 @@ restart:
  	__local_bh_enable(SOFTIRQ_OFFSET);
  }
  
@@ -10857,7 +11348,7 @@ Index: linux-2.6/kernel/softirq.c
  #ifndef __ARCH_HAS_DO_SOFTIRQ
  
  asmlinkage void do_softirq(void)
-@@ -289,6 +370,178 @@ asmlinkage void do_softirq(void)
+@@ -289,6 +371,183 @@ asmlinkage void do_softirq(void)
  
  #endif
  
@@ -10874,7 +11365,12 @@ Index: linux-2.6/kernel/softirq.c
 +static DEFINE_LOCAL_IRQ_LOCK(local_softirq_lock);
 +static DEFINE_PER_CPU(struct task_struct *, local_softirq_runner);
 +
-+static void __do_softirq(void);
++static void __do_softirq_common(int need_rcu_bh_qs);
++
++void __do_softirq(void)
++{
++	__do_softirq_common(0);
++}
 +
 +void __init softirq_early_init(void)
 +{
@@ -10937,7 +11433,7 @@ Index: linux-2.6/kernel/softirq.c
 + * Called with bh and local interrupts disabled. For full RT cpu must
 + * be pinned.
 + */
-+static void __do_softirq(void)
++static void __do_softirq_common(int need_rcu_bh_qs)
 +{
 +	u32 pending = local_softirq_pending();
 +	int cpu = smp_processor_id();
@@ -10951,7 +11447,7 @@ Index: linux-2.6/kernel/softirq.c
 +
 +	lockdep_softirq_enter();
 +
-+	handle_pending_softirqs(pending, cpu);
++	handle_pending_softirqs(pending, cpu, need_rcu_bh_qs);
 +
 +	pending = local_softirq_pending();
 +	if (pending)
@@ -10990,7 +11486,7 @@ Index: linux-2.6/kernel/softirq.c
 +	 * schedule!
 +	 */
 +	if (local_softirq_pending())
-+		__do_softirq();
++		__do_softirq_common(cpu >= 0);
 +	local_unlock(local_softirq_lock);
 +	unpin_current_cpu();
 +	preempt_disable();
@@ -11036,7 +11532,7 @@ Index: linux-2.6/kernel/softirq.c
  /*
   * Enter an interrupt context.
   */
-@@ -302,9 +555,9 @@ void irq_enter(void)
+@@ -302,9 +561,9 @@ void irq_enter(void)
  		 * Prevent raise_softirq from needlessly waking up ksoftirqd
  		 * here, as softirq will be serviced on return from interrupt.
  		 */
@@ -11048,7 +11544,7 @@ Index: linux-2.6/kernel/softirq.c
  	}
  
  	__irq_enter();
-@@ -313,6 +566,7 @@ void irq_enter(void)
+@@ -313,6 +572,7 @@ void irq_enter(void)
  #ifdef __ARCH_IRQ_EXIT_IRQS_DISABLED
  static inline void invoke_softirq(void)
  {
@@ -11056,7 +11552,7 @@ Index: linux-2.6/kernel/softirq.c
  	if (!force_irqthreads)
  		__do_softirq();
  	else {
-@@ -321,10 +575,14 @@ static inline void invoke_softirq(void)
+@@ -321,10 +581,14 @@ static inline void invoke_softirq(void)
  		wakeup_softirqd();
  		__local_bh_enable(SOFTIRQ_OFFSET);
  	}
@@ -11071,7 +11567,7 @@ Index: linux-2.6/kernel/softirq.c
  	if (!force_irqthreads)
  		do_softirq();
  	else {
-@@ -333,6 +591,9 @@ static inline void invoke_softirq(void)
+@@ -333,6 +597,9 @@ static inline void invoke_softirq(void)
  		wakeup_softirqd();
  		__local_bh_enable(SOFTIRQ_OFFSET);
  	}
@@ -11081,7 +11577,7 @@ Index: linux-2.6/kernel/softirq.c
  }
  #endif
  
-@@ -353,7 +614,7 @@ void irq_exit(void)
+@@ -353,7 +620,7 @@ void irq_exit(void)
  	if (idle_cpu(smp_processor_id()) && !in_interrupt() && !need_resched())
  		tick_nohz_stop_sched_tick(0);
  #endif
@@ -11090,7 +11586,7 @@ Index: linux-2.6/kernel/softirq.c
  }
  
  /*
-@@ -739,29 +1000,21 @@ void __init softirq_init(void)
+@@ -739,29 +1006,21 @@ void __init softirq_init(void)
  
  static int run_ksoftirqd(void * __bind_cpu)
  {
@@ -11126,7 +11622,7 @@ Index: linux-2.6/kernel/softirq.c
  			cond_resched();
  			preempt_disable();
  			rcu_note_context_switch((long)__bind_cpu);
-@@ -774,6 +1027,7 @@ static int run_ksoftirqd(void * __bind_c
+@@ -774,6 +1033,7 @@ static int run_ksoftirqd(void * __bind_c
  
  wait_to_die:
  	preempt_enable();
@@ -11134,7 +11630,7 @@ Index: linux-2.6/kernel/softirq.c
  	/* Wait for kthread_stop */
  	set_current_state(TASK_INTERRUPTIBLE);
  	while (!kthread_should_stop()) {
-@@ -850,9 +1104,8 @@ static int __cpuinit cpu_callback(struct
+@@ -850,9 +1110,8 @@ static int __cpuinit cpu_callback(struct
  	int hotcpu = (unsigned long)hcpu;
  	struct task_struct *p;
  
@@ -11145,7 +11641,7 @@ Index: linux-2.6/kernel/softirq.c
  		p = kthread_create_on_node(run_ksoftirqd,
  					   hcpu,
  					   cpu_to_node(hotcpu),
-@@ -865,19 +1118,16 @@ static int __cpuinit cpu_callback(struct
+@@ -865,19 +1124,16 @@ static int __cpuinit cpu_callback(struct
    		per_cpu(ksoftirqd, hotcpu) = p;
   		break;
  	case CPU_ONLINE:
@@ -11370,64 +11866,26 @@ Index: linux-2.6/kernel/fork.c
  #ifdef CONFIG_LOCKDEP
  	p->lockdep_depth = 0; /* no locks held yet */
  	p->curr_chain_key = 0;
-Index: linux-2.6/kernel/sched_rt.c
+Index: linux-2.6/kernel/sched_features.h
 ===================================================================
---- linux-2.6.orig/kernel/sched_rt.c
-+++ linux-2.6/kernel/sched_rt.c
-@@ -631,6 +631,7 @@ static int sched_rt_runtime_exceeded(str
+--- linux-2.6.orig/kernel/sched_features.h
++++ linux-2.6/kernel/sched_features.h
+@@ -65,10 +65,15 @@ SCHED_FEAT(OWNER_SPIN, 1)
+  */
+ SCHED_FEAT(NONIRQ_POWER, 1)
  
- 	if (rt_rq->rt_time > runtime) {
- 		rt_rq->rt_throttled = 1;
-+		printk_once(KERN_WARNING "sched: RT throttling activated\n");
- 		if (rt_rq_throttled(rt_rq)) {
- 			sched_rt_rq_dequeue(rt_rq);
- 			return 1;
-@@ -1038,7 +1039,7 @@ select_task_rq_rt(struct task_struct *p,
- 	 */
- 	if (curr && unlikely(rt_task(curr)) &&
- 	    (curr->rt.nr_cpus_allowed < 2 ||
--	     curr->prio < p->prio) &&
-+	     curr->prio <= p->prio) &&
- 	    (p->rt.nr_cpus_allowed > 1)) {
- 		int target = find_lowest_rq(p);
++#ifndef CONFIG_PREEMPT_RT_FULL
+ /*
+  * Queue remote wakeups on the target CPU and process them
+  * using the scheduler IPI. Reduces rq->lock contention/bounces.
+  */
+ SCHED_FEAT(TTWU_QUEUE, 1)
++#else
++SCHED_FEAT(TTWU_QUEUE, 0)
++#endif
  
-@@ -1186,7 +1187,7 @@ static void deactivate_task(struct rq *r
- static int pick_rt_task(struct rq *rq, struct task_struct *p, int cpu)
- {
- 	if (!task_running(rq, p) &&
--	    (cpu < 0 || cpumask_test_cpu(cpu, &p->cpus_allowed)) &&
-+	    (cpu < 0 || cpumask_test_cpu(cpu, tsk_cpus_allowed(p))) &&
- 	    (p->rt.nr_cpus_allowed > 1))
- 		return 1;
- 	return 0;
-@@ -1331,7 +1332,7 @@ static struct rq *find_lock_lowest_rq(st
- 			 */
- 			if (unlikely(task_rq(task) != rq ||
- 				     !cpumask_test_cpu(lowest_rq->cpu,
--						       &task->cpus_allowed) ||
-+						       tsk_cpus_allowed(task)) ||
- 				     task_running(rq, task) ||
- 				     !task->on_rq)) {
- 
-@@ -1569,7 +1570,7 @@ static void task_woken_rt(struct rq *rq,
- 	    p->rt.nr_cpus_allowed > 1 &&
- 	    rt_task(rq->curr) &&
- 	    (rq->curr->rt.nr_cpus_allowed < 2 ||
--	     rq->curr->prio < p->prio))
-+	     rq->curr->prio <= p->prio))
- 		push_rt_tasks(rq);
- }
- 
-@@ -1614,9 +1615,6 @@ static void set_cpus_allowed_rt(struct t
- 
- 		update_rt_migration(&rq->rt);
- 	}
--
--	cpumask_copy(&p->cpus_allowed, new_mask);
--	p->rt.nr_cpus_allowed = weight;
- }
- 
- /* Assumes rq->lock is held */
+ SCHED_FEAT(FORCE_SD_OVERLAP, 0)
++SCHED_FEAT(RT_RUNTIME_SHARE, 1)
 Index: linux-2.6/include/asm-generic/cmpxchg-local.h
 ===================================================================
 --- linux-2.6.orig/include/asm-generic/cmpxchg-local.h
@@ -11464,34 +11922,6 @@ Index: linux-2.6/include/asm-generic/cmpxchg-local.h
  	return prev;
  }
  
-Index: linux-2.6/kernel/rtmutex-debug.h
-===================================================================
---- linux-2.6.orig/kernel/rtmutex-debug.h
-+++ linux-2.6/kernel/rtmutex-debug.h
-@@ -17,17 +17,17 @@ extern void debug_rt_mutex_free_waiter(s
- extern void debug_rt_mutex_init(struct rt_mutex *lock, const char *name);
- extern void debug_rt_mutex_lock(struct rt_mutex *lock);
- extern void debug_rt_mutex_unlock(struct rt_mutex *lock);
--extern void debug_rt_mutex_proxy_lock(struct rt_mutex *lock,
--				      struct task_struct *powner);
-+extern void
-+debug_rt_mutex_proxy_lock(struct rt_mutex *lock, struct task_struct *powner);
- extern void debug_rt_mutex_proxy_unlock(struct rt_mutex *lock);
- extern void debug_rt_mutex_deadlock(int detect, struct rt_mutex_waiter *waiter,
- 				    struct rt_mutex *lock);
- extern void debug_rt_mutex_print_deadlock(struct rt_mutex_waiter *waiter);
--# define debug_rt_mutex_reset_waiter(w)			\
-+# define debug_rt_mutex_reset_waiter(w) \
- 	do { (w)->deadlock_lock = NULL; } while (0)
- 
--static inline int debug_rt_mutex_detect_deadlock(struct rt_mutex_waiter *waiter,
--						 int detect)
-+static inline int
-+debug_rt_mutex_detect_deadlock(struct rt_mutex_waiter *waiter, int detect)
- {
--	return (waiter != NULL);
-+	return waiter != NULL;
- }
 Index: linux-2.6/drivers/char/random.c
 ===================================================================
 --- linux-2.6.orig/drivers/char/random.c
@@ -11546,26 +11976,6 @@ Index: linux-2.6/drivers/char/random.c
  }
  
  void add_input_randomness(unsigned int type, unsigned int code,
-Index: linux-2.6/fs/ioprio.c
-===================================================================
---- linux-2.6.orig/fs/ioprio.c
-+++ linux-2.6/fs/ioprio.c
-@@ -226,6 +226,7 @@ SYSCALL_DEFINE2(ioprio_get, int, which, 
- 			if (!user)
- 				break;
- 
-+			rcu_read_lock();
- 			do_each_thread(g, p) {
- 				if (__task_cred(p)->uid != user->uid)
- 					continue;
-@@ -237,6 +238,7 @@ SYSCALL_DEFINE2(ioprio_get, int, which, 
- 				else
- 					ret = ioprio_best(ret, tmpio);
- 			} while_each_thread(g, p);
-+			rcu_read_unlock();
- 
- 			if (who)
- 				free_uid(user);
 Index: linux-2.6/arch/arm/mach-at91/at91rm9200_time.c
 ===================================================================
 --- linux-2.6.orig/arch/arm/mach-at91/at91rm9200_time.c
@@ -13282,122 +13692,6 @@ Index: linux-2.6/mm/page_alloc.c
  }
  
  /*
-Index: linux-2.6/kernel/sched_fair.c
-===================================================================
---- linux-2.6.orig/kernel/sched_fair.c
-+++ linux-2.6/kernel/sched_fair.c
-@@ -1565,7 +1565,7 @@ find_idlest_group(struct sched_domain *s
- 
- 		/* Skip over this group if it has no CPUs allowed */
- 		if (!cpumask_intersects(sched_group_cpus(group),
--					&p->cpus_allowed))
-+					tsk_cpus_allowed(p)))
- 			continue;
- 
- 		local_group = cpumask_test_cpu(this_cpu,
-@@ -1611,7 +1611,7 @@ find_idlest_cpu(struct sched_group *grou
- 	int i;
- 
- 	/* Traverse only the allowed CPUs */
--	for_each_cpu_and(i, sched_group_cpus(group), &p->cpus_allowed) {
-+	for_each_cpu_and(i, sched_group_cpus(group), tsk_cpus_allowed(p)) {
- 		load = weighted_cpuload(i);
- 
- 		if (load < min_load || (load == min_load && i == this_cpu)) {
-@@ -1655,7 +1655,7 @@ static int select_idle_sibling(struct ta
- 		if (!(sd->flags & SD_SHARE_PKG_RESOURCES))
- 			break;
- 
--		for_each_cpu_and(i, sched_domain_span(sd), &p->cpus_allowed) {
-+		for_each_cpu_and(i, sched_domain_span(sd), tsk_cpus_allowed(p)) {
- 			if (idle_cpu(i)) {
- 				target = i;
- 				break;
-@@ -1698,7 +1698,7 @@ select_task_rq_fair(struct task_struct *
- 	int sync = wake_flags & WF_SYNC;
- 
- 	if (sd_flag & SD_BALANCE_WAKE) {
--		if (cpumask_test_cpu(cpu, &p->cpus_allowed))
-+		if (cpumask_test_cpu(cpu, tsk_cpus_allowed(p)))
- 			want_affine = 1;
- 		new_cpu = prev_cpu;
- 	}
-@@ -2067,7 +2067,7 @@ int can_migrate_task(struct task_struct 
- 	 * 2) cannot be migrated to this CPU due to cpus_allowed, or
- 	 * 3) are cache-hot on their current CPU.
- 	 */
--	if (!cpumask_test_cpu(this_cpu, &p->cpus_allowed)) {
-+	if (!cpumask_test_cpu(this_cpu, tsk_cpus_allowed(p))) {
- 		schedstat_inc(p, se.statistics.nr_failed_migrations_affine);
- 		return 0;
- 	}
-@@ -2173,6 +2173,10 @@ balance_tasks(struct rq *this_rq, int th
- 		 */
- 		if (idle == CPU_NEWLY_IDLE)
- 			break;
-+
-+		if (raw_spin_is_contended(&this_rq->lock) ||
-+		    raw_spin_is_contended(&busiest->lock))
-+			break;
- #endif
- 
- 		/*
-@@ -2277,6 +2281,20 @@ load_balance_fair(struct rq *this_rq, in
- 		rem_load_move -= moved_load;
- 		if (rem_load_move < 0)
- 			break;
-+
-+#ifdef CONFIG_PREEMPT
-+		/*
-+		 * NEWIDLE balancing is a source of latency, so preemptible
-+		 * kernels will stop after the first task is pulled to minimize
-+		 * the critical section.
-+		 */
-+		if (idle == CPU_NEWLY_IDLE && this_rq->nr_running)
-+			break;
-+
-+		if (raw_spin_is_contended(&this_rq->lock) ||
-+		    raw_spin_is_contended(&busiest->lock))
-+			break;
-+#endif
- 	}
- 	rcu_read_unlock();
- 
-@@ -3418,7 +3436,7 @@ redo:
- 			 * moved to this_cpu
- 			 */
- 			if (!cpumask_test_cpu(this_cpu,
--					      &busiest->curr->cpus_allowed)) {
-+					tsk_cpus_allowed(busiest->curr))) {
- 				raw_spin_unlock_irqrestore(&busiest->lock,
- 							    flags);
- 				all_pinned = 1;
-Index: linux-2.6/lib/smp_processor_id.c
-===================================================================
---- linux-2.6.orig/lib/smp_processor_id.c
-+++ linux-2.6/lib/smp_processor_id.c
-@@ -22,7 +22,7 @@ notrace unsigned int debug_smp_processor
- 	 * Kernel threads bound to a single CPU can safely use
- 	 * smp_processor_id():
- 	 */
--	if (cpumask_equal(&current->cpus_allowed, cpumask_of(this_cpu)))
-+	if (cpumask_equal(tsk_cpus_allowed(current), cpumask_of(this_cpu)))
- 		goto out;
- 
- 	/*
-@@ -39,9 +39,9 @@ notrace unsigned int debug_smp_processor
- 	if (!printk_ratelimit())
- 		goto out_enable;
- 
--	printk(KERN_ERR "BUG: using smp_processor_id() in preemptible [%08x] "
--			"code: %s/%d\n",
--			preempt_count() - 1, current->comm, current->pid);
-+	printk(KERN_ERR "BUG: using smp_processor_id() in preemptible [%08x %08x] "
-+	       "code: %s/%d\n", preempt_count() - 1,
-+	       __migrate_disabled(current), current->comm, current->pid);
- 	print_symbol("caller is %s\n", (long)__builtin_return_address(0));
- 	dump_stack();
- 
 Index: linux-2.6/include/linux/pid.h
 ===================================================================
 --- linux-2.6.orig/include/linux/pid.h
@@ -13410,281 +13704,6 @@ Index: linux-2.6/include/linux/pid.h
  
  enum pid_type
  {
-Index: linux-2.6/include/linux/jbd.h
-===================================================================
---- linux-2.6.orig/include/linux/jbd.h
-+++ linux-2.6/include/linux/jbd.h
-@@ -244,6 +244,7 @@ typedef struct journal_superblock_s
- 
- #include <linux/fs.h>
- #include <linux/sched.h>
-+#include <linux/jbd_common.h>
- 
- #define J_ASSERT(assert)	BUG_ON(!(assert))
- 
-@@ -270,69 +271,6 @@ typedef struct journal_superblock_s
- #define J_EXPECT_JH(jh, expr, why...)	__journal_expect(expr, ## why)
- #endif
- 
--enum jbd_state_bits {
--	BH_JBD			/* Has an attached ext3 journal_head */
--	  = BH_PrivateStart,
--	BH_JWrite,		/* Being written to log (@@@ DEBUGGING) */
--	BH_Freed,		/* Has been freed (truncated) */
--	BH_Revoked,		/* Has been revoked from the log */
--	BH_RevokeValid,		/* Revoked flag is valid */
--	BH_JBDDirty,		/* Is dirty but journaled */
--	BH_State,		/* Pins most journal_head state */
--	BH_JournalHead,		/* Pins bh->b_private and jh->b_bh */
--	BH_Unshadow,		/* Dummy bit, for BJ_Shadow wakeup filtering */
--};
--
--BUFFER_FNS(JBD, jbd)
--BUFFER_FNS(JWrite, jwrite)
--BUFFER_FNS(JBDDirty, jbddirty)
--TAS_BUFFER_FNS(JBDDirty, jbddirty)
--BUFFER_FNS(Revoked, revoked)
--TAS_BUFFER_FNS(Revoked, revoked)
--BUFFER_FNS(RevokeValid, revokevalid)
--TAS_BUFFER_FNS(RevokeValid, revokevalid)
--BUFFER_FNS(Freed, freed)
--
--static inline struct buffer_head *jh2bh(struct journal_head *jh)
--{
--	return jh->b_bh;
--}
--
--static inline struct journal_head *bh2jh(struct buffer_head *bh)
--{
--	return bh->b_private;
--}
--
--static inline void jbd_lock_bh_state(struct buffer_head *bh)
--{
--	bit_spin_lock(BH_State, &bh->b_state);
--}
--
--static inline int jbd_trylock_bh_state(struct buffer_head *bh)
--{
--	return bit_spin_trylock(BH_State, &bh->b_state);
--}
--
--static inline int jbd_is_locked_bh_state(struct buffer_head *bh)
--{
--	return bit_spin_is_locked(BH_State, &bh->b_state);
--}
--
--static inline void jbd_unlock_bh_state(struct buffer_head *bh)
--{
--	bit_spin_unlock(BH_State, &bh->b_state);
--}
--
--static inline void jbd_lock_bh_journal_head(struct buffer_head *bh)
--{
--	bit_spin_lock(BH_JournalHead, &bh->b_state);
--}
--
--static inline void jbd_unlock_bh_journal_head(struct buffer_head *bh)
--{
--	bit_spin_unlock(BH_JournalHead, &bh->b_state);
--}
--
- struct jbd_revoke_table_s;
- 
- /**
-Index: linux-2.6/include/linux/jbd2.h
-===================================================================
---- linux-2.6.orig/include/linux/jbd2.h
-+++ linux-2.6/include/linux/jbd2.h
-@@ -275,6 +275,7 @@ typedef struct journal_superblock_s
- 
- #include <linux/fs.h>
- #include <linux/sched.h>
-+#include <linux/jbd_common.h>
- 
- #define J_ASSERT(assert)	BUG_ON(!(assert))
- 
-@@ -302,70 +303,6 @@ typedef struct journal_superblock_s
- #define J_EXPECT_JH(jh, expr, why...)	__journal_expect(expr, ## why)
- #endif
- 
--enum jbd_state_bits {
--	BH_JBD			/* Has an attached ext3 journal_head */
--	  = BH_PrivateStart,
--	BH_JWrite,		/* Being written to log (@@@ DEBUGGING) */
--	BH_Freed,		/* Has been freed (truncated) */
--	BH_Revoked,		/* Has been revoked from the log */
--	BH_RevokeValid,		/* Revoked flag is valid */
--	BH_JBDDirty,		/* Is dirty but journaled */
--	BH_State,		/* Pins most journal_head state */
--	BH_JournalHead,		/* Pins bh->b_private and jh->b_bh */
--	BH_Unshadow,		/* Dummy bit, for BJ_Shadow wakeup filtering */
--	BH_JBDPrivateStart,	/* First bit available for private use by FS */
--};
--
--BUFFER_FNS(JBD, jbd)
--BUFFER_FNS(JWrite, jwrite)
--BUFFER_FNS(JBDDirty, jbddirty)
--TAS_BUFFER_FNS(JBDDirty, jbddirty)
--BUFFER_FNS(Revoked, revoked)
--TAS_BUFFER_FNS(Revoked, revoked)
--BUFFER_FNS(RevokeValid, revokevalid)
--TAS_BUFFER_FNS(RevokeValid, revokevalid)
--BUFFER_FNS(Freed, freed)
--
--static inline struct buffer_head *jh2bh(struct journal_head *jh)
--{
--	return jh->b_bh;
--}
--
--static inline struct journal_head *bh2jh(struct buffer_head *bh)
--{
--	return bh->b_private;
--}
--
--static inline void jbd_lock_bh_state(struct buffer_head *bh)
--{
--	bit_spin_lock(BH_State, &bh->b_state);
--}
--
--static inline int jbd_trylock_bh_state(struct buffer_head *bh)
--{
--	return bit_spin_trylock(BH_State, &bh->b_state);
--}
--
--static inline int jbd_is_locked_bh_state(struct buffer_head *bh)
--{
--	return bit_spin_is_locked(BH_State, &bh->b_state);
--}
--
--static inline void jbd_unlock_bh_state(struct buffer_head *bh)
--{
--	bit_spin_unlock(BH_State, &bh->b_state);
--}
--
--static inline void jbd_lock_bh_journal_head(struct buffer_head *bh)
--{
--	bit_spin_lock(BH_JournalHead, &bh->b_state);
--}
--
--static inline void jbd_unlock_bh_journal_head(struct buffer_head *bh)
--{
--	bit_spin_unlock(BH_JournalHead, &bh->b_state);
--}
--
- /* Flags in jbd_inode->i_flags */
- #define __JI_COMMIT_RUNNING 0
- /* Commit of the inode data in progress. We use this flag to protect us from
-Index: linux-2.6/include/linux/jbd_common.h
-===================================================================
---- /dev/null
-+++ linux-2.6/include/linux/jbd_common.h
-@@ -0,0 +1,92 @@
-+#ifndef _LINUX_JBD_STATE_H
-+#define _LINUX_JBD_STATE_H
-+
-+enum jbd_state_bits {
-+	BH_JBD			/* Has an attached ext3 journal_head */
-+	  = BH_PrivateStart,
-+	BH_JWrite,		/* Being written to log (@@@ DEBUGGING) */
-+	BH_Freed,		/* Has been freed (truncated) */
-+	BH_Revoked,		/* Has been revoked from the log */
-+	BH_RevokeValid,		/* Revoked flag is valid */
-+	BH_JBDDirty,		/* Is dirty but journaled */
-+	BH_State,		/* Pins most journal_head state */
-+	BH_JournalHead,		/* Pins bh->b_private and jh->b_bh */
-+	BH_Unshadow,		/* Dummy bit, for BJ_Shadow wakeup filtering */
-+	BH_JBDPrivateStart,	/* First bit available for private use by FS */
-+};
-+
-+BUFFER_FNS(JBD, jbd)
-+BUFFER_FNS(JWrite, jwrite)
-+BUFFER_FNS(JBDDirty, jbddirty)
-+TAS_BUFFER_FNS(JBDDirty, jbddirty)
-+BUFFER_FNS(Revoked, revoked)
-+TAS_BUFFER_FNS(Revoked, revoked)
-+BUFFER_FNS(RevokeValid, revokevalid)
-+TAS_BUFFER_FNS(RevokeValid, revokevalid)
-+BUFFER_FNS(Freed, freed)
-+
-+static inline struct buffer_head *jh2bh(struct journal_head *jh)
-+{
-+	return jh->b_bh;
-+}
-+
-+static inline struct journal_head *bh2jh(struct buffer_head *bh)
-+{
-+	return bh->b_private;
-+}
-+
-+static inline void jbd_lock_bh_state(struct buffer_head *bh)
-+{
-+#ifndef CONFIG_PREEMPT_RT_BASE
-+	bit_spin_lock(BH_State, &bh->b_state);
-+#else
-+	spin_lock(&bh->b_state_lock);
-+#endif
-+}
-+
-+static inline int jbd_trylock_bh_state(struct buffer_head *bh)
-+{
-+#ifndef CONFIG_PREEMPT_RT_BASE
-+	return bit_spin_trylock(BH_State, &bh->b_state);
-+#else
-+	return spin_trylock(&bh->b_state_lock);
-+#endif
-+}
-+
-+static inline int jbd_is_locked_bh_state(struct buffer_head *bh)
-+{
-+#ifndef CONFIG_PREEMPT_RT_BASE
-+	return bit_spin_is_locked(BH_State, &bh->b_state);
-+#else
-+	return spin_is_locked(&bh->b_state_lock);
-+#endif
-+}
-+
-+static inline void jbd_unlock_bh_state(struct buffer_head *bh)
-+{
-+#ifndef CONFIG_PREEMPT_RT_BASE
-+	bit_spin_unlock(BH_State, &bh->b_state);
-+#else
-+	spin_unlock(&bh->b_state_lock);
-+#endif
-+}
-+
-+static inline void jbd_lock_bh_journal_head(struct buffer_head *bh)
-+{
-+#ifndef CONFIG_PREEMPT_RT_BASE
-+	bit_spin_lock(BH_JournalHead, &bh->b_state);
-+#else
-+	spin_lock(&bh->b_journal_head_lock);
-+#endif
-+}
-+
-+static inline void jbd_unlock_bh_journal_head(struct buffer_head *bh)
-+{
-+#ifndef CONFIG_PREEMPT_RT_BASE
-+	bit_spin_unlock(BH_JournalHead, &bh->b_state);
-+#else
-+	spin_unlock(&bh->b_journal_head_lock);
-+#endif
-+}
-+
-+#endif
-Index: linux-2.6/net/netfilter/ipvs/ip_vs_ctl.c
-===================================================================
---- linux-2.6.orig/net/netfilter/ipvs/ip_vs_ctl.c
-+++ linux-2.6/net/netfilter/ipvs/ip_vs_ctl.c
-@@ -3679,7 +3679,7 @@ int __net_init __ip_vs_control_init(stru
- 	int idx;
- 	struct netns_ipvs *ipvs = net_ipvs(net);
- 
--	ipvs->rs_lock = __RW_LOCK_UNLOCKED(ipvs->rs_lock);
-+	rwlock_init(&ipvs->rs_lock);
- 
- 	/* Initialize rs_table */
- 	for (idx = 0; idx < IP_VS_RTAB_SIZE; idx++)
 Index: linux-2.6/net/core/sock.c
 ===================================================================
 --- linux-2.6.orig/net/core/sock.c
@@ -13790,7 +13809,7 @@ Index: linux-2.6/net/core/dev.c
  #endif
  }
  
-@@ -2902,11 +2902,11 @@ int netif_rx_ni(struct sk_buff *skb)
+@@ -2902,16 +2902,46 @@ int netif_rx_ni(struct sk_buff *skb)
  {
  	int err;
  
@@ -13805,7 +13824,51 @@ Index: linux-2.6/net/core/dev.c
  
  	return err;
  }
-@@ -3276,7 +3276,7 @@ static void flush_backlog(void *arg)
+ EXPORT_SYMBOL(netif_rx_ni);
+ 
++#ifdef CONFIG_PREEMPT_RT_FULL
++/*
++ * RT runs ksoftirqd as a real time thread and the root_lock is a
++ * "sleeping spinlock". If the trylock fails then we can go into an
++ * infinite loop when ksoftirqd preempted the task which actually
++ * holds the lock, because we requeue q and raise NET_TX softirq
++ * causing ksoftirqd to loop forever.
++ *
++ * It's safe to use spin_lock on RT here as softirqs run in thread
++ * context and cannot deadlock against the thread which is holding
++ * root_lock.
++ *
++ * On !RT the trylock might fail, but there we bail out from the
++ * softirq loop after 10 attempts which we can't do on RT. And the
++ * task holding root_lock cannot be preempted, so the only downside of
++ * that trylock is that we need 10 loops to decide that we should have
++ * given up in the first one :)
++ */
++static inline int take_root_lock(spinlock_t *lock)
++{
++	spin_lock(lock);
++	return 1;
++}
++#else
++static inline int take_root_lock(spinlock_t *lock)
++{
++	return spin_trylock(lock);
++}
++#endif
++
+ static void net_tx_action(struct softirq_action *h)
+ {
+ 	struct softnet_data *sd = &__get_cpu_var(softnet_data);
+@@ -2950,7 +2980,7 @@ static void net_tx_action(struct softirq
+ 			head = head->next_sched;
+ 
+ 			root_lock = qdisc_lock(q);
+-			if (spin_trylock(root_lock)) {
++			if (take_root_lock(root_lock)) {
+ 				smp_mb__before_clear_bit();
+ 				clear_bit(__QDISC_STATE_SCHED,
+ 					  &q->state);
+@@ -3276,7 +3306,7 @@ static void flush_backlog(void *arg)
  	skb_queue_walk_safe(&sd->input_pkt_queue, skb, tmp) {
  		if (skb->dev == dev) {
  			__skb_unlink(skb, &sd->input_pkt_queue);
@@ -13814,7 +13877,7 @@ Index: linux-2.6/net/core/dev.c
  			input_queue_head_incr(sd);
  		}
  	}
-@@ -3285,10 +3285,13 @@ static void flush_backlog(void *arg)
+@@ -3285,10 +3315,13 @@ static void flush_backlog(void *arg)
  	skb_queue_walk_safe(&sd->process_queue, skb, tmp) {
  		if (skb->dev == dev) {
  			__skb_unlink(skb, &sd->process_queue);
@@ -13829,7 +13892,7 @@ Index: linux-2.6/net/core/dev.c
  }
  
  static int napi_gro_complete(struct sk_buff *skb)
-@@ -3766,10 +3769,17 @@ static void net_rx_action(struct softirq
+@@ -3766,10 +3799,17 @@ static void net_rx_action(struct softirq
  	struct softnet_data *sd = &__get_cpu_var(softnet_data);
  	unsigned long time_limit = jiffies + 2;
  	int budget = netdev_budget;
@@ -13847,7 +13910,7 @@ Index: linux-2.6/net/core/dev.c
  	while (!list_empty(&sd->poll_list)) {
  		struct napi_struct *n;
  		int work, weight;
-@@ -6196,6 +6206,9 @@ static int dev_cpu_callback(struct notif
+@@ -6196,6 +6236,9 @@ static int dev_cpu_callback(struct notif
  		netif_rx(skb);
  		input_queue_head_incr(oldsd);
  	}
@@ -13857,7 +13920,7 @@ Index: linux-2.6/net/core/dev.c
  
  	return NOTIFY_OK;
  }
-@@ -6461,8 +6474,9 @@ static int __init net_dev_init(void)
+@@ -6461,8 +6504,9 @@ static int __init net_dev_init(void)
  		struct softnet_data *sd = &per_cpu(softnet_data, i);
  
  		memset(sd, 0, sizeof(*sd));
@@ -13901,7 +13964,44 @@ Index: linux-2.6/kernel/rcutree.c
 ===================================================================
 --- linux-2.6.orig/kernel/rcutree.c
 +++ linux-2.6/kernel/rcutree.c
-@@ -1153,7 +1153,7 @@ static void __rcu_offline_cpu(int cpu, s
+@@ -166,6 +166,12 @@ void rcu_sched_qs(int cpu)
+ 	rdp->passed_quiesc = 1;
+ }
+ 
++#ifdef CONFIG_PREEMPT_RT_FULL
++void rcu_bh_qs(int cpu)
++{
++	rcu_preempt_qs(cpu);
++}
++#else
+ void rcu_bh_qs(int cpu)
+ {
+ 	struct rcu_data *rdp = &per_cpu(rcu_bh_data, cpu);
+@@ -174,6 +180,7 @@ void rcu_bh_qs(int cpu)
+ 	barrier();
+ 	rdp->passed_quiesc = 1;
+ }
++#endif
+ 
+ /*
+  * Note a context switch.  This is a quiescent state for RCU-sched,
+@@ -216,6 +223,7 @@ long rcu_batches_completed_sched(void)
+ }
+ EXPORT_SYMBOL_GPL(rcu_batches_completed_sched);
+ 
++#ifndef CONFIG_PREEMPT_RT_FULL
+ /*
+  * Return the number of RCU BH batches processed thus far for debug & stats.
+  */
+@@ -233,6 +241,7 @@ void rcu_bh_force_quiescent_state(void)
+ 	force_quiescent_state(&rcu_bh_state, 0);
+ }
+ EXPORT_SYMBOL_GPL(rcu_bh_force_quiescent_state);
++#endif
+ 
+ /*
+  * Record the number of times rcutorture tests have been initiated and
+@@ -1153,7 +1162,7 @@ static void __rcu_offline_cpu(int cpu, s
  	else
  		raw_spin_unlock_irqrestore(&rnp->lock, flags);
  	if (need_report & RCU_OFL_TASKS_EXP_GP)
@@ -13910,11 +14010,67 @@ Index: linux-2.6/kernel/rcutree.c
  	rcu_node_kthread_setaffinity(rnp, -1);
  }
  
+@@ -1579,6 +1588,7 @@ void call_rcu_sched(struct rcu_head *hea
+ }
+ EXPORT_SYMBOL_GPL(call_rcu_sched);
+ 
++#ifndef CONFIG_PREEMPT_RT_FULL
+ /*
+  * Queue an RCU for invocation after a quicker grace period.
+  */
+@@ -1587,6 +1597,7 @@ void call_rcu_bh(struct rcu_head *head, 
+ 	__call_rcu(head, func, &rcu_bh_state);
+ }
+ EXPORT_SYMBOL_GPL(call_rcu_bh);
++#endif
+ 
+ /**
+  * synchronize_sched - wait until an rcu-sched grace period has elapsed.
+@@ -1628,6 +1639,7 @@ void synchronize_sched(void)
+ }
+ EXPORT_SYMBOL_GPL(synchronize_sched);
+ 
++#ifndef CONFIG_PREEMPT_RT_FULL
+ /**
+  * synchronize_rcu_bh - wait until an rcu_bh grace period has elapsed.
+  *
+@@ -1653,6 +1665,7 @@ void synchronize_rcu_bh(void)
+ 	destroy_rcu_head_on_stack(&rcu.head);
+ }
+ EXPORT_SYMBOL_GPL(synchronize_rcu_bh);
++#endif
+ 
+ /*
+  * Check to see if there is any immediate RCU-related work to be done
+@@ -1806,6 +1819,7 @@ static void _rcu_barrier(struct rcu_stat
+ 	mutex_unlock(&rcu_barrier_mutex);
+ }
+ 
++#ifndef CONFIG_PREEMPT_RT_FULL
+ /**
+  * rcu_barrier_bh - Wait until all in-flight call_rcu_bh() callbacks complete.
+  */
+@@ -1814,6 +1828,7 @@ void rcu_barrier_bh(void)
+ 	_rcu_barrier(&rcu_bh_state, call_rcu_bh);
+ }
+ EXPORT_SYMBOL_GPL(rcu_barrier_bh);
++#endif
+ 
+ /**
+  * rcu_barrier_sched - Wait for in-flight call_rcu_sched() callbacks.
 Index: linux-2.6/kernel/rcutree.h
 ===================================================================
 --- linux-2.6.orig/kernel/rcutree.h
 +++ linux-2.6/kernel/rcutree.h
-@@ -443,7 +443,8 @@ static void rcu_preempt_check_callbacks(
+@@ -422,6 +422,7 @@ DECLARE_PER_CPU(struct rcu_data, rcu_pre
+ /* Forward declarations for rcutree_plugin.h */
+ static void rcu_bootup_announce(void);
+ long rcu_batches_completed(void);
++static void rcu_preempt_qs(int cpu);
+ static void rcu_preempt_note_context_switch(int cpu);
+ static int rcu_preempt_blocked_readers_cgp(struct rcu_node *rnp);
+ #ifdef CONFIG_HOTPLUG_CPU
+@@ -443,7 +444,8 @@ static void rcu_preempt_check_callbacks(
  static void rcu_preempt_process_callbacks(void);
  void call_rcu(struct rcu_head *head, void (*func)(struct rcu_head *rcu));
  #if defined(CONFIG_HOTPLUG_CPU) || defined(CONFIG_TREE_PREEMPT_RCU)
@@ -14044,6 +14200,15 @@ Index: linux-2.6/kernel/rcutree_plugin.h
  	raw_spin_unlock_irqrestore(&rnp->lock, flags);
  	rt_mutex_lock(&mtx);  /* Side effect: boosts task t's priority. */
  	rt_mutex_unlock(&mtx);  /* Keep lockdep happy. */
+@@ -1890,7 +1892,7 @@ EXPORT_SYMBOL_GPL(synchronize_sched_expe
+ 
+ #endif /* #else #ifndef CONFIG_SMP */
+ 
+-#if !defined(CONFIG_RCU_FAST_NO_HZ)
++#if 1 /* !defined(CONFIG_RCU_FAST_NO_HZ) */
+ 
+ /*
+  * Check to see if any future RCU-related work will need to be done
 Index: linux-2.6/drivers/usb/gadget/ci13xxx_udc.c
 ===================================================================
 --- linux-2.6.orig/drivers/usb/gadget/ci13xxx_udc.c
@@ -19537,8 +19702,6 @@ Index: linux-2.6/drivers/misc/hwlat_detector.c
 +
 +module_init(detector_init);
 +module_exit(detector_exit);
-Index: linux-2.6/localversion-rt
-===================================================================
 Index: linux-2.6/arch/arm/kernel/early_printk.c
 ===================================================================
 --- linux-2.6.orig/arch/arm/kernel/early_printk.c
@@ -20829,7 +20992,7 @@ Index: linux-2.6/lib/Kconfig.debug
  config MAGIC_SYSRQ_DEFAULT_MASK
  	hex "Default mask for Magic SysRq keys on the console"
  	depends on MAGIC_SYSRQ
-@@ -159,7 +181,7 @@ config DEBUG_KERNEL
+@@ -151,7 +173,7 @@ config DEBUG_KERNEL
  
  config DEBUG_SHIRQ
  	bool "Debug shared IRQ handlers"
@@ -22324,7 +22487,21 @@ Index: linux-2.6/include/linux/rcupdate.h
 ===================================================================
 --- linux-2.6.orig/include/linux/rcupdate.h
 +++ linux-2.6/include/linux/rcupdate.h
-@@ -104,6 +104,11 @@ void synchronize_rcu(void);
+@@ -78,7 +78,13 @@ struct rcu_head {
+ extern void call_rcu_sched(struct rcu_head *head,
+ 			   void (*func)(struct rcu_head *rcu));
+ extern void synchronize_sched(void);
++
++#ifdef CONFIG_PREEMPT_RT_FULL
++# define rcu_barrier_bh		rcu_barrier
++#else
+ extern void rcu_barrier_bh(void);
++#endif
++
+ extern void rcu_barrier_sched(void);
+ 
+ static inline void __rcu_read_lock_bh(void)
+@@ -104,6 +110,11 @@ void synchronize_rcu(void);
   * types of kernel builds, the rcu_read_lock() nesting depth is unknowable.
   */
  #define rcu_preempt_depth() (current->rcu_read_lock_nesting)
@@ -22336,7 +22513,7 @@ Index: linux-2.6/include/linux/rcupdate.h
  
  #else /* #ifdef CONFIG_PREEMPT_RCU */
  
-@@ -127,6 +132,8 @@ static inline int rcu_preempt_depth(void
+@@ -127,6 +138,8 @@ static inline int rcu_preempt_depth(void
  	return 0;
  }
  
@@ -22345,25 +22522,66 @@ Index: linux-2.6/include/linux/rcupdate.h
  #endif /* #else #ifdef CONFIG_PREEMPT_RCU */
  
  /* Internal to kernel */
-Index: linux-2.6/kernel/sched_features.h
-===================================================================
---- linux-2.6.orig/kernel/sched_features.h
-+++ linux-2.6/kernel/sched_features.h
-@@ -65,10 +65,14 @@ SCHED_FEAT(OWNER_SPIN, 1)
+@@ -222,7 +235,14 @@ static inline int rcu_read_lock_held(voi
+  * rcu_read_lock_bh_held() is defined out of line to avoid #include-file
+  * hell.
   */
- SCHED_FEAT(NONIRQ_POWER, 1)
- 
-+#ifndef CONFIG_PREEMPT_RT_FULL
- /*
-  * Queue remote wakeups on the target CPU and process them
-  * using the scheduler IPI. Reduces rq->lock contention/bounces.
-  */
- SCHED_FEAT(TTWU_QUEUE, 1)
++#ifdef CONFIG_PREEMPT_RT_FULL
++static inline int rcu_read_lock_bh_held(void)
++{
++	return rcu_read_lock_held();
++}
 +#else
-+SCHED_FEAT(TTWU_QUEUE, 0)
+ extern int rcu_read_lock_bh_held(void);
 +#endif
  
- SCHED_FEAT(FORCE_SD_OVERLAP, 0)
+ /**
+  * rcu_read_lock_sched_held() - might we be in RCU-sched read-side critical section?
+@@ -631,8 +651,13 @@ static inline void rcu_read_unlock(void)
+ static inline void rcu_read_lock_bh(void)
+ {
+ 	__rcu_read_lock_bh();
++
++#ifdef CONFIG_PREEMPT_RT_FULL
++	rcu_read_lock();
++#else
+ 	__acquire(RCU_BH);
+ 	rcu_read_acquire_bh();
++#endif
+ }
+ 
+ /*
+@@ -642,8 +667,12 @@ static inline void rcu_read_lock_bh(void
+  */
+ static inline void rcu_read_unlock_bh(void)
+ {
++#ifdef CONFIG_PREEMPT_RT_FULL
++	rcu_read_unlock();
++#else
+ 	rcu_read_release_bh();
+ 	__release(RCU_BH);
++#endif
+ 	__rcu_read_unlock_bh();
+ }
+ 
+@@ -750,6 +779,9 @@ extern void call_rcu(struct rcu_head *he
+ 
+ #endif /* #else #ifdef CONFIG_PREEMPT_RCU */
+ 
++#ifdef CONFIG_PREEMPT_RT_FULL
++#define call_rcu_bh	call_rcu
++#else
+ /**
+  * call_rcu_bh() - Queue an RCU for invocation after a quicker grace period.
+  * @head: structure to be used for queueing the RCU updates.
+@@ -770,6 +802,7 @@ extern void call_rcu(struct rcu_head *he
+  */
+ extern void call_rcu_bh(struct rcu_head *head,
+ 			void (*func)(struct rcu_head *head));
++#endif
+ 
+ /*
+  * debug_rcu_head_queue()/debug_rcu_head_unqueue() are used internally
 Index: linux-2.6/kernel/stop_machine.c
 ===================================================================
 --- linux-2.6.orig/kernel/stop_machine.c
@@ -25489,6 +25707,64 @@ Index: linux-2.6/lib/spinlock_debug.c
  }
 +
 +#endif
+Index: linux-2.6/include/linux/rcutree.h
+===================================================================
+--- linux-2.6.orig/include/linux/rcutree.h
++++ linux-2.6/include/linux/rcutree.h
+@@ -57,7 +57,11 @@ static inline void exit_rcu(void)
+ 
+ #endif /* #else #ifdef CONFIG_TREE_PREEMPT_RCU */
+ 
++#ifndef CONFIG_PREEMPT_RT_FULL
+ extern void synchronize_rcu_bh(void);
++#else
++# define synchronize_rcu_bh()	synchronize_rcu()
++#endif
+ extern void synchronize_sched_expedited(void);
+ extern void synchronize_rcu_expedited(void);
+ 
+@@ -71,13 +75,19 @@ extern void rcu_barrier(void);
+ extern unsigned long rcutorture_testseq;
+ extern unsigned long rcutorture_vernum;
+ extern long rcu_batches_completed(void);
+-extern long rcu_batches_completed_bh(void);
+ extern long rcu_batches_completed_sched(void);
+ 
+ extern void rcu_force_quiescent_state(void);
+-extern void rcu_bh_force_quiescent_state(void);
+ extern void rcu_sched_force_quiescent_state(void);
+ 
++#ifndef CONFIG_PREEMPT_RT_FULL
++extern void rcu_bh_force_quiescent_state(void);
++extern long rcu_batches_completed_bh(void);
++#else
++# define rcu_bh_force_quiescent_state	rcu_force_quiescent_state
++# define rcu_batches_completed_bh	rcu_batches_completed
++#endif
++
+ /* A context switch is a grace period for RCU-sched and RCU-bh. */
+ static inline int rcu_blocking_is_gp(void)
+ {
+Index: linux-2.6/kernel/rcupdate.c
+===================================================================
+--- linux-2.6.orig/kernel/rcupdate.c
++++ linux-2.6/kernel/rcupdate.c
+@@ -72,6 +72,7 @@ int debug_lockdep_rcu_enabled(void)
+ }
+ EXPORT_SYMBOL_GPL(debug_lockdep_rcu_enabled);
+ 
++#ifndef CONFIG_PREEMPT_RT_FULL
+ /**
+  * rcu_read_lock_bh_held() - might we be in RCU-bh read-side critical section?
+  *
+@@ -91,6 +92,7 @@ int rcu_read_lock_bh_held(void)
+ 	return in_softirq() || irqs_disabled();
+ }
+ EXPORT_SYMBOL_GPL(rcu_read_lock_bh_held);
++#endif
+ 
+ #endif /* #ifdef CONFIG_DEBUG_LOCK_ALLOC */
+ 
 Index: linux-2.6/include/linux/lglock.h
 ===================================================================
 --- linux-2.6.orig/include/linux/lglock.h
