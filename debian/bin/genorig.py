@@ -182,9 +182,11 @@ class Main(object):
         except:
             try:
                 os.unlink(out)
-            except OSError:
-                pass
+            except OSError: pass
             raise
+        try:
+            os.symlink(os.path.join('orig', self.orig_tar), os.path.join('..', self.orig_tar))
+        except OSError: pass
 
 if __name__ == '__main__':
     from optparse import OptionParser
