@@ -1299,96 +1299,7 @@ Index: linux-2.6/kernel/trace/ftrace.c
  }
  
  /*
-@@ -1744,10 +1767,36 @@ static cycle_t		ftrace_update_time;
- static unsigned long	ftrace_update_cnt;
- unsigned long		ftrace_update_tot_cnt;
- 
-+static int ops_traces_mod(struct ftrace_ops *ops)
-+{
-+	struct ftrace_hash *hash;
-+
-+	hash = ops->filter_hash;
-+	return !!(!hash || !hash->count);
-+}
-+
- static int ftrace_update_code(struct module *mod)
- {
- 	struct dyn_ftrace *p;
- 	cycle_t start, stop;
-+	unsigned long ref = 0;
-+
-+	/*
-+	 * When adding a module, we need to check if tracers are
-+	 * currently enabled and if they are set to trace all functions.
-+	 * If they are, we need to enable the module functions as well
-+	 * as update the reference counts for those function records.
-+	 */
-+	if (mod) {
-+		struct ftrace_ops *ops;
-+
-+		for (ops = ftrace_ops_list;
-+		     ops != &ftrace_list_end; ops = ops->next) {
-+			if (ops->flags & FTRACE_OPS_FL_ENABLED &&
-+			    ops_traces_mod(ops))
-+				ref++;
-+		}
-+	}
- 
- 	start = ftrace_now(raw_smp_processor_id());
- 	ftrace_update_cnt = 0;
-@@ -1760,7 +1809,7 @@ static int ftrace_update_code(struct mod
- 
- 		p = ftrace_new_addrs;
- 		ftrace_new_addrs = p->newlist;
--		p->flags = 0L;
-+		p->flags = ref;
- 
- 		/*
- 		 * Do the initial record conversion from mcount jump
-@@ -1783,7 +1832,7 @@ static int ftrace_update_code(struct mod
- 		 * conversion puts the module to the correct state, thus
- 		 * passing the ftrace_make_call check.
- 		 */
--		if (ftrace_start_up) {
-+		if (ftrace_start_up && ref) {
- 			int failed = __ftrace_replace_code(p, 1);
- 			if (failed) {
- 				ftrace_bug(failed, p->ip);
-@@ -2407,10 +2456,9 @@ ftrace_match_module_records(struct ftrac
-  */
- 
- static int
--ftrace_mod_callback(char *func, char *cmd, char *param, int enable)
-+ftrace_mod_callback(struct ftrace_hash *hash,
-+		    char *func, char *cmd, char *param, int enable)
- {
--	struct ftrace_ops *ops = &global_ops;
--	struct ftrace_hash *hash;
- 	char *mod;
- 	int ret = -EINVAL;
- 
-@@ -2430,11 +2478,6 @@ ftrace_mod_callback(char *func, char *cm
- 	if (!strlen(mod))
- 		return ret;
- 
--	if (enable)
--		hash = ops->filter_hash;
--	else
--		hash = ops->notrace_hash;
--
- 	ret = ftrace_match_module_records(hash, func, mod);
- 	if (!ret)
- 		ret = -EINVAL;
-@@ -2760,7 +2803,7 @@ static int ftrace_process_regex(struct f
- 	mutex_lock(&ftrace_cmd_mutex);
- 	list_for_each_entry(p, &ftrace_commands, list) {
- 		if (strcmp(p->name, command) == 0) {
--			ret = p->func(func, command, next, enable);
-+			ret = p->func(hash, func, command, next, enable);
- 			goto out_unlock;
- 		}
- 	}
-@@ -2857,7 +2900,7 @@ ftrace_set_regex(struct ftrace_ops *ops,
+@@ -2877,7 +2900,7 @@ ftrace_set_regex(struct ftrace_ops *ops,
  		ftrace_match_records(hash, buf, len);
  
  	mutex_lock(&ftrace_lock);
@@ -1397,7 +1308,7 @@ Index: linux-2.6/kernel/trace/ftrace.c
  	mutex_unlock(&ftrace_lock);
  
  	mutex_unlock(&ftrace_regex_lock);
-@@ -3040,18 +3083,12 @@ ftrace_regex_release(struct inode *inode
+@@ -3060,18 +3083,12 @@ ftrace_regex_release(struct inode *inode
  			orig_hash = &iter->ops->notrace_hash;
  
  		mutex_lock(&ftrace_lock);
@@ -1422,34 +1333,6 @@ Index: linux-2.6/kernel/trace/ftrace.c
  		mutex_unlock(&ftrace_lock);
  	}
  	free_ftrace_hash(iter->hash);
-Index: linux-2.6/include/linux/ftrace.h
-===================================================================
---- linux-2.6.orig/include/linux/ftrace.h
-+++ linux-2.6/include/linux/ftrace.h
-@@ -123,7 +123,8 @@ stack_trace_sysctl(struct ctl_table *tab
- struct ftrace_func_command {
- 	struct list_head	list;
- 	char			*name;
--	int			(*func)(char *func, char *cmd,
-+	int			(*func)(struct ftrace_hash *hash,
-+					char *func, char *cmd,
- 					char *params, int enable);
- };
- 
-Index: linux-2.6/kernel/trace/trace_functions.c
-===================================================================
---- linux-2.6.orig/kernel/trace/trace_functions.c
-+++ linux-2.6/kernel/trace/trace_functions.c
-@@ -324,7 +324,8 @@ ftrace_trace_onoff_unreg(char *glob, cha
- }
- 
- static int
--ftrace_trace_onoff_callback(char *glob, char *cmd, char *param, int enable)
-+ftrace_trace_onoff_callback(struct ftrace_hash *hash,
-+			    char *glob, char *cmd, char *param, int enable)
- {
- 	struct ftrace_probe_ops *ops;
- 	void *count = (void *)-1;
 Index: linux-2.6/drivers/gpu/drm/drm_irq.c
 ===================================================================
 --- linux-2.6.orig/drivers/gpu/drm/drm_irq.c
@@ -2009,7 +1892,7 @@ Index: linux-2.6/kernel/sched.c
 +		wq_worker_running(tsk);
 +}
 +
- asmlinkage void schedule(void)
+ asmlinkage void __sched schedule(void)
  {
  	struct task_struct *tsk = current;
  
@@ -2034,7 +1917,7 @@ Index: linux-2.6/kernel/sched.c
  #ifdef CONFIG_MUTEX_SPIN_ON_OWNER
  
  static inline bool owner_running(struct mutex *lock, struct task_struct *owner)
-@@ -4415,7 +4555,16 @@ asmlinkage void __sched notrace preempt_
+@@ -4391,7 +4531,16 @@ asmlinkage void __sched notrace preempt_
  
  	do {
  		add_preempt_count_notrace(PREEMPT_ACTIVE);
@@ -2051,7 +1934,7 @@ Index: linux-2.6/kernel/sched.c
  		sub_preempt_count_notrace(PREEMPT_ACTIVE);
  
  		/*
-@@ -4838,9 +4987,8 @@ long __sched sleep_on_timeout(wait_queue
+@@ -4814,9 +4963,8 @@ long __sched sleep_on_timeout(wait_queue
  EXPORT_SYMBOL(sleep_on_timeout);
  
  #ifdef CONFIG_RT_MUTEXES
@@ -2062,7 +1945,7 @@ Index: linux-2.6/kernel/sched.c
   * @p: task
   * @prio: prio value (kernel-internal form)
   *
-@@ -4849,7 +4997,7 @@ EXPORT_SYMBOL(sleep_on_timeout);
+@@ -4825,7 +4973,7 @@ EXPORT_SYMBOL(sleep_on_timeout);
   *
   * Used by the rt_mutex code to implement priority inheritance logic.
   */
@@ -2071,7 +1954,7 @@ Index: linux-2.6/kernel/sched.c
  {
  	int oldprio, on_rq, running;
  	struct rq *rq;
-@@ -4859,6 +5007,24 @@ void rt_mutex_setprio(struct task_struct
+@@ -4835,6 +4983,24 @@ void rt_mutex_setprio(struct task_struct
  
  	rq = __task_rq_lock(p);
  
@@ -2096,7 +1979,7 @@ Index: linux-2.6/kernel/sched.c
  	trace_sched_pi_setprio(p, prio);
  	oldprio = p->prio;
  	prev_class = p->sched_class;
-@@ -4882,9 +5048,9 @@ void rt_mutex_setprio(struct task_struct
+@@ -4858,9 +5024,9 @@ void rt_mutex_setprio(struct task_struct
  		enqueue_task(rq, p, oldprio < prio ? ENQUEUE_HEAD : 0);
  
  	check_class_changed(rq, p, prev_class, oldprio);
@@ -2107,7 +1990,7 @@ Index: linux-2.6/kernel/sched.c
  #endif
  
  void set_user_nice(struct task_struct *p, long nice)
-@@ -5019,7 +5185,13 @@ EXPORT_SYMBOL(task_nice);
+@@ -4995,7 +5161,13 @@ EXPORT_SYMBOL(task_nice);
   */
  int idle_cpu(int cpu)
  {
@@ -2122,7 +2005,7 @@ Index: linux-2.6/kernel/sched.c
  }
  
  /**
-@@ -5553,7 +5725,7 @@ SYSCALL_DEFINE0(sched_yield)
+@@ -5529,7 +5701,7 @@ SYSCALL_DEFINE0(sched_yield)
  	__release(rq->lock);
  	spin_release(&rq->lock.dep_map, 1, _THIS_IP_);
  	do_raw_spin_unlock(&rq->lock);
@@ -2131,7 +2014,7 @@ Index: linux-2.6/kernel/sched.c
  
  	schedule();
  
-@@ -5567,9 +5739,17 @@ static inline int should_resched(void)
+@@ -5543,9 +5715,17 @@ static inline int should_resched(void)
  
  static void __cond_resched(void)
  {
@@ -2152,7 +2035,7 @@ Index: linux-2.6/kernel/sched.c
  }
  
  int __sched _cond_resched(void)
-@@ -5610,6 +5790,7 @@ int __cond_resched_lock(spinlock_t *lock
+@@ -5586,6 +5766,7 @@ int __cond_resched_lock(spinlock_t *lock
  }
  EXPORT_SYMBOL(__cond_resched_lock);
  
@@ -2160,7 +2043,7 @@ Index: linux-2.6/kernel/sched.c
  int __sched __cond_resched_softirq(void)
  {
  	BUG_ON(!in_softirq());
-@@ -5623,6 +5804,7 @@ int __sched __cond_resched_softirq(void)
+@@ -5599,6 +5780,7 @@ int __sched __cond_resched_softirq(void)
  	return 0;
  }
  EXPORT_SYMBOL(__cond_resched_softirq);
@@ -2168,7 +2051,7 @@ Index: linux-2.6/kernel/sched.c
  
  /**
   * yield - yield the current processor to other threads.
-@@ -5869,7 +6051,7 @@ void show_state_filter(unsigned long sta
+@@ -5845,7 +6027,7 @@ void show_state_filter(unsigned long sta
  	printk(KERN_INFO
  		"  task                        PC stack   pid father\n");
  #endif
@@ -2177,7 +2060,7 @@ Index: linux-2.6/kernel/sched.c
  	do_each_thread(g, p) {
  		/*
  		 * reset the NMI-timeout, listing all files on a slow
-@@ -5885,7 +6067,7 @@ void show_state_filter(unsigned long sta
+@@ -5861,7 +6043,7 @@ void show_state_filter(unsigned long sta
  #ifdef CONFIG_SCHED_DEBUG
  	sysrq_sched_debug_show();
  #endif
@@ -2186,7 +2069,7 @@ Index: linux-2.6/kernel/sched.c
  	/*
  	 * Only show locks if all tasks are dumped:
  	 */
-@@ -6007,12 +6189,12 @@ static inline void sched_init_granularit
+@@ -5983,12 +6165,12 @@ static inline void sched_init_granularit
  #ifdef CONFIG_SMP
  void do_set_cpus_allowed(struct task_struct *p, const struct cpumask *new_mask)
  {
@@ -2203,7 +2086,7 @@ Index: linux-2.6/kernel/sched.c
  }
  
  /*
-@@ -6063,7 +6245,7 @@ int set_cpus_allowed_ptr(struct task_str
+@@ -6039,7 +6221,7 @@ int set_cpus_allowed_ptr(struct task_str
  	do_set_cpus_allowed(p, new_mask);
  
  	/* Can the task run on the task's current CPU? If so, we're done */
@@ -2212,7 +2095,7 @@ Index: linux-2.6/kernel/sched.c
  		goto out;
  
  	dest_cpu = cpumask_any_and(cpu_active_mask, new_mask);
-@@ -6110,7 +6292,7 @@ static int __migrate_task(struct task_st
+@@ -6086,7 +6268,7 @@ static int __migrate_task(struct task_st
  	if (task_cpu(p) != src_cpu)
  		goto done;
  	/* Affinity changed (again). */
@@ -2221,7 +2104,7 @@ Index: linux-2.6/kernel/sched.c
  		goto fail;
  
  	/*
-@@ -6152,6 +6334,8 @@ static int migration_cpu_stop(void *data
+@@ -6128,6 +6310,8 @@ static int migration_cpu_stop(void *data
  
  #ifdef CONFIG_HOTPLUG_CPU
  
@@ -2230,7 +2113,7 @@ Index: linux-2.6/kernel/sched.c
  /*
   * Ensures that the idle task is using init_mm right before its cpu goes
   * offline.
-@@ -6164,7 +6348,12 @@ void idle_task_exit(void)
+@@ -6140,7 +6324,12 @@ void idle_task_exit(void)
  
  	if (mm != &init_mm)
  		switch_mm(mm, &init_mm, current);
@@ -2244,7 +2127,7 @@ Index: linux-2.6/kernel/sched.c
  }
  
  /*
-@@ -6482,6 +6671,12 @@ migration_call(struct notifier_block *nf
+@@ -6458,6 +6647,12 @@ migration_call(struct notifier_block *nf
  		migrate_nr_uninterruptible(rq);
  		calc_global_load_remove(rq);
  		break;
@@ -2257,7 +2140,7 @@ Index: linux-2.6/kernel/sched.c
  #endif
  	}
  
-@@ -8199,7 +8394,8 @@ void __init sched_init(void)
+@@ -8175,7 +8370,8 @@ void __init sched_init(void)
  #ifdef CONFIG_DEBUG_SPINLOCK_SLEEP
  static inline int preempt_count_equals(int preempt_offset)
  {
@@ -3944,15 +3827,6 @@ Index: linux-2.6/kernel/sched_rt.c
  		if (rt_rq_throttled(rt_rq)) {
  			sched_rt_rq_dequeue(rt_rq);
  			return 1;
-@@ -1038,7 +1042,7 @@ select_task_rq_rt(struct task_struct *p,
- 	 */
- 	if (curr && unlikely(rt_task(curr)) &&
- 	    (curr->rt.nr_cpus_allowed < 2 ||
--	     curr->prio < p->prio) &&
-+	     curr->prio <= p->prio) &&
- 	    (p->rt.nr_cpus_allowed > 1)) {
- 		int target = find_lowest_rq(p);
- 
 @@ -1186,7 +1190,7 @@ static void deactivate_task(struct rq *r
  static int pick_rt_task(struct rq *rq, struct task_struct *p, int cpu)
  {
@@ -3970,15 +3844,6 @@ Index: linux-2.6/kernel/sched_rt.c
 +						       tsk_cpus_allowed(task)) ||
  				     task_running(rq, task) ||
  				     !task->on_rq)) {
- 
-@@ -1569,7 +1573,7 @@ static void task_woken_rt(struct rq *rq,
- 	    p->rt.nr_cpus_allowed > 1 &&
- 	    rt_task(rq->curr) &&
- 	    (rq->curr->rt.nr_cpus_allowed < 2 ||
--	     rq->curr->prio < p->prio))
-+	     rq->curr->prio <= p->prio))
- 		push_rt_tasks(rq);
- }
  
 @@ -1614,9 +1618,6 @@ static void set_cpus_allowed_rt(struct t
  
@@ -5971,7 +5836,7 @@ Index: linux-2.6/include/linux/sched.h
  #define PF_LESS_THROTTLE 0x00100000	/* Throttle me less: I clean memory */
  #define PF_KTHREAD	0x00200000	/* I am a kernel thread */
  #define PF_RANDOMIZE	0x00400000	/* randomize virtual address space */
-@@ -2022,15 +2070,27 @@ static inline void sched_autogroup_exit(
+@@ -2021,15 +2069,27 @@ static inline void sched_autogroup_exit(
  #endif
  
  #ifdef CONFIG_RT_MUTEXES
@@ -6000,7 +5865,7 @@ Index: linux-2.6/include/linux/sched.h
  #endif
  
  extern bool yield_to(struct task_struct *p, bool preempt);
-@@ -2110,6 +2170,7 @@ extern void xtime_update(unsigned long t
+@@ -2109,6 +2169,7 @@ extern void xtime_update(unsigned long t
  
  extern int wake_up_state(struct task_struct *tsk, unsigned int state);
  extern int wake_up_process(struct task_struct *tsk);
@@ -6008,7 +5873,7 @@ Index: linux-2.6/include/linux/sched.h
  extern void wake_up_new_task(struct task_struct *tsk);
  #ifdef CONFIG_SMP
   extern void kick_process(struct task_struct *tsk);
-@@ -2199,12 +2260,24 @@ extern struct mm_struct * mm_alloc(void)
+@@ -2198,12 +2259,24 @@ extern struct mm_struct * mm_alloc(void)
  
  /* mmdrop drops the mm and the page tables */
  extern void __mmdrop(struct mm_struct *);
@@ -6033,7 +5898,7 @@ Index: linux-2.6/include/linux/sched.h
  /* mmput gets rid of the mappings and all user-space */
  extern void mmput(struct mm_struct *);
  /* Grab a reference to a task's mm, if it is not already going away */
-@@ -2510,7 +2583,7 @@ extern int _cond_resched(void);
+@@ -2509,7 +2582,7 @@ extern int _cond_resched(void);
  
  extern int __cond_resched_lock(spinlock_t *lock);
  
@@ -6042,7 +5907,7 @@ Index: linux-2.6/include/linux/sched.h
  #define PREEMPT_LOCK_OFFSET	PREEMPT_OFFSET
  #else
  #define PREEMPT_LOCK_OFFSET	0
-@@ -2521,12 +2594,16 @@ extern int __cond_resched_lock(spinlock_
+@@ -2520,12 +2593,16 @@ extern int __cond_resched_lock(spinlock_
  	__cond_resched_lock(lock);				\
  })
  
@@ -6059,7 +5924,7 @@ Index: linux-2.6/include/linux/sched.h
  
  /*
   * Does a critical section need to be broken due to another
-@@ -2550,7 +2627,7 @@ void thread_group_cputimer(struct task_s
+@@ -2549,7 +2626,7 @@ void thread_group_cputimer(struct task_s
  
  static inline void thread_group_cputime_init(struct signal_struct *sig)
  {
@@ -6068,7 +5933,7 @@ Index: linux-2.6/include/linux/sched.h
  }
  
  /*
-@@ -2589,6 +2666,26 @@ static inline void set_task_cpu(struct t
+@@ -2588,6 +2665,26 @@ static inline void set_task_cpu(struct t
  
  #endif /* CONFIG_SMP */
  
