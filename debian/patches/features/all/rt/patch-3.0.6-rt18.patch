@@ -619,7 +619,7 @@ Index: linux-2.6/mm/slab.c
  }
  
  static void check_irq_on(void)
-@@ -2476,13 +2595,12 @@ static void drain_array(struct kmem_cach
+@@ -2476,26 +2595,43 @@ static void drain_array(struct kmem_cach
  			struct array_cache *ac,
  			int force, int node);
  
@@ -632,10 +632,11 @@ Index: linux-2.6/mm/slab.c
 +	int node = cpu_to_mem(cpu);
  
 -	check_irq_off();
- 	ac = cpu_cache_get(cachep);
+-	ac = cpu_cache_get(cachep);
++	ac = cpu_cache_get_on_cpu(cachep, cpu);
  	spin_lock(&cachep->nodelists[node]->list_lock);
  	free_block(cachep, ac->entry, ac->avail, node);
-@@ -2490,12 +2608,30 @@ static void do_drain(void *arg)
+ 	spin_unlock(&cachep->nodelists[node]->list_lock);
  	ac->avail = 0;
  }
  
@@ -1298,7 +1299,96 @@ Index: linux-2.6/kernel/trace/ftrace.c
  }
  
  /*
-@@ -2857,7 +2880,7 @@ ftrace_set_regex(struct ftrace_ops *ops,
+@@ -1744,10 +1767,36 @@ static cycle_t		ftrace_update_time;
+ static unsigned long	ftrace_update_cnt;
+ unsigned long		ftrace_update_tot_cnt;
+ 
++static int ops_traces_mod(struct ftrace_ops *ops)
++{
++	struct ftrace_hash *hash;
++
++	hash = ops->filter_hash;
++	return !!(!hash || !hash->count);
++}
++
+ static int ftrace_update_code(struct module *mod)
+ {
+ 	struct dyn_ftrace *p;
+ 	cycle_t start, stop;
++	unsigned long ref = 0;
++
++	/*
++	 * When adding a module, we need to check if tracers are
++	 * currently enabled and if they are set to trace all functions.
++	 * If they are, we need to enable the module functions as well
++	 * as update the reference counts for those function records.
++	 */
++	if (mod) {
++		struct ftrace_ops *ops;
++
++		for (ops = ftrace_ops_list;
++		     ops != &ftrace_list_end; ops = ops->next) {
++			if (ops->flags & FTRACE_OPS_FL_ENABLED &&
++			    ops_traces_mod(ops))
++				ref++;
++		}
++	}
+ 
+ 	start = ftrace_now(raw_smp_processor_id());
+ 	ftrace_update_cnt = 0;
+@@ -1760,7 +1809,7 @@ static int ftrace_update_code(struct mod
+ 
+ 		p = ftrace_new_addrs;
+ 		ftrace_new_addrs = p->newlist;
+-		p->flags = 0L;
++		p->flags = ref;
+ 
+ 		/*
+ 		 * Do the initial record conversion from mcount jump
+@@ -1783,7 +1832,7 @@ static int ftrace_update_code(struct mod
+ 		 * conversion puts the module to the correct state, thus
+ 		 * passing the ftrace_make_call check.
+ 		 */
+-		if (ftrace_start_up) {
++		if (ftrace_start_up && ref) {
+ 			int failed = __ftrace_replace_code(p, 1);
+ 			if (failed) {
+ 				ftrace_bug(failed, p->ip);
+@@ -2407,10 +2456,9 @@ ftrace_match_module_records(struct ftrac
+  */
+ 
+ static int
+-ftrace_mod_callback(char *func, char *cmd, char *param, int enable)
++ftrace_mod_callback(struct ftrace_hash *hash,
++		    char *func, char *cmd, char *param, int enable)
+ {
+-	struct ftrace_ops *ops = &global_ops;
+-	struct ftrace_hash *hash;
+ 	char *mod;
+ 	int ret = -EINVAL;
+ 
+@@ -2430,11 +2478,6 @@ ftrace_mod_callback(char *func, char *cm
+ 	if (!strlen(mod))
+ 		return ret;
+ 
+-	if (enable)
+-		hash = ops->filter_hash;
+-	else
+-		hash = ops->notrace_hash;
+-
+ 	ret = ftrace_match_module_records(hash, func, mod);
+ 	if (!ret)
+ 		ret = -EINVAL;
+@@ -2760,7 +2803,7 @@ static int ftrace_process_regex(struct f
+ 	mutex_lock(&ftrace_cmd_mutex);
+ 	list_for_each_entry(p, &ftrace_commands, list) {
+ 		if (strcmp(p->name, command) == 0) {
+-			ret = p->func(func, command, next, enable);
++			ret = p->func(hash, func, command, next, enable);
+ 			goto out_unlock;
+ 		}
+ 	}
+@@ -2857,7 +2900,7 @@ ftrace_set_regex(struct ftrace_ops *ops,
  		ftrace_match_records(hash, buf, len);
  
  	mutex_lock(&ftrace_lock);
@@ -1307,7 +1397,7 @@ Index: linux-2.6/kernel/trace/ftrace.c
  	mutex_unlock(&ftrace_lock);
  
  	mutex_unlock(&ftrace_regex_lock);
-@@ -3040,18 +3063,12 @@ ftrace_regex_release(struct inode *inode
+@@ -3040,18 +3083,12 @@ ftrace_regex_release(struct inode *inode
  			orig_hash = &iter->ops->notrace_hash;
  
  		mutex_lock(&ftrace_lock);
@@ -1332,6 +1422,34 @@ Index: linux-2.6/kernel/trace/ftrace.c
  		mutex_unlock(&ftrace_lock);
  	}
  	free_ftrace_hash(iter->hash);
+Index: linux-2.6/include/linux/ftrace.h
+===================================================================
+--- linux-2.6.orig/include/linux/ftrace.h
++++ linux-2.6/include/linux/ftrace.h
+@@ -123,7 +123,8 @@ stack_trace_sysctl(struct ctl_table *tab
+ struct ftrace_func_command {
+ 	struct list_head	list;
+ 	char			*name;
+-	int			(*func)(char *func, char *cmd,
++	int			(*func)(struct ftrace_hash *hash,
++					char *func, char *cmd,
+ 					char *params, int enable);
+ };
+ 
+Index: linux-2.6/kernel/trace/trace_functions.c
+===================================================================
+--- linux-2.6.orig/kernel/trace/trace_functions.c
++++ linux-2.6/kernel/trace/trace_functions.c
+@@ -324,7 +324,8 @@ ftrace_trace_onoff_unreg(char *glob, cha
+ }
+ 
+ static int
+-ftrace_trace_onoff_callback(char *glob, char *cmd, char *param, int enable)
++ftrace_trace_onoff_callback(struct ftrace_hash *hash,
++			    char *glob, char *cmd, char *param, int enable)
+ {
+ 	struct ftrace_probe_ops *ops;
+ 	void *count = (void *)-1;
 Index: linux-2.6/drivers/gpu/drm/drm_irq.c
 ===================================================================
 --- linux-2.6.orig/drivers/gpu/drm/drm_irq.c
@@ -1411,13 +1529,14 @@ Index: linux-2.6/arch/x86/kernel/hpet.c
  #include <linux/cpu.h>
  #include <linux/pm.h>
  #include <linux/io.h>
-@@ -566,6 +567,29 @@ static void init_one_hpet_msi_clockevent
+@@ -566,6 +567,30 @@ static void init_one_hpet_msi_clockevent
  #define RESERVE_TIMERS 0
  #endif
  
 +static int __init dmi_disable_hpet_msi(const struct dmi_system_id *d)
 +{
 +	hpet_msi_disable = 1;
++	return 0;
 +}
 +
 +static struct dmi_system_id __initdata dmi_hpet_table[] = {
@@ -1441,7 +1560,7 @@ Index: linux-2.6/arch/x86/kernel/hpet.c
  static void hpet_msi_capability_lookup(unsigned int start_timer)
  {
  	unsigned int id;
-@@ -573,6 +597,8 @@ static void hpet_msi_capability_lookup(u
+@@ -573,6 +598,8 @@ static void hpet_msi_capability_lookup(u
  	unsigned int num_timers_used = 0;
  	int i;
  
@@ -10358,48 +10477,6 @@ Index: linux-2.6/arch/arm/Kconfig
  	help
  	  The address space of ARM processors is only 4 Gigabytes large
  	  and it has to accommodate user address space, kernel address
-Index: linux-2.6/arch/arm/plat-versatile/platsmp.c
-===================================================================
---- linux-2.6.orig/arch/arm/plat-versatile/platsmp.c
-+++ linux-2.6/arch/arm/plat-versatile/platsmp.c
-@@ -37,7 +37,7 @@ static void __cpuinit write_pen_release(
- 	outer_clean_range(__pa(&pen_release), __pa(&pen_release + 1));
- }
- 
--static DEFINE_SPINLOCK(boot_lock);
-+static DEFINE_RAW_SPINLOCK(boot_lock);
- 
- void __cpuinit platform_secondary_init(unsigned int cpu)
- {
-@@ -57,8 +57,8 @@ void __cpuinit platform_secondary_init(u
- 	/*
- 	 * Synchronise with the boot thread.
- 	 */
--	spin_lock(&boot_lock);
--	spin_unlock(&boot_lock);
-+	raw_spin_lock(&boot_lock);
-+	raw_spin_unlock(&boot_lock);
- }
- 
- int __cpuinit boot_secondary(unsigned int cpu, struct task_struct *idle)
-@@ -69,7 +69,7 @@ int __cpuinit boot_secondary(unsigned in
- 	 * Set synchronisation state between this boot processor
- 	 * and the secondary one
- 	 */
--	spin_lock(&boot_lock);
-+	raw_spin_lock(&boot_lock);
- 
- 	/*
- 	 * This is really belt and braces; we hold unintended secondary
-@@ -99,7 +99,7 @@ int __cpuinit boot_secondary(unsigned in
- 	 * now the secondary core is starting up let it run its
- 	 * calibrations, then wait for it to finish
- 	 */
--	spin_unlock(&boot_lock);
-+	raw_spin_unlock(&boot_lock);
- 
- 	return pen_release != -1 ? -ENOSYS : 0;
- }
 Index: linux-2.6/arch/arm/mach-exynos4/platsmp.c
 ===================================================================
 --- linux-2.6.orig/arch/arm/mach-exynos4/platsmp.c
@@ -10602,6 +10679,48 @@ Index: linux-2.6/arch/arm/mach-ux500/platsmp.c
  	/*
  	 * The secondary processor is waiting to be released from
 @@ -110,7 +110,7 @@ int __cpuinit boot_secondary(unsigned in
+ 	 * now the secondary core is starting up let it run its
+ 	 * calibrations, then wait for it to finish
+ 	 */
+-	spin_unlock(&boot_lock);
++	raw_spin_unlock(&boot_lock);
+ 
+ 	return pen_release != -1 ? -ENOSYS : 0;
+ }
+Index: linux-2.6/arch/arm/plat-versatile/platsmp.c
+===================================================================
+--- linux-2.6.orig/arch/arm/plat-versatile/platsmp.c
++++ linux-2.6/arch/arm/plat-versatile/platsmp.c
+@@ -37,7 +37,7 @@ static void __cpuinit write_pen_release(
+ 	outer_clean_range(__pa(&pen_release), __pa(&pen_release + 1));
+ }
+ 
+-static DEFINE_SPINLOCK(boot_lock);
++static DEFINE_RAW_SPINLOCK(boot_lock);
+ 
+ void __cpuinit platform_secondary_init(unsigned int cpu)
+ {
+@@ -57,8 +57,8 @@ void __cpuinit platform_secondary_init(u
+ 	/*
+ 	 * Synchronise with the boot thread.
+ 	 */
+-	spin_lock(&boot_lock);
+-	spin_unlock(&boot_lock);
++	raw_spin_lock(&boot_lock);
++	raw_spin_unlock(&boot_lock);
+ }
+ 
+ int __cpuinit boot_secondary(unsigned int cpu, struct task_struct *idle)
+@@ -69,7 +69,7 @@ int __cpuinit boot_secondary(unsigned in
+ 	 * Set synchronisation state between this boot processor
+ 	 * and the secondary one
+ 	 */
+-	spin_lock(&boot_lock);
++	raw_spin_lock(&boot_lock);
+ 
+ 	/*
+ 	 * This is really belt and braces; we hold unintended secondary
+@@ -99,7 +99,7 @@ int __cpuinit boot_secondary(unsigned in
  	 * now the secondary core is starting up let it run its
  	 * calibrations, then wait for it to finish
  	 */
@@ -16777,7 +16896,7 @@ Index: linux-2.6/kernel/hrtimer.c
  	if (&timer->node == timerqueue_getnext(&base->active)) {
  #ifdef CONFIG_HIGH_RES_TIMERS
  		/* Reprogram the clock event device. if enabled */
-@@ -983,8 +1031,19 @@ int __hrtimer_start_range_ns(struct hrti
+@@ -983,8 +1031,20 @@ int __hrtimer_start_range_ns(struct hrti
  	 *
  	 * XXX send_remote_softirq() ?
  	 */
@@ -16792,6 +16911,7 @@ Index: linux-2.6/kernel/hrtimer.c
 +			 * remove it again and report a failure. This avoids
 +			 * stale base->first entries.
 +			 */
++			debug_deactivate(timer);
 +			__remove_hrtimer(timer, new_base,
 +					timer->state & HRTIMER_STATE_CALLBACK, 0);
 +		}
@@ -16799,7 +16919,7 @@ Index: linux-2.6/kernel/hrtimer.c
  
  	unlock_hrtimer_base(timer, &flags);
  
-@@ -1070,7 +1129,7 @@ int hrtimer_cancel(struct hrtimer *timer
+@@ -1070,7 +1130,7 @@ int hrtimer_cancel(struct hrtimer *timer
  
  		if (ret >= 0)
  			return ret;
@@ -16808,7 +16928,7 @@ Index: linux-2.6/kernel/hrtimer.c
  	}
  }
  EXPORT_SYMBOL_GPL(hrtimer_cancel);
-@@ -1149,6 +1208,7 @@ static void __hrtimer_init(struct hrtime
+@@ -1149,6 +1209,7 @@ static void __hrtimer_init(struct hrtime
  
  	base = hrtimer_clockid_to_base(clock_id);
  	timer->base = &cpu_base->clock_base[base];
@@ -16816,7 +16936,7 @@ Index: linux-2.6/kernel/hrtimer.c
  	timerqueue_init(&timer->node);
  
  #ifdef CONFIG_TIMER_STATS
-@@ -1232,6 +1292,122 @@ static void __run_hrtimer(struct hrtimer
+@@ -1232,6 +1293,122 @@ static void __run_hrtimer(struct hrtimer
  	timer->state &= ~HRTIMER_STATE_CALLBACK;
  }
  
@@ -16939,7 +17059,7 @@ Index: linux-2.6/kernel/hrtimer.c
  #ifdef CONFIG_HIGH_RES_TIMERS
  
  /*
-@@ -1242,7 +1418,7 @@ void hrtimer_interrupt(struct clock_even
+@@ -1242,7 +1419,7 @@ void hrtimer_interrupt(struct clock_even
  {
  	struct hrtimer_cpu_base *cpu_base = &__get_cpu_var(hrtimer_bases);
  	ktime_t expires_next, now, entry_time, delta;
@@ -16948,7 +17068,7 @@ Index: linux-2.6/kernel/hrtimer.c
  
  	BUG_ON(!cpu_base->hres_active);
  	cpu_base->nr_events++;
-@@ -1278,6 +1454,14 @@ retry:
+@@ -1278,6 +1455,14 @@ retry:
  
  			timer = container_of(node, struct hrtimer, node);
  
@@ -16963,7 +17083,7 @@ Index: linux-2.6/kernel/hrtimer.c
  			/*
  			 * The immediate goal for using the softexpires is
  			 * minimizing wakeups, not running timers at the
-@@ -1301,7 +1485,10 @@ retry:
+@@ -1301,7 +1486,10 @@ retry:
  				break;
  			}
  
@@ -16975,7 +17095,7 @@ Index: linux-2.6/kernel/hrtimer.c
  		}
  	}
  
-@@ -1316,6 +1503,10 @@ retry:
+@@ -1316,6 +1504,10 @@ retry:
  	if (expires_next.tv64 == KTIME_MAX ||
  	    !tick_program_event(expires_next, 0)) {
  		cpu_base->hang_detected = 0;
@@ -16986,7 +17106,7 @@ Index: linux-2.6/kernel/hrtimer.c
  		return;
  	}
  
-@@ -1391,17 +1582,17 @@ void hrtimer_peek_ahead_timers(void)
+@@ -1391,17 +1583,17 @@ void hrtimer_peek_ahead_timers(void)
  	local_irq_restore(flags);
  }
  
@@ -17009,7 +17129,7 @@ Index: linux-2.6/kernel/hrtimer.c
  /*
   * Called from timer softirq every jiffy, expire hrtimers:
   *
-@@ -1434,7 +1625,7 @@ void hrtimer_run_queues(void)
+@@ -1434,7 +1626,7 @@ void hrtimer_run_queues(void)
  	struct timerqueue_node *node;
  	struct hrtimer_cpu_base *cpu_base = &__get_cpu_var(hrtimer_bases);
  	struct hrtimer_clock_base *base;
@@ -17018,7 +17138,7 @@ Index: linux-2.6/kernel/hrtimer.c
  
  	if (hrtimer_hres_active())
  		return;
-@@ -1459,10 +1650,16 @@ void hrtimer_run_queues(void)
+@@ -1459,10 +1651,16 @@ void hrtimer_run_queues(void)
  					hrtimer_get_expires_tv64(timer))
  				break;
  
@@ -17036,7 +17156,7 @@ Index: linux-2.6/kernel/hrtimer.c
  }
  
  /*
-@@ -1484,6 +1681,7 @@ static enum hrtimer_restart hrtimer_wake
+@@ -1484,6 +1682,7 @@ static enum hrtimer_restart hrtimer_wake
  void hrtimer_init_sleeper(struct hrtimer_sleeper *sl, struct task_struct *task)
  {
  	sl->timer.function = hrtimer_wakeup;
@@ -17044,7 +17164,7 @@ Index: linux-2.6/kernel/hrtimer.c
  	sl->task = task;
  }
  EXPORT_SYMBOL_GPL(hrtimer_init_sleeper);
-@@ -1622,9 +1820,13 @@ static void __cpuinit init_hrtimers_cpu(
+@@ -1622,9 +1821,13 @@ static void __cpuinit init_hrtimers_cpu(
  	for (i = 0; i < HRTIMER_MAX_CLOCK_BASES; i++) {
  		cpu_base->clock_base[i].cpu_base = cpu_base;
  		timerqueue_init_head(&cpu_base->clock_base[i].active);
@@ -17058,7 +17178,7 @@ Index: linux-2.6/kernel/hrtimer.c
  }
  
  #ifdef CONFIG_HOTPLUG_CPU
-@@ -1737,9 +1939,7 @@ void __init hrtimers_init(void)
+@@ -1737,9 +1940,7 @@ void __init hrtimers_init(void)
  	hrtimer_cpu_notify(&hrtimers_nb, (unsigned long)CPU_UP_PREPARE,
  			  (void *)(long)smp_processor_id());
  	register_cpu_notifier(&hrtimers_nb);
@@ -23124,7 +23244,7 @@ Index: linux-2.6/include/linux/hardirq.h
 +# define softirq_count()	(preempt_count() & SOFTIRQ_MASK)
 +# define in_serving_softirq()	(softirq_count() & SOFTIRQ_OFFSET)
 +#else
-+# define softirq_count()	(0U)
++# define softirq_count()	(0UL)
 +extern int in_serving_softirq(void);
 +#endif
 +
