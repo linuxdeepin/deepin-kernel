@@ -1,0 +1,1462 @@
+diff --git a/Makefile b/Makefile
+index 11c4249..9f6e3cd 100644
+diff --git a/arch/arm/kernel/perf_event_v7.c b/arch/arm/kernel/perf_event_v7.c
+index 4960686..4372763 100644
+--- a/arch/arm/kernel/perf_event_v7.c
++++ b/arch/arm/kernel/perf_event_v7.c
+@@ -264,8 +264,8 @@ static const unsigned armv7_a9_perf_map[PERF_COUNT_HW_MAX] = {
+ 	[PERF_COUNT_HW_CPU_CYCLES]	    = ARMV7_PERFCTR_CPU_CYCLES,
+ 	[PERF_COUNT_HW_INSTRUCTIONS]	    =
+ 					ARMV7_PERFCTR_INST_OUT_OF_RENAME_STAGE,
+-	[PERF_COUNT_HW_CACHE_REFERENCES]    = ARMV7_PERFCTR_COHERENT_LINE_HIT,
+-	[PERF_COUNT_HW_CACHE_MISSES]	    = ARMV7_PERFCTR_COHERENT_LINE_MISS,
++	[PERF_COUNT_HW_CACHE_REFERENCES]    = ARMV7_PERFCTR_DCACHE_ACCESS,
++	[PERF_COUNT_HW_CACHE_MISSES]	    = ARMV7_PERFCTR_DCACHE_REFILL,
+ 	[PERF_COUNT_HW_BRANCH_INSTRUCTIONS] = ARMV7_PERFCTR_PC_WRITE,
+ 	[PERF_COUNT_HW_BRANCH_MISSES]	    = ARMV7_PERFCTR_PC_BRANCH_MIS_PRED,
+ 	[PERF_COUNT_HW_BUS_CYCLES]	    = ARMV7_PERFCTR_CLOCK_CYCLES,
+diff --git a/arch/arm/mm/init.c b/arch/arm/mm/init.c
+index c19571c..4a4eba5 100644
+--- a/arch/arm/mm/init.c
++++ b/arch/arm/mm/init.c
+@@ -473,6 +473,13 @@ static void __init free_unused_memmap(struct meminfo *mi)
+ 		 */
+ 		bank_start = min(bank_start,
+ 				 ALIGN(prev_bank_end, PAGES_PER_SECTION));
++#else
++		/*
++		 * Align down here since the VM subsystem insists that the
++		 * memmap entries are valid from the bank start aligned to
++		 * MAX_ORDER_NR_PAGES.
++		 */
++		bank_start = round_down(bank_start, MAX_ORDER_NR_PAGES);
+ #endif
+ 		/*
+ 		 * If we had a previous bank, and there is a space
+diff --git a/arch/x86/mm/init.c b/arch/x86/mm/init.c
+index 3032644..87488b9 100644
+--- a/arch/x86/mm/init.c
++++ b/arch/x86/mm/init.c
+@@ -63,9 +63,8 @@ static void __init find_early_table_space(unsigned long end, int use_pse,
+ #ifdef CONFIG_X86_32
+ 	/* for fixmap */
+ 	tables += roundup(__end_of_fixed_addresses * sizeof(pte_t), PAGE_SIZE);
+-
+-	good_end = max_pfn_mapped << PAGE_SHIFT;
+ #endif
++	good_end = max_pfn_mapped << PAGE_SHIFT;
+ 
+ 	base = memblock_find_in_range(start, good_end, tables, PAGE_SIZE);
+ 	if (base == MEMBLOCK_ERROR)
+diff --git a/crypto/ghash-generic.c b/crypto/ghash-generic.c
+index be44256..7835b8f 100644
+--- a/crypto/ghash-generic.c
++++ b/crypto/ghash-generic.c
+@@ -67,6 +67,9 @@ static int ghash_update(struct shash_desc *desc,
+ 	struct ghash_ctx *ctx = crypto_shash_ctx(desc->tfm);
+ 	u8 *dst = dctx->buffer;
+ 
++	if (!ctx->gf128)
++		return -ENOKEY;
++
+ 	if (dctx->bytes) {
+ 		int n = min(srclen, dctx->bytes);
+ 		u8 *pos = dst + (GHASH_BLOCK_SIZE - dctx->bytes);
+@@ -119,6 +122,9 @@ static int ghash_final(struct shash_desc *desc, u8 *dst)
+ 	struct ghash_ctx *ctx = crypto_shash_ctx(desc->tfm);
+ 	u8 *buf = dctx->buffer;
+ 
++	if (!ctx->gf128)
++		return -ENOKEY;
++
+ 	ghash_flush(ctx, dctx);
+ 	memcpy(dst, buf, GHASH_BLOCK_SIZE);
+ 
+diff --git a/drivers/firewire/sbp2.c b/drivers/firewire/sbp2.c
+index 41841a3..17cef86 100644
+--- a/drivers/firewire/sbp2.c
++++ b/drivers/firewire/sbp2.c
+@@ -1198,6 +1198,10 @@ static int sbp2_remove(struct device *dev)
+ {
+ 	struct fw_unit *unit = fw_unit(dev);
+ 	struct sbp2_target *tgt = dev_get_drvdata(&unit->device);
++	struct sbp2_logical_unit *lu;
++
++	list_for_each_entry(lu, &tgt->lu_list, link)
++		cancel_delayed_work_sync(&lu->work);
+ 
+ 	sbp2_target_put(tgt);
+ 	return 0;
+diff --git a/drivers/gpu/drm/radeon/atom.c b/drivers/gpu/drm/radeon/atom.c
+index ebdb0fd..9a0aee2 100644
+--- a/drivers/gpu/drm/radeon/atom.c
++++ b/drivers/gpu/drm/radeon/atom.c
+@@ -277,7 +277,12 @@ static uint32_t atom_get_src_int(atom_exec_context *ctx, uint8_t attr,
+ 	case ATOM_ARG_FB:
+ 		idx = U8(*ptr);
+ 		(*ptr)++;
+-		val = gctx->scratch[((gctx->fb_base + idx) / 4)];
++		if ((gctx->fb_base + (idx * 4)) > gctx->scratch_size_bytes) {
++			DRM_ERROR("ATOM: fb read beyond scratch region: %d vs. %d\n",
++				  gctx->fb_base + (idx * 4), gctx->scratch_size_bytes);
++			val = 0;
++		} else
++			val = gctx->scratch[(gctx->fb_base / 4) + idx];
+ 		if (print)
+ 			DEBUG("FB[0x%02X]", idx);
+ 		break;
+@@ -531,7 +536,11 @@ static void atom_put_dst(atom_exec_context *ctx, int arg, uint8_t attr,
+ 	case ATOM_ARG_FB:
+ 		idx = U8(*ptr);
+ 		(*ptr)++;
+-		gctx->scratch[((gctx->fb_base + idx) / 4)] = val;
++		if ((gctx->fb_base + (idx * 4)) > gctx->scratch_size_bytes) {
++			DRM_ERROR("ATOM: fb write beyond scratch region: %d vs. %d\n",
++				  gctx->fb_base + (idx * 4), gctx->scratch_size_bytes);
++		} else
++			gctx->scratch[(gctx->fb_base / 4) + idx] = val;
+ 		DEBUG("FB[0x%02X]", idx);
+ 		break;
+ 	case ATOM_ARG_PLL:
+@@ -1367,11 +1376,13 @@ int atom_allocate_fb_scratch(struct atom_context *ctx)
+ 
+ 		usage_bytes = firmware_usage->asFirmwareVramReserveInfo[0].usFirmwareUseInKb * 1024;
+ 	}
++	ctx->scratch_size_bytes = 0;
+ 	if (usage_bytes == 0)
+ 		usage_bytes = 20 * 1024;
+ 	/* allocate some scratch memory */
+ 	ctx->scratch = kzalloc(usage_bytes, GFP_KERNEL);
+ 	if (!ctx->scratch)
+ 		return -ENOMEM;
++	ctx->scratch_size_bytes = usage_bytes;
+ 	return 0;
+ }
+diff --git a/drivers/gpu/drm/radeon/atom.h b/drivers/gpu/drm/radeon/atom.h
+index a589a55..93cfe20 100644
+--- a/drivers/gpu/drm/radeon/atom.h
++++ b/drivers/gpu/drm/radeon/atom.h
+@@ -137,6 +137,7 @@ struct atom_context {
+ 	int cs_equal, cs_above;
+ 	int io_mode;
+ 	uint32_t *scratch;
++	int scratch_size_bytes;
+ };
+ 
+ extern int atom_debug;
+diff --git a/drivers/gpu/drm/ttm/ttm_bo.c b/drivers/gpu/drm/ttm/ttm_bo.c
+index b7f0726..e2b2d78 100644
+--- a/drivers/gpu/drm/ttm/ttm_bo.c
++++ b/drivers/gpu/drm/ttm/ttm_bo.c
+@@ -392,10 +392,12 @@ static int ttm_bo_handle_move_mem(struct ttm_buffer_object *bo,
+ 	 * Create and bind a ttm if required.
+ 	 */
+ 
+-	if (!(new_man->flags & TTM_MEMTYPE_FLAG_FIXED) && (bo->ttm == NULL)) {
+-		ret = ttm_bo_add_ttm(bo, false);
+-		if (ret)
+-			goto out_err;
++	if (!(new_man->flags & TTM_MEMTYPE_FLAG_FIXED)) {
++		if (bo->ttm == NULL) {
++			ret = ttm_bo_add_ttm(bo, false);
++			if (ret)
++				goto out_err;
++		}
+ 
+ 		ret = ttm_tt_set_placement_caching(bo->ttm, mem->placement);
+ 		if (ret)
+diff --git a/drivers/gpu/drm/ttm/ttm_bo_util.c b/drivers/gpu/drm/ttm/ttm_bo_util.c
+index 77dbf40..ae3c6f5 100644
+--- a/drivers/gpu/drm/ttm/ttm_bo_util.c
++++ b/drivers/gpu/drm/ttm/ttm_bo_util.c
+@@ -635,13 +635,13 @@ int ttm_bo_move_accel_cleanup(struct ttm_buffer_object *bo,
+ 		if (ret)
+ 			return ret;
+ 
+-		ttm_bo_free_old_node(bo);
+ 		if ((man->flags & TTM_MEMTYPE_FLAG_FIXED) &&
+ 		    (bo->ttm != NULL)) {
+ 			ttm_tt_unbind(bo->ttm);
+ 			ttm_tt_destroy(bo->ttm);
+ 			bo->ttm = NULL;
+ 		}
++		ttm_bo_free_old_node(bo);
+ 	} else {
+ 		/**
+ 		 * This should help pipeline ordinary buffer moves.
+diff --git a/drivers/hid/hid-ids.h b/drivers/hid/hid-ids.h
+index a756ee6..c946d90 100644
+--- a/drivers/hid/hid-ids.h
++++ b/drivers/hid/hid-ids.h
+@@ -568,6 +568,9 @@
+ #define USB_DEVICE_ID_SAMSUNG_IR_REMOTE	0x0001
+ #define USB_DEVICE_ID_SAMSUNG_WIRELESS_KBD_MOUSE	0x0600
+ 
++#define USB_VENDOR_ID_SIGMA_MICRO	0x1c4f
++#define USB_DEVICE_ID_SIGMA_MICRO_KEYBOARD	0x0002
++
+ #define USB_VENDOR_ID_SKYCABLE			0x1223
+ #define	USB_DEVICE_ID_SKYCABLE_WIRELESS_PRESENTER	0x3F07
+ 
+diff --git a/drivers/hid/hid-magicmouse.c b/drivers/hid/hid-magicmouse.c
+index 0ec91c1..56d0539 100644
+--- a/drivers/hid/hid-magicmouse.c
++++ b/drivers/hid/hid-magicmouse.c
+@@ -501,9 +501,17 @@ static int magicmouse_probe(struct hid_device *hdev,
+ 	}
+ 	report->size = 6;
+ 
++	/*
++	 * Some devices repond with 'invalid report id' when feature
++	 * report switching it into multitouch mode is sent to it.
++	 *
++	 * This results in -EIO from the _raw low-level transport callback,
++	 * but there seems to be no other way of switching the mode.
++	 * Thus the super-ugly hacky success check below.
++	 */
+ 	ret = hdev->hid_output_raw_report(hdev, feature, sizeof(feature),
+ 			HID_FEATURE_REPORT);
+-	if (ret != sizeof(feature)) {
++	if (ret != -EIO && ret != sizeof(feature)) {
+ 		hid_err(hdev, "unable to request touch data (%d)\n", ret);
+ 		goto err_stop_hw;
+ 	}
+diff --git a/drivers/hid/usbhid/hid-quirks.c b/drivers/hid/usbhid/hid-quirks.c
+index 621959d..4bdb5d4 100644
+--- a/drivers/hid/usbhid/hid-quirks.c
++++ b/drivers/hid/usbhid/hid-quirks.c
+@@ -89,6 +89,7 @@ static const struct hid_blacklist {
+ 
+ 	{ USB_VENDOR_ID_CHICONY, USB_DEVICE_ID_CHICONY_MULTI_TOUCH, HID_QUIRK_MULTI_INPUT },
+ 	{ USB_VENDOR_ID_CHICONY, USB_DEVICE_ID_CHICONY_WIRELESS, HID_QUIRK_MULTI_INPUT },
++	{ USB_VENDOR_ID_SIGMA_MICRO, USB_DEVICE_ID_SIGMA_MICRO_KEYBOARD, HID_QUIRK_NO_INIT_REPORTS },
+ 	{ 0, 0 }
+ };
+ 
+diff --git a/drivers/hwmon/w83627ehf.c b/drivers/hwmon/w83627ehf.c
+index f2b377c..36d7f27 100644
+--- a/drivers/hwmon/w83627ehf.c
++++ b/drivers/hwmon/w83627ehf.c
+@@ -390,7 +390,7 @@ temp_from_reg(u16 reg, s16 regval)
+ {
+ 	if (is_word_sized(reg))
+ 		return LM75_TEMP_FROM_REG(regval);
+-	return regval * 1000;
++	return ((s8)regval) * 1000;
+ }
+ 
+ static inline u16
+@@ -398,7 +398,8 @@ temp_to_reg(u16 reg, long temp)
+ {
+ 	if (is_word_sized(reg))
+ 		return LM75_TEMP_TO_REG(temp);
+-	return DIV_ROUND_CLOSEST(SENSORS_LIMIT(temp, -127000, 128000), 1000);
++	return (s8)DIV_ROUND_CLOSEST(SENSORS_LIMIT(temp, -127000, 128000),
++				     1000);
+ }
+ 
+ /* Some of analog inputs have internal scaling (2x), 8mV is ADC LSB */
+@@ -1715,7 +1716,8 @@ static void w83627ehf_device_remove_files(struct device *dev)
+ }
+ 
+ /* Get the monitoring functions started */
+-static inline void __devinit w83627ehf_init_device(struct w83627ehf_data *data)
++static inline void __devinit w83627ehf_init_device(struct w83627ehf_data *data,
++						   enum kinds kind)
+ {
+ 	int i;
+ 	u8 tmp, diode;
+@@ -1746,10 +1748,16 @@ static inline void __devinit w83627ehf_init_device(struct w83627ehf_data *data)
+ 		w83627ehf_write_value(data, W83627EHF_REG_VBAT, tmp | 0x01);
+ 
+ 	/* Get thermal sensor types */
+-	diode = w83627ehf_read_value(data, W83627EHF_REG_DIODE);
++	switch (kind) {
++	case w83627ehf:
++		diode = w83627ehf_read_value(data, W83627EHF_REG_DIODE);
++		break;
++	default:
++		diode = 0x70;
++	}
+ 	for (i = 0; i < 3; i++) {
+ 		if ((tmp & (0x02 << i)))
+-			data->temp_type[i] = (diode & (0x10 << i)) ? 1 : 2;
++			data->temp_type[i] = (diode & (0x10 << i)) ? 1 : 3;
+ 		else
+ 			data->temp_type[i] = 4; /* thermistor */
+ 	}
+@@ -2016,7 +2024,7 @@ static int __devinit w83627ehf_probe(struct platform_device *pdev)
+ 	}
+ 
+ 	/* Initialize the chip */
+-	w83627ehf_init_device(data);
++	w83627ehf_init_device(data, sio_data->kind);
+ 
+ 	data->vrm = vid_which_vrm();
+ 	superio_enter(sio_data->sioreg);
+diff --git a/drivers/media/video/uvc/uvc_entity.c b/drivers/media/video/uvc/uvc_entity.c
+index 48fea37..29e2399 100644
+--- a/drivers/media/video/uvc/uvc_entity.c
++++ b/drivers/media/video/uvc/uvc_entity.c
+@@ -49,7 +49,7 @@ static int uvc_mc_register_entity(struct uvc_video_chain *chain,
+ 		if (remote == NULL)
+ 			return -EINVAL;
+ 
+-		source = (UVC_ENTITY_TYPE(remote) != UVC_TT_STREAMING)
++		source = (UVC_ENTITY_TYPE(remote) == UVC_TT_STREAMING)
+ 		       ? (remote->vdev ? &remote->vdev->entity : NULL)
+ 		       : &remote->subdev.entity;
+ 		if (source == NULL)
+diff --git a/drivers/platform/x86/samsung-laptop.c b/drivers/platform/x86/samsung-laptop.c
+index d347116..1658575 100644
+--- a/drivers/platform/x86/samsung-laptop.c
++++ b/drivers/platform/x86/samsung-laptop.c
+@@ -601,6 +601,16 @@ static struct dmi_system_id __initdata samsung_dmi_table[] = {
+ 		.callback = dmi_check_cb,
+ 	},
+ 	{
++		.ident = "N150/N210/N220",
++		.matches = {
++			DMI_MATCH(DMI_SYS_VENDOR,
++					"SAMSUNG ELECTRONICS CO., LTD."),
++			DMI_MATCH(DMI_PRODUCT_NAME, "N150/N210/N220"),
++			DMI_MATCH(DMI_BOARD_NAME, "N150/N210/N220"),
++		},
++		.callback = dmi_check_cb,
++	},
++	{
+ 		.ident = "N150/N210/N220/N230",
+ 		.matches = {
+ 			DMI_MATCH(DMI_SYS_VENDOR,
+diff --git a/fs/cifs/cifsfs.c b/fs/cifs/cifsfs.c
+index fc7e57b..53e7d72 100644
+--- a/fs/cifs/cifsfs.c
++++ b/fs/cifs/cifsfs.c
+@@ -566,6 +566,12 @@ cifs_get_root(struct smb_vol *vol, struct super_block *sb)
+ 		struct inode *dir = dentry->d_inode;
+ 		struct dentry *child;
+ 
++		if (!dir) {
++			dput(dentry);
++			dentry = ERR_PTR(-ENOENT);
++			break;
++		}
++
+ 		/* skip separators */
+ 		while (*s == sep)
+ 			s++;
+@@ -581,10 +587,6 @@ cifs_get_root(struct smb_vol *vol, struct super_block *sb)
+ 		mutex_unlock(&dir->i_mutex);
+ 		dput(dentry);
+ 		dentry = child;
+-		if (!dentry->d_inode) {
+-			dput(dentry);
+-			dentry = ERR_PTR(-ENOENT);
+-		}
+ 	} while (!IS_ERR(dentry));
+ 	_FreeXid(xid);
+ 	kfree(full_path);
+diff --git a/fs/fuse/dev.c b/fs/fuse/dev.c
+index 168a80f..5cb8614 100644
+--- a/fs/fuse/dev.c
++++ b/fs/fuse/dev.c
+@@ -258,10 +258,14 @@ void fuse_queue_forget(struct fuse_conn *fc, struct fuse_forget_link *forget,
+ 	forget->forget_one.nlookup = nlookup;
+ 
+ 	spin_lock(&fc->lock);
+-	fc->forget_list_tail->next = forget;
+-	fc->forget_list_tail = forget;
+-	wake_up(&fc->waitq);
+-	kill_fasync(&fc->fasync, SIGIO, POLL_IN);
++	if (fc->connected) {
++		fc->forget_list_tail->next = forget;
++		fc->forget_list_tail = forget;
++		wake_up(&fc->waitq);
++		kill_fasync(&fc->fasync, SIGIO, POLL_IN);
++	} else {
++		kfree(forget);
++	}
+ 	spin_unlock(&fc->lock);
+ }
+ 
+diff --git a/fs/hfsplus/hfsplus_fs.h b/fs/hfsplus/hfsplus_fs.h
+index d685752..4e7f64b 100644
+--- a/fs/hfsplus/hfsplus_fs.h
++++ b/fs/hfsplus/hfsplus_fs.h
+@@ -13,6 +13,7 @@
+ #include <linux/fs.h>
+ #include <linux/mutex.h>
+ #include <linux/buffer_head.h>
++#include <linux/blkdev.h>
+ #include "hfsplus_raw.h"
+ 
+ #define DBG_BNODE_REFS	0x00000001
+@@ -110,7 +111,9 @@ struct hfsplus_vh;
+ struct hfs_btree;
+ 
+ struct hfsplus_sb_info {
++	void *s_vhdr_buf;
+ 	struct hfsplus_vh *s_vhdr;
++	void *s_backup_vhdr_buf;
+ 	struct hfsplus_vh *s_backup_vhdr;
+ 	struct hfs_btree *ext_tree;
+ 	struct hfs_btree *cat_tree;
+@@ -258,6 +261,15 @@ struct hfsplus_readdir_data {
+ 	struct hfsplus_cat_key key;
+ };
+ 
++/*
++ * Find minimum acceptible I/O size for an hfsplus sb.
++ */
++static inline unsigned short hfsplus_min_io_size(struct super_block *sb)
++{
++	return max_t(unsigned short, bdev_logical_block_size(sb->s_bdev),
++		     HFSPLUS_SECTOR_SIZE);
++}
++
+ #define hfs_btree_open hfsplus_btree_open
+ #define hfs_btree_close hfsplus_btree_close
+ #define hfs_btree_write hfsplus_btree_write
+@@ -436,8 +448,8 @@ int hfsplus_compare_dentry(const struct dentry *parent,
+ /* wrapper.c */
+ int hfsplus_read_wrapper(struct super_block *);
+ int hfs_part_find(struct super_block *, sector_t *, sector_t *);
+-int hfsplus_submit_bio(struct block_device *bdev, sector_t sector,
+-		void *data, int rw);
++int hfsplus_submit_bio(struct super_block *sb, sector_t sector,
++		void *buf, void **data, int rw);
+ 
+ /* time macros */
+ #define __hfsp_mt2ut(t)		(be32_to_cpu(t) - 2082844800U)
+diff --git a/fs/hfsplus/part_tbl.c b/fs/hfsplus/part_tbl.c
+index 40ad88c..eb355d8 100644
+--- a/fs/hfsplus/part_tbl.c
++++ b/fs/hfsplus/part_tbl.c
+@@ -88,11 +88,12 @@ static int hfs_parse_old_pmap(struct super_block *sb, struct old_pmap *pm,
+ 	return -ENOENT;
+ }
+ 
+-static int hfs_parse_new_pmap(struct super_block *sb, struct new_pmap *pm,
+-		sector_t *part_start, sector_t *part_size)
++static int hfs_parse_new_pmap(struct super_block *sb, void *buf,
++		struct new_pmap *pm, sector_t *part_start, sector_t *part_size)
+ {
+ 	struct hfsplus_sb_info *sbi = HFSPLUS_SB(sb);
+ 	int size = be32_to_cpu(pm->pmMapBlkCnt);
++	int buf_size = hfsplus_min_io_size(sb);
+ 	int res;
+ 	int i = 0;
+ 
+@@ -107,11 +108,14 @@ static int hfs_parse_new_pmap(struct super_block *sb, struct new_pmap *pm,
+ 		if (++i >= size)
+ 			return -ENOENT;
+ 
+-		res = hfsplus_submit_bio(sb->s_bdev,
+-					 *part_start + HFS_PMAP_BLK + i,
+-					 pm, READ);
+-		if (res)
+-			return res;
++		pm = (struct new_pmap *)((u8 *)pm + HFSPLUS_SECTOR_SIZE);
++		if ((u8 *)pm - (u8 *)buf >= buf_size) {
++			res = hfsplus_submit_bio(sb,
++						 *part_start + HFS_PMAP_BLK + i,
++						 buf, (void **)&pm, READ);
++			if (res)
++				return res;
++		}
+ 	} while (pm->pmSig == cpu_to_be16(HFS_NEW_PMAP_MAGIC));
+ 
+ 	return -ENOENT;
+@@ -124,15 +128,15 @@ static int hfs_parse_new_pmap(struct super_block *sb, struct new_pmap *pm,
+ int hfs_part_find(struct super_block *sb,
+ 		sector_t *part_start, sector_t *part_size)
+ {
+-	void *data;
++	void *buf, *data;
+ 	int res;
+ 
+-	data = kmalloc(HFSPLUS_SECTOR_SIZE, GFP_KERNEL);
+-	if (!data)
++	buf = kmalloc(hfsplus_min_io_size(sb), GFP_KERNEL);
++	if (!buf)
+ 		return -ENOMEM;
+ 
+-	res = hfsplus_submit_bio(sb->s_bdev, *part_start + HFS_PMAP_BLK,
+-				 data, READ);
++	res = hfsplus_submit_bio(sb, *part_start + HFS_PMAP_BLK,
++				 buf, &data, READ);
+ 	if (res)
+ 		goto out;
+ 
+@@ -141,13 +145,13 @@ int hfs_part_find(struct super_block *sb,
+ 		res = hfs_parse_old_pmap(sb, data, part_start, part_size);
+ 		break;
+ 	case HFS_NEW_PMAP_MAGIC:
+-		res = hfs_parse_new_pmap(sb, data, part_start, part_size);
++		res = hfs_parse_new_pmap(sb, buf, data, part_start, part_size);
+ 		break;
+ 	default:
+ 		res = -ENOENT;
+ 		break;
+ 	}
+ out:
+-	kfree(data);
++	kfree(buf);
+ 	return res;
+ }
+diff --git a/fs/hfsplus/super.c b/fs/hfsplus/super.c
+index 84a47b7..c3a76fd 100644
+--- a/fs/hfsplus/super.c
++++ b/fs/hfsplus/super.c
+@@ -197,17 +197,17 @@ int hfsplus_sync_fs(struct super_block *sb, int wait)
+ 		write_backup = 1;
+ 	}
+ 
+-	error2 = hfsplus_submit_bio(sb->s_bdev,
++	error2 = hfsplus_submit_bio(sb,
+ 				   sbi->part_start + HFSPLUS_VOLHEAD_SECTOR,
+-				   sbi->s_vhdr, WRITE_SYNC);
++				   sbi->s_vhdr_buf, NULL, WRITE_SYNC);
+ 	if (!error)
+ 		error = error2;
+ 	if (!write_backup)
+ 		goto out;
+ 
+-	error2 = hfsplus_submit_bio(sb->s_bdev,
++	error2 = hfsplus_submit_bio(sb,
+ 				  sbi->part_start + sbi->sect_count - 2,
+-				  sbi->s_backup_vhdr, WRITE_SYNC);
++				  sbi->s_backup_vhdr_buf, NULL, WRITE_SYNC);
+ 	if (!error)
+ 		error2 = error;
+ out:
+@@ -251,8 +251,8 @@ static void hfsplus_put_super(struct super_block *sb)
+ 	hfs_btree_close(sbi->ext_tree);
+ 	iput(sbi->alloc_file);
+ 	iput(sbi->hidden_dir);
+-	kfree(sbi->s_vhdr);
+-	kfree(sbi->s_backup_vhdr);
++	kfree(sbi->s_vhdr_buf);
++	kfree(sbi->s_backup_vhdr_buf);
+ 	unload_nls(sbi->nls);
+ 	kfree(sb->s_fs_info);
+ 	sb->s_fs_info = NULL;
+@@ -508,8 +508,8 @@ out_close_cat_tree:
+ out_close_ext_tree:
+ 	hfs_btree_close(sbi->ext_tree);
+ out_free_vhdr:
+-	kfree(sbi->s_vhdr);
+-	kfree(sbi->s_backup_vhdr);
++	kfree(sbi->s_vhdr_buf);
++	kfree(sbi->s_backup_vhdr_buf);
+ out_unload_nls:
+ 	unload_nls(sbi->nls);
+ 	unload_nls(nls);
+diff --git a/fs/hfsplus/wrapper.c b/fs/hfsplus/wrapper.c
+index 4ac88ff..7b8112da 100644
+--- a/fs/hfsplus/wrapper.c
++++ b/fs/hfsplus/wrapper.c
+@@ -31,25 +31,67 @@ static void hfsplus_end_io_sync(struct bio *bio, int err)
+ 	complete(bio->bi_private);
+ }
+ 
+-int hfsplus_submit_bio(struct block_device *bdev, sector_t sector,
+-		void *data, int rw)
++/*
++ * hfsplus_submit_bio - Perfrom block I/O
++ * @sb: super block of volume for I/O
++ * @sector: block to read or write, for blocks of HFSPLUS_SECTOR_SIZE bytes
++ * @buf: buffer for I/O
++ * @data: output pointer for location of requested data
++ * @rw: direction of I/O
++ *
++ * The unit of I/O is hfsplus_min_io_size(sb), which may be bigger than
++ * HFSPLUS_SECTOR_SIZE, and @buf must be sized accordingly. On reads
++ * @data will return a pointer to the start of the requested sector,
++ * which may not be the same location as @buf.
++ *
++ * If @sector is not aligned to the bdev logical block size it will
++ * be rounded down. For writes this means that @buf should contain data
++ * that starts at the rounded-down address. As long as the data was
++ * read using hfsplus_submit_bio() and the same buffer is used things
++ * will work correctly.
++ */
++int hfsplus_submit_bio(struct super_block *sb, sector_t sector,
++		void *buf, void **data, int rw)
+ {
+ 	DECLARE_COMPLETION_ONSTACK(wait);
+ 	struct bio *bio;
+ 	int ret = 0;
++	unsigned int io_size;
++	loff_t start;
++	int offset;
++
++	/*
++	 * Align sector to hardware sector size and find offset. We
++	 * assume that io_size is a power of two, which _should_
++	 * be true.
++	 */
++	io_size = hfsplus_min_io_size(sb);
++	start = (loff_t)sector << HFSPLUS_SECTOR_SHIFT;
++	offset = start & (io_size - 1);
++	sector &= ~((io_size >> HFSPLUS_SECTOR_SHIFT) - 1);
+ 
+ 	bio = bio_alloc(GFP_NOIO, 1);
+ 	bio->bi_sector = sector;
+-	bio->bi_bdev = bdev;
++	bio->bi_bdev = sb->s_bdev;
+ 	bio->bi_end_io = hfsplus_end_io_sync;
+ 	bio->bi_private = &wait;
+ 
+-	/*
+-	 * We always submit one sector at a time, so bio_add_page must not fail.
+-	 */
+-	if (bio_add_page(bio, virt_to_page(data), HFSPLUS_SECTOR_SIZE,
+-			 offset_in_page(data)) != HFSPLUS_SECTOR_SIZE)
+-		BUG();
++	if (!(rw & WRITE) && data)
++		*data = (u8 *)buf + offset;
++
++	while (io_size > 0) {
++		unsigned int page_offset = offset_in_page(buf);
++		unsigned int len = min_t(unsigned int, PAGE_SIZE - page_offset,
++					 io_size);
++
++		ret = bio_add_page(bio, virt_to_page(buf), len, page_offset);
++		if (ret != len) {
++			ret = -EIO;
++			goto out;
++		}
++		io_size -= len;
++		buf = (u8 *)buf + len;
++	}
+ 
+ 	submit_bio(rw, bio);
+ 	wait_for_completion(&wait);
+@@ -57,8 +99,9 @@ int hfsplus_submit_bio(struct block_device *bdev, sector_t sector,
+ 	if (!bio_flagged(bio, BIO_UPTODATE))
+ 		ret = -EIO;
+ 
++out:
+ 	bio_put(bio);
+-	return ret;
++	return ret < 0 ? ret : 0;
+ }
+ 
+ static int hfsplus_read_mdb(void *bufptr, struct hfsplus_wd *wd)
+@@ -147,17 +190,17 @@ int hfsplus_read_wrapper(struct super_block *sb)
+ 	}
+ 
+ 	error = -ENOMEM;
+-	sbi->s_vhdr = kmalloc(HFSPLUS_SECTOR_SIZE, GFP_KERNEL);
+-	if (!sbi->s_vhdr)
++	sbi->s_vhdr_buf = kmalloc(hfsplus_min_io_size(sb), GFP_KERNEL);
++	if (!sbi->s_vhdr_buf)
+ 		goto out;
+-	sbi->s_backup_vhdr = kmalloc(HFSPLUS_SECTOR_SIZE, GFP_KERNEL);
+-	if (!sbi->s_backup_vhdr)
++	sbi->s_backup_vhdr_buf = kmalloc(hfsplus_min_io_size(sb), GFP_KERNEL);
++	if (!sbi->s_backup_vhdr_buf)
+ 		goto out_free_vhdr;
+ 
+ reread:
+-	error = hfsplus_submit_bio(sb->s_bdev,
+-				   part_start + HFSPLUS_VOLHEAD_SECTOR,
+-				   sbi->s_vhdr, READ);
++	error = hfsplus_submit_bio(sb, part_start + HFSPLUS_VOLHEAD_SECTOR,
++				   sbi->s_vhdr_buf, (void **)&sbi->s_vhdr,
++				   READ);
+ 	if (error)
+ 		goto out_free_backup_vhdr;
+ 
+@@ -186,9 +229,9 @@ reread:
+ 		goto reread;
+ 	}
+ 
+-	error = hfsplus_submit_bio(sb->s_bdev,
+-				   part_start + part_size - 2,
+-				   sbi->s_backup_vhdr, READ);
++	error = hfsplus_submit_bio(sb, part_start + part_size - 2,
++				   sbi->s_backup_vhdr_buf,
++				   (void **)&sbi->s_backup_vhdr, READ);
+ 	if (error)
+ 		goto out_free_backup_vhdr;
+ 
+@@ -232,9 +275,9 @@ reread:
+ 	return 0;
+ 
+ out_free_backup_vhdr:
+-	kfree(sbi->s_backup_vhdr);
++	kfree(sbi->s_backup_vhdr_buf);
+ out_free_vhdr:
+-	kfree(sbi->s_vhdr);
++	kfree(sbi->s_vhdr_buf);
+ out:
+ 	return error;
+ }
+diff --git a/fs/xfs/linux-2.6/xfs_linux.h b/fs/xfs/linux-2.6/xfs_linux.h
+index 8633521..8731516 100644
+--- a/fs/xfs/linux-2.6/xfs_linux.h
++++ b/fs/xfs/linux-2.6/xfs_linux.h
+@@ -70,6 +70,8 @@
+ #include <linux/ctype.h>
+ #include <linux/writeback.h>
+ #include <linux/capability.h>
++#include <linux/kthread.h>
++#include <linux/freezer.h>
+ #include <linux/list_sort.h>
+ 
+ #include <asm/page.h>
+diff --git a/fs/xfs/linux-2.6/xfs_super.c b/fs/xfs/linux-2.6/xfs_super.c
+index a1a881e..347cae9 100644
+--- a/fs/xfs/linux-2.6/xfs_super.c
++++ b/fs/xfs/linux-2.6/xfs_super.c
+@@ -1412,37 +1412,35 @@ xfs_fs_fill_super(
+ 	sb->s_time_gran = 1;
+ 	set_posix_acl_flag(sb);
+ 
+-	error = xfs_syncd_init(mp);
+-	if (error)
+-		goto out_filestream_unmount;
+-
+ 	xfs_inode_shrinker_register(mp);
+ 
+ 	error = xfs_mountfs(mp);
+ 	if (error)
+-		goto out_syncd_stop;
++		goto out_filestream_unmount;
++
++	error = xfs_syncd_init(mp);
++	if (error)
++		goto out_unmount;
+ 
+ 	root = igrab(VFS_I(mp->m_rootip));
+ 	if (!root) {
+ 		error = ENOENT;
+-		goto fail_unmount;
++		goto out_syncd_stop;
+ 	}
+ 	if (is_bad_inode(root)) {
+ 		error = EINVAL;
+-		goto fail_vnrele;
++		goto out_syncd_stop;
+ 	}
+ 	sb->s_root = d_alloc_root(root);
+ 	if (!sb->s_root) {
+ 		error = ENOMEM;
+-		goto fail_vnrele;
++		goto out_iput;
+ 	}
+ 
+ 	return 0;
+ 
+- out_syncd_stop:
+-	xfs_inode_shrinker_unregister(mp);
+-	xfs_syncd_stop(mp);
+  out_filestream_unmount:
++	xfs_inode_shrinker_unregister(mp);
+ 	xfs_filestream_unmount(mp);
+  out_free_sb:
+ 	xfs_freesb(mp);
+@@ -1456,17 +1454,12 @@ xfs_fs_fill_super(
+  out:
+ 	return -error;
+ 
+- fail_vnrele:
+-	if (sb->s_root) {
+-		dput(sb->s_root);
+-		sb->s_root = NULL;
+-	} else {
+-		iput(root);
+-	}
+-
+- fail_unmount:
+-	xfs_inode_shrinker_unregister(mp);
++ out_iput:
++	iput(root);
++ out_syncd_stop:
+ 	xfs_syncd_stop(mp);
++ out_unmount:
++	xfs_inode_shrinker_unregister(mp);
+ 
+ 	/*
+ 	 * Blow away any referenced inode in the filestreams cache.
+@@ -1667,24 +1660,13 @@ xfs_init_workqueues(void)
+ 	 */
+ 	xfs_syncd_wq = alloc_workqueue("xfssyncd", WQ_CPU_INTENSIVE, 8);
+ 	if (!xfs_syncd_wq)
+-		goto out;
+-
+-	xfs_ail_wq = alloc_workqueue("xfsail", WQ_CPU_INTENSIVE, 8);
+-	if (!xfs_ail_wq)
+-		goto out_destroy_syncd;
+-
++		return -ENOMEM;
+ 	return 0;
+-
+-out_destroy_syncd:
+-	destroy_workqueue(xfs_syncd_wq);
+-out:
+-	return -ENOMEM;
+ }
+ 
+ STATIC void
+ xfs_destroy_workqueues(void)
+ {
+-	destroy_workqueue(xfs_ail_wq);
+ 	destroy_workqueue(xfs_syncd_wq);
+ }
+ 
+diff --git a/fs/xfs/quota/xfs_dquot_item.c b/fs/xfs/quota/xfs_dquot_item.c
+index 9e0e2fa..8126fc2 100644
+--- a/fs/xfs/quota/xfs_dquot_item.c
++++ b/fs/xfs/quota/xfs_dquot_item.c
+@@ -183,13 +183,14 @@ xfs_qm_dqunpin_wait(
+  * search the buffer cache can be a time consuming thing, and AIL lock is a
+  * spinlock.
+  */
+-STATIC void
++STATIC bool
+ xfs_qm_dquot_logitem_pushbuf(
+ 	struct xfs_log_item	*lip)
+ {
+ 	struct xfs_dq_logitem	*qlip = DQUOT_ITEM(lip);
+ 	struct xfs_dquot	*dqp = qlip->qli_dquot;
+ 	struct xfs_buf		*bp;
++	bool			ret = true;
+ 
+ 	ASSERT(XFS_DQ_IS_LOCKED(dqp));
+ 
+@@ -201,17 +202,20 @@ xfs_qm_dquot_logitem_pushbuf(
+ 	if (completion_done(&dqp->q_flush) ||
+ 	    !(lip->li_flags & XFS_LI_IN_AIL)) {
+ 		xfs_dqunlock(dqp);
+-		return;
++		return true;
+ 	}
+ 
+ 	bp = xfs_incore(dqp->q_mount->m_ddev_targp, qlip->qli_format.qlf_blkno,
+ 			dqp->q_mount->m_quotainfo->qi_dqchunklen, XBF_TRYLOCK);
+ 	xfs_dqunlock(dqp);
+ 	if (!bp)
+-		return;
++		return true;
+ 	if (XFS_BUF_ISDELAYWRITE(bp))
+ 		xfs_buf_delwri_promote(bp);
++	if (XFS_BUF_ISPINNED(bp))
++		ret = false;
+ 	xfs_buf_relse(bp);
++	return ret;
+ }
+ 
+ /*
+diff --git a/fs/xfs/xfs_buf_item.c b/fs/xfs/xfs_buf_item.c
+index 7b7e005..a7342e8 100644
+--- a/fs/xfs/xfs_buf_item.c
++++ b/fs/xfs/xfs_buf_item.c
+@@ -632,7 +632,7 @@ xfs_buf_item_push(
+  * the xfsbufd to get this buffer written. We have to unlock the buffer
+  * to allow the xfsbufd to write it, too.
+  */
+-STATIC void
++STATIC bool
+ xfs_buf_item_pushbuf(
+ 	struct xfs_log_item	*lip)
+ {
+@@ -646,6 +646,7 @@ xfs_buf_item_pushbuf(
+ 
+ 	xfs_buf_delwri_promote(bp);
+ 	xfs_buf_relse(bp);
++	return true;
+ }
+ 
+ STATIC void
+diff --git a/fs/xfs/xfs_inode_item.c b/fs/xfs/xfs_inode_item.c
+index b1e88d5..391044c 100644
+--- a/fs/xfs/xfs_inode_item.c
++++ b/fs/xfs/xfs_inode_item.c
+@@ -713,13 +713,14 @@ xfs_inode_item_committed(
+  * marked delayed write. If that's the case, we'll promote it and that will
+  * allow the caller to write the buffer by triggering the xfsbufd to run.
+  */
+-STATIC void
++STATIC bool
+ xfs_inode_item_pushbuf(
+ 	struct xfs_log_item	*lip)
+ {
+ 	struct xfs_inode_log_item *iip = INODE_ITEM(lip);
+ 	struct xfs_inode	*ip = iip->ili_inode;
+ 	struct xfs_buf		*bp;
++	bool			ret = true;
+ 
+ 	ASSERT(xfs_isilocked(ip, XFS_ILOCK_SHARED));
+ 
+@@ -730,7 +731,7 @@ xfs_inode_item_pushbuf(
+ 	if (completion_done(&ip->i_flush) ||
+ 	    !(lip->li_flags & XFS_LI_IN_AIL)) {
+ 		xfs_iunlock(ip, XFS_ILOCK_SHARED);
+-		return;
++		return true;
+ 	}
+ 
+ 	bp = xfs_incore(ip->i_mount->m_ddev_targp, iip->ili_format.ilf_blkno,
+@@ -738,10 +739,13 @@ xfs_inode_item_pushbuf(
+ 
+ 	xfs_iunlock(ip, XFS_ILOCK_SHARED);
+ 	if (!bp)
+-		return;
++		return true;
+ 	if (XFS_BUF_ISDELAYWRITE(bp))
+ 		xfs_buf_delwri_promote(bp);
++	if (XFS_BUF_ISPINNED(bp))
++		ret = false;
+ 	xfs_buf_relse(bp);
++	return ret;
+ }
+ 
+ /*
+diff --git a/fs/xfs/xfs_trans.c b/fs/xfs/xfs_trans.c
+index c83f63b..efc147f 100644
+--- a/fs/xfs/xfs_trans.c
++++ b/fs/xfs/xfs_trans.c
+@@ -1426,6 +1426,7 @@ xfs_trans_committed(
+ static inline void
+ xfs_log_item_batch_insert(
+ 	struct xfs_ail		*ailp,
++	struct xfs_ail_cursor	*cur,
+ 	struct xfs_log_item	**log_items,
+ 	int			nr_items,
+ 	xfs_lsn_t		commit_lsn)
+@@ -1434,7 +1435,7 @@ xfs_log_item_batch_insert(
+ 
+ 	spin_lock(&ailp->xa_lock);
+ 	/* xfs_trans_ail_update_bulk drops ailp->xa_lock */
+-	xfs_trans_ail_update_bulk(ailp, log_items, nr_items, commit_lsn);
++	xfs_trans_ail_update_bulk(ailp, cur, log_items, nr_items, commit_lsn);
+ 
+ 	for (i = 0; i < nr_items; i++)
+ 		IOP_UNPIN(log_items[i], 0);
+@@ -1452,6 +1453,13 @@ xfs_log_item_batch_insert(
+  * as an iclog write error even though we haven't started any IO yet. Hence in
+  * this case all we need to do is IOP_COMMITTED processing, followed by an
+  * IOP_UNPIN(aborted) call.
++ *
++ * The AIL cursor is used to optimise the insert process. If commit_lsn is not
++ * at the end of the AIL, the insert cursor avoids the need to walk
++ * the AIL to find the insertion point on every xfs_log_item_batch_insert()
++ * call. This saves a lot of needless list walking and is a net win, even
++ * though it slightly increases that amount of AIL lock traffic to set it up
++ * and tear it down.
+  */
+ void
+ xfs_trans_committed_bulk(
+@@ -1463,8 +1471,13 @@ xfs_trans_committed_bulk(
+ #define LOG_ITEM_BATCH_SIZE	32
+ 	struct xfs_log_item	*log_items[LOG_ITEM_BATCH_SIZE];
+ 	struct xfs_log_vec	*lv;
++	struct xfs_ail_cursor	cur;
+ 	int			i = 0;
+ 
++	spin_lock(&ailp->xa_lock);
++	xfs_trans_ail_cursor_last(ailp, &cur, commit_lsn);
++	spin_unlock(&ailp->xa_lock);
++
+ 	/* unpin all the log items */
+ 	for (lv = log_vector; lv; lv = lv->lv_next ) {
+ 		struct xfs_log_item	*lip = lv->lv_item;
+@@ -1493,7 +1506,9 @@ xfs_trans_committed_bulk(
+ 			/*
+ 			 * Not a bulk update option due to unusual item_lsn.
+ 			 * Push into AIL immediately, rechecking the lsn once
+-			 * we have the ail lock. Then unpin the item.
++			 * we have the ail lock. Then unpin the item. This does
++			 * not affect the AIL cursor the bulk insert path is
++			 * using.
+ 			 */
+ 			spin_lock(&ailp->xa_lock);
+ 			if (XFS_LSN_CMP(item_lsn, lip->li_lsn) > 0)
+@@ -1507,7 +1522,7 @@ xfs_trans_committed_bulk(
+ 		/* Item is a candidate for bulk AIL insert.  */
+ 		log_items[i++] = lv->lv_item;
+ 		if (i >= LOG_ITEM_BATCH_SIZE) {
+-			xfs_log_item_batch_insert(ailp, log_items,
++			xfs_log_item_batch_insert(ailp, &cur, log_items,
+ 					LOG_ITEM_BATCH_SIZE, commit_lsn);
+ 			i = 0;
+ 		}
+@@ -1515,7 +1530,11 @@ xfs_trans_committed_bulk(
+ 
+ 	/* make sure we insert the remainder! */
+ 	if (i)
+-		xfs_log_item_batch_insert(ailp, log_items, i, commit_lsn);
++		xfs_log_item_batch_insert(ailp, &cur, log_items, i, commit_lsn);
++
++	spin_lock(&ailp->xa_lock);
++	xfs_trans_ail_cursor_done(ailp, &cur);
++	spin_unlock(&ailp->xa_lock);
+ }
+ 
+ /*
+diff --git a/fs/xfs/xfs_trans.h b/fs/xfs/xfs_trans.h
+index 06a9759..53597f4 100644
+--- a/fs/xfs/xfs_trans.h
++++ b/fs/xfs/xfs_trans.h
+@@ -350,7 +350,7 @@ typedef struct xfs_item_ops {
+ 	void (*iop_unlock)(xfs_log_item_t *);
+ 	xfs_lsn_t (*iop_committed)(xfs_log_item_t *, xfs_lsn_t);
+ 	void (*iop_push)(xfs_log_item_t *);
+-	void (*iop_pushbuf)(xfs_log_item_t *);
++	bool (*iop_pushbuf)(xfs_log_item_t *);
+ 	void (*iop_committing)(xfs_log_item_t *, xfs_lsn_t);
+ } xfs_item_ops_t;
+ 
+diff --git a/fs/xfs/xfs_trans_ail.c b/fs/xfs/xfs_trans_ail.c
+index 5fc2380..a4c281b 100644
+--- a/fs/xfs/xfs_trans_ail.c
++++ b/fs/xfs/xfs_trans_ail.c
+@@ -28,8 +28,6 @@
+ #include "xfs_trans_priv.h"
+ #include "xfs_error.h"
+ 
+-struct workqueue_struct	*xfs_ail_wq;	/* AIL workqueue */
+-
+ #ifdef DEBUG
+ /*
+  * Check that the list is sorted as it should be.
+@@ -272,9 +270,9 @@ xfs_trans_ail_cursor_clear(
+ }
+ 
+ /*
+- * Return the item in the AIL with the current lsn.
+- * Return the current tree generation number for use
+- * in calls to xfs_trans_next_ail().
++ * Initialise the cursor to the first item in the AIL with the given @lsn.
++ * This searches the list from lowest LSN to highest. Pass a @lsn of zero
++ * to initialise the cursor to the first item in the AIL.
+  */
+ xfs_log_item_t *
+ xfs_trans_ail_cursor_first(
+@@ -300,31 +298,97 @@ out:
+ }
+ 
+ /*
+- * splice the log item list into the AIL at the given LSN.
++ * Initialise the cursor to the last item in the AIL with the given @lsn.
++ * This searches the list from highest LSN to lowest. If there is no item with
++ * the value of @lsn, then it sets the cursor to the last item with an LSN lower
++ * than @lsn.
++ */
++static struct xfs_log_item *
++__xfs_trans_ail_cursor_last(
++	struct xfs_ail		*ailp,
++	xfs_lsn_t		lsn)
++{
++	xfs_log_item_t		*lip;
++
++	list_for_each_entry_reverse(lip, &ailp->xa_ail, li_ail) {
++		if (XFS_LSN_CMP(lip->li_lsn, lsn) <= 0)
++			return lip;
++	}
++	return NULL;
++}
++
++/*
++ * Initialise the cursor to the last item in the AIL with the given @lsn.
++ * This searches the list from highest LSN to lowest.
++ */
++struct xfs_log_item *
++xfs_trans_ail_cursor_last(
++	struct xfs_ail		*ailp,
++	struct xfs_ail_cursor	*cur,
++	xfs_lsn_t		lsn)
++{
++	xfs_trans_ail_cursor_init(ailp, cur);
++	cur->item = __xfs_trans_ail_cursor_last(ailp, lsn);
++	return cur->item;
++}
++
++/*
++ * splice the log item list into the AIL at the given LSN. We splice to the
++ * tail of the given LSN to maintain insert order for push traversals. The
++ * cursor is optional, allowing repeated updates to the same LSN to avoid
++ * repeated traversals.
+  */
+ static void
+ xfs_ail_splice(
+-	struct xfs_ail  *ailp,
+-	struct list_head *list,
+-	xfs_lsn_t       lsn)
++	struct xfs_ail		*ailp,
++	struct xfs_ail_cursor	*cur,
++	struct list_head	*list,
++	xfs_lsn_t		lsn)
+ {
+-	xfs_log_item_t  *next_lip;
++	struct xfs_log_item	*lip = cur ? cur->item : NULL;
++	struct xfs_log_item	*next_lip;
+ 
+-	/* If the list is empty, just insert the item.  */
+-	if (list_empty(&ailp->xa_ail)) {
+-		list_splice(list, &ailp->xa_ail);
+-		return;
+-	}
++	/*
++	 * Get a new cursor if we don't have a placeholder or the existing one
++	 * has been invalidated.
++	 */
++	if (!lip || (__psint_t)lip & 1) {
++		lip = __xfs_trans_ail_cursor_last(ailp, lsn);
+ 
+-	list_for_each_entry_reverse(next_lip, &ailp->xa_ail, li_ail) {
+-		if (XFS_LSN_CMP(next_lip->li_lsn, lsn) <= 0)
+-			break;
++		if (!lip) {
++			/* The list is empty, so just splice and return.  */
++			if (cur)
++				cur->item = NULL;
++			list_splice(list, &ailp->xa_ail);
++			return;
++		}
+ 	}
+ 
+-	ASSERT(&next_lip->li_ail == &ailp->xa_ail ||
+-	       XFS_LSN_CMP(next_lip->li_lsn, lsn) <= 0);
+-
+-	list_splice_init(list, &next_lip->li_ail);
++	/*
++	 * Our cursor points to the item we want to insert _after_, so we have
++	 * to update the cursor to point to the end of the list we are splicing
++	 * in so that it points to the correct location for the next splice.
++	 * i.e. before the splice
++	 *
++	 *  lsn -> lsn -> lsn + x -> lsn + x ...
++	 *          ^
++	 *          | cursor points here
++	 *
++	 * After the splice we have:
++	 *
++	 *  lsn -> lsn -> lsn -> lsn -> .... -> lsn -> lsn + x -> lsn + x ...
++	 *          ^                            ^
++	 *          | cursor points here         | needs to move here
++	 *
++	 * So we set the cursor to the last item in the list to be spliced
++	 * before we execute the splice, resulting in the cursor pointing to
++	 * the correct item after the splice occurs.
++	 */
++	if (cur) {
++		next_lip = list_entry(list->prev, struct xfs_log_item, li_ail);
++		cur->item = next_lip;
++	}
++	list_splice(list, &lip->li_ail);
+ }
+ 
+ /*
+@@ -340,16 +404,10 @@ xfs_ail_delete(
+ 	xfs_trans_ail_cursor_clear(ailp, lip);
+ }
+ 
+-/*
+- * xfs_ail_worker does the work of pushing on the AIL. It will requeue itself
+- * to run at a later time if there is more work to do to complete the push.
+- */
+-STATIC void
+-xfs_ail_worker(
+-	struct work_struct	*work)
++static long
++xfsaild_push(
++	struct xfs_ail		*ailp)
+ {
+-	struct xfs_ail		*ailp = container_of(to_delayed_work(work),
+-					struct xfs_ail, xa_work);
+ 	xfs_mount_t		*mp = ailp->xa_mount;
+ 	struct xfs_ail_cursor	*cur = &ailp->xa_cursors;
+ 	xfs_log_item_t		*lip;
+@@ -412,8 +470,13 @@ xfs_ail_worker(
+ 
+ 		case XFS_ITEM_PUSHBUF:
+ 			XFS_STATS_INC(xs_push_ail_pushbuf);
+-			IOP_PUSHBUF(lip);
+-			ailp->xa_last_pushed_lsn = lsn;
++
++			if (!IOP_PUSHBUF(lip)) {
++				stuck++;
++				flush_log = 1;
++			} else {
++				ailp->xa_last_pushed_lsn = lsn;
++			}
+ 			push_xfsbufd = 1;
+ 			break;
+ 
+@@ -425,7 +488,6 @@ xfs_ail_worker(
+ 
+ 		case XFS_ITEM_LOCKED:
+ 			XFS_STATS_INC(xs_push_ail_locked);
+-			ailp->xa_last_pushed_lsn = lsn;
+ 			stuck++;
+ 			break;
+ 
+@@ -486,20 +548,6 @@ out_done:
+ 		/* We're past our target or empty, so idle */
+ 		ailp->xa_last_pushed_lsn = 0;
+ 
+-		/*
+-		 * We clear the XFS_AIL_PUSHING_BIT first before checking
+-		 * whether the target has changed. If the target has changed,
+-		 * this pushes the requeue race directly onto the result of the
+-		 * atomic test/set bit, so we are guaranteed that either the
+-		 * the pusher that changed the target or ourselves will requeue
+-		 * the work (but not both).
+-		 */
+-		clear_bit(XFS_AIL_PUSHING_BIT, &ailp->xa_flags);
+-		smp_rmb();
+-		if (XFS_LSN_CMP(ailp->xa_target, target) == 0 ||
+-		    test_and_set_bit(XFS_AIL_PUSHING_BIT, &ailp->xa_flags))
+-			return;
+-
+ 		tout = 50;
+ 	} else if (XFS_LSN_CMP(lsn, target) >= 0) {
+ 		/*
+@@ -522,9 +570,30 @@ out_done:
+ 		tout = 20;
+ 	}
+ 
+-	/* There is more to do, requeue us.  */
+-	queue_delayed_work(xfs_syncd_wq, &ailp->xa_work,
+-					msecs_to_jiffies(tout));
++	return tout;
++}
++
++static int
++xfsaild(
++	void		*data)
++{
++	struct xfs_ail	*ailp = data;
++	long		tout = 0;	/* milliseconds */
++
++	while (!kthread_should_stop()) {
++		if (tout && tout <= 20)
++			__set_current_state(TASK_KILLABLE);
++		else
++			__set_current_state(TASK_INTERRUPTIBLE);
++		schedule_timeout(tout ?
++				 msecs_to_jiffies(tout) : MAX_SCHEDULE_TIMEOUT);
++
++		try_to_freeze();
++
++		tout = xfsaild_push(ailp);
++	}
++
++	return 0;
+ }
+ 
+ /*
+@@ -559,8 +628,9 @@ xfs_ail_push(
+ 	 */
+ 	smp_wmb();
+ 	xfs_trans_ail_copy_lsn(ailp, &ailp->xa_target, &threshold_lsn);
+-	if (!test_and_set_bit(XFS_AIL_PUSHING_BIT, &ailp->xa_flags))
+-		queue_delayed_work(xfs_syncd_wq, &ailp->xa_work, 0);
++	smp_wmb();
++
++	wake_up_process(ailp->xa_task);
+ }
+ 
+ /*
+@@ -645,6 +715,7 @@ xfs_trans_unlocked_item(
+ void
+ xfs_trans_ail_update_bulk(
+ 	struct xfs_ail		*ailp,
++	struct xfs_ail_cursor	*cur,
+ 	struct xfs_log_item	**log_items,
+ 	int			nr_items,
+ 	xfs_lsn_t		lsn) __releases(ailp->xa_lock)
+@@ -674,7 +745,7 @@ xfs_trans_ail_update_bulk(
+ 		list_add(&lip->li_ail, &tmp);
+ 	}
+ 
+-	xfs_ail_splice(ailp, &tmp, lsn);
++	xfs_ail_splice(ailp, cur, &tmp, lsn);
+ 
+ 	if (!mlip_changed) {
+ 		spin_unlock(&ailp->xa_lock);
+@@ -794,9 +865,18 @@ xfs_trans_ail_init(
+ 	ailp->xa_mount = mp;
+ 	INIT_LIST_HEAD(&ailp->xa_ail);
+ 	spin_lock_init(&ailp->xa_lock);
+-	INIT_DELAYED_WORK(&ailp->xa_work, xfs_ail_worker);
++
++	ailp->xa_task = kthread_run(xfsaild, ailp, "xfsaild/%s",
++			ailp->xa_mount->m_fsname);
++	if (IS_ERR(ailp->xa_task))
++		goto out_free_ailp;
++
+ 	mp->m_ail = ailp;
+ 	return 0;
++
++out_free_ailp:
++	kmem_free(ailp);
++	return ENOMEM;
+ }
+ 
+ void
+@@ -805,6 +885,6 @@ xfs_trans_ail_destroy(
+ {
+ 	struct xfs_ail	*ailp = mp->m_ail;
+ 
+-	cancel_delayed_work_sync(&ailp->xa_work);
++	kthread_stop(ailp->xa_task);
+ 	kmem_free(ailp);
+ }
+diff --git a/fs/xfs/xfs_trans_priv.h b/fs/xfs/xfs_trans_priv.h
+index 6b164e9..fe2e3cb 100644
+--- a/fs/xfs/xfs_trans_priv.h
++++ b/fs/xfs/xfs_trans_priv.h
+@@ -64,24 +64,19 @@ struct xfs_ail_cursor {
+  */
+ struct xfs_ail {
+ 	struct xfs_mount	*xa_mount;
++	struct task_struct	*xa_task;
+ 	struct list_head	xa_ail;
+ 	xfs_lsn_t		xa_target;
+ 	struct xfs_ail_cursor	xa_cursors;
+ 	spinlock_t		xa_lock;
+-	struct delayed_work	xa_work;
+ 	xfs_lsn_t		xa_last_pushed_lsn;
+-	unsigned long		xa_flags;
+ };
+ 
+-#define XFS_AIL_PUSHING_BIT	0
+-
+ /*
+  * From xfs_trans_ail.c
+  */
+-
+-extern struct workqueue_struct	*xfs_ail_wq;	/* AIL workqueue */
+-
+ void	xfs_trans_ail_update_bulk(struct xfs_ail *ailp,
++				struct xfs_ail_cursor *cur,
+ 				struct xfs_log_item **log_items, int nr_items,
+ 				xfs_lsn_t lsn) __releases(ailp->xa_lock);
+ static inline void
+@@ -90,7 +85,7 @@ xfs_trans_ail_update(
+ 	struct xfs_log_item	*lip,
+ 	xfs_lsn_t		lsn) __releases(ailp->xa_lock)
+ {
+-	xfs_trans_ail_update_bulk(ailp, &lip, 1, lsn);
++	xfs_trans_ail_update_bulk(ailp, NULL, &lip, 1, lsn);
+ }
+ 
+ void	xfs_trans_ail_delete_bulk(struct xfs_ail *ailp,
+@@ -111,10 +106,13 @@ xfs_lsn_t		xfs_ail_min_lsn(struct xfs_ail *ailp);
+ void			xfs_trans_unlocked_item(struct xfs_ail *,
+ 					xfs_log_item_t *);
+ 
+-struct xfs_log_item	*xfs_trans_ail_cursor_first(struct xfs_ail *ailp,
++struct xfs_log_item *	xfs_trans_ail_cursor_first(struct xfs_ail *ailp,
++					struct xfs_ail_cursor *cur,
++					xfs_lsn_t lsn);
++struct xfs_log_item *	xfs_trans_ail_cursor_last(struct xfs_ail *ailp,
+ 					struct xfs_ail_cursor *cur,
+ 					xfs_lsn_t lsn);
+-struct xfs_log_item	*xfs_trans_ail_cursor_next(struct xfs_ail *ailp,
++struct xfs_log_item *	xfs_trans_ail_cursor_next(struct xfs_ail *ailp,
+ 					struct xfs_ail_cursor *cur);
+ void			xfs_trans_ail_cursor_done(struct xfs_ail *ailp,
+ 					struct xfs_ail_cursor *cur);
+diff --git a/kernel/posix-cpu-timers.c b/kernel/posix-cpu-timers.c
+index c8008dd..640ded8 100644
+--- a/kernel/posix-cpu-timers.c
++++ b/kernel/posix-cpu-timers.c
+@@ -274,9 +274,7 @@ void thread_group_cputimer(struct task_struct *tsk, struct task_cputime *times)
+ 	struct task_cputime sum;
+ 	unsigned long flags;
+ 
+-	spin_lock_irqsave(&cputimer->lock, flags);
+ 	if (!cputimer->running) {
+-		cputimer->running = 1;
+ 		/*
+ 		 * The POSIX timer interface allows for absolute time expiry
+ 		 * values through the TIMER_ABSTIME flag, therefore we have
+@@ -284,8 +282,11 @@ void thread_group_cputimer(struct task_struct *tsk, struct task_cputime *times)
+ 		 * it.
+ 		 */
+ 		thread_group_cputime(tsk, &sum);
++		spin_lock_irqsave(&cputimer->lock, flags);
++		cputimer->running = 1;
+ 		update_gt_cputime(&cputimer->cputime, &sum);
+-	}
++	} else
++		spin_lock_irqsave(&cputimer->lock, flags);
+ 	*times = cputimer->cputime;
+ 	spin_unlock_irqrestore(&cputimer->lock, flags);
+ }
+diff --git a/kernel/sys.c b/kernel/sys.c
+index 5c942cf..f88dadc 100644
+--- a/kernel/sys.c
++++ b/kernel/sys.c
+@@ -1135,7 +1135,7 @@ DECLARE_RWSEM(uts_sem);
+ static int override_release(char __user *release, int len)
+ {
+ 	int ret = 0;
+-	char buf[len];
++	char buf[65];
+ 
+ 	if (current->personality & UNAME26) {
+ 		char *rest = UTS_RELEASE;
+diff --git a/mm/migrate.c b/mm/migrate.c
+index 666e4e6..14d0a6a 100644
+--- a/mm/migrate.c
++++ b/mm/migrate.c
+@@ -120,10 +120,10 @@ static int remove_migration_pte(struct page *new, struct vm_area_struct *vma,
+ 
+ 		ptep = pte_offset_map(pmd, addr);
+ 
+-		if (!is_swap_pte(*ptep)) {
+-			pte_unmap(ptep);
+-			goto out;
+-		}
++		/*
++		 * Peek to check is_swap_pte() before taking ptlock?  No, we
++		 * can race mremap's move_ptes(), which skips anon_vma lock.
++		 */
+ 
+ 		ptl = pte_lockptr(mm, pmd);
+ 	}
+diff --git a/net/x25/af_x25.c b/net/x25/af_x25.c
+index 4680b1e..373e14f 100644
+--- a/net/x25/af_x25.c
++++ b/net/x25/af_x25.c
+@@ -295,7 +295,8 @@ static struct sock *x25_find_listener(struct x25_address *addr,
+ 			 * Found a listening socket, now check the incoming
+ 			 * call user data vs this sockets call user data
+ 			 */
+-			if(skb->len > 0 && x25_sk(s)->cudmatchlength > 0) {
++			if (x25_sk(s)->cudmatchlength > 0 &&
++				skb->len >= x25_sk(s)->cudmatchlength) {
+ 				if((memcmp(x25_sk(s)->calluserdata.cuddata,
+ 					skb->data,
+ 					x25_sk(s)->cudmatchlength)) == 0) {
+diff --git a/sound/pci/hda/hda_intel.c b/sound/pci/hda/hda_intel.c
+index 486f6de..981b6fd 100644
+--- a/sound/pci/hda/hda_intel.c
++++ b/sound/pci/hda/hda_intel.c
+@@ -2352,6 +2352,7 @@ static struct snd_pci_quirk position_fix_list[] __devinitdata = {
+ 	SND_PCI_QUIRK(0x1028, 0x01cc, "Dell D820", POS_FIX_LPIB),
+ 	SND_PCI_QUIRK(0x1028, 0x01de, "Dell Precision 390", POS_FIX_LPIB),
+ 	SND_PCI_QUIRK(0x1028, 0x01f6, "Dell Latitude 131L", POS_FIX_LPIB),
++	SND_PCI_QUIRK(0x1028, 0x02c6, "Dell Inspiron 1010", POS_FIX_LPIB),
+ 	SND_PCI_QUIRK(0x1028, 0x0470, "Dell Inspiron 1120", POS_FIX_LPIB),
+ 	SND_PCI_QUIRK(0x103c, 0x306d, "HP dv3", POS_FIX_LPIB),
+ 	SND_PCI_QUIRK(0x1043, 0x813d, "ASUS P5AD2", POS_FIX_LPIB),
+diff --git a/sound/pci/hda/patch_conexant.c b/sound/pci/hda/patch_conexant.c
+index 7bbc5f2..cf1fa36 100644
+--- a/sound/pci/hda/patch_conexant.c
++++ b/sound/pci/hda/patch_conexant.c
+@@ -3097,6 +3097,7 @@ static const struct snd_pci_quirk cxt5066_cfg_tbl[] = {
+ 	SND_PCI_QUIRK(0x17aa, 0x21c5, "Thinkpad Edge 13", CXT5066_THINKPAD),
+ 	SND_PCI_QUIRK(0x17aa, 0x21c6, "Thinkpad Edge 13", CXT5066_ASUS),
+  	SND_PCI_QUIRK(0x17aa, 0x215e, "Lenovo Thinkpad", CXT5066_THINKPAD),
++	SND_PCI_QUIRK(0x17aa, 0x21cf, "Lenovo T520 & W520", CXT5066_AUTO),
+ 	SND_PCI_QUIRK(0x17aa, 0x21da, "Lenovo X220", CXT5066_THINKPAD),
+ 	SND_PCI_QUIRK(0x17aa, 0x21db, "Lenovo X220-tablet", CXT5066_THINKPAD),
+ 	SND_PCI_QUIRK(0x17aa, 0x3a0d, "Lenovo U350", CXT5066_ASUS),
