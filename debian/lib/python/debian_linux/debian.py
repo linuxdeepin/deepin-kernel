@@ -94,10 +94,10 @@ class VersionLinux(Version):
     _version_linux_rules = ur"""
 ^
 (?P<version>
-    \d+\.\d+\.\d+
+    \d+\.\d+
 )
 (?:
-    (\.\d+)
+    \.\d+
     |
     ~
     (?P<modifier>
