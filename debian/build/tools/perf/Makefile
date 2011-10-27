@@ -28,9 +28,6 @@ endif
 
 MAKE_PERF := $(MAKE) prefix=/usr perfexecdir=share/perf_$(VERSION)-core NO_PERL=1 V=2 HAVE_CPLUS_DEMANGLE=1 ARCH=$(KERNEL_ARCH_PERF) EXTRA_WARNINGS=-Wno-error
 
-$(warning $(KERNEL_ARCH_PERF))
-$(warning $(DEB_HOST_ARCH_CPU))
-
 all:
 ifdef KERNEL_ARCH_PERF
 	-mkdir out
