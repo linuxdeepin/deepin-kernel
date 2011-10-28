@@ -25,6 +25,7 @@ class Gencontrol(Base):
             'VERSION': self.version.linux_version,
             'UPSTREAMVERSION': self.version.linux_upstream,
             'ABINAME': self.abiname,
+            'ABINAME_PART': self.abiname_part,
             'SOURCEVERSION': self.version.complete,
         })
 
@@ -76,7 +77,7 @@ class Gencontrol(Base):
             kw_env['KW_CONFIG_DIR'] = installer_dir
             kw_proc = subprocess.Popen(
                 ['kernel-wedge', 'gen-control',
-                 self.version.linux_upstream + vars['abiname']],
+                 self.abiname],
                 stdout=subprocess.PIPE,
                 env=kw_env)
             udeb_packages = read_control(kw_proc.stdout)
@@ -343,9 +344,11 @@ class Gencontrol(Base):
         self.versions = versions
         version = self.version = self.changelog[0].version
         if self.version.linux_modifier is not None:
-            self.abiname = ''
+            self.abiname = self.version.linux_upstream
+            self.abiname_part = ''
         else:
-            self.abiname = '-%s' % self.config['abi',]['abiname']
+            self.abiname_part = '-%s' % self.config['abi',]['abiname']
+            self.abiname = self.version.linux_upstream + self.abiname_part
         self.vars = {
             'upstreamversion': self.version.linux_upstream,
             'version': self.version.linux_version,
