@@ -1,0 +1,81 @@
+From: Jeff Layton <jlayton@redhat.com>
+Date: Wed, 19 Oct 2011 15:30:40 -0400
+Subject: [PATCH] cifs, freezer: add wait_event_freezekillable and have cifs
+ use it
+
+commit f06ac72e929115f2772c29727152ba0832d641e4 upstream.
+
+CIFS currently uses wait_event_killable to put tasks to sleep while
+they await replies from the server. That function though does not
+allow the freezer to run. In many cases, the network interface may
+be going down anyway, in which case the reply will never come. The
+client then ends up blocking the computer from suspending.
+
+Fix this by adding a new wait_event_freezable variant --
+wait_event_freezekillable. The idea is to combine the behavior of
+wait_event_killable and wait_event_freezable -- put the task to
+sleep and only allow it to be awoken by fatal signals, but also
+allow the freezer to do its job.
+
+Signed-off-by: Jeff Layton <jlayton@redhat.com>
+---
+ fs/cifs/transport.c     |    3 ++-
+ include/linux/freezer.h |   19 +++++++++++++++++--
+ 2 files changed, 19 insertions(+), 3 deletions(-)
+
+diff --git a/fs/cifs/transport.c b/fs/cifs/transport.c
+index e7398d0..0cc9584 100644
+--- a/fs/cifs/transport.c
++++ b/fs/cifs/transport.c
+@@ -26,6 +26,7 @@
+ #include <linux/wait.h>
+ #include <linux/net.h>
+ #include <linux/delay.h>
++#include <linux/freezer.h>
+ #include <asm/uaccess.h>
+ #include <asm/processor.h>
+ #include <linux/mempool.h>
+@@ -324,7 +325,7 @@ wait_for_response(struct TCP_Server_Info *server, struct mid_q_entry *midQ)
+ {
+ 	int error;
+ 
+-	error = wait_event_killable(server->response_q,
++	error = wait_event_freezekillable(server->response_q,
+ 				    midQ->midState != MID_REQUEST_SUBMITTED);
+ 	if (error < 0)
+ 		return -ERESTARTSYS;
+diff --git a/include/linux/freezer.h b/include/linux/freezer.h
+index 1effc8b..3672f73 100644
+--- a/include/linux/freezer.h
++++ b/include/linux/freezer.h
+@@ -134,10 +134,25 @@ static inline void set_freezable_with_signal(void)
+ }
+ 
+ /*
+- * Freezer-friendly wrappers around wait_event_interruptible() and
+- * wait_event_interruptible_timeout(), originally defined in <linux/wait.h>
++ * Freezer-friendly wrappers around wait_event_interruptible(),
++ * wait_event_killable() and wait_event_interruptible_timeout(), originally
++ * defined in <linux/wait.h>
+  */
+ 
++#define wait_event_freezekillable(wq, condition)			\
++({									\
++	int __retval;							\
++	do {								\
++		__retval = wait_event_killable(wq, 			\
++				(condition) || freezing(current));	\
++		if (__retval && !freezing(current))			\
++			break;						\
++		else if (!(condition))					\
++			__retval = -ERESTARTSYS;			\
++	} while (try_to_freeze());					\
++	__retval;							\
++})
++
+ #define wait_event_freezable(wq, condition)				\
+ ({									\
+ 	int __retval;							\
+-- 
+1.7.7.2
+
