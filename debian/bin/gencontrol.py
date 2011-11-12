@@ -344,15 +344,13 @@ class Gencontrol(Base):
         self.versions = versions
         version = self.version = self.changelog[0].version
         if self.version.linux_modifier is not None:
-            self.abiname = self.version.linux_upstream
             self.abiname_part = ''
         else:
             self.abiname_part = '-%s' % self.config['abi',]['abiname']
-            # XXX: We need to add another part before Wheezy
-            if self.version.linux_upstream in ('3.0', '3.1'):
-                self.abiname = self.version.linux_upstream + '.0' + self.abiname_part
-            else:
-                self.abiname = self.version.linux_upstream + self.abiname_part
+        # XXX: We need to add another part until after wheezy
+        self.abiname = (re.sub('^(\d+\.\d+)(?=-|$)', r'\1.0',
+                               self.version.linux_upstream)
+                        + self.abiname_part)
         self.vars = {
             'upstreamversion': self.version.linux_upstream,
             'version': self.version.linux_version,
