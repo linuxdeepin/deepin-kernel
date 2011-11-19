@@ -17,7 +17,7 @@ else ifeq ($(DEB_HOST_ARCH_CPU),powerpc64)
 else ifeq ($(DEB_HOST_ARCH_CPU),s390)
   KERNEL_ARCH_PERF = s390
 else ifeq ($(DEB_HOST_ARCH_CPU),s390x)
-  KERNEL_ARCH_PERF = s390x
+  KERNEL_ARCH_PERF = s390
 else ifeq ($(DEB_HOST_ARCH_CPU),sh4)
   KERNEL_ARCH_PERF = sh
 else ifeq ($(DEB_HOST_ARCH_CPU),sparc)
