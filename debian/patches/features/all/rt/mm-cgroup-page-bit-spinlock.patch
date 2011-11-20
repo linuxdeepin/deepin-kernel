@@ -1,0 +1,95 @@
+From: Thomas Gleixner <tglx@linutronix.de>
+Date: Wed, 19 Aug 2009 09:56:42 +0200
+Subject: mm: Replace cgroup_page bit spinlock
+
+Bit spinlocks are not working on RT. Replace them.
+
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+
+---
+ include/linux/page_cgroup.h |   28 ++++++++++++++++++++++++++++
+ mm/page_cgroup.c            |    1 +
+ 2 files changed, 29 insertions(+)
+
+Index: linux-3.2/include/linux/page_cgroup.h
+===================================================================
+--- linux-3.2.orig/include/linux/page_cgroup.h
++++ linux-3.2/include/linux/page_cgroup.h
+@@ -30,6 +30,10 @@ enum {
+  */
+ struct page_cgroup {
+ 	unsigned long flags;
++#ifdef CONFIG_PREEMPT_RT_BASE
++	spinlock_t pcg_lock;
++	spinlock_t pcm_lock;
++#endif
+ 	struct mem_cgroup *mem_cgroup;
+ 	struct list_head lru;		/* per cgroup LRU list */
+ };
+@@ -96,30 +100,54 @@ static inline void lock_page_cgroup(stru
+ 	 * Don't take this lock in IRQ context.
+ 	 * This lock is for pc->mem_cgroup, USED, CACHE, MIGRATION
+ 	 */
++#ifndef CONFIG_PREEMPT_RT_BASE
+ 	bit_spin_lock(PCG_LOCK, &pc->flags);
++#else
++	spin_lock(&pc->pcg_lock);
++#endif
+ }
+ 
+ static inline void unlock_page_cgroup(struct page_cgroup *pc)
+ {
++#ifndef CONFIG_PREEMPT_RT_BASE
+ 	bit_spin_unlock(PCG_LOCK, &pc->flags);
++#else
++	spin_unlock(&pc->pcg_lock);
++#endif
+ }
+ 
+ static inline void move_lock_page_cgroup(struct page_cgroup *pc,
+ 	unsigned long *flags)
+ {
++#ifndef CONFIG_PREEMPT_RT_BASE
+ 	/*
+ 	 * We know updates to pc->flags of page cache's stats are from both of
+ 	 * usual context or IRQ context. Disable IRQ to avoid deadlock.
+ 	 */
+ 	local_irq_save(*flags);
+ 	bit_spin_lock(PCG_MOVE_LOCK, &pc->flags);
++#else
++	spin_lock_irqsave(&pc->pcm_lock, *flags);
++#endif
+ }
+ 
+ static inline void move_unlock_page_cgroup(struct page_cgroup *pc,
+ 	unsigned long *flags)
+ {
++#ifndef CONFIG_PREEMPT_RT_BASE
+ 	bit_spin_unlock(PCG_MOVE_LOCK, &pc->flags);
+ 	local_irq_restore(*flags);
++#else
++	spin_unlock_irqrestore(&pc->pcm_lock, *flags);
++#endif
++}
++
++static inline void page_cgroup_lock_init(struct page_cgroup *pc)
++{
++#ifdef CONFIG_PREEMPT_RT_BASE
++	spin_lock_init(&pc->pcg_lock);
++	spin_lock_init(&pc->pcm_lock);
++#endif
+ }
+ 
+ #ifdef CONFIG_SPARSEMEM
+Index: linux-3.2/mm/page_cgroup.c
+===================================================================
+--- linux-3.2.orig/mm/page_cgroup.c
++++ linux-3.2/mm/page_cgroup.c
+@@ -17,6 +17,7 @@ static void __meminit init_page_cgroup(s
+ 	set_page_cgroup_array_id(pc, id);
+ 	pc->mem_cgroup = NULL;
+ 	INIT_LIST_HEAD(&pc->lru);
++	page_cgroup_lock_init(pc);
+ }
+ static unsigned long total_usage;
+ 

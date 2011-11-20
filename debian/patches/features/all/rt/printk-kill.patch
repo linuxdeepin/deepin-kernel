@@ -1,0 +1,121 @@
+Subject: printk-kill.patch
+From: Ingo Molnar <mingo@elte.hu>
+Date: Fri, 22 Jul 2011 17:58:40 +0200
+
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+---
+ include/linux/printk.h |    3 ++-
+ kernel/printk.c        |   33 +++++++++++++++++++++++++++++++++
+ kernel/watchdog.c      |   15 +++++++++++++--
+ 3 files changed, 48 insertions(+), 3 deletions(-)
+
+Index: linux-3.2/include/linux/printk.h
+===================================================================
+--- linux-3.2.orig/include/linux/printk.h
++++ linux-3.2/include/linux/printk.h
+@@ -91,9 +91,11 @@ int no_printk(const char *fmt, ...)
+ #ifdef CONFIG_EARLY_PRINTK
+ extern asmlinkage __printf(1, 2)
+ void early_printk(const char *fmt, ...);
++extern void printk_kill(void);
+ #else
+ static inline __printf(1, 2) __cold
+ void early_printk(const char *s, ...) { }
++static inline void printk_kill(void) { }
+ #endif
+ 
+ extern int printk_needs_cpu(int cpu);
+@@ -114,7 +116,6 @@ extern int __printk_ratelimit(const char
+ #define printk_ratelimit() __printk_ratelimit(__func__)
+ extern bool printk_timed_ratelimit(unsigned long *caller_jiffies,
+ 				   unsigned int interval_msec);
+-
+ extern int printk_delay_msec;
+ extern int dmesg_restrict;
+ extern int kptr_restrict;
+Index: linux-3.2/kernel/printk.c
+===================================================================
+--- linux-3.2.orig/kernel/printk.c
++++ linux-3.2/kernel/printk.c
+@@ -532,6 +532,32 @@ asmlinkage void early_printk(const char 
+ 	early_vprintk(fmt, ap);
+ 	va_end(ap);
+ }
++
++/*
++ * This is independent of any log levels - a global
++ * kill switch that turns off all of printk.
++ *
++ * Used by the NMI watchdog if early-printk is enabled.
++ */
++static int __read_mostly printk_killswitch;
++
++void printk_kill(void)
++{
++	printk_killswitch = 1;
++}
++
++static int forced_early_printk(const char *fmt, va_list ap)
++{
++	if (!printk_killswitch)
++		return 0;
++	early_vprintk(fmt, ap);
++	return 1;
++}
++#else
++static inline int forced_early_printk(const char *fmt, va_list ap)
++{
++	return 0;
++}
+ #endif
+ 
+ static int __read_mostly ignore_loglevel;
+@@ -850,6 +876,13 @@ asmlinkage int vprintk(const char *fmt, 
+ 	size_t plen;
+ 	char special;
+ 
++	/*
++	 * Fall back to early_printk if a debugging subsystem has
++	 * killed printk output
++	 */
++	if (unlikely(forced_early_printk(fmt, args)))
++		return 1;
++
+ 	boot_delay_msec();
+ 	printk_delay();
+ 
+Index: linux-3.2/kernel/watchdog.c
+===================================================================
+--- linux-3.2.orig/kernel/watchdog.c
++++ linux-3.2/kernel/watchdog.c
+@@ -201,6 +201,8 @@ static int is_softlockup(unsigned long t
+ 
+ #ifdef CONFIG_HARDLOCKUP_DETECTOR
+ 
++static DEFINE_RAW_SPINLOCK(watchdog_output_lock);
++
+ static struct perf_event_attr wd_hw_attr = {
+ 	.type		= PERF_TYPE_HARDWARE,
+ 	.config		= PERF_COUNT_HW_CPU_CYCLES,
+@@ -235,10 +237,19 @@ static void watchdog_overflow_callback(s
+ 		if (__this_cpu_read(hard_watchdog_warn) == true)
+ 			return;
+ 
+-		if (hardlockup_panic)
++		/*
++		 * If early-printk is enabled then make sure we do not
++		 * lock up in printk() and kill console logging:
++		 */
++		printk_kill();
++
++		if (hardlockup_panic) {
+ 			panic("Watchdog detected hard LOCKUP on cpu %d", this_cpu);
+-		else
++		} else {
++			raw_spin_lock(&watchdog_output_lock);
+ 			WARN(1, "Watchdog detected hard LOCKUP on cpu %d", this_cpu);
++			raw_spin_unlock(&watchdog_output_lock);
++		}
+ 
+ 		__this_cpu_write(hard_watchdog_warn, true);
+ 		return;

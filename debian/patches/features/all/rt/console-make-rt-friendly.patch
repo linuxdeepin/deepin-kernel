@@ -1,0 +1,84 @@
+Subject: console-make-rt-friendly.patch
+From: Thomas Gleixner <tglx@linutronix.de>
+Date: Sun, 17 Jul 2011 22:43:07 +0200
+
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+---
+ kernel/printk.c |   26 +++++++++++++++++++++++---
+ 1 file changed, 23 insertions(+), 3 deletions(-)
+
+Index: linux-3.2/kernel/printk.c
+===================================================================
+--- linux-3.2.orig/kernel/printk.c
++++ linux-3.2/kernel/printk.c
+@@ -504,6 +504,7 @@ static void __call_console_drivers(unsig
+ {
+ 	struct console *con;
+ 
++	migrate_disable();
+ 	for_each_console(con) {
+ 		if (exclusive_console && con != exclusive_console)
+ 			continue;
+@@ -512,6 +513,7 @@ static void __call_console_drivers(unsig
+ 				(con->flags & CON_ANYTIME)))
+ 			con->write(con, &LOG_BUF(start), end - start);
+ 	}
++	migrate_enable();
+ }
+ 
+ #ifdef CONFIG_EARLY_PRINTK
+@@ -827,12 +829,18 @@ static inline int can_use_console(unsign
+  * interrupts disabled. It should return with 'lockbuf_lock'
+  * released but interrupts still disabled.
+  */
+-static int console_trylock_for_printk(unsigned int cpu)
++static int console_trylock_for_printk(unsigned int cpu, unsigned long flags)
+ 	__releases(&logbuf_lock)
+ {
+ 	int retval = 0, wake = 0;
++#ifdef CONFIG_PREEMPT_RT_FULL
++	int lock = !early_boot_irqs_disabled && !irqs_disabled_flags(flags) &&
++		!preempt_count();
++#else
++	int lock = 1;
++#endif
+ 
+-	if (console_trylock()) {
++	if (lock && console_trylock()) {
+ 		retval = 1;
+ 
+ 		/*
+@@ -1010,8 +1018,15 @@ asmlinkage int vprintk(const char *fmt, 
+ 	 * will release 'logbuf_lock' regardless of whether it
+ 	 * actually gets the semaphore or not.
+ 	 */
+-	if (console_trylock_for_printk(this_cpu))
++	if (console_trylock_for_printk(this_cpu, flags)) {
++#ifndef CONFIG_PREEMPT_RT_FULL
+ 		console_unlock();
++#else
++		raw_local_irq_restore(flags);
++		console_unlock();
++		raw_local_irq_save(flags);
++#endif
++	}
+ 
+ 	lockdep_on();
+ out_restore_irqs:
+@@ -1321,11 +1336,16 @@ again:
+ 		_con_start = con_start;
+ 		_log_end = log_end;
+ 		con_start = log_end;		/* Flush */
++#ifndef CONFIG_PREEMPT_RT_FULL
+ 		raw_spin_unlock(&logbuf_lock);
+ 		stop_critical_timings();	/* don't trace print latency */
+ 		call_console_drivers(_con_start, _log_end);
+ 		start_critical_timings();
+ 		local_irq_restore(flags);
++#else
++		raw_spin_unlock_irqrestore(&logbuf_lock, flags);
++		call_console_drivers(_con_start, _log_end);
++#endif
+ 	}
+ 	console_locked = 0;
+ 

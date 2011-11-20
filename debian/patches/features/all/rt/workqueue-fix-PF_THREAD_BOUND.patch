@@ -1,0 +1,102 @@
+Subject: workqueue: Fix PF_THREAD_BOUND abuse
+From: Peter Zijlstra <a.p.zijlstra@chello.nl>
+Date: Mon Oct 03 12:43:25 CEST 2011
+
+PF_THREAD_BOUND is set by kthread_bind() and means the thread is bound
+to a particular cpu for correctness. The workqueue code abuses this
+flag and blindly sets it for all created threads, including those that
+are free to migrate.
+
+Restore the original semantics now that the worst abuse in the
+cpu-hotplug path are gone. The only icky bit is the rescue thread for
+per-cpu workqueues, this cannot use kthread_bind() but will use
+set_cpus_allowed_ptr() to migrate itself to the desired cpu.
+
+Set and clear PF_THREAD_BOUND manually here.
+
+XXX: I think worker_maybe_bind_and_lock()/worker_unbind_and_unlock()
+should also do a get_online_cpus(), this would likely allow us to
+remove the while loop.
+
+XXX: should probably repurpose GCWQ_DISASSOCIATED to warn on adding
+works after CPU_DOWN_PREPARE -- its dual use to mark unbound gcwqs is
+a tad annoying though.
+
+Signed-off-by: Peter Zijlstra <a.p.zijlstra@chello.nl>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+---
+ kernel/workqueue.c |   29 ++++++++++++++++++++---------
+ 1 file changed, 20 insertions(+), 9 deletions(-)
+
+Index: linux-3.2/kernel/workqueue.c
+===================================================================
+--- linux-3.2.orig/kernel/workqueue.c
++++ linux-3.2/kernel/workqueue.c
+@@ -1286,8 +1286,14 @@ __acquires(&gcwq->lock)
+ 			return false;
+ 		if (task_cpu(task) == gcwq->cpu &&
+ 		    cpumask_equal(&current->cpus_allowed,
+-				  get_cpu_mask(gcwq->cpu)))
++				  get_cpu_mask(gcwq->cpu))) {
++			/*
++			 * Since we're binding to a particular cpu and need to
++			 * stay there for correctness, mark us PF_THREAD_BOUND.
++			 */
++			task->flags |= PF_THREAD_BOUND;
+ 			return true;
++		}
+ 		spin_unlock_irq(&gcwq->lock);
+ 
+ 		/*
+@@ -1301,6 +1307,18 @@ __acquires(&gcwq->lock)
+ 	}
+ }
+ 
++static void worker_unbind_and_unlock(struct worker *worker)
++{
++	struct global_cwq *gcwq = worker->gcwq;
++	struct task_struct *task = worker->task;
++
++	/*
++	 * Its no longer required we're PF_THREAD_BOUND, the work is done.
++	 */
++	task->flags &= ~PF_THREAD_BOUND;
++	spin_unlock_irq(&gcwq->lock);
++}
++
+ static struct worker *alloc_worker(void)
+ {
+ 	struct worker *worker;
+@@ -1363,15 +1381,9 @@ static struct worker *create_worker(stru
+ 	if (IS_ERR(worker->task))
+ 		goto fail;
+ 
+-	/*
+-	 * A rogue worker will become a regular one if CPU comes
+-	 * online later on.  Make sure every worker has
+-	 * PF_THREAD_BOUND set.
+-	 */
+ 	if (bind && !on_unbound_cpu)
+ 		kthread_bind(worker->task, gcwq->cpu);
+ 	else {
+-		worker->task->flags |= PF_THREAD_BOUND;
+ 		if (on_unbound_cpu)
+ 			worker->flags |= WORKER_UNBOUND;
+ 	}
+@@ -2048,7 +2060,7 @@ repeat:
+ 		if (keep_working(gcwq))
+ 			wake_up_worker(gcwq);
+ 
+-		spin_unlock_irq(&gcwq->lock);
++		worker_unbind_and_unlock(rescuer);
+ 	}
+ 
+ 	schedule();
+@@ -2997,7 +3009,6 @@ struct workqueue_struct *__alloc_workque
+ 		if (IS_ERR(rescuer->task))
+ 			goto err;
+ 
+-		rescuer->task->flags |= PF_THREAD_BOUND;
+ 		wake_up_process(rescuer->task);
+ 	}
+ 

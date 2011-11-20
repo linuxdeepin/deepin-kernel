@@ -1,0 +1,261 @@
+Subject: rcu: Merge RCU-bh into RCU-preempt
+Date: Wed, 5 Oct 2011 11:59:38 -0700
+From: Thomas Gleixner <tglx@linutronix.de>
+
+The Linux kernel has long RCU-bh read-side critical sections that
+intolerably increase scheduling latency under mainline's RCU-bh rules,
+which include RCU-bh read-side critical sections being non-preemptible.
+This patch therefore arranges for RCU-bh to be implemented in terms of
+RCU-preempt for CONFIG_PREEMPT_RT_FULL=y.
+
+This has the downside of defeating the purpose of RCU-bh, namely,
+handling the case where the system is subjected to a network-based
+denial-of-service attack that keeps at least one CPU doing full-time
+softirq processing.  This issue will be fixed by a later commit.
+
+The current commit will need some work to make it appropriate for
+mainline use, for example, it needs to be extended to cover Tiny RCU.
+
+[ paulmck: Added a useful changelog ]
+
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Signed-off-by: Paul E. McKenney <paulmck@linux.vnet.ibm.com>
+Link: http://lkml.kernel.org/r/20111005185938.GA20403@linux.vnet.ibm.com
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+
+---
+ include/linux/rcupdate.h |   25 +++++++++++++++++++++++++
+ include/linux/rcutree.h  |   18 ++++++++++++++++--
+ kernel/rcupdate.c        |    2 ++
+ kernel/rcutree.c         |   10 ++++++++++
+ 4 files changed, 53 insertions(+), 2 deletions(-)
+
+Index: linux-3.2/include/linux/rcupdate.h
+===================================================================
+--- linux-3.2.orig/include/linux/rcupdate.h
++++ linux-3.2/include/linux/rcupdate.h
+@@ -92,6 +92,9 @@ extern void call_rcu(struct rcu_head *he
+ 
+ #endif /* #else #ifdef CONFIG_PREEMPT_RCU */
+ 
++#ifdef CONFIG_PREEMPT_RT_FULL
++#define call_rcu_bh	call_rcu
++#else
+ /**
+  * call_rcu_bh() - Queue an RCU for invocation after a quicker grace period.
+  * @head: structure to be used for queueing the RCU updates.
+@@ -112,6 +115,7 @@ extern void call_rcu(struct rcu_head *he
+  */
+ extern void call_rcu_bh(struct rcu_head *head,
+ 			void (*func)(struct rcu_head *head));
++#endif
+ 
+ /**
+  * call_rcu_sched() - Queue an RCU for invocation after sched grace period.
+@@ -181,7 +185,13 @@ static inline int rcu_preempt_depth(void
+ 
+ /* Internal to kernel */
+ extern void rcu_sched_qs(int cpu);
++
++#ifndef CONFIG_PREEMPT_RT_FULL
+ extern void rcu_bh_qs(int cpu);
++#else
++static inline void rcu_bh_qs(int cpu) { }
++#endif
++
+ extern void rcu_check_callbacks(int cpu, int user);
+ struct notifier_block;
+ 
+@@ -281,7 +291,14 @@ static inline int rcu_read_lock_held(voi
+  * rcu_read_lock_bh_held() is defined out of line to avoid #include-file
+  * hell.
+  */
++#ifdef CONFIG_PREEMPT_RT_FULL
++static inline int rcu_read_lock_bh_held(void)
++{
++	return rcu_read_lock_held();
++}
++#else
+ extern int rcu_read_lock_bh_held(void);
++#endif
+ 
+ /**
+  * rcu_read_lock_sched_held() - might we be in RCU-sched read-side critical section?
+@@ -684,8 +701,12 @@ static inline void rcu_read_unlock(void)
+ static inline void rcu_read_lock_bh(void)
+ {
+ 	local_bh_disable();
++#ifdef CONFIG_PREEMPT_RT_FULL
++	rcu_read_lock();
++#else
+ 	__acquire(RCU_BH);
+ 	rcu_read_acquire_bh();
++#endif
+ }
+ 
+ /*
+@@ -695,8 +716,12 @@ static inline void rcu_read_lock_bh(void
+  */
+ static inline void rcu_read_unlock_bh(void)
+ {
++#ifdef CONFIG_PREEMPT_RT_FULL
++	rcu_read_unlock();
++#else
+ 	rcu_read_release_bh();
+ 	__release(RCU_BH);
++#endif
+ 	local_bh_enable();
+ }
+ 
+Index: linux-3.2/include/linux/rcutree.h
+===================================================================
+--- linux-3.2.orig/include/linux/rcutree.h
++++ linux-3.2/include/linux/rcutree.h
+@@ -57,7 +57,11 @@ static inline void exit_rcu(void)
+ 
+ #endif /* #else #ifdef CONFIG_TREE_PREEMPT_RCU */
+ 
++#ifndef CONFIG_PREEMPT_RT_FULL
+ extern void synchronize_rcu_bh(void);
++#else
++# define synchronize_rcu_bh()	synchronize_rcu()
++#endif
+ extern void synchronize_sched_expedited(void);
+ extern void synchronize_rcu_expedited(void);
+ 
+@@ -67,19 +71,29 @@ static inline void synchronize_rcu_bh_ex
+ }
+ 
+ extern void rcu_barrier(void);
++#ifdef CONFIG_PREEMPT_RT_FULL
++# define rcu_barrier_bh		rcu_barrier
++#else
+ extern void rcu_barrier_bh(void);
++#endif
+ extern void rcu_barrier_sched(void);
+ 
+ extern unsigned long rcutorture_testseq;
+ extern unsigned long rcutorture_vernum;
+ extern long rcu_batches_completed(void);
+-extern long rcu_batches_completed_bh(void);
+ extern long rcu_batches_completed_sched(void);
+ 
+ extern void rcu_force_quiescent_state(void);
+-extern void rcu_bh_force_quiescent_state(void);
+ extern void rcu_sched_force_quiescent_state(void);
+ 
++#ifndef CONFIG_PREEMPT_RT_FULL
++extern void rcu_bh_force_quiescent_state(void);
++extern long rcu_batches_completed_bh(void);
++#else
++# define rcu_bh_force_quiescent_state	rcu_force_quiescent_state
++# define rcu_batches_completed_bh	rcu_batches_completed
++#endif
++
+ /* A context switch is a grace period for RCU-sched and RCU-bh. */
+ static inline int rcu_blocking_is_gp(void)
+ {
+Index: linux-3.2/kernel/rcupdate.c
+===================================================================
+--- linux-3.2.orig/kernel/rcupdate.c
++++ linux-3.2/kernel/rcupdate.c
+@@ -77,6 +77,7 @@ int debug_lockdep_rcu_enabled(void)
+ }
+ EXPORT_SYMBOL_GPL(debug_lockdep_rcu_enabled);
+ 
++#ifndef CONFIG_PREEMPT_RT_FULL
+ /**
+  * rcu_read_lock_bh_held() - might we be in RCU-bh read-side critical section?
+  *
+@@ -96,6 +97,7 @@ int rcu_read_lock_bh_held(void)
+ 	return in_softirq() || irqs_disabled();
+ }
+ EXPORT_SYMBOL_GPL(rcu_read_lock_bh_held);
++#endif
+ 
+ #endif /* #ifdef CONFIG_DEBUG_LOCK_ALLOC */
+ 
+Index: linux-3.2/kernel/rcutree.c
+===================================================================
+--- linux-3.2.orig/kernel/rcutree.c
++++ linux-3.2/kernel/rcutree.c
+@@ -170,6 +170,7 @@ void rcu_sched_qs(int cpu)
+ 	rdp->passed_quiesce = 1;
+ }
+ 
++#ifndef CONFIG_PREEMPT_RT_FULL
+ void rcu_bh_qs(int cpu)
+ {
+ 	struct rcu_data *rdp = &per_cpu(rcu_bh_data, cpu);
+@@ -180,6 +181,7 @@ void rcu_bh_qs(int cpu)
+ 		trace_rcu_grace_period("rcu_bh", rdp->gpnum, "cpuqs");
+ 	rdp->passed_quiesce = 1;
+ }
++#endif
+ 
+ /*
+  * Note a context switch.  This is a quiescent state for RCU-sched,
+@@ -225,6 +227,7 @@ long rcu_batches_completed_sched(void)
+ }
+ EXPORT_SYMBOL_GPL(rcu_batches_completed_sched);
+ 
++#ifndef CONFIG_PREEMPT_RT_FULL
+ /*
+  * Return the number of RCU BH batches processed thus far for debug & stats.
+  */
+@@ -242,6 +245,7 @@ void rcu_bh_force_quiescent_state(void)
+ 	force_quiescent_state(&rcu_bh_state, 0);
+ }
+ EXPORT_SYMBOL_GPL(rcu_bh_force_quiescent_state);
++#endif
+ 
+ /*
+  * Record the number of times rcutorture tests have been initiated and
+@@ -1667,6 +1671,7 @@ void call_rcu_sched(struct rcu_head *hea
+ }
+ EXPORT_SYMBOL_GPL(call_rcu_sched);
+ 
++#ifndef CONFIG_PREEMPT_RT_FULL
+ /*
+  * Queue an RCU for invocation after a quicker grace period.
+  */
+@@ -1675,6 +1680,7 @@ void call_rcu_bh(struct rcu_head *head, 
+ 	__call_rcu(head, func, &rcu_bh_state);
+ }
+ EXPORT_SYMBOL_GPL(call_rcu_bh);
++#endif
+ 
+ /**
+  * synchronize_sched - wait until an rcu-sched grace period has elapsed.
+@@ -1707,6 +1713,7 @@ void synchronize_sched(void)
+ }
+ EXPORT_SYMBOL_GPL(synchronize_sched);
+ 
++#ifndef CONFIG_PREEMPT_RT_FULL
+ /**
+  * synchronize_rcu_bh - wait until an rcu_bh grace period has elapsed.
+  *
+@@ -1723,6 +1730,7 @@ void synchronize_rcu_bh(void)
+ 	wait_rcu_gp(call_rcu_bh);
+ }
+ EXPORT_SYMBOL_GPL(synchronize_rcu_bh);
++#endif
+ 
+ /*
+  * Check to see if there is any immediate RCU-related work to be done
+@@ -1877,6 +1885,7 @@ static void _rcu_barrier(struct rcu_stat
+ 	mutex_unlock(&rcu_barrier_mutex);
+ }
+ 
++#ifndef CONFIG_PREEMPT_RT_FULL
+ /**
+  * rcu_barrier_bh - Wait until all in-flight call_rcu_bh() callbacks complete.
+  */
+@@ -1885,6 +1894,7 @@ void rcu_barrier_bh(void)
+ 	_rcu_barrier(&rcu_bh_state, call_rcu_bh);
+ }
+ EXPORT_SYMBOL_GPL(rcu_barrier_bh);
++#endif
+ 
+ /**
+  * rcu_barrier_sched - Wait for in-flight call_rcu_sched() callbacks.

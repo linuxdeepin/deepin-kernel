@@ -1,0 +1,155 @@
+Subject: softirq-split-out-code.patch
+From: Thomas Gleixner <tglx@linutronix.de>
+Date: Tue, 28 Jun 2011 15:46:49 +0200
+
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+---
+ kernel/softirq.c |   94 ++++++++++++++++++++++++++++++-------------------------
+ 1 file changed, 52 insertions(+), 42 deletions(-)
+
+Index: linux-3.2/kernel/softirq.c
+===================================================================
+--- linux-3.2.orig/kernel/softirq.c
++++ linux-3.2/kernel/softirq.c
+@@ -76,6 +76,34 @@ static void wakeup_softirqd(void)
+ 		wake_up_process(tsk);
+ }
+ 
++static void handle_pending_softirqs(u32 pending, int cpu)
++{
++	struct softirq_action *h = softirq_vec;
++	unsigned int prev_count = preempt_count();
++
++	local_irq_enable();
++	for ( ; pending; h++, pending >>= 1) {
++		unsigned int vec_nr = h - softirq_vec;
++
++		if (!(pending & 1))
++			continue;
++
++		kstat_incr_softirqs_this_cpu(vec_nr);
++		trace_softirq_entry(vec_nr);
++		h->action(h);
++		trace_softirq_exit(vec_nr);
++		if (unlikely(prev_count != preempt_count())) {
++			printk(KERN_ERR
++ "huh, entered softirq %u %s %p with preempt_count %08x exited with %08x?\n",
++			       vec_nr, softirq_to_name[vec_nr], h->action,
++			       prev_count, (unsigned int) preempt_count());
++			preempt_count() = prev_count;
++		}
++		rcu_bh_qs(cpu);
++	}
++	local_irq_disable();
++}
++
+ /*
+  * preempt_count and SOFTIRQ_OFFSET usage:
+  * - preempt_count is changed by SOFTIRQ_OFFSET on entering or leaving
+@@ -206,7 +234,6 @@ EXPORT_SYMBOL(local_bh_enable_ip);
+ 
+ asmlinkage void __do_softirq(void)
+ {
+-	struct softirq_action *h;
+ 	__u32 pending;
+ 	int max_restart = MAX_SOFTIRQ_RESTART;
+ 	int cpu;
+@@ -215,7 +242,7 @@ asmlinkage void __do_softirq(void)
+ 	account_system_vtime(current);
+ 
+ 	__local_bh_disable((unsigned long)__builtin_return_address(0),
+-				SOFTIRQ_OFFSET);
++			   SOFTIRQ_OFFSET);
+ 	lockdep_softirq_enter();
+ 
+ 	cpu = smp_processor_id();
+@@ -223,36 +250,7 @@ restart:
+ 	/* Reset the pending bitmask before enabling irqs */
+ 	set_softirq_pending(0);
+ 
+-	local_irq_enable();
+-
+-	h = softirq_vec;
+-
+-	do {
+-		if (pending & 1) {
+-			unsigned int vec_nr = h - softirq_vec;
+-			int prev_count = preempt_count();
+-
+-			kstat_incr_softirqs_this_cpu(vec_nr);
+-
+-			trace_softirq_entry(vec_nr);
+-			h->action(h);
+-			trace_softirq_exit(vec_nr);
+-			if (unlikely(prev_count != preempt_count())) {
+-				printk(KERN_ERR "huh, entered softirq %u %s %p"
+-				       "with preempt_count %08x,"
+-				       " exited with %08x?\n", vec_nr,
+-				       softirq_to_name[vec_nr], h->action,
+-				       prev_count, preempt_count());
+-				preempt_count() = prev_count;
+-			}
+-
+-			rcu_bh_qs(cpu);
+-		}
+-		h++;
+-		pending >>= 1;
+-	} while (pending);
+-
+-	local_irq_disable();
++	handle_pending_softirqs(pending, cpu);
+ 
+ 	pending = local_softirq_pending();
+ 	if (pending && --max_restart)
+@@ -267,6 +265,26 @@ restart:
+ 	__local_bh_enable(SOFTIRQ_OFFSET);
+ }
+ 
++/*
++ * Called with preemption disabled from run_ksoftirqd()
++ */
++static int ksoftirqd_do_softirq(int cpu)
++{
++	/*
++	 * Preempt disable stops cpu going offline.
++	 * If already offline, we'll be on wrong CPU:
++	 * don't process.
++	 */
++	if (cpu_is_offline(cpu))
++		return -1;
++
++	local_irq_disable();
++	if (local_softirq_pending())
++		__do_softirq();
++	local_irq_enable();
++	return 0;
++}
++
+ #ifndef __ARCH_HAS_DO_SOFTIRQ
+ 
+ asmlinkage void do_softirq(void)
+@@ -743,22 +761,14 @@ static int run_ksoftirqd(void * __bind_c
+ 
+ 	while (!kthread_should_stop()) {
+ 		preempt_disable();
+-		if (!local_softirq_pending()) {
++		if (!local_softirq_pending())
+ 			schedule_preempt_disabled();
+-		}
+ 
+ 		__set_current_state(TASK_RUNNING);
+ 
+ 		while (local_softirq_pending()) {
+-			/* Preempt disable stops cpu going offline.
+-			   If already offline, we'll be on wrong CPU:
+-			   don't process */
+-			if (cpu_is_offline((long)__bind_cpu))
++			if (ksoftirqd_do_softirq((long) __bind_cpu))
+ 				goto wait_to_die;
+-			local_irq_disable();
+-			if (local_softirq_pending())
+-				__do_softirq();
+-			local_irq_enable();
+ 			__preempt_enable_no_resched();
+ 			cond_resched();
+ 			preempt_disable();

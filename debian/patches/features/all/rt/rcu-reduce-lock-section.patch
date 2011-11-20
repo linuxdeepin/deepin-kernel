@@ -1,0 +1,94 @@
+Subject: rcu: Reduce lock section
+From: Thomas Gleixner <tglx@linutronix.de>
+Date: Fri, 24 Jun 2011 22:23:02 +0200
+
+So the waitqueue wakeup is outside the raw locked section.
+
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+---
+ kernel/rcutree.c        |    2 +-
+ kernel/rcutree.h        |    3 ++-
+ kernel/rcutree_plugin.h |   14 ++++++++------
+ 3 files changed, 11 insertions(+), 8 deletions(-)
+
+Index: linux-3.2/kernel/rcutree.c
+===================================================================
+--- linux-3.2.orig/kernel/rcutree.c
++++ linux-3.2/kernel/rcutree.c
+@@ -1221,7 +1221,7 @@ static void __rcu_offline_cpu(int cpu, s
+ 	else
+ 		raw_spin_unlock_irqrestore(&rnp->lock, flags);
+ 	if (need_report & RCU_OFL_TASKS_EXP_GP)
+-		rcu_report_exp_rnp(rsp, rnp);
++		rcu_report_exp_rnp(rsp, rnp, true);
+ 	rcu_node_kthread_setaffinity(rnp, -1);
+ }
+ 
+Index: linux-3.2/kernel/rcutree.h
+===================================================================
+--- linux-3.2.orig/kernel/rcutree.h
++++ linux-3.2/kernel/rcutree.h
+@@ -451,7 +451,8 @@ static void rcu_preempt_check_callbacks(
+ static void rcu_preempt_process_callbacks(void);
+ void call_rcu(struct rcu_head *head, void (*func)(struct rcu_head *rcu));
+ #if defined(CONFIG_HOTPLUG_CPU) || defined(CONFIG_TREE_PREEMPT_RCU)
+-static void rcu_report_exp_rnp(struct rcu_state *rsp, struct rcu_node *rnp);
++static void rcu_report_exp_rnp(struct rcu_state *rsp, struct rcu_node *rnp,
++			       bool wake);
+ #endif /* #if defined(CONFIG_HOTPLUG_CPU) || defined(CONFIG_TREE_PREEMPT_RCU) */
+ static int rcu_preempt_pending(int cpu);
+ static int rcu_preempt_needs_cpu(int cpu);
+Index: linux-3.2/kernel/rcutree_plugin.h
+===================================================================
+--- linux-3.2.orig/kernel/rcutree_plugin.h
++++ linux-3.2/kernel/rcutree_plugin.h
+@@ -407,7 +407,7 @@ static noinline void rcu_read_unlock_spe
+ 		 * then we need to report up the rcu_node hierarchy.
+ 		 */
+ 		if (!empty_exp && !rcu_preempted_readers_exp(rnp))
+-			rcu_report_exp_rnp(&rcu_preempt_state, rnp);
++			rcu_report_exp_rnp(&rcu_preempt_state, rnp, true);
+ 	} else {
+ 		local_irq_restore(flags);
+ 	}
+@@ -731,7 +731,8 @@ static int sync_rcu_preempt_exp_done(str
+  *
+  * Caller must hold sync_rcu_preempt_exp_mutex.
+  */
+-static void rcu_report_exp_rnp(struct rcu_state *rsp, struct rcu_node *rnp)
++static void rcu_report_exp_rnp(struct rcu_state *rsp, struct rcu_node *rnp,
++			       bool wake)
+ {
+ 	unsigned long flags;
+ 	unsigned long mask;
+@@ -744,7 +745,8 @@ static void rcu_report_exp_rnp(struct rc
+ 		}
+ 		if (rnp->parent == NULL) {
+ 			raw_spin_unlock_irqrestore(&rnp->lock, flags);
+-			wake_up(&sync_rcu_preempt_exp_wq);
++			if (wake)
++				wake_up(&sync_rcu_preempt_exp_wq);
+ 			break;
+ 		}
+ 		mask = rnp->grpmask;
+@@ -777,7 +779,7 @@ sync_rcu_preempt_exp_init(struct rcu_sta
+ 		must_wait = 1;
+ 	}
+ 	if (!must_wait)
+-		rcu_report_exp_rnp(rsp, rnp);
++		rcu_report_exp_rnp(rsp, rnp, false);
+ }
+ 
+ /*
+@@ -1069,9 +1071,9 @@ EXPORT_SYMBOL_GPL(synchronize_rcu_expedi
+  * report on tasks preempted in RCU read-side critical sections during
+  * expedited RCU grace periods.
+  */
+-static void rcu_report_exp_rnp(struct rcu_state *rsp, struct rcu_node *rnp)
++static void rcu_report_exp_rnp(struct rcu_state *rsp, struct rcu_node *rnp,
++			       bool wake)
+ {
+-	return;
+ }
+ 
+ #endif /* #ifdef CONFIG_HOTPLUG_CPU */

@@ -1,0 +1,129 @@
+Subject: ping-sysrq.patch
+From: Carsten Emde <C.Emde@osadl.org>
+Date: Tue, 19 Jul 2011 13:51:17 +0100
+
+There are (probably rare) situations when a system crashed and the system
+console becomes unresponsive but the network icmp layer still is alive.
+Wouldn't it be wonderful, if we then could submit a sysreq command via ping?
+
+This patch provides this facility. Please consult the updated documentation
+Documentation/sysrq.txt for details.
+
+Signed-off-by: Carsten Emde <C.Emde@osadl.org>
+
+---
+ Documentation/sysrq.txt    |   11 +++++++++--
+ include/net/netns/ipv4.h   |    1 +
+ net/ipv4/icmp.c            |   30 ++++++++++++++++++++++++++++++
+ net/ipv4/sysctl_net_ipv4.c |    7 +++++++
+ 4 files changed, 47 insertions(+), 2 deletions(-)
+
+Index: linux-3.2/Documentation/sysrq.txt
+===================================================================
+--- linux-3.2.orig/Documentation/sysrq.txt
++++ linux-3.2/Documentation/sysrq.txt
+@@ -57,10 +57,17 @@ On PowerPC - Press 'ALT - Print Screen (
+ On other - If you know of the key combos for other architectures, please
+            let me know so I can add them to this section.
+ 
+-On all -  write a character to /proc/sysrq-trigger.  e.g.:
+-
++On all -  write a character to /proc/sysrq-trigger, e.g.:
+ 		echo t > /proc/sysrq-trigger
+ 
++On all - Enable network SysRq by writing a cookie to icmp_echo_sysrq, e.g.
++		echo 0x01020304 >/proc/sys/net/ipv4/icmp_echo_sysrq
++	 Send an ICMP echo request with this pattern plus the particular
++	 SysRq command key. Example:
++	 	# ping -c1 -s57 -p0102030468
++	 will trigger the SysRq-H (help) command.
++
++
+ *  What are the 'command' keys?
+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ 'b'     - Will immediately reboot the system without syncing or unmounting
+Index: linux-3.2/include/net/netns/ipv4.h
+===================================================================
+--- linux-3.2.orig/include/net/netns/ipv4.h
++++ linux-3.2/include/net/netns/ipv4.h
+@@ -47,6 +47,7 @@ struct netns_ipv4 {
+ 
+ 	int sysctl_icmp_echo_ignore_all;
+ 	int sysctl_icmp_echo_ignore_broadcasts;
++	int sysctl_icmp_echo_sysrq;
+ 	int sysctl_icmp_ignore_bogus_error_responses;
+ 	int sysctl_icmp_ratelimit;
+ 	int sysctl_icmp_ratemask;
+Index: linux-3.2/net/ipv4/icmp.c
+===================================================================
+--- linux-3.2.orig/net/ipv4/icmp.c
++++ linux-3.2/net/ipv4/icmp.c
+@@ -67,6 +67,7 @@
+ #include <linux/jiffies.h>
+ #include <linux/kernel.h>
+ #include <linux/fcntl.h>
++#include <linux/sysrq.h>
+ #include <linux/socket.h>
+ #include <linux/in.h>
+ #include <linux/inet.h>
+@@ -801,6 +802,30 @@ out_err:
+ }
+ 
+ /*
++ * 32bit and 64bit have different timestamp length, so we check for
++ * the cookie at offset 20 and verify it is repeated at offset 50
++ */
++#define CO_POS0		20
++#define CO_POS1		50
++#define CO_SIZE		sizeof(int)
++#define ICMP_SYSRQ_SIZE	57
++
++/*
++ * We got a ICMP_SYSRQ_SIZE sized ping request. Check for the cookie
++ * pattern and if it matches send the next byte as a trigger to sysrq.
++ */
++static void icmp_check_sysrq(struct net *net, struct sk_buff *skb)
++{
++	int cookie = htonl(net->ipv4.sysctl_icmp_echo_sysrq);
++	char *p = skb->data;
++
++	if (!memcmp(&cookie, p + CO_POS0, CO_SIZE) &&
++	    !memcmp(&cookie, p + CO_POS1, CO_SIZE) &&
++	    p[CO_POS0 + CO_SIZE] == p[CO_POS1 + CO_SIZE])
++		handle_sysrq(p[CO_POS0 + CO_SIZE]);
++}
++
++/*
+  *	Handle ICMP_ECHO ("ping") requests.
+  *
+  *	RFC 1122: 3.2.2.6 MUST have an echo server that answers ICMP echo
+@@ -827,6 +852,11 @@ static void icmp_echo(struct sk_buff *sk
+ 		icmp_param.data_len	   = skb->len;
+ 		icmp_param.head_len	   = sizeof(struct icmphdr);
+ 		icmp_reply(&icmp_param, skb);
++
++		if (skb->len == ICMP_SYSRQ_SIZE &&
++		    net->ipv4.sysctl_icmp_echo_sysrq) {
++			icmp_check_sysrq(net, skb);
++		}
+ 	}
+ }
+ 
+Index: linux-3.2/net/ipv4/sysctl_net_ipv4.c
+===================================================================
+--- linux-3.2.orig/net/ipv4/sysctl_net_ipv4.c
++++ linux-3.2/net/ipv4/sysctl_net_ipv4.c
+@@ -680,6 +680,13 @@ static struct ctl_table ipv4_net_table[]
+ 		.proc_handler	= proc_dointvec
+ 	},
+ 	{
++		.procname	= "icmp_echo_sysrq",
++		.data		= &init_net.ipv4.sysctl_icmp_echo_sysrq,
++		.maxlen		= sizeof(int),
++		.mode		= 0644,
++		.proc_handler	= proc_dointvec
++	},
++	{
+ 		.procname	= "icmp_ignore_bogus_error_responses",
+ 		.data		= &init_net.ipv4.sysctl_icmp_ignore_bogus_error_responses,
+ 		.maxlen		= sizeof(int),

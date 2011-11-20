@@ -1,0 +1,54 @@
+From: Thomas Gleixner <tglx@linutronix.de>
+Date: Tue, 17 Nov 2009 12:02:43 +0100
+Subject: drivers: net: at91_ether: Make mdio protection -rt safe
+
+Neither the phy interrupt nor the timer callback which updates the
+link status in absense of a phy interrupt are taking lp->lock which
+serializes the MDIO access. This works on mainline as at91 is an UP
+machine. On preempt-rt the timer callback can run even in the
+spin_lock_irq(&lp->lock) protected code pathes because spin_lock_irq
+is neither disabling interrupts nor disabling preemption.
+
+Fix this by adding proper locking to at91ether_phy_interrupt() and
+at91_check_ether() which serializes the access on -rt.
+
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+
+---
+ drivers/net/ethernet/cadence/at91_ether.c |    5 +++++
+ 1 file changed, 5 insertions(+)
+
+Index: linux-3.2/drivers/net/ethernet/cadence/at91_ether.c
+===================================================================
+--- linux-3.2.orig/drivers/net/ethernet/cadence/at91_ether.c
++++ linux-3.2/drivers/net/ethernet/cadence/at91_ether.c
+@@ -200,7 +200,9 @@ static irqreturn_t at91ether_phy_interru
+ 	struct net_device *dev = (struct net_device *) dev_id;
+ 	struct at91_private *lp = netdev_priv(dev);
+ 	unsigned int phy;
++	unsigned long flags;
+ 
++	spin_lock_irqsave(&lp->lock, flags);
+ 	/*
+ 	 * This hander is triggered on both edges, but the PHY chips expect
+ 	 * level-triggering.  We therefore have to check if the PHY actually has
+@@ -242,6 +244,7 @@ static irqreturn_t at91ether_phy_interru
+ 
+ done:
+ 	disable_mdi();
++	spin_unlock_irqrestore(&lp->lock, flags);
+ 
+ 	return IRQ_HANDLED;
+ }
+@@ -398,9 +401,11 @@ static void at91ether_check_link(unsigne
+ 	struct net_device *dev = (struct net_device *) dev_id;
+ 	struct at91_private *lp = netdev_priv(dev);
+ 
++	spin_lock_irq(&lp->lock);
+ 	enable_mdi();
+ 	update_linkspeed(dev, 1);
+ 	disable_mdi();
++	spin_unlock_irq(&lp->lock);
+ 
+ 	mod_timer(&lp->check_timer, jiffies + LINK_POLL_INTERVAL);
+ }
