@@ -335,10 +335,10 @@ class Gencontrol(Base):
                 packages.append(new_package)
 
     def process_changelog(self):
-        act_upstream = self.changelog[0].version.linux_upstream
+        act_upstream = self.changelog[0].version.upstream
         versions = []
         for i in self.changelog:
-            if i.version.linux_upstream != act_upstream:
+            if i.version.upstream != act_upstream:
                 break
             versions.append(i.version)
         self.versions = versions
