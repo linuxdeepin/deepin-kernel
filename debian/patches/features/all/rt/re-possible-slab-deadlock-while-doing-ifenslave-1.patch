@@ -1,0 +1,132 @@
+Subject: slab, lockdep: Annotate all slab caches
+From: Peter Zijlstra <a.p.zijlstra@chello.nl>
+Date: Mon Nov 28 19:51:51 CET 2011
+
+Currently we only annotate the kmalloc caches, annotate all of them.
+
+Signed-off-by: Peter Zijlstra <a.p.zijlstra@chello.nl>
+Cc: Hans Schillstrom <hans@schillstrom.com>
+Cc: Christoph Lameter <cl@gentwo.org>
+Cc: Pekka Enberg <penberg@cs.helsinki.fi>
+Cc: Matt Mackall <mpm@selenic.com>
+Cc: Sitsofe Wheeler <sitsofe@yahoo.com>
+Cc: linux-mm@kvack.org
+Cc: David Rientjes <rientjes@google.com>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Link: http://lkml.kernel.org/n/tip-10bey2cgpcvtbdkgigaoab8w@git.kernel.org
+---
+ mm/slab.c |   52 ++++++++++++++++++++++++++++------------------------
+ 1 file changed, 28 insertions(+), 24 deletions(-)
+Index: linux-3.2/mm/slab.c
+===================================================================
+--- linux-3.2.orig/mm/slab.c
++++ linux-3.2/mm/slab.c
+@@ -607,6 +607,12 @@ int slab_is_available(void)
+ 	return g_cpucache_up >= EARLY;
+ }
+ 
++/*
++ * Guard access to the cache-chain.
++ */
++static DEFINE_MUTEX(cache_chain_mutex);
++static struct list_head cache_chain;
++
+ #ifdef CONFIG_LOCKDEP
+ 
+ /*
+@@ -668,38 +674,41 @@ static void slab_set_debugobj_lock_class
+ 		slab_set_debugobj_lock_classes_node(cachep, node);
+ }
+ 
+-static void init_node_lock_keys(int q)
++static void init_lock_keys(struct kmem_cache *cachep, int node)
+ {
+-	struct cache_sizes *s = malloc_sizes;
++	struct kmem_list3 *l3;
+ 
+ 	if (g_cpucache_up < LATE)
+ 		return;
+ 
+-	for (s = malloc_sizes; s->cs_size != ULONG_MAX; s++) {
+-		struct kmem_list3 *l3;
++	l3 = cachep->nodelists[node];
++	if (!l3 || OFF_SLAB(cachep))
++		return;
+ 
+-		l3 = s->cs_cachep->nodelists[q];
+-		if (!l3 || OFF_SLAB(s->cs_cachep))
+-			continue;
++	slab_set_lock_classes(cachep, &on_slab_l3_key, &on_slab_alc_key, node);
++}
+ 
+-		slab_set_lock_classes(s->cs_cachep, &on_slab_l3_key,
+-				&on_slab_alc_key, q);
+-	}
++static void init_node_lock_keys(int node)
++{
++	struct kmem_cache *cachep;
++
++	list_for_each_entry(cachep, &cache_chain, next)
++		init_lock_keys(cachep, node);
+ }
+ 
+-static inline void init_lock_keys(void)
++static inline void init_cachep_lock_keys(struct kmem_cache *cachep)
+ {
+ 	int node;
+ 
+ 	for_each_node(node)
+-		init_node_lock_keys(node);
++		init_lock_keys(cachep, node);
+ }
+ #else
+-static void init_node_lock_keys(int q)
++static void init_node_lock_keys(int node)
+ {
+ }
+ 
+-static inline void init_lock_keys(void)
++static void init_cachep_lock_keys(struct kmem_cache *cachep)
+ {
+ }
+ 
+@@ -712,12 +721,6 @@ static void slab_set_debugobj_lock_class
+ }
+ #endif
+ 
+-/*
+- * Guard access to the cache-chain.
+- */
+-static DEFINE_MUTEX(cache_chain_mutex);
+-static struct list_head cache_chain;
+-
+ static DEFINE_PER_CPU(struct delayed_work, slab_reap_work);
+ 
+ static inline struct array_cache *cpu_cache_get(struct kmem_cache *cachep)
+@@ -1669,14 +1672,13 @@ void __init kmem_cache_init_late(void)
+ 
+ 	g_cpucache_up = LATE;
+ 
+-	/* Annotate slab for lockdep -- annotate the malloc caches */
+-	init_lock_keys();
+-
+ 	/* 6) resize the head arrays to their final sizes */
+ 	mutex_lock(&cache_chain_mutex);
+-	list_for_each_entry(cachep, &cache_chain, next)
++	list_for_each_entry(cachep, &cache_chain, next) {
++		init_cachep_lock_keys(cachep);
+ 		if (enable_cpucache(cachep, GFP_NOWAIT))
+ 			BUG();
++	}
+ 	mutex_unlock(&cache_chain_mutex);
+ 
+ 	/* Done! */
+@@ -2479,6 +2481,8 @@ kmem_cache_create (const char *name, siz
+ 		slab_set_debugobj_lock_classes(cachep);
+ 	}
+ 
++	init_cachep_lock_keys(cachep);
++
+ 	/* cache setup completed, link it into the list */
+ 	list_add(&cachep->next, &cache_chain);
+ oops:

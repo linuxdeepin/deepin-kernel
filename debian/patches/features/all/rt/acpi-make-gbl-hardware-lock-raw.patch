@@ -1,0 +1,406 @@
+Subject: acpi: Make gbl_[hardware|gpe]_lock raw
+From: Thomas Gleixner <tglx@linutronix.de>
+Date: Mon, 28 Nov 2011 17:09:54 +0100
+
+These locks are taken in the guts of the idle code and cannot be
+converted to "sleeping" spinlocks on RT
+
+Cc: stable-rt@vger.kernel.org
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+---
+ drivers/acpi/acpica/acglobal.h  |    4 ++--
+ drivers/acpi/acpica/evgpe.c     |    4 ++--
+ drivers/acpi/acpica/evgpeblk.c  |    8 ++++----
+ drivers/acpi/acpica/evgpeutil.c |   12 ++++++------
+ drivers/acpi/acpica/evxface.c   |   10 +++++-----
+ drivers/acpi/acpica/evxfgpe.c   |   24 ++++++++++++------------
+ drivers/acpi/acpica/hwregs.c    |    4 ++--
+ drivers/acpi/acpica/hwxface.c   |    4 ++--
+ drivers/acpi/acpica/utmutex.c   |   21 +++------------------
+ 9 files changed, 38 insertions(+), 53 deletions(-)
+
+Index: linux-3.2/drivers/acpi/acpica/acglobal.h
+===================================================================
+--- linux-3.2.orig/drivers/acpi/acpica/acglobal.h
++++ linux-3.2/drivers/acpi/acpica/acglobal.h
+@@ -235,8 +235,8 @@ ACPI_EXTERN u8 acpi_gbl_global_lock_pend
+  * Spinlocks are used for interfaces that can be possibly called at
+  * interrupt level
+  */
+-ACPI_EXTERN acpi_spinlock acpi_gbl_gpe_lock;	/* For GPE data structs and registers */
+-ACPI_EXTERN acpi_spinlock acpi_gbl_hardware_lock;	/* For ACPI H/W except GPE registers */
++extern raw_spinlock_t acpi_gbl_gpe_lock;	/* For GPE data structs and registers */
++extern raw_spinlock_t acpi_gbl_hardware_lock;	/* For ACPI H/W except GPE registers */
+ 
+ /*****************************************************************************
+  *
+Index: linux-3.2/drivers/acpi/acpica/evgpe.c
+===================================================================
+--- linux-3.2.orig/drivers/acpi/acpica/evgpe.c
++++ linux-3.2/drivers/acpi/acpica/evgpe.c
+@@ -357,7 +357,7 @@ u32 acpi_ev_gpe_detect(struct acpi_gpe_x
+ 	 * Note: Not necessary to obtain the hardware lock, since the GPE
+ 	 * registers are owned by the gpe_lock.
+ 	 */
+-	flags = acpi_os_acquire_lock(acpi_gbl_gpe_lock);
++	raw_spin_lock_irqsave(&acpi_gbl_gpe_lock, flags);
+ 
+ 	/* Examine all GPE blocks attached to this interrupt level */
+ 
+@@ -440,7 +440,7 @@ u32 acpi_ev_gpe_detect(struct acpi_gpe_x
+ 
+       unlock_and_exit:
+ 
+-	acpi_os_release_lock(acpi_gbl_gpe_lock, flags);
++	raw_spin_unlock_irqrestore(&acpi_gbl_gpe_lock, flags);
+ 	return (int_status);
+ }
+ 
+Index: linux-3.2/drivers/acpi/acpica/evgpeblk.c
+===================================================================
+--- linux-3.2.orig/drivers/acpi/acpica/evgpeblk.c
++++ linux-3.2/drivers/acpi/acpica/evgpeblk.c
+@@ -95,7 +95,7 @@ acpi_ev_install_gpe_block(struct acpi_gp
+ 
+ 	/* Install the new block at the end of the list with lock */
+ 
+-	flags = acpi_os_acquire_lock(acpi_gbl_gpe_lock);
++	raw_spin_lock_irqsave(&acpi_gbl_gpe_lock, flags);
+ 	if (gpe_xrupt_block->gpe_block_list_head) {
+ 		next_gpe_block = gpe_xrupt_block->gpe_block_list_head;
+ 		while (next_gpe_block->next) {
+@@ -109,7 +109,7 @@ acpi_ev_install_gpe_block(struct acpi_gp
+ 	}
+ 
+ 	gpe_block->xrupt_block = gpe_xrupt_block;
+-	acpi_os_release_lock(acpi_gbl_gpe_lock, flags);
++	raw_spin_unlock_irqrestore(&acpi_gbl_gpe_lock, flags);
+ 
+       unlock_and_exit:
+ 	status = acpi_ut_release_mutex(ACPI_MTX_EVENTS);
+@@ -156,7 +156,7 @@ acpi_status acpi_ev_delete_gpe_block(str
+ 	} else {
+ 		/* Remove the block on this interrupt with lock */
+ 
+-		flags = acpi_os_acquire_lock(acpi_gbl_gpe_lock);
++		raw_spin_lock_irqsave(&acpi_gbl_gpe_lock, flags);
+ 		if (gpe_block->previous) {
+ 			gpe_block->previous->next = gpe_block->next;
+ 		} else {
+@@ -167,7 +167,7 @@ acpi_status acpi_ev_delete_gpe_block(str
+ 		if (gpe_block->next) {
+ 			gpe_block->next->previous = gpe_block->previous;
+ 		}
+-		acpi_os_release_lock(acpi_gbl_gpe_lock, flags);
++		raw_spin_unlock_irqrestore(&acpi_gbl_gpe_lock, flags);
+ 	}
+ 
+ 	acpi_current_gpe_count -= gpe_block->gpe_count;
+Index: linux-3.2/drivers/acpi/acpica/evgpeutil.c
+===================================================================
+--- linux-3.2.orig/drivers/acpi/acpica/evgpeutil.c
++++ linux-3.2/drivers/acpi/acpica/evgpeutil.c
+@@ -70,7 +70,7 @@ acpi_ev_walk_gpe_list(acpi_gpe_callback 
+ 
+ 	ACPI_FUNCTION_TRACE(ev_walk_gpe_list);
+ 
+-	flags = acpi_os_acquire_lock(acpi_gbl_gpe_lock);
++	raw_spin_lock_irqsave(&acpi_gbl_gpe_lock, flags);
+ 
+ 	/* Walk the interrupt level descriptor list */
+ 
+@@ -101,7 +101,7 @@ acpi_ev_walk_gpe_list(acpi_gpe_callback 
+ 	}
+ 
+       unlock_and_exit:
+-	acpi_os_release_lock(acpi_gbl_gpe_lock, flags);
++	raw_spin_unlock_irqrestore(&acpi_gbl_gpe_lock, flags);
+ 	return_ACPI_STATUS(status);
+ }
+ 
+@@ -237,7 +237,7 @@ struct acpi_gpe_xrupt_info *acpi_ev_get_
+ 
+ 	/* Install new interrupt descriptor with spin lock */
+ 
+-	flags = acpi_os_acquire_lock(acpi_gbl_gpe_lock);
++	raw_spin_lock_irqsave(&acpi_gbl_gpe_lock, flags);
+ 	if (acpi_gbl_gpe_xrupt_list_head) {
+ 		next_gpe_xrupt = acpi_gbl_gpe_xrupt_list_head;
+ 		while (next_gpe_xrupt->next) {
+@@ -249,7 +249,7 @@ struct acpi_gpe_xrupt_info *acpi_ev_get_
+ 	} else {
+ 		acpi_gbl_gpe_xrupt_list_head = gpe_xrupt;
+ 	}
+-	acpi_os_release_lock(acpi_gbl_gpe_lock, flags);
++	raw_spin_unlock_irqrestore(&acpi_gbl_gpe_lock, flags);
+ 
+ 	/* Install new interrupt handler if not SCI_INT */
+ 
+@@ -306,7 +306,7 @@ acpi_status acpi_ev_delete_gpe_xrupt(str
+ 
+ 	/* Unlink the interrupt block with lock */
+ 
+-	flags = acpi_os_acquire_lock(acpi_gbl_gpe_lock);
++	raw_spin_lock_irqsave(&acpi_gbl_gpe_lock, flags);
+ 	if (gpe_xrupt->previous) {
+ 		gpe_xrupt->previous->next = gpe_xrupt->next;
+ 	} else {
+@@ -318,7 +318,7 @@ acpi_status acpi_ev_delete_gpe_xrupt(str
+ 	if (gpe_xrupt->next) {
+ 		gpe_xrupt->next->previous = gpe_xrupt->previous;
+ 	}
+-	acpi_os_release_lock(acpi_gbl_gpe_lock, flags);
++	raw_spin_unlock_irqrestore(&acpi_gbl_gpe_lock, flags);
+ 
+ 	/* Free the block */
+ 
+Index: linux-3.2/drivers/acpi/acpica/evxface.c
+===================================================================
+--- linux-3.2.orig/drivers/acpi/acpica/evxface.c
++++ linux-3.2/drivers/acpi/acpica/evxface.c
+@@ -751,7 +751,7 @@ acpi_install_gpe_handler(acpi_handle gpe
+ 		goto unlock_and_exit;
+ 	}
+ 
+-	flags = acpi_os_acquire_lock(acpi_gbl_gpe_lock);
++	raw_spin_lock_irqsave(&acpi_gbl_gpe_lock, flags);
+ 
+ 	/* Ensure that we have a valid GPE number */
+ 
+@@ -799,14 +799,14 @@ acpi_install_gpe_handler(acpi_handle gpe
+ 	    ~(ACPI_GPE_XRUPT_TYPE_MASK | ACPI_GPE_DISPATCH_MASK);
+ 	gpe_event_info->flags |= (u8) (type | ACPI_GPE_DISPATCH_HANDLER);
+ 
+-	acpi_os_release_lock(acpi_gbl_gpe_lock, flags);
++	raw_spin_unlock_irqrestore(&acpi_gbl_gpe_lock, flags);
+ 
+ unlock_and_exit:
+ 	(void)acpi_ut_release_mutex(ACPI_MTX_EVENTS);
+ 	return_ACPI_STATUS(status);
+ 
+ free_and_exit:
+-	acpi_os_release_lock(acpi_gbl_gpe_lock, flags);
++	raw_spin_unlock_irqrestore(&acpi_gbl_gpe_lock, flags);
+ 	ACPI_FREE(handler);
+ 	goto unlock_and_exit;
+ }
+@@ -853,7 +853,7 @@ acpi_remove_gpe_handler(acpi_handle gpe_
+ 		return_ACPI_STATUS(status);
+ 	}
+ 
+-	flags = acpi_os_acquire_lock(acpi_gbl_gpe_lock);
++	raw_spin_lock_irqsave(&acpi_gbl_gpe_lock, flags);
+ 
+ 	/* Ensure that we have a valid GPE number */
+ 
+@@ -904,7 +904,7 @@ acpi_remove_gpe_handler(acpi_handle gpe_
+ 	ACPI_FREE(handler);
+ 
+ unlock_and_exit:
+-	acpi_os_release_lock(acpi_gbl_gpe_lock, flags);
++	raw_spin_unlock_irqrestore(&acpi_gbl_gpe_lock, flags);
+ 
+ 	(void)acpi_ut_release_mutex(ACPI_MTX_EVENTS);
+ 	return_ACPI_STATUS(status);
+Index: linux-3.2/drivers/acpi/acpica/evxfgpe.c
+===================================================================
+--- linux-3.2.orig/drivers/acpi/acpica/evxfgpe.c
++++ linux-3.2/drivers/acpi/acpica/evxfgpe.c
+@@ -122,7 +122,7 @@ acpi_status acpi_enable_gpe(acpi_handle 
+ 
+ 	ACPI_FUNCTION_TRACE(acpi_enable_gpe);
+ 
+-	flags = acpi_os_acquire_lock(acpi_gbl_gpe_lock);
++	raw_spin_lock_irqsave(&acpi_gbl_gpe_lock, flags);
+ 
+ 	/* Ensure that we have a valid GPE number */
+ 
+@@ -131,7 +131,7 @@ acpi_status acpi_enable_gpe(acpi_handle 
+ 		status = acpi_ev_add_gpe_reference(gpe_event_info);
+ 	}
+ 
+-	acpi_os_release_lock(acpi_gbl_gpe_lock, flags);
++	raw_spin_unlock_irqrestore(&acpi_gbl_gpe_lock, flags);
+ 	return_ACPI_STATUS(status);
+ }
+ ACPI_EXPORT_SYMBOL(acpi_enable_gpe)
+@@ -159,7 +159,7 @@ acpi_status acpi_disable_gpe(acpi_handle
+ 
+ 	ACPI_FUNCTION_TRACE(acpi_disable_gpe);
+ 
+-	flags = acpi_os_acquire_lock(acpi_gbl_gpe_lock);
++	raw_spin_lock_irqsave(&acpi_gbl_gpe_lock, flags);
+ 
+ 	/* Ensure that we have a valid GPE number */
+ 
+@@ -168,7 +168,7 @@ acpi_status acpi_disable_gpe(acpi_handle
+ 		status = acpi_ev_remove_gpe_reference(gpe_event_info) ;
+ 	}
+ 
+-	acpi_os_release_lock(acpi_gbl_gpe_lock, flags);
++	raw_spin_unlock_irqrestore(&acpi_gbl_gpe_lock, flags);
+ 	return_ACPI_STATUS(status);
+ }
+ ACPI_EXPORT_SYMBOL(acpi_disable_gpe)
+@@ -215,7 +215,7 @@ acpi_setup_gpe_for_wake(acpi_handle wake
+ 		return_ACPI_STATUS(AE_BAD_PARAMETER);
+ 	}
+ 
+-	flags = acpi_os_acquire_lock(acpi_gbl_gpe_lock);
++	raw_spin_lock_irqsave(&acpi_gbl_gpe_lock, flags);
+ 
+ 	/* Ensure that we have a valid GPE number */
+ 
+@@ -271,7 +271,7 @@ acpi_setup_gpe_for_wake(acpi_handle wake
+ 	status = AE_OK;
+ 
+  unlock_and_exit:
+-	acpi_os_release_lock(acpi_gbl_gpe_lock, flags);
++	raw_spin_unlock_irqrestore(&acpi_gbl_gpe_lock, flags);
+ 	return_ACPI_STATUS(status);
+ }
+ ACPI_EXPORT_SYMBOL(acpi_setup_gpe_for_wake)
+@@ -301,7 +301,7 @@ acpi_status acpi_set_gpe_wake_mask(acpi_
+ 
+ 	ACPI_FUNCTION_TRACE(acpi_set_gpe_wake_mask);
+ 
+-	flags = acpi_os_acquire_lock(acpi_gbl_gpe_lock);
++	raw_spin_lock_irqsave(&acpi_gbl_gpe_lock, flags);
+ 
+ 	/*
+ 	 * Ensure that we have a valid GPE number and that this GPE is in
+@@ -347,7 +347,7 @@ acpi_status acpi_set_gpe_wake_mask(acpi_
+ 	}
+ 
+ unlock_and_exit:
+-	acpi_os_release_lock(acpi_gbl_gpe_lock, flags);
++	raw_spin_unlock_irqrestore(&acpi_gbl_gpe_lock, flags);
+ 	return_ACPI_STATUS(status);
+ }
+ 
+@@ -373,7 +373,7 @@ acpi_status acpi_clear_gpe(acpi_handle g
+ 
+ 	ACPI_FUNCTION_TRACE(acpi_clear_gpe);
+ 
+-	flags = acpi_os_acquire_lock(acpi_gbl_gpe_lock);
++	raw_spin_lock_irqsave(&acpi_gbl_gpe_lock, flags);
+ 
+ 	/* Ensure that we have a valid GPE number */
+ 
+@@ -386,7 +386,7 @@ acpi_status acpi_clear_gpe(acpi_handle g
+ 	status = acpi_hw_clear_gpe(gpe_event_info);
+ 
+       unlock_and_exit:
+-	acpi_os_release_lock(acpi_gbl_gpe_lock, flags);
++	raw_spin_unlock_irqrestore(&acpi_gbl_gpe_lock, flags);
+ 	return_ACPI_STATUS(status);
+ }
+ 
+@@ -416,7 +416,7 @@ acpi_get_gpe_status(acpi_handle gpe_devi
+ 
+ 	ACPI_FUNCTION_TRACE(acpi_get_gpe_status);
+ 
+-	flags = acpi_os_acquire_lock(acpi_gbl_gpe_lock);
++	raw_spin_lock_irqsave(&acpi_gbl_gpe_lock, flags);
+ 
+ 	/* Ensure that we have a valid GPE number */
+ 
+@@ -434,7 +434,7 @@ acpi_get_gpe_status(acpi_handle gpe_devi
+ 		*event_status |= ACPI_EVENT_FLAG_HANDLE;
+ 
+       unlock_and_exit:
+-	acpi_os_release_lock(acpi_gbl_gpe_lock, flags);
++	raw_spin_unlock_irqrestore(&acpi_gbl_gpe_lock, flags);
+ 	return_ACPI_STATUS(status);
+ }
+ 
+Index: linux-3.2/drivers/acpi/acpica/hwregs.c
+===================================================================
+--- linux-3.2.orig/drivers/acpi/acpica/hwregs.c
++++ linux-3.2/drivers/acpi/acpica/hwregs.c
+@@ -263,14 +263,14 @@ acpi_status acpi_hw_clear_acpi_status(vo
+ 			  ACPI_BITMASK_ALL_FIXED_STATUS,
+ 			  ACPI_FORMAT_UINT64(acpi_gbl_xpm1a_status.address)));
+ 
+-	lock_flags = acpi_os_acquire_lock(acpi_gbl_hardware_lock);
++	raw_spin_lock_irqsave(&acpi_gbl_hardware_lock, lock_flags);
+ 
+ 	/* Clear the fixed events in PM1 A/B */
+ 
+ 	status = acpi_hw_register_write(ACPI_REGISTER_PM1_STATUS,
+ 					ACPI_BITMASK_ALL_FIXED_STATUS);
+ 
+-	acpi_os_release_lock(acpi_gbl_hardware_lock, lock_flags);
++	raw_spin_unlock_irqrestore(&acpi_gbl_hardware_lock, lock_flags);
+ 
+ 	if (ACPI_FAILURE(status))
+ 		goto exit;
+Index: linux-3.2/drivers/acpi/acpica/hwxface.c
+===================================================================
+--- linux-3.2.orig/drivers/acpi/acpica/hwxface.c
++++ linux-3.2/drivers/acpi/acpica/hwxface.c
+@@ -387,7 +387,7 @@ acpi_status acpi_write_bit_register(u32 
+ 		return_ACPI_STATUS(AE_BAD_PARAMETER);
+ 	}
+ 
+-	lock_flags = acpi_os_acquire_lock(acpi_gbl_hardware_lock);
++	raw_spin_lock_irqsave(&acpi_gbl_hardware_lock, lock_flags);
+ 
+ 	/*
+ 	 * At this point, we know that the parent register is one of the
+@@ -448,7 +448,7 @@ acpi_status acpi_write_bit_register(u32 
+ 
+ unlock_and_exit:
+ 
+-	acpi_os_release_lock(acpi_gbl_hardware_lock, lock_flags);
++	raw_spin_unlock_irqrestore(&acpi_gbl_hardware_lock, lock_flags);
+ 	return_ACPI_STATUS(status);
+ }
+ 
+Index: linux-3.2/drivers/acpi/acpica/utmutex.c
+===================================================================
+--- linux-3.2.orig/drivers/acpi/acpica/utmutex.c
++++ linux-3.2/drivers/acpi/acpica/utmutex.c
+@@ -52,6 +52,9 @@ static acpi_status acpi_ut_create_mutex(
+ 
+ static void acpi_ut_delete_mutex(acpi_mutex_handle mutex_id);
+ 
++DEFINE_RAW_SPINLOCK(acpi_gbl_gpe_lock);
++DEFINE_RAW_SPINLOCK(acpi_gbl_hardware_lock);
++
+ /*******************************************************************************
+  *
+  * FUNCTION:    acpi_ut_mutex_initialize
+@@ -81,18 +84,6 @@ acpi_status acpi_ut_mutex_initialize(voi
+ 		}
+ 	}
+ 
+-	/* Create the spinlocks for use at interrupt level */
+-
+-	status = acpi_os_create_lock (&acpi_gbl_gpe_lock);
+-	if (ACPI_FAILURE (status)) {
+-		return_ACPI_STATUS (status);
+-	}
+-
+-	status = acpi_os_create_lock (&acpi_gbl_hardware_lock);
+-	if (ACPI_FAILURE (status)) {
+-		return_ACPI_STATUS (status);
+-	}
+-
+ 	/* Mutex for _OSI support */
+ 	status = acpi_os_create_mutex(&acpi_gbl_osi_mutex);
+ 	if (ACPI_FAILURE(status)) {
+@@ -132,13 +123,7 @@ void acpi_ut_mutex_terminate(void)
+ 
+ 	acpi_os_delete_mutex(acpi_gbl_osi_mutex);
+ 
+-	/* Delete the spinlocks */
+-
+-	acpi_os_delete_lock(acpi_gbl_gpe_lock);
+-	acpi_os_delete_lock(acpi_gbl_hardware_lock);
+-
+ 	/* Delete the reader/writer lock */
+-
+ 	acpi_ut_delete_rw_lock(&acpi_gbl_namespace_rw_lock);
+ 	return_VOID;
+ }
