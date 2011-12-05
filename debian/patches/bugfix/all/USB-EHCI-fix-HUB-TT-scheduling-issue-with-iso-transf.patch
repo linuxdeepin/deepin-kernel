@@ -1,0 +1,106 @@
+From: Thomas Poussevin <thomas.poussevin@parrot.com>
+Date: Thu, 27 Oct 2011 18:46:48 +0200
+Subject: [PATCH 1/2] USB: EHCI: fix HUB TT scheduling issue with iso transfer
+
+commit 811c926c538f7e8d3c08b630dd5844efd7e000f6 upstream.
+
+The current TT scheduling doesn't allow to play and then record on a
+full-speed device connected to a high speed hub.
+
+The IN iso stream can only start on the first uframe (0-2 for a 165 us)
+because of CSPLIT transactions.
+For the OUT iso stream there no such restriction. uframe 0-5 are possible.
+
+The idea of this patch is that the first uframe are precious (for IN TT iso
+stream) and we should allocate the last uframes first if possible.
+
+For that we reverse the order of uframe allocation (last uframe first).
+
+Here an example :
+
+hid interrupt stream
+----------------------------------------------------------------------
+uframe                |  0  |  1  |  2  |  3  |  4  |  5  |  6  |  7  |
+----------------------------------------------------------------------
+max_tt_usecs          | 125 | 125 | 125 | 125 | 125 | 125 | 30  |  0  |
+----------------------------------------------------------------------
+used usecs on a frame | 13  |  0  |  0  |  0  |  0  |  0  |  0  |  0  |
+----------------------------------------------------------------------
+
+iso OUT stream
+----------------------------------------------------------------------
+uframe                |  0  |  1  |  2  |  3  |  4  |  5  |  6  |  7  |
+----------------------------------------------------------------------
+max_tt_usecs          | 125 | 125 | 125 | 125 | 125 | 125 | 30  |  0  |
+----------------------------------------------------------------------
+used usecs on a frame | 13  | 125 |  39 |  0  |  0  |  0  |  0  |  0  |
+----------------------------------------------------------------------
+
+There no place for iso IN stream  (uframe 0-2 are used) and we got "cannot
+submit datapipe for urb 0, error -28: not enough bandwidth" error.
+
+With the patch this become.
+
+iso OUT stream
+----------------------------------------------------------------------
+uframe                |  0  |  1  |  2  |  3  |  4  |  5  |  6  |  7  |
+----------------------------------------------------------------------
+max_tt_usecs          | 125 | 125 | 125 | 125 | 125 | 125 | 30  |  0  |
+----------------------------------------------------------------------
+used usecs on a frame |  13 |  0  |  0  |  0  | 125 |  39 |  0  |  0  |
+----------------------------------------------------------------------
+
+iso IN stream
+----------------------------------------------------------------------
+uframe                |  0  |  1  |  2  |  3  |  4  |  5  |  6  |  7  |
+----------------------------------------------------------------------
+max_tt_usecs          | 125 | 125 | 125 | 125 | 125 | 125 | 30  |  0  |
+----------------------------------------------------------------------
+used usecs on a frame |  13 |  0  | 125 | 40  | 125 |  39 |  0  |  0  |
+----------------------------------------------------------------------
+
+Signed-off-by: Matthieu Castet <matthieu.castet@parrot.com>
+Signed-off-by: Thomas Poussevin <thomas.poussevin@parrot.com>
+Signed-off-by: Alan Stern <stern@rowland.harvard.edu>
+Cc: stable <stable@vger.kernel.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+---
+ drivers/usb/host/ehci-sched.c |   15 ++++++++++-----
+ 1 files changed, 10 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/usb/host/ehci-sched.c b/drivers/usb/host/ehci-sched.c
+index 2e829fa..56a3203 100644
+--- a/drivers/usb/host/ehci-sched.c
++++ b/drivers/usb/host/ehci-sched.c
+@@ -1479,10 +1479,15 @@ iso_stream_schedule (
+ 
+ 		/* NOTE:  assumes URB_ISO_ASAP, to limit complexity/bugs */
+ 
+-		/* find a uframe slot with enough bandwidth */
+-		next = start + period;
+-		for (; start < next; start++) {
+-
++		/* find a uframe slot with enough bandwidth.
++		 * Early uframes are more precious because full-speed
++		 * iso IN transfers can't use late uframes,
++		 * and therefore they should be allocated last.
++		 */
++		next = start;
++		start += period;
++		do {
++			start--;
+ 			/* check schedule: enough space? */
+ 			if (stream->highspeed) {
+ 				if (itd_slot_ok(ehci, mod, start,
+@@ -1495,7 +1500,7 @@ iso_stream_schedule (
+ 						start, sched, period))
+ 					break;
+ 			}
+-		}
++		} while (start > next);
+ 
+ 		/* no room in the schedule */
+ 		if (start == next) {
+-- 
+1.7.7.3
+
