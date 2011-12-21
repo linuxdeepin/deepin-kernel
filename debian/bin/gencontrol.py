@@ -71,10 +71,12 @@ class Gencontrol(Base):
                       (arch, makeflags)])
 
         # Add udebs using kernel-wedge
-        installer_dir = 'debian/installer/' + arch
-        if os.path.isdir(installer_dir):
+        installer_def_dir = 'debian/installer'
+        installer_arch_dir = os.path.join(installer_def_dir, arch)
+        if os.path.isdir(installer_arch_dir):
             kw_env = os.environ.copy()
-            kw_env['KW_CONFIG_DIR'] = installer_dir
+            kw_env['KW_DEFCONFIG_DIR'] = installer_def_dir
+            kw_env['KW_CONFIG_DIR'] = installer_arch_dir
             kw_proc = subprocess.Popen(
                 ['kernel-wedge', 'gen-control',
                  self.abiname],
