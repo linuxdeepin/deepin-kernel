@@ -49,7 +49,7 @@ class main(object):
 
         local_config = ConfigCoreDump(fp = file("debian/config.defines.dump"))
 
-        self.version_abi = self.version + '-' + local_config['abi',]['abiname']
+        self.version_abi = local_config['version',]['abiname']
 
     def __call__(self):
         self.dir = tempfile.mkdtemp(prefix = 'abiupdate')
