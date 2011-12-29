@@ -24,7 +24,7 @@ class FirmwareWhence(list):
         licence = None
         binary = None
         desc = None
-        source = None
+        source = []
         version = None
 
         for line in file:
@@ -49,7 +49,7 @@ class FirmwareWhence(list):
                     files[binary] = FirmwareFile(binary, desc, source, version)
                 binary = None
                 desc = None
-                source = None
+                source = []
                 version = None
                 continue
 
@@ -62,18 +62,13 @@ class FirmwareWhence(list):
                 if keyword == 'Driver':
                     driver = value.split(' ')[0].lower()
                 elif keyword == 'File':
-                    match = re.match(r'(\S+)\s+--\s+(.*)', value)
-                    if match:
-                        binary = match.group(1)
-                        desc = match.group(2)
-                    else:
-                        for binary in value.strip().split():
-                            files[binary] = FirmwareFile(binary)
-                        binary = None
+                    match = re.match(r'(\S+)(?:\s+--\s+(.*))?', value)
+                    binary = match.group(1)
+                    desc = match.group(2)
                 elif keyword in ['Info', 'Version']:
                     version = value
                 elif keyword == 'Source':
-                    source = value
+                    source.append(value)
                 else:
                     licence = value
             elif licence is not None:
