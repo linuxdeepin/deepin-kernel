@@ -1,0 +1,125 @@
+From: Paolo Bonzini <pbonzini@redhat.com>
+Subject: [PATCH 2/3] block: fail SCSI passthrough ioctls on partition devices
+Date: Thu, 22 Dec 2011 19:02:18 +0100
+
+Linux allows executing the SG_IO ioctl on a partition or even on an
+LVM volume, and will pass the command to the underlying block device.
+This is well-known, but it is also a large security problem when (via
+Unix permissions, ACLs, SELinux or a combination thereof) a program or
+user needs to be granted access to a particular partition or logical
+volume but not to the full device.
+
+This patch limits the ioctls that are forwarded to non-SCSI devices to
+a few ones that are harmless.  This restriction includes programs
+running with the CAP_SYS_RAWIO.  If for example I let a program access
+/dev/sda2 and /dev/sdb, it still should not be able to read/write outside
+the boundaries of /dev/sda2 independent of the capabilities.
+
+This patch does not affect the non-libata IDE driver.  That driver however
+already tests for bd != bd->bd_contains before issuing some ioctl; so,
+programs that do not require CAP_SYS_ADMIN or CAP_SYS_RAWIO are safe.
+Whenever possible a workaround is just to use libata, of course.
+
+Encryption on the host is a mitigating factor, but it does not provide
+a full solution.  In particular it doesn't protect against DoS (write
+random data), replay attacks (reinstate old ciphertext sectors), or
+writes to unencrypted areas including the MBR, the partition table, or
+/boot.
+
+Thanks to Daniel Berrange, Milan Broz, Mike Christie, Alasdair Kergon,
+Petr Matousek, Jeff Moyer, Mike Snitzer and others for help discussing
+this issue.
+
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+[bwh: Adjust context for 3.1]
+---
+--- a/block/scsi_ioctl.c
++++ b/block/scsi_ioctl.c
+@@ -675,9 +675,43 @@ int scsi_cmd_ioctl(struct request_queue *q, struct gendisk *bd_disk, fmode_t mod
+ }
+ EXPORT_SYMBOL(scsi_cmd_ioctl);
+ 
++int scsi_verify_blk_ioctl(struct block_device *bd, unsigned int cmd)
++{
++	if (bd && bd == bd->bd_contains)
++		return 0;
++
++	/* Actually none of this is particularly useful on a partition
++	 * device, but let's play it safe.
++	 */
++	switch (cmd) {
++	case SCSI_IOCTL_GET_IDLUN:
++	case SCSI_IOCTL_GET_BUS_NUMBER:
++	case SCSI_IOCTL_GET_PCI:
++	case SCSI_IOCTL_PROBE_HOST:
++	case SG_GET_VERSION_NUM:
++	case SG_SET_TIMEOUT:
++	case SG_GET_TIMEOUT:
++	case SG_GET_RESERVED_SIZE:
++	case SG_SET_RESERVED_SIZE:
++	case SG_EMULATED_HOST:
++		return 0;
++	default:
++		break;
++	}
++	/* In particular, rule out all resets and host-specific ioctls.  */
++	return -ENOTTY;
++}
++EXPORT_SYMBOL(scsi_verify_blk_ioctl);
++
+ int scsi_cmd_blk_ioctl(struct block_device *bd, fmode_t mode,
+ 		       unsigned int cmd, void __user *arg)
+ {
++	int ret;
++
++	ret = scsi_verify_blk_ioctl(bd, cmd);
++	if (ret < 0)
++		return ret;
++
+ 	return scsi_cmd_ioctl(bd->bd_disk->queue, bd->bd_disk, mode, cmd, arg);
+ }
+ EXPORT_SYMBOL(scsi_cmd_blk_ioctl);
+--- a/drivers/scsi/sd.c
++++ b/drivers/scsi/sd.c
+@@ -1058,6 +1058,10 @@ static int sd_ioctl(struct block_device *bdev, fmode_t mode,
+ 	SCSI_LOG_IOCTL(1, printk("sd_ioctl: disk=%s, cmd=0x%x\n",
+ 						disk->disk_name, cmd));
+ 
++	error = scsi_verify_blk_ioctl(bdev, cmd);
++	if (error < 0)
++		return error;
++
+ 	/*
+ 	 * If we are in the middle of error recovery, don't let anyone
+ 	 * else try and use this device.  Also, if error recovery fails, it
+@@ -1228,6 +1232,11 @@ static int sd_compat_ioctl(struct block_device *bdev, fmode_t mode,
+ 			   unsigned int cmd, unsigned long arg)
+ {
+ 	struct scsi_device *sdev = scsi_disk(bdev->bd_disk)->device;
++	int ret;
++
++	ret = scsi_verify_blk_ioctl(bdev, cmd);
++	if (ret < 0)
++		return ret == -ENOTTY ? -ENOIOCTLCMD : ret;
+ 
+ 	/*
+ 	 * If we are in the middle of error recovery, don't let anyone
+@@ -1239,8 +1248,6 @@ static int sd_compat_ioctl(struct block_device *bdev, fmode_t mode,
+ 		return -ENODEV;
+ 	       
+ 	if (sdev->host->hostt->compat_ioctl) {
+-		int ret;
+-
+ 		ret = sdev->host->hostt->compat_ioctl(sdev, cmd, (void __user *)arg);
+ 
+ 		return ret;
+--- a/include/linux/blkdev.h
++++ b/include/linux/blkdev.h
+@@ -761,6 +761,7 @@ extern void blk_plug_device(struct request_queue *);
+ 				     struct request *rq);
+ extern void blk_delay_queue(struct request_queue *, unsigned long);
+ extern void blk_recount_segments(struct request_queue *, struct bio *);
++extern int scsi_verify_blk_ioctl(struct block_device *, unsigned int);
+ extern int scsi_cmd_blk_ioctl(struct block_device *, fmode_t,
+ 			      unsigned int, void __user *);
+ extern int scsi_cmd_ioctl(struct request_queue *, struct gendisk *, fmode_t,
