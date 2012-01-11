@@ -1,8 +1,9 @@
-from debian import *
-from utils import SortedDict
+from collections import OrderedDict
+
+from .debian import *
 
 
-class PackagesList(SortedDict):
+class PackagesList(OrderedDict):
     def append(self, package):
         self[package['Package']] = package
 

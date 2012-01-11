@@ -1,6 +1,4 @@
-from __future__ import absolute_import
-
-from .utils import SortedDict
+from collections import OrderedDict
 
 __all__ = (
     "KconfigFile",
@@ -44,7 +42,7 @@ class EntryTristate(object):
             return "%s=m" % conf
 
 
-class KconfigFile(SortedDict):
+class KconfigFile(OrderedDict):
     def __str__(self):
         ret = []
         for i in self.str_iter():

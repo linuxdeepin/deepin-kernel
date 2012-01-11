@@ -1,42 +1,6 @@
-from __future__ import absolute_import
-
 import os
 import re
 import textwrap
-
-_marker = object
-
-
-class SortedDict(dict):
-    __slots__ = '_list',
-
-    def __init__(self, entries=None):
-        super(SortedDict, self).__init__()
-        self._list = []
-        if entries is not None:
-            for key, value in entries:
-                self[key] = value
-
-    def __delitem__(self, key):
-        super(SortedDict, self).__delitem__(key)
-        self._list.remove(key)
-
-    def __setitem__(self, key, value):
-        super(SortedDict, self).__setitem__(key, value)
-        if key not in self._list:
-            self._list.append(key)
-
-    def iterkeys(self):
-        for i in iter(self._list):
-            yield i
-
-    def iteritems(self):
-        for i in iter(self._list):
-            yield (i, self[i])
-
-    def itervalues(self):
-        for i in iter(self._list):
-            yield self[i]
 
 
 class Templates(object):

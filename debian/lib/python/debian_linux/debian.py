@@ -1,8 +1,9 @@
+from collections import OrderedDict
 import itertools
 import os.path
 import re
-import utils
 
+from . import utils
 
 class Changelog(list):
     _rules = r"""
@@ -362,7 +363,7 @@ class PackageRelationEntry(object):
 
 
 class Package(dict):
-    _fields = utils.SortedDict((
+    _fields = OrderedDict((
         ('Package', str),
         ('Source', str),
         ('Architecture', PackageFieldList),
