@@ -7,15 +7,43 @@ import os
 import os.path
 import subprocess
 
-from debian_linux.config import ConfigCoreHierarchy
+from debian_linux import config
 from debian_linux.debian import *
 from debian_linux.gencontrol import Gencontrol as Base
 from debian_linux.utils import Templates, read_control
 
 
 class Gencontrol(Base):
+    config_schema = {
+        'abi': {
+            'ignore-changes': config.SchemaItemList(),
+        },
+        'base': {
+            'modules': config.SchemaItemBoolean(),
+        },
+        'build': {
+            'debug-info': config.SchemaItemBoolean(),
+        },
+        'description': {
+            'parts': config.SchemaItemList(),
+        },
+        'image': {
+            'bootloaders': config.SchemaItemList(),
+            'configs': config.SchemaItemList(),
+            'initramfs': config.SchemaItemBoolean(),
+            'initramfs-generators': config.SchemaItemList(),
+        },
+        'relations': {
+        },
+        'xen': {
+            'dom0-support': config.SchemaItemBoolean(),
+            'flavours': config.SchemaItemList(),
+            'versions': config.SchemaItemList(),
+        }
+    }
+
     def __init__(self, config_dirs=["debian/config"], template_dirs=["debian/templates"]):
-        super(Gencontrol, self).__init__(ConfigCoreHierarchy(config_dirs), Templates(template_dirs), VersionLinux)
+        super(Gencontrol, self).__init__(config.ConfigCoreHierarchy(self.config_schema, config_dirs), Templates(template_dirs), VersionLinux)
         self.process_changelog()
         self.config_dirs = config_dirs
 

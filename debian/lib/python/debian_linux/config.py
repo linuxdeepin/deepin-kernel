@@ -87,40 +87,20 @@ class ConfigCoreDump(object):
 
 
 class ConfigCoreHierarchy(object):
-    schemas = {
-        'abi': {
-            'ignore-changes': SchemaItemList(),
-        },
+    schema_base = {
         'base': {
             'arches': SchemaItemList(),
             'enabled': SchemaItemBoolean(),
             'featuresets': SchemaItemList(),
             'flavours': SchemaItemList(),
-            'modules': SchemaItemBoolean(),
         },
-        'build': {
-            'debug-info': SchemaItemBoolean(),
-        },
-        'description': {
-            'parts': SchemaItemList(),
-        },
-        'image': {
-            'bootloaders': SchemaItemList(),
-            'configs': SchemaItemList(),
-            'initramfs': SchemaItemBoolean(),
-            'initramfs-generators': SchemaItemList(),
-        },
-        'relations': {
-        },
-        'xen': {
-            'dom0-support': SchemaItemBoolean(),
-            'flavours': SchemaItemList(),
-            'versions': SchemaItemList(),
-        }
     }
 
-    def __new__(cls, dirs=[]):
-        return cls.Reader(dirs, cls.schemas)()
+    def __new__(cls, schema, dirs=[]):
+        schema_complete = cls.schema_base.copy()
+        for key, value in schema.iteritems():
+            schema_complete.setdefault(key, {}).update(value)
+        return cls.Reader(dirs, schema_complete)()
 
     class Reader(object):
         config_name = "defines"
