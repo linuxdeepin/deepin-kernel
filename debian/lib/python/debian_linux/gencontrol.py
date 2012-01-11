@@ -278,7 +278,7 @@ class Gencontrol(object):
         def subst(match):
             return vars[match.group(1)]
 
-        return re.sub(r'@([-_a-z]+)@', subst, s)
+        return re.sub(r'@([-_a-z]+)@', subst, str(s))
 
     def write(self, packages, makefile):
         self.write_control(packages.itervalues())

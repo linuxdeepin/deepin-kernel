@@ -327,7 +327,7 @@ class Gencontrol(Base):
             name = new_package['Package']
             if name in packages:
                 package = packages.get(name)
-                package['Architecture'].append(arch)
+                package['Architecture'].add(arch)
 
                 for field in 'Depends', 'Provides', 'Suggests', 'Recommends', 'Conflicts':
                     if field in new_package:
@@ -338,7 +338,7 @@ class Gencontrol(Base):
                             package[field] = new_package[field]
 
             else:
-                new_package['Architecture'] = [arch]
+                new_package['Architecture'] = arch
                 packages.append(new_package)
 
     def process_changelog(self):

@@ -1,4 +1,4 @@
-from collections import OrderedDict
+import collections
 import itertools
 import os.path
 import re
@@ -157,22 +157,38 @@ $
         self.linux_revision_other = match.group('revision_other') and True
 
 
-class PackageFieldList(list):
+class PackageArchitecture(collections.MutableSet):
+    __slots__ = '_data'
+
     def __init__(self, value=None):
-        self.extend(value)
+        self._data = set()
+        if value:
+            self.extend(value)
+
+    def __contains__(self, value):
+        return self._data.__contains__(value)
+
+    def __iter__(self):
+        return self._data.__iter__()
+
+    def __len__(self):
+        return self._data.__len__()
 
     def __str__(self):
-        return ' '.join(self)
+        return ' '.join(sorted(self))
 
-    def _extend(self, value):
-        if value is not None:
-            self.extend([j.strip() for j in re.split('\s', value.strip())])
+    def add(self, value):
+        self._data.add(value)
+
+    def discard(self, value):
+        self._data.discard(value)
 
     def extend(self, value):
-        if isinstance(value, str):
-            self._extend(value)
+        if isinstance(value, basestring):
+            for i in re.split('\s', value.strip()):
+                self.add(i)
         else:
-            super(PackageFieldList, self).extend(value)
+            raise RuntimeError
 
 
 class PackageDescription(object):
@@ -363,10 +379,10 @@ class PackageRelationEntry(object):
 
 
 class Package(dict):
-    _fields = OrderedDict((
+    _fields = collections.OrderedDict((
         ('Package', str),
         ('Source', str),
-        ('Architecture', PackageFieldList),
+        ('Architecture', PackageArchitecture),
         ('Section', str),
         ('Priority', str),
         ('Maintainer', str),
