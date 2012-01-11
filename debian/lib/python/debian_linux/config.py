@@ -121,7 +121,9 @@ class ConfigCoreHierarchy(ConfigCore):
             'flavours': SchemaItemList(),
             'modules': SchemaItemBoolean(),
         },
-        'build': {},
+        'build': {
+            'debug-info': SchemaItemBoolean(),
+        },
         'description': {
             'parts': SchemaItemList(),
         },
@@ -130,9 +132,6 @@ class ConfigCoreHierarchy(ConfigCore):
             'configs': SchemaItemList(),
             'initramfs': SchemaItemBoolean(),
             'initramfs-generators': SchemaItemList(),
-        },
-        'image-dbg': {
-            'enabled': SchemaItemBoolean(),
         },
         'relations': {
         },
