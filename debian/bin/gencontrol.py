@@ -157,9 +157,9 @@ class Gencontrol(Base):
         headers = self.templates["control.headers"]
 
         config_entry_base = self.config.merge('base', arch, featureset, flavour)
+        config_entry_build = self.config.merge('build', arch, featureset, flavour)
         config_entry_description = self.config.merge('description', arch, featureset, flavour)
         config_entry_image = self.config.merge('image', arch, featureset, flavour)
-        config_entry_image_dbg = self.config.merge('image-dbg', arch, featureset, flavour)
         config_entry_relations = self.config.merge('relations', arch, featureset, flavour)
 
         compiler = config_entry_base.get('compiler', 'gcc')
@@ -243,7 +243,7 @@ class Gencontrol(Base):
             packages_own.append(package_headers)
             extra['headers_arch_depends'].append('%s (= ${binary:Version})' % packages_own[-1]['Package'])
 
-        build_debug = config_entry_image_dbg.get('enabled')
+        build_debug = config_entry_build.get('debug-info')
         if build_debug:
             makeflags['DEBUG'] = True
             packages_own.extend(self.process_packages(self.templates['control.image-dbg'], vars))
