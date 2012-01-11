@@ -1,10 +1,15 @@
-import os, os.path, re, sys, textwrap
+import os
+import os.path
+import re
+import sys
+import textwrap
 
 __all__ = [
     'ConfigCoreDump',
     'ConfigCoreHierarchy',
     'ConfigParser',
 ]
+
 
 class SchemaItemBoolean(object):
     def __call__(self, i):
@@ -15,8 +20,9 @@ class SchemaItemBoolean(object):
             return False
         raise Error
 
+
 class SchemaItemList(object):
-    def __init__(self, type = "\s+"):
+    def __init__(self, type="\s+"):
         self.type = type
 
     def __call__(self, i):
@@ -24,6 +30,7 @@ class SchemaItemList(object):
         if not i:
             return []
         return [j.strip() for j in re.split(self.type, i)]
+
 
 class ConfigCore(dict):
     def get_merge(self, section, arch, featureset, flavour, key, default=None):
@@ -55,7 +62,7 @@ class ConfigCore(dict):
 
         return ret or default
 
-    def merge(self, section, arch = None, featureset = None, flavour = None):
+    def merge(self, section, arch=None, featureset=None, flavour=None):
         ret = {}
         ret.update(self.get((section,), {}))
         if featureset:
@@ -81,8 +88,9 @@ class ConfigCore(dict):
                 fp.write('%s: %r\n' % (item, items[item]))
             fp.write('\n')
 
+
 class ConfigCoreDump(ConfigCore):
-    def __init__(self, config = None, fp = None):
+    def __init__(self, config=None, fp=None):
         super(ConfigCoreDump, self).__init__(self)
         if config is not None:
             self.update(config)
@@ -97,6 +105,7 @@ class ConfigCoreDump(ConfigCore):
                     value_real = eval(value)
                     data[key] = value_real
                 self[section_real] = data
+
 
 class ConfigCoreHierarchy(ConfigCore):
     config_name = "defines"
@@ -134,7 +143,7 @@ class ConfigCoreHierarchy(ConfigCore):
         }
     }
 
-    def __init__(self, dirs = []):
+    def __init__(self, dirs=[]):
         super(ConfigCoreHierarchy, self).__init__()
         self._dirs = dirs
         self._read_base()
@@ -143,8 +152,8 @@ class ConfigCoreHierarchy(ConfigCore):
         config = ConfigParser(self.schemas)
         config.read(self.get_files("%s/%s" % (arch, self.config_name)))
 
-        featuresets = config['base',].get('featuresets', [])
-        flavours = config['base',].get('flavours', [])
+        featuresets = config['base', ].get('featuresets', [])
+        flavours = config['base', ].get('flavours', [])
 
         for section in iter(config):
             if section[0] in featuresets:
@@ -172,7 +181,7 @@ class ConfigCoreHierarchy(ConfigCore):
         config = ConfigParser(self.schemas)
         config.read(self.get_files("%s/%s/%s" % (arch, featureset, self.config_name)))
 
-        flavours = config['base',].get('flavours', [])
+        flavours = config['base', ].get('flavours', [])
 
         for section in iter(config):
             real = (section[-1], arch, featureset) + section[:-1]
@@ -184,8 +193,8 @@ class ConfigCoreHierarchy(ConfigCore):
         config = ConfigParser(self.schemas)
         config.read(self.get_files(self.config_name))
 
-        arches = config['base',]['arches']
-        featuresets = config['base',].get('featuresets', [])
+        arches = config['base', ]['arches']
+        featuresets = config['base', ].get('featuresets', [])
 
         for section in iter(config):
             if section[0].startswith('featureset-'):
@@ -211,6 +220,7 @@ class ConfigCoreHierarchy(ConfigCore):
 
     def get_files(self, name):
         return [os.path.join(i, name) for i in self._dirs if i]
+
 
 class ConfigParser(object):
     __slots__ = '_config', 'schemas'
@@ -260,7 +270,8 @@ class ConfigParser(object):
             for key in data.keys():
                 try:
                     data[key] = schema[key](data[key])
-                except KeyError: pass
+                except KeyError:
+                    pass
             super(ConfigParser.SectionSchema, self).__init__(data)
 
 if __name__ == '__main__':
@@ -276,4 +287,3 @@ if __name__ == '__main__':
         for item in items:
             print "%s: %s" % (item, items[item])
         print
-

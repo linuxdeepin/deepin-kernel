@@ -1,4 +1,8 @@
-import itertools, os.path, re, utils
+import itertools
+import os.path
+import re
+import utils
+
 
 class Changelog(list):
     _rules = r"""
@@ -26,7 +30,7 @@ class Changelog(list):
         def __init__(self, distribution, source, version):
             self.distribution, self.source, self.version = distribution, source, version
 
-    def __init__(self, dir = '', version = None):
+    def __init__(self, dir='', version=None):
         if version is None:
             version = Version
         f = file(os.path.join(dir, "debian/changelog"))
@@ -44,6 +48,7 @@ class Changelog(list):
                     raise
                 v = Version(match.group('version'))
             self.append(self.Entry(match.group('distribution'), match.group('source'), v))
+
 
 class Version(object):
     _version_rules = ur"""
@@ -68,7 +73,7 @@ $
     def __init__(self, version):
         match = self._version_re.match(version)
         if match is None:
-            raise RuntimeError, "Invalid debian version"
+            raise RuntimeError("Invalid debian version")
         self.epoch = None
         if match.group("epoch") is not None:
             self.epoch = int(match.group("epoch"))
@@ -93,8 +98,9 @@ $
     @property
     def debian(self):
         from warnings import warn
-        warn("debian argument was replaced by revision", DeprecationWarning, stacklevel = 2)
+        warn("debian argument was replaced by revision", DeprecationWarning, stacklevel=2)
         return self.revision
+
 
 class VersionLinux(Version):
     _version_linux_rules = ur"""
@@ -137,7 +143,7 @@ $
         super(VersionLinux, self).__init__(version)
         match = self._version_linux_re.match(version)
         if match is None:
-            raise RuntimeError, "Invalid debian linux version"
+            raise RuntimeError("Invalid debian linux version")
         d = match.groupdict()
         self.linux_modifier = d['modifier']
         self.linux_version = d['version']
@@ -148,9 +154,10 @@ $
         self.linux_dfsg = d['dfsg']
         self.linux_revision_experimental = match.group('revision_experimental') and True
         self.linux_revision_other = match.group('revision_other') and True
- 
+
+
 class PackageFieldList(list):
-    def __init__(self, value = None):
+    def __init__(self, value=None):
         self.extend(value)
 
     def __str__(self):
@@ -166,10 +173,11 @@ class PackageFieldList(list):
         else:
             super(PackageFieldList, self).extend(value)
 
+
 class PackageDescription(object):
     __slots__ = "short", "long"
 
-    def __init__(self, value = None):
+    def __init__(self, value=None):
         self.short = []
         self.long = []
         if value is not None:
@@ -178,7 +186,7 @@ class PackageDescription(object):
             self.append_short(short)
 
     def __str__(self):
-        wrap = utils.TextWrapper(width = 74, fix_sentence_endings = True).wrap
+        wrap = utils.TextWrapper(width=74, fix_sentence_endings=True).wrap
         short = ', '.join(self.short)
         long_pars = []
         for i in self.long:
@@ -203,6 +211,7 @@ class PackageDescription(object):
         else:
             raise TypeError
 
+
 class PackageRelation(list):
     def __init__(self, value=None, override_arches=None):
         if value:
@@ -221,7 +230,7 @@ class PackageRelation(list):
         if isinstance(value, basestring):
             value = PackageRelationGroup(value, override_arches)
         elif not isinstance(value, PackageRelationGroup):
-            raise ValueError, "got %s" % type(value)
+            raise ValueError("got %s" % type(value))
         j = self._search_value(value)
         if j:
             j._update_arches(value)
@@ -232,9 +241,10 @@ class PackageRelation(list):
         if isinstance(value, basestring):
             value = [j.strip() for j in re.split(',', value.strip())]
         elif not isinstance(value, (list, tuple)):
-            raise ValueError, "got %s" % type(value)
+            raise ValueError("got %s" % type(value))
         for i in value:
             self.append(i, override_arches)
+
 
 class PackageRelationGroup(list):
     def __init__(self, value=None, override_arches=None):
@@ -272,15 +282,38 @@ class PackageRelationGroup(list):
         for i in value:
             self.append(i, override_arches)
 
+
 class PackageRelationEntry(object):
     __slots__ = "name", "operator", "version", "arches"
 
     _re = re.compile(r'^(\S+)(?: \((<<|<=|=|!=|>=|>>)\s*([^)]+)\))?(?: \[([^]]+)\])?$')
 
     class _operator(object):
-        OP_LT = 1; OP_LE = 2; OP_EQ = 3; OP_NE = 4; OP_GE = 5; OP_GT = 6
-        operators = { '<<': OP_LT, '<=': OP_LE, '=':  OP_EQ, '!=': OP_NE, '>=': OP_GE, '>>': OP_GT }
-        operators_neg = { OP_LT: OP_GE, OP_LE: OP_GT, OP_EQ: OP_NE, OP_NE: OP_EQ, OP_GE: OP_LT, OP_GT: OP_LE }
+        OP_LT = 1
+        OP_LE = 2
+        OP_EQ = 3
+        OP_NE = 4
+        OP_GE = 5
+        OP_GT = 6
+
+        operators = {
+                '<<': OP_LT,
+                '<=': OP_LE,
+                '=': OP_EQ,
+                '!=': OP_NE,
+                '>=': OP_GE,
+                '>>': OP_GT,
+        }
+
+        operators_neg = {
+                OP_LT: OP_GE,
+                OP_LE: OP_GT,
+                OP_EQ: OP_NE,
+                OP_NE: OP_EQ,
+                OP_GE: OP_LT,
+                OP_GT: OP_LE,
+        }
+
         operators_text = dict([(b, a) for a, b in operators.iteritems()])
 
         __slots__ = '_op',
@@ -314,7 +347,7 @@ class PackageRelationEntry(object):
     def parse(self, value):
         match = self._re.match(value)
         if match is None:
-            raise RuntimeError, "Can't parse dependency %s" % value
+            raise RuntimeError("Can't parse dependency %s" % value)
         match = match.groups()
         self.name = match[0]
         if match[1] is not None:
@@ -326,6 +359,7 @@ class PackageRelationEntry(object):
             self.arches = re.split('\s+', match[3])
         else:
             self.arches = []
+
 
 class Package(dict):
     _fields = utils.SortedDict((
@@ -355,13 +389,14 @@ class Package(dict):
             cls = self._fields[key]
             if not isinstance(value, cls):
                 value = cls(value)
-        except KeyError: pass
+        except KeyError:
+            pass
         super(Package, self).__setitem__(key, value)
 
     def iterkeys(self):
         keys = set(self.keys())
         for i in self._fields.iterkeys():
-            if self.has_key(i):
+            if i in self:
                 keys.remove(i)
                 yield i
         for i in keys:
@@ -374,4 +409,3 @@ class Package(dict):
     def itervalues(self):
         for i in self.iterkeys():
             yield self[i]
-

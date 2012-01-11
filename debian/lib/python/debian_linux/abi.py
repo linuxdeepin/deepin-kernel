@@ -10,9 +10,12 @@ class Symbol(object):
         # Symbols are resolved to modules by depmod at installation/
         # upgrade time, not compile time, so moving a symbol between
         # modules is not an ABI change.  Compare everything else.
-        if self.name != other.name: return False
-        if self.version != other.version: return False
-        if self.export != other.export: return False
+        if self.name != other.name:
+            return False
+        if self.version != other.version:
+            return False
+        if self.export != other.export:
+            return False
 
         return True
 
@@ -21,6 +24,7 @@ class Symbol(object):
         if ret is NotImplemented:
             return ret
         return not ret
+
 
 class Symbols(dict):
     def __init__(self, file=None):
@@ -36,4 +40,5 @@ class Symbols(dict):
         symbols = self.values()
         symbols.sort(key=lambda i: i.name)
         for s in symbols:
-            file.write("%s %s %s %s\n" % (s.version, s.name, s.module, s.export))
+            file.write("%s %s %s %s\n" %
+                    (s.version, s.name, s.module, s.export))

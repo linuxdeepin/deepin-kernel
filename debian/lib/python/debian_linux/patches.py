@@ -1,10 +1,13 @@
-import glob, os, shutil
+import glob
+import os
+import shutil
+
 
 class Operation(object):
     def __init__(self, name, data):
         self.name, self.data = name, data
 
-    def __call__(self, dir = '.', reverse = False):
+    def __call__(self, dir='.', reverse=False):
         try:
             if not reverse:
                 self.do(dir)
@@ -28,6 +31,7 @@ class Operation(object):
     def do_reverse(self, dir):
         raise NotImplementedError
 
+
 class OperationPatch(Operation):
     def __init__(self, name, fopen, data):
         super(OperationPatch, self).__init__(name, data)
@@ -46,17 +50,20 @@ class OperationPatch(Operation):
     def patch_pop(self, dir):
         self._call(dir, '-R')
 
+
 class OperationPatchPush(OperationPatch):
     operation = '+'
 
     do = OperationPatch.patch_push
     do_reverse = OperationPatch.patch_pop
 
+
 class OperationPatchPop(OperationPatch):
     operation = '-'
 
     do = OperationPatch.patch_pop
     do_reverse = OperationPatch.patch_push
+
 
 class SubOperation(Operation):
     def _log(self, result):
@@ -65,6 +72,7 @@ class SubOperation(Operation):
         else:
             s = "FAIL"
         print """    %-10s %-4s %s""" % ('(%s)' % self.operation, s, self.name)
+
 
 class SubOperationFilesRemove(SubOperation):
     operation = "remove"
@@ -76,6 +84,7 @@ class SubOperationFilesRemove(SubOperation):
                 shutil.rmtree(n)
             else:
                 os.unlink(n)
+
 
 class SubOperationFilesUnifdef(SubOperation):
     operation = "unifdef"
@@ -93,6 +102,7 @@ class SubOperationFilesUnifdef(SubOperation):
         f1 = file(filename, 'wb')
         f1.write(data)
         f1.close()
+
 
 class OperationFiles(Operation):
     operation = 'X'
@@ -126,7 +136,8 @@ class OperationFiles(Operation):
 
     def do(self, dir):
         for i in self.ops:
-            i(dir = dir)
+            i(dir=dir)
+
 
 class PatchSeries(list):
     operations = {
@@ -166,20 +177,21 @@ class PatchSeries(list):
 
             self.append(self.operations[operation](filename, fopen, data))
 
-    def __call__(self, cond = bool, dir = '.', reverse = False):
+    def __call__(self, cond=bool, dir='.', reverse=False):
         if not reverse:
             l = self
         else:
             l = self[::-1]
         for i in l:
             if cond(i):
-                i(dir = dir, reverse = reverse)
+                i(dir=dir, reverse=reverse)
 
     def __repr__(self):
         return '<%s object for %s>' % (self.__class__.__name__, self.name)
 
+
 class PatchSeriesList(list):
-    def __call__(self, cond = bool, reverse = False):
+    def __call__(self, cond=bool, reverse=False):
         if not reverse:
             l = self
         else:
@@ -189,7 +201,7 @@ class PatchSeriesList(list):
                 print "--> Try to unapply %s." % i.name
             else:
                 print "--> Try to apply %s." % i.name
-            i(cond = cond, reverse = reverse)
+            i(cond=cond, reverse=reverse)
             if reverse:
                 print "--> %s fully unapplied." % i.name
             else:
@@ -205,4 +217,3 @@ class PatchSeriesList(list):
             except IOError:
                 pass
         return ret
-

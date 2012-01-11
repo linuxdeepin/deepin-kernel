@@ -1,13 +1,16 @@
 from __future__ import absolute_import
 
-import re, os, textwrap
+import os
+import re
+import textwrap
 
 _marker = object
+
 
 class SortedDict(dict):
     __slots__ = '_list',
 
-    def __init__(self, entries = None):
+    def __init__(self, entries=None):
         super(SortedDict, self).__init__()
         self._list = []
         if entries is not None:
@@ -35,8 +38,9 @@ class SortedDict(dict):
         for i in iter(self._list):
             yield self[i]
 
+
 class Templates(object):
-    def __init__(self, dirs = ["debian/templates"]):
+    def __init__(self, dirs=["debian/templates"]):
         self.dirs = dirs
 
         self._cache = {}
@@ -67,6 +71,7 @@ class Templates(object):
             return default
         return value
 
+
 def read_control(f):
     from .debian import Package
 
@@ -96,7 +101,7 @@ def read_control(f):
             if i < 0:
                 raise ValueError("Not a header, not a continuation: ``%s''" % line)
             last = line[:i]
-            lines = [line[i+1:].lstrip()]
+            lines = [line[i + 1:].lstrip()]
         if last:
             e[last] = '\n'.join(lines)
         if e:
@@ -104,8 +109,8 @@ def read_control(f):
 
     return entries
 
+
 class TextWrapper(textwrap.TextWrapper):
     wordsep_re = re.compile(
         r'(\s+|'                                  # any whitespace
         r'(?<=[\w\!\"\'\&\.\,\?])-{2,}(?=\w))')   # em-dash
-
