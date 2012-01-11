@@ -5,6 +5,7 @@ import re
 
 from . import utils
 
+
 class Changelog(list):
     _rules = r"""
 ^
@@ -74,32 +75,32 @@ $
     def __init__(self, version):
         match = self._version_re.match(version)
         if match is None:
-            raise RuntimeError("Invalid debian version")
+            raise RuntimeError(u"Invalid debian version")
         self.epoch = None
         if match.group("epoch") is not None:
             self.epoch = int(match.group("epoch"))
         self.upstream = match.group("upstream")
         self.revision = match.group("revision")
 
-    def __str__(self):
+    def __unicode__(self):
         return self.complete
 
     @property
     def complete(self):
         if self.epoch is not None:
-            return "%d:%s" % (self.epoch, self.complete_noepoch)
+            return u"%d:%s" % (self.epoch, self.complete_noepoch)
         return self.complete_noepoch
 
     @property
     def complete_noepoch(self):
         if self.revision is not None:
-            return "%s-%s" % (self.upstream, self.revision)
+            return u"%s-%s" % (self.upstream, self.revision)
         return self.upstream
 
     @property
     def debian(self):
         from warnings import warn
-        warn("debian argument was replaced by revision", DeprecationWarning, stacklevel=2)
+        warn(u"debian argument was replaced by revision", DeprecationWarning, stacklevel=2)
         return self.revision
 
 
@@ -144,7 +145,7 @@ $
         super(VersionLinux, self).__init__(version)
         match = self._version_linux_re.match(version)
         if match is None:
-            raise RuntimeError("Invalid debian linux version")
+            raise RuntimeError(u"Invalid debian linux version")
         d = match.groupdict()
         self.linux_modifier = d['modifier']
         self.linux_version = d['version']
@@ -174,7 +175,7 @@ class PackageArchitecture(collections.MutableSet):
     def __len__(self):
         return self._data.__len__()
 
-    def __str__(self):
+    def __unicode__(self):
         return ' '.join(sorted(self))
 
     def add(self, value):
@@ -198,11 +199,11 @@ class PackageDescription(object):
         self.short = []
         self.long = []
         if value is not None:
-            short, long = value.split("\n", 1)
+            short, long = value.split(u"\n", 1)
             self.append(long)
             self.append_short(short)
 
-    def __str__(self):
+    def __unicode__(self):
         wrap = utils.TextWrapper(width=74, fix_sentence_endings=True).wrap
         short = ', '.join(self.short)
         long_pars = []
@@ -214,10 +215,10 @@ class PackageDescription(object):
     def append(self, str):
         str = str.strip()
         if str:
-            self.long.extend(str.split("\n.\n"))
+            self.long.extend(str.split(u"\n.\n"))
 
     def append_short(self, str):
-        for i in [i.strip() for i in str.split(",")]:
+        for i in [i.strip() for i in str.split(u",")]:
             if i:
                 self.short.append(i)
 
@@ -234,8 +235,8 @@ class PackageRelation(list):
         if value:
             self.extend(value, override_arches)
 
-    def __str__(self):
-        return ', '.join([str(i) for i in self])
+    def __unicode__(self):
+        return ', '.join([unicode(i) for i in self])
 
     def _search_value(self, value):
         for i in self:
@@ -247,7 +248,7 @@ class PackageRelation(list):
         if isinstance(value, basestring):
             value = PackageRelationGroup(value, override_arches)
         elif not isinstance(value, PackageRelationGroup):
-            raise ValueError("got %s" % type(value))
+            raise ValueError(u"got %s" % type(value))
         j = self._search_value(value)
         if j:
             j._update_arches(value)
@@ -258,7 +259,7 @@ class PackageRelation(list):
         if isinstance(value, basestring):
             value = [j.strip() for j in re.split(',', value.strip())]
         elif not isinstance(value, (list, tuple)):
-            raise ValueError("got %s" % type(value))
+            raise ValueError(u"got %s" % type(value))
         for i in value:
             self.append(i, override_arches)
 
@@ -268,8 +269,8 @@ class PackageRelationGroup(list):
         if value:
             self.extend(value, override_arches)
 
-    def __str__(self):
-        return ' | '.join([str(i) for i in self])
+    def __unicode__(self):
+        return ' | '.join([unicode(i) for i in self])
 
     def _search_value(self, value):
         for i, j in itertools.izip(self, value):
@@ -314,12 +315,12 @@ class PackageRelationEntry(object):
         OP_GT = 6
 
         operators = {
-                '<<': OP_LT,
-                '<=': OP_LE,
-                '=': OP_EQ,
-                '!=': OP_NE,
-                '>=': OP_GE,
-                '>>': OP_GT,
+                u'<<': OP_LT,
+                u'<=': OP_LE,
+                u'=': OP_EQ,
+                u'!=': OP_NE,
+                u'>=': OP_GE,
+                u'>>': OP_GT,
         }
 
         operators_neg = {
@@ -341,7 +342,7 @@ class PackageRelationEntry(object):
         def __neg__(self):
             return self.__class__(self.operators_text[self.operators_neg[self._op]])
 
-        def __str__(self):
+        def __unicode__(self):
             return self.operators_text[self._op]
 
     def __init__(self, value=None, override_arches=None):
@@ -353,18 +354,18 @@ class PackageRelationEntry(object):
         if override_arches:
             self.arches = list(override_arches)
 
-    def __str__(self):
+    def __unicode__(self):
         ret = [self.name]
         if self.operator is not None and self.version is not None:
-            ret.extend([' (', str(self.operator), ' ', self.version, ')'])
+            ret.extend((u' (', unicode(self.operator), u' ', self.version, u')'))
         if self.arches:
-            ret.extend([' [', ' '.join(self.arches), ']'])
+            ret.extend((u' [', u' '.join(self.arches), u']'))
         return ''.join(ret)
 
     def parse(self, value):
         match = self._re.match(value)
         if match is None:
-            raise RuntimeError("Can't parse dependency %s" % value)
+            raise RuntimeError(u"Can't parse dependency %s" % value)
         match = match.groups()
         self.name = match[0]
         if match[1] is not None:
@@ -380,14 +381,14 @@ class PackageRelationEntry(object):
 
 class Package(dict):
     _fields = collections.OrderedDict((
-        ('Package', str),
-        ('Source', str),
+        ('Package', unicode),
+        ('Source', unicode),
         ('Architecture', PackageArchitecture),
-        ('Section', str),
-        ('Priority', str),
-        ('Maintainer', str),
-        ('Uploaders', str),
-        ('Standards-Version', str),
+        ('Section', unicode),
+        ('Priority', unicode),
+        ('Maintainer', unicode),
+        ('Uploaders', unicode),
+        ('Standards-Version', unicode),
         ('Build-Depends', PackageRelation),
         ('Build-Depends-Indep', PackageRelation),
         ('Provides', PackageRelation),

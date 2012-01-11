@@ -1,3 +1,4 @@
+import codecs
 import os
 import re
 import textwrap
@@ -21,7 +22,7 @@ class Templates(object):
         for dir in self.dirs:
             filename = "%s/%s.in" % (dir, name)
             if os.path.exists(filename):
-                f = file(filename)
+                f = codecs.open(filename, 'r', 'utf-8')
                 if prefix == 'control':
                     return read_control(f)
                 return f.read()
@@ -56,14 +57,14 @@ def read_control(f):
                 break
             if line[0] in ' \t':
                 if not last:
-                    raise ValueError('Continuation line seen before first header')
+                    raise ValueError(u'Continuation line seen before first header')
                 lines.append(line.lstrip())
                 continue
             if last:
-                e[last] = '\n'.join(lines)
+                e[last] = u'\n'.join(lines)
             i = line.find(':')
             if i < 0:
-                raise ValueError("Not a header, not a continuation: ``%s''" % line)
+                raise ValueError(u"Not a header, not a continuation: ``%s''" % line)
             last = line[:i]
             lines = [line[i + 1:].lstrip()]
         if last:

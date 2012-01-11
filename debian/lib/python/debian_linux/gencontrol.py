@@ -1,3 +1,4 @@
+import codecs
 from collections import OrderedDict
 
 from .debian import *
@@ -278,7 +279,7 @@ class Gencontrol(object):
         def subst(match):
             return vars[match.group(1)]
 
-        return re.sub(r'@([-_a-z]+)@', subst, str(s))
+        return re.sub(r'@([-_a-z]+)@', subst, unicode(s))
 
     def write(self, packages, makefile):
         self.write_control(packages.itervalues())
@@ -290,7 +291,7 @@ class Gencontrol(object):
         f.close()
 
     def write_control(self, list):
-        self.write_rfc822(file("debian/control", 'w'), list)
+        self.write_rfc822(codecs.open("debian/control", 'w', 'utf-8'), list)
 
     def write_makefile(self, makefile):
         f = file("debian/rules.gen", 'w')
@@ -300,5 +301,6 @@ class Gencontrol(object):
     def write_rfc822(self, f, list):
         for entry in list:
             for key, value in entry.iteritems():
-                f.write("%s: %s\n" % (key, value))
-            f.write('\n')
+                print key, repr(unicode(value))
+                f.write(u"%s: %s\n" % (key, value))
+            f.write(u'\n')
