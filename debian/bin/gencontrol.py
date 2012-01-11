@@ -18,11 +18,9 @@ class Gencontrol(Base):
         'abi': {
             'ignore-changes': config.SchemaItemList(),
         },
-        'base': {
-            'modules': config.SchemaItemBoolean(),
-        },
         'build': {
             'debug-info': config.SchemaItemBoolean(),
+            'modules': config.SchemaItemBoolean(),
         },
         'description': {
             'parts': config.SchemaItemList(),
@@ -245,9 +243,7 @@ class Gencontrol(Base):
 
         if config_entry_image['type'] == 'plain-s390-tape':
             image = self.templates["control.image.type-standalone"]
-            build_modules = False
         else:
-            build_modules = True
             image = self.templates["control.image.type-%s" % config_entry_image['type']]
 
         config_entry_xen = self.config.merge('xen', arch, featureset, flavour)
@@ -264,7 +260,7 @@ class Gencontrol(Base):
         packages_own.append(self.process_real_image(image[0], image_fields, vars))
         packages_own.extend(self.process_packages(image[1:], vars))
 
-        if build_modules:
+        if config_entry_build.get('modules', True):
             makeflags['MODULES'] = True
             package_headers = self.process_package(headers[0], vars)
             package_headers['Depends'].extend(relations_compiler)
