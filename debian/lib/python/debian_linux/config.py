@@ -107,9 +107,7 @@ class ConfigCoreDump(ConfigCore):
                 self[section_real] = data
 
 
-class ConfigCoreHierarchy(ConfigCore):
-    config_name = "defines"
-
+class ConfigCoreHierarchy(object):
     schemas = {
         'abi': {
             'ignore-changes': SchemaItemList(),
@@ -142,83 +140,92 @@ class ConfigCoreHierarchy(ConfigCore):
         }
     }
 
-    def __init__(self, dirs=[]):
-        super(ConfigCoreHierarchy, self).__init__()
-        self._dirs = dirs
-        self._read_base()
+    def __new__(cls, dirs=[]):
+        return cls.Reader(dirs, cls.schemas)()
 
-    def _read_arch(self, arch):
-        config = ConfigParser(self.schemas)
-        config.read(self.get_files("%s/%s" % (arch, self.config_name)))
+    class Reader(object):
+        config_name = "defines"
 
-        featuresets = config['base', ].get('featuresets', [])
-        flavours = config['base', ].get('flavours', [])
+        def __init__(self, dirs, schema):
+            self.dirs, self.schema = dirs, schema
 
-        for section in iter(config):
-            if section[0] in featuresets:
-                real = (section[-1], arch, section[0])
-            elif len(section) > 1:
-                real = (section[-1], arch, None) + section[:-1]
-            else:
-                real = (section[-1], arch) + section[:-1]
-            s = self.get(real, {})
-            s.update(config[section])
-            self[tuple(real)] = s
+        def __call__(self):
+            ret = ConfigCore()
+            self.read(ret)
+            return ret
 
-        for featureset in featuresets:
-            self._read_arch_featureset(arch, featureset)
+        def get_files(self, name):
+            return [os.path.join(i, name) for i in self.dirs if i]
 
-        if flavours:
-            base = self['base', arch]
-            featuresets.insert(0, 'none')
-            base['featuresets'] = featuresets
-            del base['flavours']
-            self['base', arch] = base
-            self['base', arch, 'none'] = {'flavours': flavours, 'implicit-flavour': True}
+        def read_arch(self, ret, arch):
+            config = ConfigParser(self.schema)
+            config.read(self.get_files("%s/%s" % (arch, self.config_name)))
 
-    def _read_arch_featureset(self, arch, featureset):
-        config = ConfigParser(self.schemas)
-        config.read(self.get_files("%s/%s/%s" % (arch, featureset, self.config_name)))
+            featuresets = config['base', ].get('featuresets', [])
+            flavours = config['base', ].get('flavours', [])
 
-        flavours = config['base', ].get('flavours', [])
+            for section in iter(config):
+                if section[0] in featuresets:
+                    real = (section[-1], arch, section[0])
+                elif len(section) > 1:
+                    real = (section[-1], arch, None) + section[:-1]
+                else:
+                    real = (section[-1], arch) + section[:-1]
+                s = ret.get(real, {})
+                s.update(config[section])
+                ret[tuple(real)] = s
 
-        for section in iter(config):
-            real = (section[-1], arch, featureset) + section[:-1]
-            s = self.get(real, {})
-            s.update(config[section])
-            self[tuple(real)] = s
+            for featureset in featuresets:
+                self.read_arch_featureset(ret, arch, featureset)
 
-    def _read_base(self):
-        config = ConfigParser(self.schemas)
-        config.read(self.get_files(self.config_name))
+            if flavours:
+                base = ret['base', arch]
+                featuresets.insert(0, 'none')
+                base['featuresets'] = featuresets
+                del base['flavours']
+                ret['base', arch] = base
+                ret['base', arch, 'none'] = {'flavours': flavours, 'implicit-flavour': True}
 
-        arches = config['base', ]['arches']
-        featuresets = config['base', ].get('featuresets', [])
+        def read_arch_featureset(self, ret, arch, featureset):
+            config = ConfigParser(self.schema)
+            config.read(self.get_files("%s/%s/%s" % (arch, featureset, self.config_name)))
 
-        for section in iter(config):
-            if section[0].startswith('featureset-'):
-                real = (section[-1], None, section[0].lstrip('featureset-'))
-            else:
-                real = (section[-1],) + section[1:]
-            self[real] = config[section]
+            flavours = config['base', ].get('flavours', [])
 
-        for arch in arches:
-            self._read_arch(arch)
-        for featureset in featuresets:
-            self._read_featureset(featureset)
+            for section in iter(config):
+                real = (section[-1], arch, featureset) + section[:-1]
+                s = ret.get(real, {})
+                s.update(config[section])
+                ret[tuple(real)] = s
 
-    def _read_featureset(self, featureset):
-        config = ConfigParser(self.schemas)
-        config.read(self.get_files("featureset-%s/%s" % (featureset, self.config_name)))
+        def read(self, ret):
+            config = ConfigParser(self.schema)
+            config.read(self.get_files(self.config_name))
 
-        for section in iter(config):
-            real = (section[-1], None, featureset)
-            s = self.get(real, {})
-            s.update(config[section])
-            self[real] = s
+            arches = config['base', ]['arches']
+            featuresets = config['base', ].get('featuresets', [])
 
-    def get_files(self, name):
-        return [os.path.join(i, name) for i in self._dirs if i]
+            for section in iter(config):
+                if section[0].startswith('featureset-'):
+                    real = (section[-1], None, section[0].lstrip('featureset-'))
+                else:
+                    real = (section[-1],) + section[1:]
+                ret[real] = config[section]
+
+            for arch in arches:
+                self.read_arch(ret, arch)
+            for featureset in featuresets:
+                self.read_featureset(ret, featureset)
+
+        def read_featureset(self, ret, featureset):
+            config = ConfigParser(self.schema)
+            config.read(self.get_files("featureset-%s/%s" % (featureset, self.config_name)))
+
+            for section in iter(config):
+                real = (section[-1], None, featureset)
+                s = ret.get(real, {})
+                s.update(config[section])
+                ret[real] = s
 
 
 class ConfigParser(object):
