@@ -274,11 +274,6 @@ class Gencontrol(Base):
 
         self.merge_packages(packages, packages_own + packages_dummy, arch)
 
-        if config_entry_image['type'] == 'plain-xen':
-            for i in ('postinst', 'postrm', 'prerm'):
-                j = self.substitute(self.templates["image.xen.%s" % i], vars)
-                file("debian/%s.%s" % (packages_own[0]['Package'], i), 'w').write(j)
-
         def get_config(*entry_name):
             entry_real = ('image',) + entry_name
             entry = self.config.get(entry_real, None)
