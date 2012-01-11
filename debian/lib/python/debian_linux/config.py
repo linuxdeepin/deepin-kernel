@@ -81,22 +81,9 @@ class ConfigCore(dict):
         cPickle.dump(self, fp, -1)
 
 
-class ConfigCoreDump(ConfigCore):
-    def __init__(self, config=None, fp=None):
-        super(ConfigCoreDump, self).__init__(self)
-        if config is not None:
-            self.update(config)
-        if fp is not None:
-            from ConfigParser import RawConfigParser
-            config = RawConfigParser()
-            config.readfp(fp)
-            for section in config.sections():
-                section_real = eval(section)
-                data = {}
-                for key, value in config.items(section):
-                    value_real = eval(value)
-                    data[key] = value_real
-                self[section_real] = data
+class ConfigCoreDump(object):
+    def __new__(self, fp):
+        return cPickle.load(fp)
 
 
 class ConfigCoreHierarchy(object):
