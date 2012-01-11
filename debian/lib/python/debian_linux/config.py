@@ -113,12 +113,14 @@ class ConfigCoreHierarchy(object):
             self.read(ret)
             return ret
 
-        def get_files(self, name):
-            return [os.path.join(i, name) for i in self.dirs if i]
+        def get_files(self, *dirs):
+            dirs = list(dirs)
+            dirs.append(self.config_name)
+            return (os.path.join(i, *dirs) for i in self.dirs if i)
 
         def read_arch(self, ret, arch):
             config = ConfigParser(self.schema)
-            config.read(self.get_files("%s/%s" % (arch, self.config_name)))
+            config.read(self.get_files(arch))
 
             featuresets = config['base', ].get('featuresets', [])
             flavours = config['base', ].get('flavours', [])
@@ -147,7 +149,7 @@ class ConfigCoreHierarchy(object):
 
         def read_arch_featureset(self, ret, arch, featureset):
             config = ConfigParser(self.schema)
-            config.read(self.get_files("%s/%s/%s" % (arch, featureset, self.config_name)))
+            config.read(self.get_files(arch, featureset))
 
             flavours = config['base', ].get('flavours', [])
 
@@ -159,7 +161,7 @@ class ConfigCoreHierarchy(object):
 
         def read(self, ret):
             config = ConfigParser(self.schema)
-            config.read(self.get_files(self.config_name))
+            config.read(self.get_files())
 
             arches = config['base', ]['arches']
             featuresets = config['base', ].get('featuresets', [])
@@ -178,7 +180,7 @@ class ConfigCoreHierarchy(object):
 
         def read_featureset(self, ret, featureset):
             config = ConfigParser(self.schema)
-            config.read(self.get_files("featureset-%s/%s" % (featureset, self.config_name)))
+            config.read(self.get_files('featureset-%s' % featureset))
 
             for section in iter(config):
                 real = (section[-1], None, featureset)
