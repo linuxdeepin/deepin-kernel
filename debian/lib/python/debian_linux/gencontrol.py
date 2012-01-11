@@ -301,6 +301,5 @@ class Gencontrol(object):
     def write_rfc822(self, f, list):
         for entry in list:
             for key, value in entry.iteritems():
-                print key, repr(unicode(value))
                 f.write(u"%s: %s\n" % (key, value))
             f.write(u'\n')

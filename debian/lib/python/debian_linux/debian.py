@@ -150,7 +150,7 @@ $
         self.linux_modifier = d['modifier']
         self.linux_version = d['version']
         if d['modifier'] is not None:
-            self.linux_upstream = '-'.join((d['version'], d['modifier']))
+            self.linux_upstream = u'-'.join((d['version'], d['modifier']))
         else:
             self.linux_upstream = d['version']
         self.linux_dfsg = d['dfsg']
@@ -176,7 +176,7 @@ class PackageArchitecture(collections.MutableSet):
         return self._data.__len__()
 
     def __unicode__(self):
-        return ' '.join(sorted(self))
+        return u' '.join(sorted(self))
 
     def add(self, value):
         self._data.add(value)
@@ -205,12 +205,12 @@ class PackageDescription(object):
 
     def __unicode__(self):
         wrap = utils.TextWrapper(width=74, fix_sentence_endings=True).wrap
-        short = ', '.join(self.short)
+        short = u', '.join(self.short)
         long_pars = []
         for i in self.long:
             long_pars.append(wrap(i))
-        long = '\n .\n '.join(['\n '.join(i) for i in long_pars])
-        return short + '\n ' + long
+        long = u'\n .\n '.join([u'\n '.join(i) for i in long_pars])
+        return short + u'\n ' + long
 
     def append(self, str):
         str = str.strip()
@@ -236,7 +236,7 @@ class PackageRelation(list):
             self.extend(value, override_arches)
 
     def __unicode__(self):
-        return ', '.join([unicode(i) for i in self])
+        return u', '.join((unicode(i) for i in self))
 
     def _search_value(self, value):
         for i in self:
@@ -257,9 +257,7 @@ class PackageRelation(list):
 
     def extend(self, value, override_arches=None):
         if isinstance(value, basestring):
-            value = [j.strip() for j in re.split(',', value.strip())]
-        elif not isinstance(value, (list, tuple)):
-            raise ValueError(u"got %s" % type(value))
+            value = (j.strip() for j in re.split(u',', value.strip()))
         for i in value:
             self.append(i, override_arches)
 
@@ -270,7 +268,7 @@ class PackageRelationGroup(list):
             self.extend(value, override_arches)
 
     def __unicode__(self):
-        return ' | '.join([unicode(i) for i in self])
+        return u' | '.join((unicode(i) for i in self))
 
     def _search_value(self, value):
         for i, j in itertools.izip(self, value):
@@ -294,9 +292,7 @@ class PackageRelationGroup(list):
 
     def extend(self, value, override_arches=None):
         if isinstance(value, basestring):
-            value = [j.strip() for j in re.split('\|', value.strip())]
-        elif not isinstance(value, (list, tuple)):
-            raise ValueError
+            value = (j.strip() for j in re.split('\|', value.strip()))
         for i in value:
             self.append(i, override_arches)
 
@@ -360,7 +356,7 @@ class PackageRelationEntry(object):
             ret.extend((u' (', unicode(self.operator), u' ', self.version, u')'))
         if self.arches:
             ret.extend((u' [', u' '.join(self.arches), u']'))
-        return ''.join(ret)
+        return u''.join(ret)
 
     def parse(self, value):
         match = self._re.match(value)
