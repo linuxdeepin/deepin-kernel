@@ -240,14 +240,10 @@ class ConfigParser(object):
 
 if __name__ == '__main__':
     import sys
-    config = ConfigCoreHierarchy(['debian/config'])
-    sections = config.keys()
-    sections.sort()
-    for section in sections:
-        print "[%s]" % (section,)
-        items = config[section]
-        items_keys = items.keys()
-        items_keys.sort()
-        for item in items:
-            print "%s: %s" % (item, items[item])
+    sys.path.append('debian/lib/python')
+    config = ConfigCoreDump(open('debian/config.defines.dump'))
+    for section, items in sorted(config.iteritems()):
+        print u"[%s]" % (section,)
+        for item, value in sorted(items.iteritems()):
+            print u"%s: %s" % (item, value)
         print
