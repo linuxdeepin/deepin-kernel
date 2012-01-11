@@ -3,6 +3,7 @@ import os.path
 import re
 import sys
 import textwrap
+import cPickle
 
 __all__ = [
     'ConfigCoreDump',
@@ -77,16 +78,7 @@ class ConfigCore(dict):
         return ret
 
     def dump(self, fp):
-        sections = self.keys()
-        sections.sort()
-        for section in sections:
-            fp.write('[%r]\n' % (section,))
-            items = self[section]
-            items_keys = items.keys()
-            items_keys.sort()
-            for item in items:
-                fp.write('%s: %r\n' % (item, items[item]))
-            fp.write('\n')
+        cPickle.dump(self, fp, -1)
 
 
 class ConfigCoreDump(ConfigCore):
@@ -252,33 +244,30 @@ class ConfigParser(object):
             data = {}
             for key, value in self._config.items(section):
                 data[key] = value
-            s1 = section.split('_')
-            if s1[-1] in self.schemas:
-                ret[tuple(s1)] = self.SectionSchema(data, self.schemas[s1[-1]])
+            section_list = section.split('_')
+            section_base = section_list[-1]
+            if section_base in self.schemas:
+                section_ret = tuple(section_list)
+                data = self._convert_one(self.schemas[section_base], data)
             else:
-                ret[(section,)] = self.Section(data)
+                section_ret = (section, )
+            ret[section_ret] = data
         return ret
 
+    def _convert_one(self, schema, data):
+        ret = {}
+        for key, value in data.iteritems():
+            if key in schema:
+                value = schema[key](value)
+            ret[key] = value
+        return ret
+ 
     def keys(self):
         return self._convert().keys()
 
     def read(self, data):
         return self._config.read(data)
 
-    class Section(dict):
-        def __init__(self, data):
-            super(ConfigParser.Section, self).__init__(data)
-
-    class SectionSchema(Section):
-        __slots__ = ()
-
-        def __init__(self, data, schema):
-            for key in data.keys():
-                try:
-                    data[key] = schema[key](data[key])
-                except KeyError:
-                    pass
-            super(ConfigParser.SectionSchema, self).__init__(data)
 
 if __name__ == '__main__':
     import sys
