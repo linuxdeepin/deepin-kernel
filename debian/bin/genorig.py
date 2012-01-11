@@ -12,13 +12,14 @@ import subprocess
 from debian_linux.debian import Changelog, VersionLinux
 from debian_linux.patches import PatchSeries
 
+
 class Main(object):
     def __init__(self, input_files, override_version):
         self.log = sys.stdout.write
 
         self.input_files = input_files
 
-        changelog = Changelog(version = VersionLinux)[0]
+        changelog = Changelog(version=VersionLinux)[0]
         source = changelog.source
         version = changelog.version
 
@@ -38,7 +39,7 @@ class Main(object):
 
     def __call__(self):
         import tempfile
-        self.dir = tempfile.mkdtemp(prefix = 'genorig', dir = 'debian')
+        self.dir = tempfile.mkdtemp(prefix='genorig', dir='debian')
         try:
             if os.path.isdir(self.input_files[0]):
                 self.upstream_export(self.input_files[0])
@@ -103,17 +104,19 @@ class Main(object):
         self.log("Patching source with debian patch (series %s)\n" % name)
         fp = file("debian/patches/series/" + name)
         series = PatchSeries(name, "debian/patches", fp)
-        series(dir = os.path.join(self.dir, self.orig))
+        series(dir=os.path.join(self.dir, self.orig))
 
     def tar(self):
         out = os.path.join("../orig", self.orig_tar)
         try:
             os.mkdir("../orig")
-        except OSError: pass
+        except OSError:
+            pass
         try:
             os.stat(out)
             raise RuntimeError("Destination already exists")
-        except OSError: pass
+        except OSError:
+            pass
         self.log("Generate tarball %s\n" % out)
         cmdline = ['tar -czf', out, '-C', self.dir, self.orig]
         try:
@@ -129,8 +132,8 @@ class Main(object):
 
 if __name__ == '__main__':
     from optparse import OptionParser
-    parser = OptionParser(usage = "%prog [OPTION]... {TAR [PATCH] | REPO}")
-    parser.add_option("-V", "--override-version", dest = "override_version", help = "Override version", metavar = "VERSION")
+    parser = OptionParser(usage="%prog [OPTION]... {TAR [PATCH] | REPO}")
+    parser.add_option("-V", "--override-version", dest="override_version", help="Override version", metavar="VERSION")
     options, args = parser.parse_args()
 
     assert 1 <= len(args) <= 2

@@ -1,15 +1,20 @@
 #!/usr/bin/env python
 
-import os, os.path, subprocess, sys
+import sys
 sys.path.append("debian/lib/python")
+
+import os
+import os.path
+import subprocess
 
 from debian_linux.config import ConfigCoreHierarchy
 from debian_linux.debian import *
 from debian_linux.gencontrol import Gencontrol as Base
 from debian_linux.utils import Templates, read_control
 
+
 class Gencontrol(Base):
-    def __init__(self, config_dirs = ["debian/config"], template_dirs = ["debian/templates"]):
+    def __init__(self, config_dirs=["debian/config"], template_dirs=["debian/templates"]):
         super(Gencontrol, self).__init__(ConfigCoreHierarchy(config_dirs), Templates(template_dirs), VersionLinux)
         self.process_changelog()
         self.config_dirs = config_dirs
@@ -53,7 +58,7 @@ class Gencontrol(Base):
 
         libc_dev = self.templates["control.libc-dev"]
         packages_headers_arch[0:0] = self.process_packages(libc_dev, {})
-        
+
         packages_headers_arch[-1]['Depends'].extend(PackageRelation())
         extra['headers_arch_depends'] = packages_headers_arch[-1]['Depends']
 
@@ -61,8 +66,8 @@ class Gencontrol(Base):
 
         cmds_binary_arch = ["$(MAKE) -f debian/rules.real binary-arch-arch %s" % makeflags]
         cmds_source = ["$(MAKE) -f debian/rules.real source-arch %s" % makeflags]
-        makefile.add('binary-arch_%s_real' % arch, cmds = cmds_binary_arch)
-        makefile.add('source_%s_real' % arch, cmds = cmds_source)
+        makefile.add('binary-arch_%s_real' % arch, cmds=cmds_binary_arch)
+        makefile.add('source_%s_real' % arch, cmds=cmds_source)
 
         # Shortcut to aid architecture bootstrapping
         makefile.add('binary-libc-dev_%s' % arch,
@@ -94,7 +99,7 @@ class Gencontrol(Base):
             # per-featureset packages.
             makefile.add(
                 'binary-arch_%s' % arch,
-                cmds = ["$(MAKE) -f debian/rules.real install-udeb_%s %s "
+                cmds=["$(MAKE) -f debian/rules.real install-udeb_%s %s "
                         "PACKAGE_NAMES='%s'" %
                         (arch, makeflags,
                          ' '.join(p['Package'] for p in udeb_packages))])
@@ -111,8 +116,8 @@ class Gencontrol(Base):
 
         cmds_binary_arch = ["$(MAKE) -f debian/rules.real binary-arch-featureset %s" % makeflags]
         cmds_source = ["$(MAKE) -f debian/rules.real source-featureset %s" % makeflags]
-        makefile.add('binary-arch_%s_%s_real' % (arch, featureset), cmds = cmds_binary_arch)
-        makefile.add('source_%s_%s_real' % (arch, featureset), cmds = cmds_source)
+        makefile.add('binary-arch_%s_%s_real' % (arch, featureset), cmds=cmds_binary_arch)
+        makefile.add('source_%s_%s_real' % (arch, featureset), cmds=cmds_source)
 
     flavour_makeflags_base = (
         ('compiler', 'COMPILER', False),
@@ -299,9 +304,9 @@ class Gencontrol(Base):
             cmds_binary_arch.append("$(MAKE) -f debian/rules.real install-dummy DH_OPTIONS='%s' %s" % (' '.join(["-p%s" % i['Package'] for i in packages_dummy]), makeflags))
         cmds_build = ["$(MAKE) -f debian/rules.real build %s" % makeflags]
         cmds_setup = ["$(MAKE) -f debian/rules.real setup-flavour %s" % makeflags]
-        makefile.add('binary-arch_%s_%s_%s_real' % (arch, featureset, flavour), cmds = cmds_binary_arch)
-        makefile.add('build_%s_%s_%s_real' % (arch, featureset, flavour), cmds = cmds_build)
-        makefile.add('setup_%s_%s_%s_real' % (arch, featureset, flavour), cmds = cmds_setup)
+        makefile.add('binary-arch_%s_%s_%s_real' % (arch, featureset, flavour), cmds=cmds_binary_arch)
+        makefile.add('build_%s_%s_%s_real' % (arch, featureset, flavour), cmds=cmds_build)
+        makefile.add('setup_%s_%s_%s_real' % (arch, featureset, flavour), cmds=cmds_setup)
 
     def do_extra(self, packages, makefile):
         apply = self.templates['patch.apply']
@@ -348,7 +353,7 @@ class Gencontrol(Base):
         if self.version.linux_modifier is not None:
             self.abiname_part = ''
         else:
-            self.abiname_part = '-%s' % self.config['abi',]['abiname']
+            self.abiname_part = '-%s' % self.config['abi', ]['abiname']
         # XXX: We need to add another part until after wheezy
         self.abiname = (re.sub('^(\d+\.\d+)(?=-|$)', r'\1.0',
                                self.version.linux_upstream)
@@ -360,7 +365,7 @@ class Gencontrol(Base):
             'source_package': self.changelog[0].source,
             'abiname': self.abiname,
         }
-        self.config['version',] = {'source': self.version.complete, 'abiname': self.abiname}
+        self.config['version', ] = {'source': self.version.complete, 'abiname': self.abiname}
 
         distribution = self.changelog[0].distribution
         if distribution in ('unstable', ):

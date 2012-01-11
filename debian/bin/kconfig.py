@@ -7,6 +7,7 @@ import sys
 
 from debian_linux.kconfig import *
 
+
 def merge(output, configs, overrides):
     kconfig = KconfigFile()
     for c in configs:
@@ -14,6 +15,7 @@ def merge(output, configs, overrides):
     for key, value in overrides.iteritems():
         kconfig.set(key, value)
     file(output, "w").write(str(kconfig))
+
 
 def opt_callback_dict(option, opt, value, parser):
     match = re.match('^\s*(\S+)=(\S+)\s*$', value)
@@ -23,8 +25,9 @@ def opt_callback_dict(option, opt, value, parser):
     data = getattr(parser.values, dest)
     data[match.group(1)] = match.group(2)
 
+
 if __name__ == '__main__':
-    parser = optparse.OptionParser(usage = "%prog [OPTION]... FILE...")
+    parser = optparse.OptionParser(usage="%prog [OPTION]... FILE...")
     parser.add_option('-o', '--override',
             action='callback',
             callback=opt_callback_dict,

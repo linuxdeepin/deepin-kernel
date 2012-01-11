@@ -46,7 +46,7 @@ class CheckAbi(object):
 
         changelog = Changelog(version=VersionLinux)[0]
         version = changelog.version.linux_version
-        abiname = self.config['abi',]['abiname']
+        abiname = self.config['abi', ]['abiname']
         self.filename_ref = "debian/abi/%s-%s/%s_%s_%s" % (version, abiname, arch, featureset, flavour)
 
     def __call__(self, out):
@@ -163,7 +163,7 @@ class CheckAbi(object):
                 raise NotImplementedError
 
         return filtered
- 
+
 
 class CheckImage(object):
     def __init__(self, config, dir, arch, featureset, flavour):

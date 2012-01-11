@@ -3,13 +3,19 @@
 import sys
 sys.path.append(sys.path[0] + "/../lib/python")
 
-import optparse, os, shutil, tempfile, urllib2
+import optparse
+import os
+import shutil
+import tempfile
+import urllib2
+
 from debian_linux.abi import Symbols
 from debian_linux.config import *
 from debian_linux.debian import *
 
 default_url_base = "http://ftp.de.debian.org/debian/"
 default_url_base_incoming = "http://incoming.debian.org/"
+
 
 class url_debian_flat(object):
     def __init__(self, base):
@@ -18,6 +24,7 @@ class url_debian_flat(object):
     def __call__(self, source, filename):
         return self.base + filename
 
+
 class url_debian_pool(object):
     def __init__(self, base):
         self.base = base
@@ -25,10 +32,11 @@ class url_debian_pool(object):
     def __call__(self, source, filename):
         return self.base + "pool/main/" + source[0] + "/" + source + "/" + filename
 
-class main(object):
+
+class Main(object):
     dir = None
 
-    def __init__(self, url, url_config = None, arch = None, featureset = None, flavour = None):
+    def __init__(self, url, url_config=None, arch=None, featureset=None, flavour=None):
         self.log = sys.stdout.write
 
         self.url = self.url_config = url
@@ -38,7 +46,7 @@ class main(object):
         self.override_featureset = featureset
         self.override_flavour = flavour
 
-        changelog = Changelog(version = VersionLinux)
+        changelog = Changelog(version=VersionLinux)
         while changelog[0].distribution == 'UNRELEASED':
             changelog.pop(0)
         changelog = changelog[0]
@@ -47,12 +55,12 @@ class main(object):
         self.version = changelog.version.linux_version
         self.version_source = changelog.version.complete
 
-        local_config = ConfigCoreDump(fp = file("debian/config.defines.dump"))
+        local_config = ConfigCoreDump(fp=file("debian/config.defines.dump"))
 
-        self.version_abi = local_config['version',]['abiname']
+        self.version_abi = local_config['version', ]['abiname']
 
     def __call__(self):
-        self.dir = tempfile.mkdtemp(prefix = 'abiupdate')
+        self.dir = tempfile.mkdtemp(prefix='abiupdate')
         try:
             self.log("Retreive config\n")
             config = self.get_config()
@@ -85,7 +93,7 @@ class main(object):
         f = self.retrieve_package(self.url_config, filename)
         d = self.extract_package(f, "linux-support")
         c = d + "/usr/src/linux-support-" + self.version_abi + "/config.defines.dump"
-        config = ConfigCoreDump(fp = file(c))
+        config = ConfigCoreDump(fp=file(c))
         shutil.rmtree(d)
         return config
 
@@ -155,20 +163,20 @@ class main(object):
 
 if __name__ == '__main__':
     options = optparse.OptionParser()
-    options.add_option("-i", "--incoming", action = "store_true", dest = "incoming")
-    options.add_option("--incoming-config", action = "store_true", dest = "incoming_config")
-    options.add_option("-u", "--url-base", dest = "url_base", default = default_url_base)
-    options.add_option("--url-base-incoming", dest = "url_base_incoming", default = default_url_base_incoming)
+    options.add_option("-i", "--incoming", action="store_true", dest="incoming")
+    options.add_option("--incoming-config", action="store_true", dest="incoming_config")
+    options.add_option("-u", "--url-base", dest="url_base", default=default_url_base)
+    options.add_option("--url-base-incoming", dest="url_base_incoming", default=default_url_base_incoming)
 
     opts, args = options.parse_args()
 
     kw = {}
     if len(args) >= 1:
-        kw['arch'] =args[0]
+        kw['arch'] = args[0]
     if len(args) >= 2:
-        kw['featureset'] =args[1]
+        kw['featureset'] = args[1]
     if len(args) >= 3:
-        kw['flavour'] =args[2]
+        kw['flavour'] = args[2]
 
     url_base = url_debian_pool(opts.url_base)
     url_base_incoming = url_debian_flat(opts.url_base_incoming)
