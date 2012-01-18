@@ -78,7 +78,7 @@ class ConfigCore(dict):
         return ret
 
     def dump(self, fp):
-        cPickle.dump(self, fp, -1)
+        cPickle.dump(self, fp, 0)
 
 
 class ConfigCoreDump(object):
