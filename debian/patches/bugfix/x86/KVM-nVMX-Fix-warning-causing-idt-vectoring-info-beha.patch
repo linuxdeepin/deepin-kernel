@@ -1,0 +1,73 @@
+From: Nadav Har'El <nyh@il.ibm.com>
+Date: Thu, 22 Sep 2011 13:53:26 +0300
+Subject: [PATCH 2/2] KVM: nVMX: Fix warning-causing idt-vectoring-info
+ behavior
+
+commit 51cfe38ea50aa631f58ed8c340ed6f0143c325a8 upstream.
+
+When L0 wishes to inject an interrupt while L2 is running, it emulates an exit
+to L1 with EXIT_REASON_EXTERNAL_INTERRUPT. This was explained in the original
+nVMX patch 23, titled "Correct handling of interrupt injection".
+
+Unfortunately, it is possible (though rare) that at this point there is valid
+idt_vectoring_info in vmcs02. For example, L1 injected some interrupt to L2,
+and when L2 tried to run this interrupt's handler, it got a page fault - so
+it returns the original interrupt vector in idt_vectoring_info. The problem
+is that if this is the case, we cannot exit to L1 with EXTERNAL_INTERRUPT
+like we wished to, because the VMX spec guarantees that idt_vectoring_info
+and exit_reason_external_interrupt can never happen together. This is not
+just specified in the spec - a KVM L1 actually prints a kernel warning
+"unexpected, valid vectoring info" if we violate this guarantee, and some
+users noticed these warnings in L1's logs.
+
+In order to better emulate a processor, which would never return the external
+interrupt and the idt-vectoring-info together, we need to separate the two
+injection steps: First, complete L1's injection into L2 (i.e., enter L2,
+injecting to it the idt-vectoring-info); Second, after entry into L2 succeeds
+and it exits back to L0, exit to L1 with the EXIT_REASON_EXTERNAL_INTERRUPT.
+Most of this is already in the code - the only change we need is to remain
+in L2 (and not exit to L1) in this case.
+
+Note that the previous patch ensures (by using KVM_REQ_IMMEDIATE_EXIT) that
+although we do enter L2 first, it will exit immediately after processing its
+injection, allowing us to promptly inject to L1.
+
+Note how we test vmcs12->idt_vectoring_info_field; This isn't really the
+vmcs12 value (we haven't exited to L1 yet, so vmcs12 hasn't been updated),
+but rather the place we save, at the end of vmx_vcpu_run, the vmcs02 value
+of this field. This was explained in patch 25 ("Correct handling of idt
+vectoring info") of the original nVMX patch series.
+
+Thanks to Dave Allan and to Federico Simoncelli for reporting this bug,
+to Abel Gordon for helping me figure out the solution, and to Avi Kivity
+for helping to improve it.
+
+Signed-off-by: Nadav Har'El <nyh@il.ibm.com>
+Signed-off-by: Avi Kivity <avi@redhat.com>
+---
+ arch/x86/kvm/vmx.c |    7 ++++---
+ 1 files changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx.c b/arch/x86/kvm/vmx.c
+index d75d914..6e28d58 100644
+--- a/arch/x86/kvm/vmx.c
++++ b/arch/x86/kvm/vmx.c
+@@ -4080,11 +4080,12 @@ static void vmx_set_nmi_mask(struct kvm_vcpu *vcpu, bool masked)
+ static int vmx_interrupt_allowed(struct kvm_vcpu *vcpu)
+ {
+ 	if (is_guest_mode(vcpu) && nested_exit_on_intr(vcpu)) {
+-		struct vmcs12 *vmcs12;
+-		if (to_vmx(vcpu)->nested.nested_run_pending)
++		struct vmcs12 *vmcs12 = get_vmcs12(vcpu);
++		if (to_vmx(vcpu)->nested.nested_run_pending ||
++		    (vmcs12->idt_vectoring_info_field &
++		     VECTORING_INFO_VALID_MASK))
+ 			return 0;
+ 		nested_vmx_vmexit(vcpu);
+-		vmcs12 = get_vmcs12(vcpu);
+ 		vmcs12->vm_exit_reason = EXIT_REASON_EXTERNAL_INTERRUPT;
+ 		vmcs12->vm_exit_intr_info = 0;
+ 		/* fall through to normal code, but now in L1, not L2 */
+-- 
+1.7.8.3
+

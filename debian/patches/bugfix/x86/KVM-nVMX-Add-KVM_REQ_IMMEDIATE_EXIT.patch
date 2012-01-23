@@ -1,0 +1,111 @@
+From: Nadav Har'El <nyh@il.ibm.com>
+Date: Thu, 22 Sep 2011 13:52:56 +0300
+Subject: [PATCH 1/2] KVM: nVMX: Add KVM_REQ_IMMEDIATE_EXIT
+
+commit d6185f20a0efbf175e12831d0de330e4f21725aa upstream.
+
+This patch adds a new vcpu->requests bit, KVM_REQ_IMMEDIATE_EXIT.
+This bit requests that when next entering the guest, we should run it only
+for as little as possible, and exit again.
+
+We use this new option in nested VMX: When L1 launches L2, but L0 wishes L1
+to continue running so it can inject an event to it, we unfortunately cannot
+just pretend to have run L2 for a little while - We must really launch L2,
+otherwise certain one-off vmcs12 parameters (namely, L1 injection into L2)
+will be lost. So the existing code runs L2 in this case.
+But L2 could potentially run for a long time until it exits, and the
+injection into L1 will be delayed. The new KVM_REQ_IMMEDIATE_EXIT allows us
+to request that L2 will be entered, as necessary, but will exit as soon as
+possible after entry.
+
+Our implementation of this request uses smp_send_reschedule() to send a
+self-IPI, with interrupts disabled. The interrupts remain disabled until the
+guest is entered, and then, after the entry is complete (often including
+processing an injection and jumping to the relevant handler), the physical
+interrupt is noticed and causes an exit.
+
+On recent Intel processors, we could have achieved the same goal by using
+MTF instead of a self-IPI. Another technique worth considering in the future
+is to use VM_EXIT_ACK_INTR_ON_EXIT and a highest-priority vector IPI - to
+slightly improve performance by avoiding the useless interrupt handler
+which ends up being called when smp_send_reschedule() is used.
+
+Signed-off-by: Nadav Har'El <nyh@il.ibm.com>
+Signed-off-by: Avi Kivity <avi@redhat.com>
+---
+ arch/x86/kvm/vmx.c       |   11 +++++++----
+ arch/x86/kvm/x86.c       |    7 ++++++-
+ include/linux/kvm_host.h |    1 +
+ 3 files changed, 14 insertions(+), 5 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx.c b/arch/x86/kvm/vmx.c
+index 579a0b5..d75d914 100644
+--- a/arch/x86/kvm/vmx.c
++++ b/arch/x86/kvm/vmx.c
+@@ -3945,12 +3945,15 @@ static bool nested_exit_on_intr(struct kvm_vcpu *vcpu)
+ static void enable_irq_window(struct kvm_vcpu *vcpu)
+ {
+ 	u32 cpu_based_vm_exec_control;
+-	if (is_guest_mode(vcpu) && nested_exit_on_intr(vcpu))
+-		/* We can get here when nested_run_pending caused
+-		 * vmx_interrupt_allowed() to return false. In this case, do
+-		 * nothing - the interrupt will be injected later.
++	if (is_guest_mode(vcpu) && nested_exit_on_intr(vcpu)) {
++		/*
++		 * We get here if vmx_interrupt_allowed() said we can't
++		 * inject to L1 now because L2 must run. Ask L2 to exit
++		 * right after entry, so we can inject to L1 more promptly.
+ 		 */
++		kvm_make_request(KVM_REQ_IMMEDIATE_EXIT, vcpu);
+ 		return;
++	}
+ 
+ 	cpu_based_vm_exec_control = vmcs_read32(CPU_BASED_VM_EXEC_CONTROL);
+ 	cpu_based_vm_exec_control |= CPU_BASED_VIRTUAL_INTR_PENDING;
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index 4c938da..e24edbc 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -5648,6 +5648,7 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
+ 	int r;
+ 	bool req_int_win = !irqchip_in_kernel(vcpu->kvm) &&
+ 		vcpu->run->request_interrupt_window;
++	bool req_immediate_exit = 0;
+ 
+ 	if (vcpu->requests) {
+ 		if (kvm_check_request(KVM_REQ_MMU_RELOAD, vcpu))
+@@ -5687,7 +5688,8 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
+ 			record_steal_time(vcpu);
+ 		if (kvm_check_request(KVM_REQ_NMI, vcpu))
+ 			process_nmi(vcpu);
+-
++		req_immediate_exit =
++			kvm_check_request(KVM_REQ_IMMEDIATE_EXIT, vcpu);
+ 	}
+ 
+ 	r = kvm_mmu_reload(vcpu);
+@@ -5738,6 +5740,9 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
+ 
+ 	srcu_read_unlock(&vcpu->kvm->srcu, vcpu->srcu_idx);
+ 
++	if (req_immediate_exit)
++		smp_send_reschedule(vcpu->cpu);
++
+ 	kvm_guest_enter();
+ 
+ 	if (unlikely(vcpu->arch.switch_db_regs)) {
+diff --git a/include/linux/kvm_host.h b/include/linux/kvm_host.h
+index d526231..9fedeb3 100644
+--- a/include/linux/kvm_host.h
++++ b/include/linux/kvm_host.h
+@@ -50,6 +50,7 @@
+ #define KVM_REQ_APF_HALT          12
+ #define KVM_REQ_STEAL_UPDATE      13
+ #define KVM_REQ_NMI               14
++#define KVM_REQ_IMMEDIATE_EXIT    15
+ 
+ #define KVM_USERSPACE_IRQ_SOURCE_ID	0
+ 
+-- 
+1.7.8.3
+
