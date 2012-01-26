@@ -189,4 +189,4 @@ if __name__ == '__main__':
         else:
             url = url_base
 
-    main(url, url_config, **kw)()
+    Main(url, url_config, **kw)()
