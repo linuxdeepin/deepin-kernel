@@ -70,7 +70,7 @@ class Main(object):
     def __call__(self):
         self.dir = tempfile.mkdtemp(prefix='abiupdate')
         try:
-            self.log("Retreive config\n")
+            self.log("Retrieve config\n")
             config = self.get_config()
             if self.override_arch:
                 arches = [self.override_arch]
