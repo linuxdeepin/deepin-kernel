@@ -37,7 +37,7 @@ class url_debian_pool(object):
 class url_debian_ports_pool(url_debian_pool):
     def __call__(self, source, filename, arch):
         if arch == 'all':
-            return url_debian_ports_pool(self, source, filename, arch)
+            return url_debian_pool.__call__(self, source, filename, arch)
         return self.base + "pool-" + arch + "/main/" + source[0] + "/" + source + "/" + filename
 
 
