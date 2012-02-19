@@ -1759,8 +1759,8 @@
 +
 +-include ${srctree}/${src}/conf_priv.mk
 --- a/fs/aufs/cpup.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/cpup.c	2012-01-10 02:15:56.545455955 +0000
-@@ -0,0 +1,1079 @@
++++ b/fs/aufs/cpup.c	2012-02-19 21:12:26.542426948 +0000
+@@ -0,0 +1,1084 @@
 +/*
 + * Copyright (C) 2005-2012 Junjiro R. Okajima
 + *
@@ -1821,7 +1821,12 @@
 +	    && au_plink_test(inode))
 +		return;
 +
-+	set_nlink(inode, h_inode->i_nlink);
++	/*
++	 * 0 can happen in revalidating.
++	 * h_inode->i_mutex is not held, but it is harmless since once i_nlink
++	 * reaches 0, it will never become positive.
++	 */
++	vfsub_set_nlink(inode, h_inode->i_nlink);
 +
 +	/*
 +	 * fewer nlink makes find(1) noisy, but larger nlink doesn't.
@@ -6324,8 +6329,8 @@
 +	return -1;
 +}
 --- a/fs/aufs/dir.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/dir.c	2012-01-10 02:15:56.549455982 +0000
-@@ -0,0 +1,634 @@
++++ b/fs/aufs/dir.c	2012-02-19 21:12:26.566427085 +0000
+@@ -0,0 +1,636 @@
 +/*
 + * Copyright (C) 2005-2012 Junjiro R. Okajima
 + *
@@ -6361,7 +6366,8 @@
 +	nlink += h_dir->i_nlink - 2;
 +	if (h_dir->i_nlink < 2)
 +		nlink += 2;
-+	set_nlink(dir, nlink);
++	/* 0 can happen in revaliding */
++	vfsub_set_nlink(dir, nlink);
 +}
 +
 +void au_sub_nlink(struct inode *dir, struct inode *h_dir)
@@ -6374,6 +6380,7 @@
 +	nlink -= h_dir->i_nlink - 2;
 +	if (h_dir->i_nlink < 2)
 +		nlink -= 2;
++	/* no vfsub version. nlink == 0 means the branch-fs is broken */
 +	set_nlink(dir, nlink);
 +}
 +
@@ -7560,8 +7567,8 @@
 +#endif /* __KERNEL__ */
 +#endif /* __AUFS_DYNOP_H__ */
 --- a/fs/aufs/export.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/export.c	2012-01-10 02:15:56.549455982 +0000
-@@ -0,0 +1,804 @@
++++ b/fs/aufs/export.c	2012-02-19 21:12:26.566427085 +0000
+@@ -0,0 +1,803 @@
 +/*
 + * Copyright (C) 2005-2012 Junjiro R. Okajima
 + *
@@ -7585,11 +7592,12 @@
 + */
 +
 +#include <linux/exportfs.h>
-+#include <linux/mnt_namespace.h>
++#include <linux/fs_struct.h>
 +#include <linux/namei.h>
 +#include <linux/nsproxy.h>
 +#include <linux/random.h>
 +#include <linux/writeback.h>
++#include "../fs/mount.h"
 +#include "aufs.h"
 +
 +union conv {
@@ -7843,18 +7851,16 @@
 +static struct vfsmount *au_mnt_get(struct super_block *sb)
 +{
 +	int err;
++	struct path root;
 +	struct au_compare_mnt_args args = {
 +		.sb = sb
 +	};
-+	struct mnt_namespace *ns;
 +
++	get_fs_root(current->fs, &root);
 +	br_read_lock(vfsmount_lock);
-+	/* no get/put ?? */
-+	AuDebugOn(!current->nsproxy);
-+	ns = current->nsproxy->mnt_ns;
-+	AuDebugOn(!ns);
-+	err = iterate_mounts(au_compare_mnt, &args, ns->root);
++	err = iterate_mounts(au_compare_mnt, &args, root.mnt);
 +	br_read_unlock(vfsmount_lock);
++	path_put(&root);
 +	AuDebugOn(!err);
 +	AuDebugOn(!args.mnt);
 +	return args.mnt;
@@ -9400,8 +9406,8 @@
 +	return ret;
 +}
 --- a/fs/aufs/file.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/file.c	2012-01-10 02:15:56.549455982 +0000
-@@ -0,0 +1,673 @@
++++ b/fs/aufs/file.c	2012-02-19 21:12:26.570427095 +0000
+@@ -0,0 +1,676 @@
 +/*
 + * Copyright (C) 2005-2012 Junjiro R. Okajima
 + *
@@ -9424,6 +9430,9 @@
 + * handling file/dir, and address_space operation
 + */
 +
++#ifdef CONFIG_AUFS_DEBUG
++#include <linux/migrate.h>
++#endif
 +#include <linux/pagemap.h>
 +#include "aufs.h"
 +
@@ -10042,7 +10051,7 @@
 +static int aufs_releasepage(struct page *page, gfp_t gfp)
 +{ AuUnsupport(); return 0; }
 +static int aufs_migratepage(struct address_space *mapping, struct page *newpage,
-+			    struct page *page)
++			    struct page *page, enum migrate_mode mode)
 +{ AuUnsupport(); return 0; }
 +static int aufs_launder_page(struct page *page)
 +{ AuUnsupport(); return 0; }
@@ -12060,7 +12069,7 @@
 +		au_hn_destroy_cache();
 +}
 --- a/fs/aufs/i_op.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/i_op.c	2012-01-10 02:15:56.553455997 +0000
++++ b/fs/aufs/i_op.c	2012-02-19 21:12:26.570427095 +0000
 @@ -0,0 +1,992 @@
 +/*
 + * Copyright (C) 2005-2012 Junjiro R. Okajima
@@ -12761,8 +12770,7 @@
 +	a->h_path.mnt = au_sbr_mnt(sb, a->btgt);
 +	if ((ia->ia_valid & (ATTR_MODE | ATTR_CTIME))
 +	    == (ATTR_MODE | ATTR_CTIME)) {
-+		err = security_path_chmod(a->h_path.dentry, a->h_path.mnt,
-+					  ia->ia_mode);
++		err = security_path_chmod(&a->h_path, ia->ia_mode);
 +		if (unlikely(err))
 +			goto out_unlock;
 +	} else if ((ia->ia_valid & (ATTR_UID | ATTR_GID))
@@ -12828,7 +12836,8 @@
 +		n = inode->i_nlink;
 +		n -= nlink;
 +		n += st->nlink;
-+		set_nlink(inode, n);
++		/* 0 can happen */
++		vfsub_set_nlink(inode, n);
 +	}
 +
 +	spin_lock(&inode->i_lock);
@@ -13055,7 +13064,7 @@
 +	.truncate_range	= aufs_truncate_range
 +};
 --- a/fs/aufs/i_op_add.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/i_op_add.c	2012-01-10 02:15:56.553455997 +0000
++++ b/fs/aufs/i_op_add.c	2012-02-19 21:12:26.570427095 +0000
 @@ -0,0 +1,711 @@
 +/*
 + * Copyright (C) 2005-2012 Junjiro R. Okajima
@@ -13274,14 +13283,14 @@
 +	int type;
 +	union {
 +		struct {
-+			int mode;
++			umode_t mode;
 +			struct nameidata *nd;
 +		} c;
 +		struct {
 +			const char *symname;
 +		} s;
 +		struct {
-+			int mode;
++			umode_t mode;
 +			dev_t dev;
 +		} m;
 +	} u;
@@ -13368,7 +13377,7 @@
 +	return err;
 +}
 +
-+int aufs_mknod(struct inode *dir, struct dentry *dentry, int mode, dev_t dev)
++int aufs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode, dev_t dev)
 +{
 +	struct simple_arg arg = {
 +		.type = Mknod,
@@ -13389,7 +13398,7 @@
 +	return add_simple(dir, dentry, &arg);
 +}
 +
-+int aufs_create(struct inode *dir, struct dentry *dentry, int mode,
++int aufs_create(struct inode *dir, struct dentry *dentry, umode_t mode,
 +		struct nameidata *nd)
 +{
 +	struct simple_arg arg = {
@@ -13661,7 +13670,7 @@
 +	return err;
 +}
 +
-+int aufs_mkdir(struct inode *dir, struct dentry *dentry, int mode)
++int aufs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 +{
 +	int err, rerr;
 +	aufs_bindex_t bindex;
@@ -16011,7 +16020,7 @@
 +	return au_test_h_perm(h_inode, mask);
 +}
 --- a/fs/aufs/inode.h	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/inode.h	2012-01-10 02:15:56.557456016 +0000
++++ b/fs/aufs/inode.h	2012-02-19 21:12:26.570427095 +0000
 @@ -0,0 +1,554 @@
 +/*
 + * Copyright (C) 2005-2012 Junjiro R. Okajima
@@ -16173,13 +16182,13 @@
 +/* i_op_add.c */
 +int au_may_add(struct dentry *dentry, aufs_bindex_t bindex,
 +	       struct dentry *h_parent, int isdir);
-+int aufs_mknod(struct inode *dir, struct dentry *dentry, int mode, dev_t dev);
++int aufs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode, dev_t dev);
 +int aufs_symlink(struct inode *dir, struct dentry *dentry, const char *symname);
-+int aufs_create(struct inode *dir, struct dentry *dentry, int mode,
++int aufs_create(struct inode *dir, struct dentry *dentry, umode_t mode,
 +		struct nameidata *nd);
 +int aufs_link(struct dentry *src_dentry, struct inode *dir,
 +	      struct dentry *dentry);
-+int aufs_mkdir(struct inode *dir, struct dentry *dentry, int mode);
++int aufs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode);
 +
 +/* i_op_del.c */
 +int au_wr_dir_need_wh(struct dentry *dentry, int isdir, aufs_bindex_t *bcpup);
@@ -20951,8 +20960,8 @@
 +#endif /* __KERNEL__ */
 +#endif /* __AUFS_SPL_H__ */
 --- a/fs/aufs/super.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/super.c	2012-01-10 02:15:56.569456073 +0000
-@@ -0,0 +1,938 @@
++++ b/fs/aufs/super.c	2012-02-19 21:12:26.570427095 +0000
+@@ -0,0 +1,936 @@
 +/*
 + * Copyright (C) 2005-2012 Junjiro R. Okajima
 + *
@@ -21118,7 +21127,7 @@
 +	}
 +}
 +
-+static int au_show_xino(struct seq_file *seq, struct vfsmount *mnt)
++static int au_show_xino(struct seq_file *seq, struct super_block *sb)
 +{
 +#ifdef CONFIG_SYSFS
 +	return 0;
@@ -21126,7 +21135,6 @@
 +	int err;
 +	const int len = sizeof(AUFS_XINO_FNAME) - 1;
 +	aufs_bindex_t bindex, brid;
-+	struct super_block *sb;
 +	struct qstr *name;
 +	struct file *f;
 +	struct dentry *d, *h_root;
@@ -21135,7 +21143,6 @@
 +	AuRwMustAnyLock(&sbinfo->si_rwsem);
 +
 +	err = 0;
-+	sb = mnt->mnt_sb;
 +	f = au_sbi(sb)->si_xib;
 +	if (!f)
 +		goto out;
@@ -21165,7 +21172,7 @@
 +}
 +
 +/* seq_file will re-call me in case of too long string */
-+static int aufs_show_options(struct seq_file *m, struct vfsmount *mnt)
++static int aufs_show_options(struct seq_file *m, struct dentry *dentry)
 +{
 +	int err;
 +	unsigned int mnt_flags, v;
@@ -21190,14 +21197,14 @@
 +} while (0)
 +
 +	/* lock free root dinfo */
-+	sb = mnt->mnt_sb;
++	sb = dentry->d_sb;
 +	si_noflush_read_lock(sb);
 +	sbinfo = au_sbi(sb);
 +	seq_printf(m, ",si=%lx", sysaufs_si_id(sbinfo));
 +
 +	mnt_flags = au_mntflags(sb);
 +	if (au_opt_test(mnt_flags, XINO)) {
-+		err = au_show_xino(m, mnt);
++		err = au_show_xino(m, sb);
 +		if (unlikely(err))
 +			goto out;
 +	} else
@@ -24793,8 +24800,8 @@
 +	return err;
 +}
 --- a/fs/aufs/vfsub.h	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/vfsub.h	2012-01-10 02:15:56.569456073 +0000
-@@ -0,0 +1,232 @@
++++ b/fs/aufs/vfsub.h	2012-02-19 21:12:26.574427108 +0000
+@@ -0,0 +1,240 @@
 +/*
 + * Copyright (C) 2005-2012 Junjiro R. Okajima
 + *
@@ -24895,6 +24902,14 @@
 +	AuDebugOn(!S_ISDIR(inode->i_mode));
 +	inode->i_flags |= S_DEAD;
 +	clear_nlink(inode);
++}
++
++static inline void vfsub_set_nlink(struct inode *inode, unsigned int nlink)
++{
++	if (nlink)
++		set_nlink(inode, nlink);
++	else
++		clear_nlink(inode);
 +}
 +
 +/* ---------------------------------------------------------------------- */
@@ -28453,7 +28468,7 @@
 +	return err;
 +}
 --- a/include/linux/aufs_type.h	1970-01-01 01:00:00.000000000 +0100
-+++ b/include/linux/aufs_type.h	2012-01-10 02:15:56.573456100 +0000
++++ b/include/linux/aufs_type.h	2012-02-19 21:12:26.574427108 +0000
 @@ -0,0 +1,233 @@
 +/*
 + * Copyright (C) 2005-2012 Junjiro R. Okajima
@@ -28496,7 +28511,7 @@
 +
 +#include <linux/limits.h>
 +
-+#define AUFS_VERSION	"3.2-20120109"
++#define AUFS_VERSION	"3.x-rcN-20120123"
 +
 +/* todo? move this to linux-2.6.19/include/magic.h */
 +#define AUFS_SUPER_MAGIC	('a' << 24 | 'u' << 16 | 'f' << 8 | 's')
