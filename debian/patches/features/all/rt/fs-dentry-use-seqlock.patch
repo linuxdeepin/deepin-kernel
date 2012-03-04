@@ -1,0 +1,3033 @@
+Subject: fs: dentry use seqlock
+From: Thomas Gleixner <tglx@linutronix.de>
+Date: Mon, 27 Feb 2012 18:08:46 +0100
+
+Replace the open coded seqlock with a real seqlock, so RT can handle
+it.
+
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Cc: stable-rt@vger.kernel.org
+
+---
+ arch/powerpc/platforms/cell/spufs/inode.c |    6 
+ drivers/infiniband/hw/ipath/ipath_fs.c    |    6 
+ drivers/infiniband/hw/qib/qib_fs.c        |    6 
+ drivers/usb/core/inode.c                  |   12 -
+ fs/9p/vfs_dir.c                           |    4 
+ fs/afs/dir.c                              |    4 
+ fs/autofs4/autofs_i.h                     |   24 +-
+ fs/autofs4/expire.c                       |   44 ++---
+ fs/autofs4/root.c                         |   38 ++--
+ fs/btrfs/export.c                         |    4 
+ fs/btrfs/inode.c                          |    4 
+ fs/ceph/caps.c                            |    8 
+ fs/ceph/debugfs.c                         |    8 
+ fs/ceph/dir.c                             |   30 +--
+ fs/ceph/export.c                          |    4 
+ fs/ceph/inode.c                           |   20 +-
+ fs/ceph/mds_client.c                      |   18 +-
+ fs/cifs/dir.c                             |    6 
+ fs/coda/cache.c                           |    4 
+ fs/configfs/configfs_internal.h           |    4 
+ fs/configfs/inode.c                       |    6 
+ fs/dcache.c                               |  253 ++++++++++++++----------------
+ fs/dcookies.c                             |    8 
+ fs/exportfs/expfs.c                       |   12 -
+ fs/fat/inode.c                            |    4 
+ fs/fat/namei_vfat.c                       |    4 
+ fs/fs-writeback.c                         |    4 
+ fs/fuse/inode.c                           |    4 
+ fs/gfs2/export.c                          |    4 
+ fs/isofs/export.c                         |    4 
+ fs/libfs.c                                |   36 ++--
+ fs/namei.c                                |   42 ++--
+ fs/namespace.c                            |    8 
+ fs/ncpfs/dir.c                            |    6 
+ fs/ncpfs/ncplib_kernel.h                  |    8 
+ fs/nfs/dir.c                              |    6 
+ fs/nfs/getroot.c                          |   12 -
+ fs/nfs/namespace.c                        |   16 -
+ fs/nfs/unlink.c                           |   20 +-
+ fs/nilfs2/namei.c                         |    4 
+ fs/notify/fsnotify.c                      |    8 
+ fs/notify/vfsmount_mark.c                 |   24 +-
+ fs/ocfs2/dcache.c                         |    6 
+ fs/ocfs2/export.c                         |    4 
+ fs/reiserfs/inode.c                       |    4 
+ fs/udf/namei.c                            |    4 
+ fs/xfs/xfs_export.c                       |    8 
+ include/linux/dcache.h                    |   15 -
+ include/linux/fs.h                        |    4 
+ include/linux/fsnotify_backend.h          |    6 
+ kernel/cgroup.c                           |   22 +-
+ net/sunrpc/rpc_pipe.c                     |    6 
+ security/selinux/selinuxfs.c              |   14 -
+ 53 files changed, 418 insertions(+), 422 deletions(-)
+
+Index: linux-3.2/arch/powerpc/platforms/cell/spufs/inode.c
+===================================================================
+--- linux-3.2.orig/arch/powerpc/platforms/cell/spufs/inode.c
++++ linux-3.2/arch/powerpc/platforms/cell/spufs/inode.c
+@@ -165,18 +165,18 @@ static void spufs_prune_dir(struct dentr
+ 
+ 	mutex_lock(&dir->d_inode->i_mutex);
+ 	list_for_each_entry_safe(dentry, tmp, &dir->d_subdirs, d_u.d_child) {
+-		spin_lock(&dentry->d_lock);
++		seq_spin_lock(&dentry->d_lock);
+ 		if (!(d_unhashed(dentry)) && dentry->d_inode) {
+ 			dget_dlock(dentry);
+ 			__d_drop(dentry);
+-			spin_unlock(&dentry->d_lock);
++			seq_spin_unlock(&dentry->d_lock);
+ 			simple_unlink(dir->d_inode, dentry);
+ 			/* XXX: what was dcache_lock protecting here? Other
+ 			 * filesystems (IB, configfs) release dcache_lock
+ 			 * before unlink */
+ 			dput(dentry);
+ 		} else {
+-			spin_unlock(&dentry->d_lock);
++			seq_spin_unlock(&dentry->d_lock);
+ 		}
+ 	}
+ 	shrink_dcache_parent(dir);
+Index: linux-3.2/drivers/infiniband/hw/ipath/ipath_fs.c
+===================================================================
+--- linux-3.2.orig/drivers/infiniband/hw/ipath/ipath_fs.c
++++ linux-3.2/drivers/infiniband/hw/ipath/ipath_fs.c
+@@ -277,14 +277,14 @@ static int remove_file(struct dentry *pa
+ 		goto bail;
+ 	}
+ 
+-	spin_lock(&tmp->d_lock);
++	seq_spin_lock(&tmp->d_lock);
+ 	if (!(d_unhashed(tmp) && tmp->d_inode)) {
+ 		dget_dlock(tmp);
+ 		__d_drop(tmp);
+-		spin_unlock(&tmp->d_lock);
++		seq_spin_unlock(&tmp->d_lock);
+ 		simple_unlink(parent->d_inode, tmp);
+ 	} else
+-		spin_unlock(&tmp->d_lock);
++		seq_spin_unlock(&tmp->d_lock);
+ 
+ 	ret = 0;
+ bail:
+Index: linux-3.2/drivers/infiniband/hw/qib/qib_fs.c
+===================================================================
+--- linux-3.2.orig/drivers/infiniband/hw/qib/qib_fs.c
++++ linux-3.2/drivers/infiniband/hw/qib/qib_fs.c
+@@ -453,14 +453,14 @@ static int remove_file(struct dentry *pa
+ 		goto bail;
+ 	}
+ 
+-	spin_lock(&tmp->d_lock);
++	seq_spin_lock(&tmp->d_lock);
+ 	if (!(d_unhashed(tmp) && tmp->d_inode)) {
+ 		dget_dlock(tmp);
+ 		__d_drop(tmp);
+-		spin_unlock(&tmp->d_lock);
++		seq_spin_unlock(&tmp->d_lock);
+ 		simple_unlink(parent->d_inode, tmp);
+ 	} else {
+-		spin_unlock(&tmp->d_lock);
++		seq_spin_unlock(&tmp->d_lock);
+ 	}
+ 
+ 	ret = 0;
+Index: linux-3.2/drivers/usb/core/inode.c
+===================================================================
+--- linux-3.2.orig/drivers/usb/core/inode.c
++++ linux-3.2/drivers/usb/core/inode.c
+@@ -343,19 +343,19 @@ static int usbfs_empty (struct dentry *d
+ {
+ 	struct list_head *list;
+ 
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	list_for_each(list, &dentry->d_subdirs) {
+ 		struct dentry *de = list_entry(list, struct dentry, d_u.d_child);
+ 
+-		spin_lock_nested(&de->d_lock, DENTRY_D_LOCK_NESTED);
++		seq_spin_lock_nested(&de->d_lock, DENTRY_D_LOCK_NESTED);
+ 		if (usbfs_positive(de)) {
+-			spin_unlock(&de->d_lock);
+-			spin_unlock(&dentry->d_lock);
++			seq_spin_unlock(&de->d_lock);
++			seq_spin_unlock(&dentry->d_lock);
+ 			return 0;
+ 		}
+-		spin_unlock(&de->d_lock);
++		seq_spin_unlock(&de->d_lock);
+ 	}
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ 	return 1;
+ }
+ 
+Index: linux-3.2/fs/9p/vfs_dir.c
+===================================================================
+--- linux-3.2.orig/fs/9p/vfs_dir.c
++++ linux-3.2/fs/9p/vfs_dir.c
+@@ -107,7 +107,7 @@ static int v9fs_alloc_rdir_buf(struct fi
+ 			err = -ENOMEM;
+ 			goto exit;
+ 		}
+-		spin_lock(&filp->f_dentry->d_lock);
++		seq_spin_lock(&filp->f_dentry->d_lock);
+ 		if (!fid->rdir) {
+ 			rdir->buf = (uint8_t *)rdir + sizeof(struct p9_rdir);
+ 			mutex_init(&rdir->mutex);
+@@ -115,7 +115,7 @@ static int v9fs_alloc_rdir_buf(struct fi
+ 			fid->rdir = (void *) rdir;
+ 			rdir = NULL;
+ 		}
+-		spin_unlock(&filp->f_dentry->d_lock);
++		seq_spin_unlock(&filp->f_dentry->d_lock);
+ 		kfree(rdir);
+ 	}
+ exit:
+Index: linux-3.2/fs/afs/dir.c
+===================================================================
+--- linux-3.2.orig/fs/afs/dir.c
++++ linux-3.2/fs/afs/dir.c
+@@ -705,9 +705,9 @@ out_skip:
+ 
+ 	/* the dirent, if it exists, now points to a different vnode */
+ not_found:
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	dentry->d_flags |= DCACHE_NFSFS_RENAMED;
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ 
+ out_bad:
+ 	if (dentry->d_inode) {
+Index: linux-3.2/fs/autofs4/autofs_i.h
+===================================================================
+--- linux-3.2.orig/fs/autofs4/autofs_i.h
++++ linux-3.2/fs/autofs4/autofs_i.h
+@@ -197,9 +197,9 @@ static inline void __managed_dentry_set_
+ 
+ static inline void managed_dentry_set_automount(struct dentry *dentry)
+ {
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	__managed_dentry_set_automount(dentry);
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ }
+ 
+ static inline void __managed_dentry_clear_automount(struct dentry *dentry)
+@@ -209,9 +209,9 @@ static inline void __managed_dentry_clea
+ 
+ static inline void managed_dentry_clear_automount(struct dentry *dentry)
+ {
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	__managed_dentry_clear_automount(dentry);
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ }
+ 
+ static inline void __managed_dentry_set_transit(struct dentry *dentry)
+@@ -221,9 +221,9 @@ static inline void __managed_dentry_set_
+ 
+ static inline void managed_dentry_set_transit(struct dentry *dentry)
+ {
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	__managed_dentry_set_transit(dentry);
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ }
+ 
+ static inline void __managed_dentry_clear_transit(struct dentry *dentry)
+@@ -233,9 +233,9 @@ static inline void __managed_dentry_clea
+ 
+ static inline void managed_dentry_clear_transit(struct dentry *dentry)
+ {
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	__managed_dentry_clear_transit(dentry);
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ }
+ 
+ static inline void __managed_dentry_set_managed(struct dentry *dentry)
+@@ -245,9 +245,9 @@ static inline void __managed_dentry_set_
+ 
+ static inline void managed_dentry_set_managed(struct dentry *dentry)
+ {
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	__managed_dentry_set_managed(dentry);
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ }
+ 
+ static inline void __managed_dentry_clear_managed(struct dentry *dentry)
+@@ -257,9 +257,9 @@ static inline void __managed_dentry_clea
+ 
+ static inline void managed_dentry_clear_managed(struct dentry *dentry)
+ {
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	__managed_dentry_clear_managed(dentry);
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ }
+ 
+ /* Initializing function */
+Index: linux-3.2/fs/autofs4/expire.c
+===================================================================
+--- linux-3.2.orig/fs/autofs4/expire.c
++++ linux-3.2/fs/autofs4/expire.c
+@@ -99,7 +99,7 @@ static struct dentry *get_next_positive_
+ 	spin_lock(&sbi->lookup_lock);
+ 
+ 	if (prev == NULL) {
+-		spin_lock(&root->d_lock);
++		seq_spin_lock(&root->d_lock);
+ 		prev = dget_dlock(root);
+ 		next = prev->d_subdirs.next;
+ 		p = prev;
+@@ -107,12 +107,12 @@ static struct dentry *get_next_positive_
+ 	}
+ 
+ 	p = prev;
+-	spin_lock(&p->d_lock);
++	seq_spin_lock(&p->d_lock);
+ again:
+ 	next = p->d_u.d_child.next;
+ start:
+ 	if (next == &root->d_subdirs) {
+-		spin_unlock(&p->d_lock);
++		seq_spin_unlock(&p->d_lock);
+ 		spin_unlock(&sbi->lookup_lock);
+ 		dput(prev);
+ 		return NULL;
+@@ -120,16 +120,16 @@ start:
+ 
+ 	q = list_entry(next, struct dentry, d_u.d_child);
+ 
+-	spin_lock_nested(&q->d_lock, DENTRY_D_LOCK_NESTED);
++	seq_spin_lock_nested(&q->d_lock, DENTRY_D_LOCK_NESTED);
+ 	/* Negative dentry - try next */
+ 	if (!simple_positive(q)) {
+-		spin_unlock(&p->d_lock);
++		seq_spin_unlock(&p->d_lock);
+ 		p = q;
+ 		goto again;
+ 	}
+ 	dget_dlock(q);
+-	spin_unlock(&q->d_lock);
+-	spin_unlock(&p->d_lock);
++	seq_spin_unlock(&q->d_lock);
++	seq_spin_unlock(&p->d_lock);
+ 	spin_unlock(&sbi->lookup_lock);
+ 
+ 	dput(prev);
+@@ -153,7 +153,7 @@ static struct dentry *get_next_positive_
+ 	spin_lock(&sbi->lookup_lock);
+ relock:
+ 	p = prev;
+-	spin_lock(&p->d_lock);
++	seq_spin_lock(&p->d_lock);
+ again:
+ 	next = p->d_subdirs.next;
+ 	if (next == &p->d_subdirs) {
+@@ -161,19 +161,19 @@ again:
+ 			struct dentry *parent;
+ 
+ 			if (p == root) {
+-				spin_unlock(&p->d_lock);
++				seq_spin_unlock(&p->d_lock);
+ 				spin_unlock(&sbi->lookup_lock);
+ 				dput(prev);
+ 				return NULL;
+ 			}
+ 
+ 			parent = p->d_parent;
+-			if (!spin_trylock(&parent->d_lock)) {
+-				spin_unlock(&p->d_lock);
++			if (!seq_spin_trylock(&parent->d_lock)) {
++				seq_spin_unlock(&p->d_lock);
+ 				cpu_relax();
+ 				goto relock;
+ 			}
+-			spin_unlock(&p->d_lock);
++			seq_spin_unlock(&p->d_lock);
+ 			next = p->d_u.d_child.next;
+ 			p = parent;
+ 			if (next != &parent->d_subdirs)
+@@ -182,16 +182,16 @@ again:
+ 	}
+ 	ret = list_entry(next, struct dentry, d_u.d_child);
+ 
+-	spin_lock_nested(&ret->d_lock, DENTRY_D_LOCK_NESTED);
++	seq_spin_lock_nested(&ret->d_lock, DENTRY_D_LOCK_NESTED);
+ 	/* Negative dentry - try next */
+ 	if (!simple_positive(ret)) {
+-		spin_unlock(&p->d_lock);
++		seq_spin_unlock(&p->d_lock);
+ 		p = ret;
+ 		goto again;
+ 	}
+ 	dget_dlock(ret);
+-	spin_unlock(&ret->d_lock);
+-	spin_unlock(&p->d_lock);
++	seq_spin_unlock(&ret->d_lock);
++	seq_spin_unlock(&p->d_lock);
+ 	spin_unlock(&sbi->lookup_lock);
+ 
+ 	dput(prev);
+@@ -462,11 +462,11 @@ found:
+ 	init_completion(&ino->expire_complete);
+ 	spin_unlock(&sbi->fs_lock);
+ 	spin_lock(&sbi->lookup_lock);
+-	spin_lock(&expired->d_parent->d_lock);
+-	spin_lock_nested(&expired->d_lock, DENTRY_D_LOCK_NESTED);
++	seq_spin_lock(&expired->d_parent->d_lock);
++	seq_spin_lock_nested(&expired->d_lock, DENTRY_D_LOCK_NESTED);
+ 	list_move(&expired->d_parent->d_subdirs, &expired->d_u.d_child);
+-	spin_unlock(&expired->d_lock);
+-	spin_unlock(&expired->d_parent->d_lock);
++	seq_spin_unlock(&expired->d_lock);
++	seq_spin_unlock(&expired->d_parent->d_lock);
+ 	spin_unlock(&sbi->lookup_lock);
+ 	return expired;
+ }
+@@ -556,7 +556,7 @@ int autofs4_do_expire_multi(struct super
+ 
+ 		spin_lock(&sbi->fs_lock);
+ 		ino->flags &= ~AUTOFS_INF_EXPIRING;
+-		spin_lock(&dentry->d_lock);
++		seq_spin_lock(&dentry->d_lock);
+ 		if (!ret) {
+ 			if ((IS_ROOT(dentry) ||
+ 			    (autofs_type_indirect(sbi->type) &&
+@@ -564,7 +564,7 @@ int autofs4_do_expire_multi(struct super
+ 			    !(dentry->d_flags & DCACHE_NEED_AUTOMOUNT))
+ 				__managed_dentry_set_automount(dentry);
+ 		}
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 		complete_all(&ino->expire_complete);
+ 		spin_unlock(&sbi->fs_lock);
+ 		dput(dentry);
+Index: linux-3.2/fs/autofs4/root.c
+===================================================================
+--- linux-3.2.orig/fs/autofs4/root.c
++++ linux-3.2/fs/autofs4/root.c
+@@ -124,13 +124,13 @@ static int autofs4_dir_open(struct inode
+ 	 * it.
+ 	 */
+ 	spin_lock(&sbi->lookup_lock);
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	if (!d_mountpoint(dentry) && list_empty(&dentry->d_subdirs)) {
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 		spin_unlock(&sbi->lookup_lock);
+ 		return -ENOENT;
+ 	}
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ 	spin_unlock(&sbi->lookup_lock);
+ 
+ out:
+@@ -179,7 +179,7 @@ static struct dentry *autofs4_lookup_act
+ 		ino = list_entry(p, struct autofs_info, active);
+ 		active = ino->dentry;
+ 
+-		spin_lock(&active->d_lock);
++		seq_spin_lock(&active->d_lock);
+ 
+ 		/* Already gone? */
+ 		if (active->d_count == 0)
+@@ -199,12 +199,12 @@ static struct dentry *autofs4_lookup_act
+ 
+ 		if (d_unhashed(active)) {
+ 			dget_dlock(active);
+-			spin_unlock(&active->d_lock);
++			seq_spin_unlock(&active->d_lock);
+ 			spin_unlock(&sbi->lookup_lock);
+ 			return active;
+ 		}
+ next:
+-		spin_unlock(&active->d_lock);
++		seq_spin_unlock(&active->d_lock);
+ 	}
+ 	spin_unlock(&sbi->lookup_lock);
+ 
+@@ -231,7 +231,7 @@ static struct dentry *autofs4_lookup_exp
+ 		ino = list_entry(p, struct autofs_info, expiring);
+ 		expiring = ino->dentry;
+ 
+-		spin_lock(&expiring->d_lock);
++		seq_spin_lock(&expiring->d_lock);
+ 
+ 		/* Bad luck, we've already been dentry_iput */
+ 		if (!expiring->d_inode)
+@@ -251,12 +251,12 @@ static struct dentry *autofs4_lookup_exp
+ 
+ 		if (d_unhashed(expiring)) {
+ 			dget_dlock(expiring);
+-			spin_unlock(&expiring->d_lock);
++			seq_spin_unlock(&expiring->d_lock);
+ 			spin_unlock(&sbi->lookup_lock);
+ 			return expiring;
+ 		}
+ next:
+-		spin_unlock(&expiring->d_lock);
++		seq_spin_unlock(&expiring->d_lock);
+ 	}
+ 	spin_unlock(&sbi->lookup_lock);
+ 
+@@ -382,12 +382,12 @@ static struct vfsmount *autofs4_d_automo
+ 			if (have_submounts(dentry))
+ 				goto done;
+ 		} else {
+-			spin_lock(&dentry->d_lock);
++			seq_spin_lock(&dentry->d_lock);
+ 			if (!list_empty(&dentry->d_subdirs)) {
+-				spin_unlock(&dentry->d_lock);
++				seq_spin_unlock(&dentry->d_lock);
+ 				goto done;
+ 			}
+-			spin_unlock(&dentry->d_lock);
++			seq_spin_unlock(&dentry->d_lock);
+ 		}
+ 		ino->flags |= AUTOFS_INF_PENDING;
+ 		spin_unlock(&sbi->fs_lock);
+@@ -410,12 +410,12 @@ done:
+ 		 * an actual mount so ->d_automount() won't be called during
+ 		 * the follow.
+ 		 */
+-		spin_lock(&dentry->d_lock);
++		seq_spin_lock(&dentry->d_lock);
+ 		if ((!d_mountpoint(dentry) &&
+ 		    !list_empty(&dentry->d_subdirs)) ||
+ 		    (dentry->d_inode && S_ISLNK(dentry->d_inode->i_mode)))
+ 			__managed_dentry_clear_automount(dentry);
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 	}
+ 	spin_unlock(&sbi->fs_lock);
+ 
+@@ -597,9 +597,9 @@ static int autofs4_dir_unlink(struct ino
+ 
+ 	spin_lock(&sbi->lookup_lock);
+ 	__autofs4_add_expiring(dentry);
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	__d_drop(dentry);
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ 	spin_unlock(&sbi->lookup_lock);
+ 
+ 	return 0;
+@@ -670,15 +670,15 @@ static int autofs4_dir_rmdir(struct inod
+ 		return -EACCES;
+ 
+ 	spin_lock(&sbi->lookup_lock);
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	if (!list_empty(&dentry->d_subdirs)) {
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 		spin_unlock(&sbi->lookup_lock);
+ 		return -ENOTEMPTY;
+ 	}
+ 	__autofs4_add_expiring(dentry);
+ 	__d_drop(dentry);
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ 	spin_unlock(&sbi->lookup_lock);
+ 
+ 	if (sbi->version < 5)
+Index: linux-3.2/fs/btrfs/export.c
+===================================================================
+--- linux-3.2.orig/fs/btrfs/export.c
++++ linux-3.2/fs/btrfs/export.c
+@@ -40,14 +40,14 @@ static int btrfs_encode_fh(struct dentry
+ 		struct inode *parent;
+ 		u64 parent_root_id;
+ 
+-		spin_lock(&dentry->d_lock);
++		seq_spin_lock(&dentry->d_lock);
+ 
+ 		parent = dentry->d_parent->d_inode;
+ 		fid->parent_objectid = BTRFS_I(parent)->location.objectid;
+ 		fid->parent_gen = parent->i_generation;
+ 		parent_root_id = BTRFS_I(parent)->root->objectid;
+ 
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 
+ 		if (parent_root_id != fid->root_objectid) {
+ 			fid->parent_root_objectid = parent_root_id;
+Index: linux-3.2/fs/btrfs/inode.c
+===================================================================
+--- linux-3.2.orig/fs/btrfs/inode.c
++++ linux-3.2/fs/btrfs/inode.c
+@@ -4002,9 +4002,9 @@ static struct dentry *btrfs_lookup(struc
+ 
+ 	ret = d_splice_alias(btrfs_lookup_dentry(dir, dentry), dentry);
+ 	if (unlikely(d_need_lookup(dentry))) {
+-		spin_lock(&dentry->d_lock);
++		seq_spin_lock(&dentry->d_lock);
+ 		dentry->d_flags &= ~DCACHE_NEED_LOOKUP;
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 	}
+ 	return ret;
+ }
+Index: linux-3.2/fs/ceph/caps.c
+===================================================================
+--- linux-3.2.orig/fs/ceph/caps.c
++++ linux-3.2/fs/ceph/caps.c
+@@ -3066,14 +3066,14 @@ int ceph_encode_dentry_release(void **p,
+ 	 * doesn't have to be perfect; the mds will revoke anything we don't
+ 	 * release.
+ 	 */
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	if (di->lease_session && di->lease_session->s_mds == mds)
+ 		force = 1;
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ 
+ 	ret = ceph_encode_inode_release(p, dir, mds, drop, unless, force);
+ 
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	if (ret && di->lease_session && di->lease_session->s_mds == mds) {
+ 		dout("encode_dentry_release %p mds%d seq %d\n",
+ 		     dentry, mds, (int)di->lease_seq);
+@@ -3083,6 +3083,6 @@ int ceph_encode_dentry_release(void **p,
+ 		rel->dname_seq = cpu_to_le32(di->lease_seq);
+ 		__ceph_mdsc_drop_dentry_lease(dentry);
+ 	}
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ 	return ret;
+ }
+Index: linux-3.2/fs/ceph/debugfs.c
+===================================================================
+--- linux-3.2.orig/fs/ceph/debugfs.c
++++ linux-3.2/fs/ceph/debugfs.c
+@@ -82,13 +82,13 @@ static int mdsc_show(struct seq_file *s,
+ 						    &pathbase, 0);
+ 			if (IS_ERR(path))
+ 				path = NULL;
+-			spin_lock(&req->r_dentry->d_lock);
++			seq_spin_lock(&req->r_dentry->d_lock);
+ 			seq_printf(s, " #%llx/%.*s (%s)",
+ 				   ceph_ino(req->r_dentry->d_parent->d_inode),
+ 				   req->r_dentry->d_name.len,
+ 				   req->r_dentry->d_name.name,
+ 				   path ? path : "");
+-			spin_unlock(&req->r_dentry->d_lock);
++			seq_spin_unlock(&req->r_dentry->d_lock);
+ 			kfree(path);
+ 		} else if (req->r_path1) {
+ 			seq_printf(s, " #%llx/%s", req->r_ino1.ino,
+@@ -100,13 +100,13 @@ static int mdsc_show(struct seq_file *s,
+ 						    &pathbase, 0);
+ 			if (IS_ERR(path))
+ 				path = NULL;
+-			spin_lock(&req->r_old_dentry->d_lock);
++			seq_spin_lock(&req->r_old_dentry->d_lock);
+ 			seq_printf(s, " #%llx/%.*s (%s)",
+ 			   ceph_ino(req->r_old_dentry_dir),
+ 				   req->r_old_dentry->d_name.len,
+ 				   req->r_old_dentry->d_name.name,
+ 				   path ? path : "");
+-			spin_unlock(&req->r_old_dentry->d_lock);
++			seq_spin_unlock(&req->r_old_dentry->d_lock);
+ 			kfree(path);
+ 		} else if (req->r_path2) {
+ 			if (req->r_ino2.ino)
+Index: linux-3.2/fs/ceph/dir.c
+===================================================================
+--- linux-3.2.orig/fs/ceph/dir.c
++++ linux-3.2/fs/ceph/dir.c
+@@ -44,7 +44,7 @@ int ceph_init_dentry(struct dentry *dent
+ 	if (!di)
+ 		return -ENOMEM;          /* oh well */
+ 
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	if (dentry->d_fsdata) {
+ 		/* lost a race */
+ 		kmem_cache_free(ceph_dentry_cachep, di);
+@@ -67,7 +67,7 @@ int ceph_init_dentry(struct dentry *dent
+ 	dentry->d_fsdata = di;
+ 	ceph_dentry_lru_add(dentry);
+ out_unlock:
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ 	return 0;
+ }
+ 
+@@ -78,12 +78,12 @@ struct inode *ceph_get_dentry_parent_ino
+ 	if (!dentry)
+ 		return NULL;
+ 
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	if (dentry->d_parent) {
+ 		inode = dentry->d_parent->d_inode;
+ 		ihold(inode);
+ 	}
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ 	return inode;
+ }
+ 
+@@ -130,7 +130,7 @@ static int __dcache_readdir(struct file 
+ 	dout("__dcache_readdir %p at %llu (last %p)\n", dir, filp->f_pos,
+ 	     last);
+ 
+-	spin_lock(&parent->d_lock);
++	seq_spin_lock(&parent->d_lock);
+ 
+ 	/* start at beginning? */
+ 	if (filp->f_pos == 2 || last == NULL ||
+@@ -154,7 +154,7 @@ more:
+ 			fi->flags |= CEPH_F_ATEND;
+ 			goto out_unlock;
+ 		}
+-		spin_lock_nested(&dentry->d_lock, DENTRY_D_LOCK_NESTED);
++		seq_spin_lock_nested(&dentry->d_lock, DENTRY_D_LOCK_NESTED);
+ 		if (!d_unhashed(dentry) && dentry->d_inode &&
+ 		    ceph_snap(dentry->d_inode) != CEPH_SNAPDIR &&
+ 		    ceph_ino(dentry->d_inode) != CEPH_INO_CEPH &&
+@@ -164,15 +164,15 @@ more:
+ 		     dentry->d_name.len, dentry->d_name.name, di->offset,
+ 		     filp->f_pos, d_unhashed(dentry) ? " unhashed" : "",
+ 		     !dentry->d_inode ? " null" : "");
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 		p = p->prev;
+ 		dentry = list_entry(p, struct dentry, d_u.d_child);
+ 		di = ceph_dentry(dentry);
+ 	}
+ 
+ 	dget_dlock(dentry);
+-	spin_unlock(&dentry->d_lock);
+-	spin_unlock(&parent->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&parent->d_lock);
+ 
+ 	dout(" %llu (%llu) dentry %p %.*s %p\n", di->offset, filp->f_pos,
+ 	     dentry, dentry->d_name.len, dentry->d_name.name, dentry->d_inode);
+@@ -205,12 +205,12 @@ more:
+ 		goto out;
+ 	}
+ 
+-	spin_lock(&parent->d_lock);
++	seq_spin_lock(&parent->d_lock);
+ 	p = p->prev;	/* advance to next dentry */
+ 	goto more;
+ 
+ out_unlock:
+-	spin_unlock(&parent->d_lock);
++	seq_spin_unlock(&parent->d_lock);
+ out:
+ 	if (last)
+ 		dput(last);
+@@ -950,10 +950,10 @@ static int ceph_rename(struct inode *old
+  */
+ void ceph_invalidate_dentry_lease(struct dentry *dentry)
+ {
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	dentry->d_time = jiffies;
+ 	ceph_dentry(dentry)->lease_shared_gen = 0;
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ }
+ 
+ /*
+@@ -971,7 +971,7 @@ static int dentry_lease_is_valid(struct 
+ 	struct inode *dir = NULL;
+ 	u32 seq = 0;
+ 
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	di = ceph_dentry(dentry);
+ 	if (di && di->lease_session) {
+ 		s = di->lease_session;
+@@ -995,7 +995,7 @@ static int dentry_lease_is_valid(struct 
+ 			}
+ 		}
+ 	}
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ 
+ 	if (session) {
+ 		ceph_mdsc_lease_send_msg(session, dir, dentry,
+Index: linux-3.2/fs/ceph/export.c
+===================================================================
+--- linux-3.2.orig/fs/ceph/export.c
++++ linux-3.2/fs/ceph/export.c
+@@ -55,9 +55,9 @@ static int ceph_encode_fh(struct dentry 
+ 	if (ceph_snap(inode) != CEPH_NOSNAP)
+ 		return -EINVAL;
+ 
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	parent = dget(dentry->d_parent);
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ 
+ 	if (*max_len >= connected_handle_length) {
+ 		dout("encode_fh %p connectable\n", dentry);
+Index: linux-3.2/fs/ceph/inode.c
+===================================================================
+--- linux-3.2.orig/fs/ceph/inode.c
++++ linux-3.2/fs/ceph/inode.c
+@@ -809,7 +809,7 @@ static void update_dentry_lease(struct d
+ 	if (dentry->d_op != &ceph_dentry_ops)
+ 		return;
+ 
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	dout("update_dentry_lease %p duration %lu ms ttl %lu\n",
+ 	     dentry, duration, ttl);
+ 
+@@ -837,7 +837,7 @@ static void update_dentry_lease(struct d
+ 	di->lease_renew_from = 0;
+ 	dentry->d_time = ttl;
+ out_unlock:
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ 	return;
+ }
+ 
+@@ -866,13 +866,13 @@ static void ceph_set_dentry_offset(struc
+ 	di->offset = ceph_inode(inode)->i_max_offset++;
+ 	spin_unlock(&ci->i_ceph_lock);
+ 
+-	spin_lock(&dir->d_lock);
+-	spin_lock_nested(&dn->d_lock, DENTRY_D_LOCK_NESTED);
++	seq_spin_lock(&dir->d_lock);
++	seq_spin_lock_nested(&dn->d_lock, DENTRY_D_LOCK_NESTED);
+ 	list_move(&dn->d_u.d_child, &dir->d_subdirs);
+ 	dout("set_dentry_offset %p %lld (%p %p)\n", dn, di->offset,
+ 	     dn->d_u.d_child.prev, dn->d_u.d_child.next);
+-	spin_unlock(&dn->d_lock);
+-	spin_unlock(&dir->d_lock);
++	seq_spin_unlock(&dn->d_lock);
++	seq_spin_unlock(&dir->d_lock);
+ }
+ 
+ /*
+@@ -1254,11 +1254,11 @@ retry_lookup:
+ 			goto retry_lookup;
+ 		} else {
+ 			/* reorder parent's d_subdirs */
+-			spin_lock(&parent->d_lock);
+-			spin_lock_nested(&dn->d_lock, DENTRY_D_LOCK_NESTED);
++			seq_spin_lock(&parent->d_lock);
++			seq_spin_lock_nested(&dn->d_lock, DENTRY_D_LOCK_NESTED);
+ 			list_move(&dn->d_u.d_child, &parent->d_subdirs);
+-			spin_unlock(&dn->d_lock);
+-			spin_unlock(&parent->d_lock);
++			seq_spin_unlock(&dn->d_lock);
++			seq_spin_unlock(&parent->d_lock);
+ 		}
+ 
+ 		di = dn->d_fsdata;
+Index: linux-3.2/fs/ceph/mds_client.c
+===================================================================
+--- linux-3.2.orig/fs/ceph/mds_client.c
++++ linux-3.2/fs/ceph/mds_client.c
+@@ -1488,25 +1488,25 @@ retry:
+ 	for (temp = dentry; !IS_ROOT(temp) && pos != 0; ) {
+ 		struct inode *inode;
+ 
+-		spin_lock(&temp->d_lock);
++		seq_spin_lock(&temp->d_lock);
+ 		inode = temp->d_inode;
+ 		if (inode && ceph_snap(inode) == CEPH_SNAPDIR) {
+ 			dout("build_path path+%d: %p SNAPDIR\n",
+ 			     pos, temp);
+ 		} else if (stop_on_nosnap && inode &&
+ 			   ceph_snap(inode) == CEPH_NOSNAP) {
+-			spin_unlock(&temp->d_lock);
++			seq_spin_unlock(&temp->d_lock);
+ 			break;
+ 		} else {
+ 			pos -= temp->d_name.len;
+ 			if (pos < 0) {
+-				spin_unlock(&temp->d_lock);
++				seq_spin_unlock(&temp->d_lock);
+ 				break;
+ 			}
+ 			strncpy(path + pos, temp->d_name.name,
+ 				temp->d_name.len);
+ 		}
+-		spin_unlock(&temp->d_lock);
++		seq_spin_unlock(&temp->d_lock);
+ 		if (pos)
+ 			path[--pos] = '/';
+ 		temp = temp->d_parent;
+@@ -2768,7 +2768,7 @@ static void handle_lease(struct ceph_mds
+ 	if (!dentry)
+ 		goto release;
+ 
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	di = ceph_dentry(dentry);
+ 	switch (h->action) {
+ 	case CEPH_MDS_LEASE_REVOKE:
+@@ -2796,7 +2796,7 @@ static void handle_lease(struct ceph_mds
+ 		}
+ 		break;
+ 	}
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ 	dput(dentry);
+ 
+ 	if (!release)
+@@ -2869,7 +2869,7 @@ void ceph_mdsc_lease_release(struct ceph
+ 	BUG_ON(dentry == NULL);
+ 
+ 	/* is dentry lease valid? */
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	di = ceph_dentry(dentry);
+ 	if (!di || !di->lease_session ||
+ 	    di->lease_session->s_mds < 0 ||
+@@ -2878,7 +2878,7 @@ void ceph_mdsc_lease_release(struct ceph
+ 		dout("lease_release inode %p dentry %p -- "
+ 		     "no lease\n",
+ 		     inode, dentry);
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 		return;
+ 	}
+ 
+@@ -2886,7 +2886,7 @@ void ceph_mdsc_lease_release(struct ceph
+ 	session = ceph_get_mds_session(di->lease_session);
+ 	seq = di->lease_seq;
+ 	__ceph_mdsc_drop_dentry_lease(dentry);
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ 
+ 	dout("lease_release inode %p dentry %p to mds%d\n",
+ 	     inode, dentry, session->s_mds);
+Index: linux-3.2/fs/cifs/dir.c
+===================================================================
+--- linux-3.2.orig/fs/cifs/dir.c
++++ linux-3.2/fs/cifs/dir.c
+@@ -83,10 +83,10 @@ cifs_bp_rename_retry:
+ 	full_path[namelen] = 0;	/* trailing null */
+ 	rcu_read_lock();
+ 	for (temp = direntry; !IS_ROOT(temp);) {
+-		spin_lock(&temp->d_lock);
++		seq_spin_lock(&temp->d_lock);
+ 		namelen -= 1 + temp->d_name.len;
+ 		if (namelen < 0) {
+-			spin_unlock(&temp->d_lock);
++			seq_spin_unlock(&temp->d_lock);
+ 			break;
+ 		} else {
+ 			full_path[namelen] = dirsep;
+@@ -94,7 +94,7 @@ cifs_bp_rename_retry:
+ 				temp->d_name.len);
+ 			cFYI(0, "name: %s", full_path + namelen);
+ 		}
+-		spin_unlock(&temp->d_lock);
++		seq_spin_unlock(&temp->d_lock);
+ 		temp = temp->d_parent;
+ 		if (temp == NULL) {
+ 			cERROR(1, "corrupt dentry");
+Index: linux-3.2/fs/coda/cache.c
+===================================================================
+--- linux-3.2.orig/fs/coda/cache.c
++++ linux-3.2/fs/coda/cache.c
+@@ -92,7 +92,7 @@ static void coda_flag_children(struct de
+ 	struct list_head *child;
+ 	struct dentry *de;
+ 
+-	spin_lock(&parent->d_lock);
++	seq_spin_lock(&parent->d_lock);
+ 	list_for_each(child, &parent->d_subdirs)
+ 	{
+ 		de = list_entry(child, struct dentry, d_u.d_child);
+@@ -101,7 +101,7 @@ static void coda_flag_children(struct de
+ 			continue;
+ 		coda_flag_inode(de->d_inode, flag);
+ 	}
+-	spin_unlock(&parent->d_lock);
++	seq_spin_unlock(&parent->d_lock);
+ 	return; 
+ }
+ 
+Index: linux-3.2/fs/configfs/configfs_internal.h
+===================================================================
+--- linux-3.2.orig/fs/configfs/configfs_internal.h
++++ linux-3.2/fs/configfs/configfs_internal.h
+@@ -121,7 +121,7 @@ static inline struct config_item *config
+ {
+ 	struct config_item * item = NULL;
+ 
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	if (!d_unhashed(dentry)) {
+ 		struct configfs_dirent * sd = dentry->d_fsdata;
+ 		if (sd->s_type & CONFIGFS_ITEM_LINK) {
+@@ -130,7 +130,7 @@ static inline struct config_item *config
+ 		} else
+ 			item = config_item_get(sd->s_element);
+ 	}
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ 
+ 	return item;
+ }
+Index: linux-3.2/fs/configfs/inode.c
+===================================================================
+--- linux-3.2.orig/fs/configfs/inode.c
++++ linux-3.2/fs/configfs/inode.c
+@@ -251,14 +251,14 @@ void configfs_drop_dentry(struct configf
+ 	struct dentry * dentry = sd->s_dentry;
+ 
+ 	if (dentry) {
+-		spin_lock(&dentry->d_lock);
++		seq_spin_lock(&dentry->d_lock);
+ 		if (!(d_unhashed(dentry) && dentry->d_inode)) {
+ 			dget_dlock(dentry);
+ 			__d_drop(dentry);
+-			spin_unlock(&dentry->d_lock);
++			seq_spin_unlock(&dentry->d_lock);
+ 			simple_unlink(parent->d_inode, dentry);
+ 		} else
+-			spin_unlock(&dentry->d_lock);
++			seq_spin_unlock(&dentry->d_lock);
+ 	}
+ }
+ 
+Index: linux-3.2/fs/dcache.c
+===================================================================
+--- linux-3.2.orig/fs/dcache.c
++++ linux-3.2/fs/dcache.c
+@@ -172,9 +172,9 @@ static void d_free(struct dentry *dentry
+  */
+ static inline void dentry_rcuwalk_barrier(struct dentry *dentry)
+ {
+-	assert_spin_locked(&dentry->d_lock);
++	assert_seq_spin_locked(&dentry->d_lock);
+ 	/* Go through a barrier */
+-	write_seqcount_barrier(&dentry->d_seq);
++	write_seqlock_barrier(&dentry->d_lock);
+ }
+ 
+ /*
+@@ -190,7 +190,7 @@ static void dentry_iput(struct dentry * 
+ 	if (inode) {
+ 		dentry->d_inode = NULL;
+ 		list_del_init(&dentry->d_alias);
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 		spin_unlock(&inode->i_lock);
+ 		if (!inode->i_nlink)
+ 			fsnotify_inoderemove(inode);
+@@ -199,7 +199,7 @@ static void dentry_iput(struct dentry * 
+ 		else
+ 			iput(inode);
+ 	} else {
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 	}
+ }
+ 
+@@ -215,7 +215,7 @@ static void dentry_unlink_inode(struct d
+ 	dentry->d_inode = NULL;
+ 	list_del_init(&dentry->d_alias);
+ 	dentry_rcuwalk_barrier(dentry);
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ 	spin_unlock(&inode->i_lock);
+ 	if (!inode->i_nlink)
+ 		fsnotify_inoderemove(inode);
+@@ -313,7 +313,7 @@ static struct dentry *d_kill(struct dent
+ 	 */
+ 	dentry->d_flags |= DCACHE_DISCONNECTED;
+ 	if (parent)
+-		spin_unlock(&parent->d_lock);
++		seq_spin_unlock(&parent->d_lock);
+ 	dentry_iput(dentry);
+ 	/*
+ 	 * dentry_iput drops the locks, at which point nobody (except
+@@ -370,9 +370,9 @@ EXPORT_SYMBOL(__d_drop);
+ 
+ void d_drop(struct dentry *dentry)
+ {
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	__d_drop(dentry);
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ }
+ EXPORT_SYMBOL(d_drop);
+ 
+@@ -387,10 +387,10 @@ EXPORT_SYMBOL(d_drop);
+  */
+ void d_clear_need_lookup(struct dentry *dentry)
+ {
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	__d_drop(dentry);
+ 	dentry->d_flags &= ~DCACHE_NEED_LOOKUP;
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ }
+ EXPORT_SYMBOL(d_clear_need_lookup);
+ 
+@@ -409,7 +409,7 @@ static inline struct dentry *dentry_kill
+ 	inode = dentry->d_inode;
+ 	if (inode && !spin_trylock(&inode->i_lock)) {
+ relock:
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 		cpu_relax();
+ 		return dentry; /* try again with same dentry */
+ 	}
+@@ -417,7 +417,7 @@ relock:
+ 		parent = NULL;
+ 	else
+ 		parent = dentry->d_parent;
+-	if (parent && !spin_trylock(&parent->d_lock)) {
++	if (parent && !seq_spin_trylock(&parent->d_lock)) {
+ 		if (inode)
+ 			spin_unlock(&inode->i_lock);
+ 		goto relock;
+@@ -470,11 +470,11 @@ void dput(struct dentry *dentry)
+ repeat:
+ 	if (dentry->d_count == 1)
+ 		might_sleep();
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	BUG_ON(!dentry->d_count);
+ 	if (dentry->d_count > 1) {
+ 		dentry->d_count--;
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 		return;
+ 	}
+ 
+@@ -497,7 +497,7 @@ repeat:
+ 	dentry_lru_add(dentry);
+ 
+ 	dentry->d_count--;
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ 	return;
+ 
+ kill_it:
+@@ -524,9 +524,9 @@ int d_invalidate(struct dentry * dentry)
+ 	/*
+ 	 * If it's already been dropped, return OK.
+ 	 */
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	if (d_unhashed(dentry)) {
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 		return 0;
+ 	}
+ 	/*
+@@ -534,9 +534,9 @@ int d_invalidate(struct dentry * dentry)
+ 	 * to get rid of unused child entries.
+ 	 */
+ 	if (!list_empty(&dentry->d_subdirs)) {
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 		shrink_dcache_parent(dentry);
+-		spin_lock(&dentry->d_lock);
++		seq_spin_lock(&dentry->d_lock);
+ 	}
+ 
+ 	/*
+@@ -553,13 +553,13 @@ int d_invalidate(struct dentry * dentry)
+ 	 */
+ 	if (dentry->d_count > 1 && dentry->d_inode) {
+ 		if (S_ISDIR(dentry->d_inode->i_mode) || d_mountpoint(dentry)) {
+-			spin_unlock(&dentry->d_lock);
++			seq_spin_unlock(&dentry->d_lock);
+ 			return -EBUSY;
+ 		}
+ 	}
+ 
+ 	__d_drop(dentry);
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ 	return 0;
+ }
+ EXPORT_SYMBOL(d_invalidate);
+@@ -572,9 +572,9 @@ static inline void __dget_dlock(struct d
+ 
+ static inline void __dget(struct dentry *dentry)
+ {
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	__dget_dlock(dentry);
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ }
+ 
+ struct dentry *dget_parent(struct dentry *dentry)
+@@ -588,16 +588,16 @@ repeat:
+ 	 */
+ 	rcu_read_lock();
+ 	ret = dentry->d_parent;
+-	spin_lock(&ret->d_lock);
++	seq_spin_lock(&ret->d_lock);
+ 	if (unlikely(ret != dentry->d_parent)) {
+-		spin_unlock(&ret->d_lock);
++		seq_spin_unlock(&ret->d_lock);
+ 		rcu_read_unlock();
+ 		goto repeat;
+ 	}
+ 	rcu_read_unlock();
+ 	BUG_ON(!ret->d_count);
+ 	ret->d_count++;
+-	spin_unlock(&ret->d_lock);
++	seq_spin_unlock(&ret->d_lock);
+ 	return ret;
+ }
+ EXPORT_SYMBOL(dget_parent);
+@@ -625,31 +625,31 @@ static struct dentry *__d_find_alias(str
+ again:
+ 	discon_alias = NULL;
+ 	list_for_each_entry(alias, &inode->i_dentry, d_alias) {
+-		spin_lock(&alias->d_lock);
++		seq_spin_lock(&alias->d_lock);
+  		if (S_ISDIR(inode->i_mode) || !d_unhashed(alias)) {
+ 			if (IS_ROOT(alias) &&
+ 			    (alias->d_flags & DCACHE_DISCONNECTED)) {
+ 				discon_alias = alias;
+ 			} else if (!want_discon) {
+ 				__dget_dlock(alias);
+-				spin_unlock(&alias->d_lock);
++				seq_spin_unlock(&alias->d_lock);
+ 				return alias;
+ 			}
+ 		}
+-		spin_unlock(&alias->d_lock);
++		seq_spin_unlock(&alias->d_lock);
+ 	}
+ 	if (discon_alias) {
+ 		alias = discon_alias;
+-		spin_lock(&alias->d_lock);
++		seq_spin_lock(&alias->d_lock);
+ 		if (S_ISDIR(inode->i_mode) || !d_unhashed(alias)) {
+ 			if (IS_ROOT(alias) &&
+ 			    (alias->d_flags & DCACHE_DISCONNECTED)) {
+ 				__dget_dlock(alias);
+-				spin_unlock(&alias->d_lock);
++				seq_spin_unlock(&alias->d_lock);
+ 				return alias;
+ 			}
+ 		}
+-		spin_unlock(&alias->d_lock);
++		seq_spin_unlock(&alias->d_lock);
+ 		goto again;
+ 	}
+ 	return NULL;
+@@ -678,16 +678,16 @@ void d_prune_aliases(struct inode *inode
+ restart:
+ 	spin_lock(&inode->i_lock);
+ 	list_for_each_entry(dentry, &inode->i_dentry, d_alias) {
+-		spin_lock(&dentry->d_lock);
++		seq_spin_lock(&dentry->d_lock);
+ 		if (!dentry->d_count) {
+ 			__dget_dlock(dentry);
+ 			__d_drop(dentry);
+-			spin_unlock(&dentry->d_lock);
++			seq_spin_unlock(&dentry->d_lock);
+ 			spin_unlock(&inode->i_lock);
+ 			dput(dentry);
+ 			goto restart;
+ 		}
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 	}
+ 	spin_unlock(&inode->i_lock);
+ }
+@@ -724,10 +724,10 @@ static void try_prune_one_dentry(struct 
+ 	/* Prune ancestors. */
+ 	dentry = parent;
+ 	while (dentry) {
+-		spin_lock(&dentry->d_lock);
++		seq_spin_lock(&dentry->d_lock);
+ 		if (dentry->d_count > 1) {
+ 			dentry->d_count--;
+-			spin_unlock(&dentry->d_lock);
++			seq_spin_unlock(&dentry->d_lock);
+ 			return;
+ 		}
+ 		dentry = dentry_kill(dentry, 1);
+@@ -743,9 +743,9 @@ static void shrink_dentry_list(struct li
+ 		dentry = list_entry_rcu(list->prev, struct dentry, d_lru);
+ 		if (&dentry->d_lru == list)
+ 			break; /* empty */
+-		spin_lock(&dentry->d_lock);
++		seq_spin_lock(&dentry->d_lock);
+ 		if (dentry != list_entry(list->prev, struct dentry, d_lru)) {
+-			spin_unlock(&dentry->d_lock);
++			seq_spin_unlock(&dentry->d_lock);
+ 			continue;
+ 		}
+ 
+@@ -756,7 +756,7 @@ static void shrink_dentry_list(struct li
+ 		 */
+ 		if (dentry->d_count) {
+ 			dentry_lru_del(dentry);
+-			spin_unlock(&dentry->d_lock);
++			seq_spin_unlock(&dentry->d_lock);
+ 			continue;
+ 		}
+ 
+@@ -794,7 +794,7 @@ relock:
+ 				struct dentry, d_lru);
+ 		BUG_ON(dentry->d_sb != sb);
+ 
+-		if (!spin_trylock(&dentry->d_lock)) {
++		if (!seq_spin_trylock(&dentry->d_lock)) {
+ 			spin_unlock(&dcache_lru_lock);
+ 			cpu_relax();
+ 			goto relock;
+@@ -803,11 +803,11 @@ relock:
+ 		if (dentry->d_flags & DCACHE_REFERENCED) {
+ 			dentry->d_flags &= ~DCACHE_REFERENCED;
+ 			list_move(&dentry->d_lru, &referenced);
+-			spin_unlock(&dentry->d_lock);
++			seq_spin_unlock(&dentry->d_lock);
+ 		} else {
+ 			list_move_tail(&dentry->d_lru, &tmp);
+ 			dentry->d_flags |= DCACHE_SHRINK_LIST;
+-			spin_unlock(&dentry->d_lock);
++			seq_spin_unlock(&dentry->d_lock);
+ 			if (!--count)
+ 				break;
+ 		}
+@@ -960,8 +960,8 @@ static struct dentry *try_to_ascend(stru
+ 	struct dentry *new = old->d_parent;
+ 
+ 	rcu_read_lock();
+-	spin_unlock(&old->d_lock);
+-	spin_lock(&new->d_lock);
++	seq_spin_unlock(&old->d_lock);
++	seq_spin_lock(&new->d_lock);
+ 
+ 	/*
+ 	 * might go back up the wrong parent if we have had a rename
+@@ -970,7 +970,7 @@ static struct dentry *try_to_ascend(stru
+ 	if (new != old->d_parent ||
+ 		 (old->d_flags & DCACHE_DISCONNECTED) ||
+ 		 (!locked && read_seqretry(&rename_lock, seq))) {
+-		spin_unlock(&new->d_lock);
++		seq_spin_unlock(&new->d_lock);
+ 		new = NULL;
+ 	}
+ 	rcu_read_unlock();
+@@ -1004,7 +1004,7 @@ again:
+ 
+ 	if (d_mountpoint(parent))
+ 		goto positive;
+-	spin_lock(&this_parent->d_lock);
++	seq_spin_lock(&this_parent->d_lock);
+ repeat:
+ 	next = this_parent->d_subdirs.next;
+ resume:
+@@ -1013,21 +1013,21 @@ resume:
+ 		struct dentry *dentry = list_entry(tmp, struct dentry, d_u.d_child);
+ 		next = tmp->next;
+ 
+-		spin_lock_nested(&dentry->d_lock, DENTRY_D_LOCK_NESTED);
++		seq_spin_lock_nested(&dentry->d_lock, DENTRY_D_LOCK_NESTED);
+ 		/* Have we found a mount point ? */
+ 		if (d_mountpoint(dentry)) {
+-			spin_unlock(&dentry->d_lock);
+-			spin_unlock(&this_parent->d_lock);
++			seq_spin_unlock(&dentry->d_lock);
++			seq_spin_unlock(&this_parent->d_lock);
+ 			goto positive;
+ 		}
+ 		if (!list_empty(&dentry->d_subdirs)) {
+-			spin_unlock(&this_parent->d_lock);
+-			spin_release(&dentry->d_lock.dep_map, 1, _RET_IP_);
++			seq_spin_unlock(&this_parent->d_lock);
++			spin_release(&dentry->d_lock.lock.dep_map, 1, _RET_IP_);
+ 			this_parent = dentry;
+-			spin_acquire(&this_parent->d_lock.dep_map, 0, 1, _RET_IP_);
++			spin_acquire(&this_parent->d_lock.lock.dep_map, 0, 1, _RET_IP_);
+ 			goto repeat;
+ 		}
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 	}
+ 	/*
+ 	 * All done at this level ... ascend and resume the search.
+@@ -1040,7 +1040,7 @@ resume:
+ 		next = child->d_u.d_child.next;
+ 		goto resume;
+ 	}
+-	spin_unlock(&this_parent->d_lock);
++	seq_spin_unlock(&this_parent->d_lock);
+ 	if (!locked && read_seqretry(&rename_lock, seq))
+ 		goto rename_retry;
+ 	if (locked)
+@@ -1085,7 +1085,7 @@ static int select_parent(struct dentry *
+ 	seq = read_seqbegin(&rename_lock);
+ again:
+ 	this_parent = parent;
+-	spin_lock(&this_parent->d_lock);
++	seq_spin_lock(&this_parent->d_lock);
+ repeat:
+ 	next = this_parent->d_subdirs.next;
+ resume:
+@@ -1094,7 +1094,7 @@ resume:
+ 		struct dentry *dentry = list_entry(tmp, struct dentry, d_u.d_child);
+ 		next = tmp->next;
+ 
+-		spin_lock_nested(&dentry->d_lock, DENTRY_D_LOCK_NESTED);
++		seq_spin_lock_nested(&dentry->d_lock, DENTRY_D_LOCK_NESTED);
+ 
+ 		/*
+ 		 * move only zero ref count dentries to the dispose list.
+@@ -1117,7 +1117,7 @@ resume:
+ 		 * the rest.
+ 		 */
+ 		if (found && need_resched()) {
+-			spin_unlock(&dentry->d_lock);
++			seq_spin_unlock(&dentry->d_lock);
+ 			goto out;
+ 		}
+ 
+@@ -1125,14 +1125,14 @@ resume:
+ 		 * Descend a level if the d_subdirs list is non-empty.
+ 		 */
+ 		if (!list_empty(&dentry->d_subdirs)) {
+-			spin_unlock(&this_parent->d_lock);
+-			spin_release(&dentry->d_lock.dep_map, 1, _RET_IP_);
++			seq_spin_unlock(&this_parent->d_lock);
++			spin_release(&dentry->d_lock.lock.dep_map, 1, _RET_IP_);
+ 			this_parent = dentry;
+-			spin_acquire(&this_parent->d_lock.dep_map, 0, 1, _RET_IP_);
++			spin_acquire(&this_parent->d_lock.lock.dep_map, 0, 1, _RET_IP_);
+ 			goto repeat;
+ 		}
+ 
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 	}
+ 	/*
+ 	 * All done at this level ... ascend and resume the search.
+@@ -1146,7 +1146,7 @@ resume:
+ 		goto resume;
+ 	}
+ out:
+-	spin_unlock(&this_parent->d_lock);
++	seq_spin_unlock(&this_parent->d_lock);
+ 	if (!locked && read_seqretry(&rename_lock, seq))
+ 		goto rename_retry;
+ 	if (locked)
+@@ -1214,8 +1214,7 @@ struct dentry *__d_alloc(struct super_bl
+ 
+ 	dentry->d_count = 1;
+ 	dentry->d_flags = 0;
+-	spin_lock_init(&dentry->d_lock);
+-	seqcount_init(&dentry->d_seq);
++	seqlock_init(&dentry->d_lock);
+ 	dentry->d_inode = NULL;
+ 	dentry->d_parent = dentry;
+ 	dentry->d_sb = sb;
+@@ -1248,7 +1247,7 @@ struct dentry *d_alloc(struct dentry * p
+ 	if (!dentry)
+ 		return NULL;
+ 
+-	spin_lock(&parent->d_lock);
++	seq_spin_lock(&parent->d_lock);
+ 	/*
+ 	 * don't need child lock because it is not subject
+ 	 * to concurrency here
+@@ -1256,7 +1255,7 @@ struct dentry *d_alloc(struct dentry * p
+ 	__dget_dlock(parent);
+ 	dentry->d_parent = parent;
+ 	list_add(&dentry->d_u.d_child, &parent->d_subdirs);
+-	spin_unlock(&parent->d_lock);
++	seq_spin_unlock(&parent->d_lock);
+ 
+ 	return dentry;
+ }
+@@ -1308,7 +1307,7 @@ EXPORT_SYMBOL(d_set_d_op);
+ 
+ static void __d_instantiate(struct dentry *dentry, struct inode *inode)
+ {
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	if (inode) {
+ 		if (unlikely(IS_AUTOMOUNT(inode)))
+ 			dentry->d_flags |= DCACHE_NEED_AUTOMOUNT;
+@@ -1316,7 +1315,7 @@ static void __d_instantiate(struct dentr
+ 	}
+ 	dentry->d_inode = inode;
+ 	dentry_rcuwalk_barrier(dentry);
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ 	fsnotify_d_instantiate(dentry, inode);
+ }
+ 
+@@ -1516,14 +1515,14 @@ struct dentry *d_obtain_alias(struct ino
+ 	}
+ 
+ 	/* attach a disconnected dentry */
+-	spin_lock(&tmp->d_lock);
++	seq_spin_lock(&tmp->d_lock);
+ 	tmp->d_inode = inode;
+ 	tmp->d_flags |= DCACHE_DISCONNECTED;
+ 	list_add(&tmp->d_alias, &inode->i_dentry);
+ 	hlist_bl_lock(&tmp->d_sb->s_anon);
+ 	hlist_bl_add_head(&tmp->d_hash, &tmp->d_sb->s_anon);
+ 	hlist_bl_unlock(&tmp->d_sb->s_anon);
+-	spin_unlock(&tmp->d_lock);
++	seq_spin_unlock(&tmp->d_lock);
+ 	spin_unlock(&inode->i_lock);
+ 	security_d_instantiate(tmp, inode);
+ 
+@@ -1731,7 +1730,7 @@ struct dentry *__d_lookup_rcu(struct den
+ 			continue;
+ 
+ seqretry:
+-		*seq = read_seqcount_begin(&dentry->d_seq);
++		*seq = read_seqbegin(&dentry->d_lock);
+ 		if (dentry->d_parent != parent)
+ 			continue;
+ 		if (d_unhashed(dentry))
+@@ -1746,7 +1745,7 @@ seqretry:
+ 		 * edge of memory when walking. If we could load this
+ 		 * atomically some other way, we could drop this check.
+ 		 */
+-		if (read_seqcount_retry(&dentry->d_seq, *seq))
++		if (read_seqretry(&dentry->d_lock, *seq))
+ 			goto seqretry;
+ 		if (unlikely(parent->d_flags & DCACHE_OP_COMPARE)) {
+ 			if (parent->d_op->d_compare(parent, *inode,
+@@ -1849,7 +1848,7 @@ struct dentry *__d_lookup(struct dentry 
+ 		if (dentry->d_name.hash != hash)
+ 			continue;
+ 
+-		spin_lock(&dentry->d_lock);
++		seq_spin_lock(&dentry->d_lock);
+ 		if (dentry->d_parent != parent)
+ 			goto next;
+ 		if (d_unhashed(dentry))
+@@ -1873,10 +1872,10 @@ struct dentry *__d_lookup(struct dentry 
+ 
+ 		dentry->d_count++;
+ 		found = dentry;
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 		break;
+ next:
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+  	}
+  	rcu_read_unlock();
+ 
+@@ -1924,17 +1923,17 @@ int d_validate(struct dentry *dentry, st
+ {
+ 	struct dentry *child;
+ 
+-	spin_lock(&dparent->d_lock);
++	seq_spin_lock(&dparent->d_lock);
+ 	list_for_each_entry(child, &dparent->d_subdirs, d_u.d_child) {
+ 		if (dentry == child) {
+-			spin_lock_nested(&dentry->d_lock, DENTRY_D_LOCK_NESTED);
++			seq_spin_lock_nested(&dentry->d_lock, DENTRY_D_LOCK_NESTED);
+ 			__dget_dlock(dentry);
+-			spin_unlock(&dentry->d_lock);
+-			spin_unlock(&dparent->d_lock);
++			seq_spin_unlock(&dentry->d_lock);
++			seq_spin_unlock(&dparent->d_lock);
+ 			return 1;
+ 		}
+ 	}
+-	spin_unlock(&dparent->d_lock);
++	seq_spin_unlock(&dparent->d_lock);
+ 
+ 	return 0;
+ }
+@@ -1969,12 +1968,12 @@ void d_delete(struct dentry * dentry)
+ 	 * Are we the only user?
+ 	 */
+ again:
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	inode = dentry->d_inode;
+ 	isdir = S_ISDIR(inode->i_mode);
+ 	if (dentry->d_count == 1) {
+ 		if (inode && !spin_trylock(&inode->i_lock)) {
+-			spin_unlock(&dentry->d_lock);
++			seq_spin_unlock(&dentry->d_lock);
+ 			cpu_relax();
+ 			goto again;
+ 		}
+@@ -1987,7 +1986,7 @@ again:
+ 	if (!d_unhashed(dentry))
+ 		__d_drop(dentry);
+ 
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ 
+ 	fsnotify_nameremove(dentry, isdir);
+ }
+@@ -2016,9 +2015,9 @@ static void _d_rehash(struct dentry * en
+  
+ void d_rehash(struct dentry * entry)
+ {
+-	spin_lock(&entry->d_lock);
++	seq_spin_lock(&entry->d_lock);
+ 	_d_rehash(entry);
+-	spin_unlock(&entry->d_lock);
++	seq_spin_unlock(&entry->d_lock);
+ }
+ EXPORT_SYMBOL(d_rehash);
+ 
+@@ -2041,11 +2040,9 @@ void dentry_update_name_case(struct dent
+ 	BUG_ON(!mutex_is_locked(&dentry->d_parent->d_inode->i_mutex));
+ 	BUG_ON(dentry->d_name.len != name->len); /* d_lookup gives this */
+ 
+-	spin_lock(&dentry->d_lock);
+-	write_seqcount_begin(&dentry->d_seq);
++	write_seqlock(&dentry->d_lock);
+ 	memcpy((unsigned char *)dentry->d_name.name, name->name, name->len);
+-	write_seqcount_end(&dentry->d_seq);
+-	spin_unlock(&dentry->d_lock);
++	write_sequnlock(&dentry->d_lock);
+ }
+ EXPORT_SYMBOL(dentry_update_name_case);
+ 
+@@ -2096,24 +2093,24 @@ static void dentry_lock_for_move(struct 
+ 	 * XXXX: do we really need to take target->d_lock?
+ 	 */
+ 	if (IS_ROOT(dentry) || dentry->d_parent == target->d_parent)
+-		spin_lock(&target->d_parent->d_lock);
++		seq_spin_lock(&target->d_parent->d_lock);
+ 	else {
+ 		if (d_ancestor(dentry->d_parent, target->d_parent)) {
+-			spin_lock(&dentry->d_parent->d_lock);
+-			spin_lock_nested(&target->d_parent->d_lock,
+-						DENTRY_D_LOCK_NESTED);
++			seq_spin_lock(&dentry->d_parent->d_lock);
++			seq_spin_lock_nested(&target->d_parent->d_lock,
++					    DENTRY_D_LOCK_NESTED);
+ 		} else {
+-			spin_lock(&target->d_parent->d_lock);
+-			spin_lock_nested(&dentry->d_parent->d_lock,
+-						DENTRY_D_LOCK_NESTED);
++			seq_spin_lock(&target->d_parent->d_lock);
++			seq_spin_lock_nested(&dentry->d_parent->d_lock,
++					    DENTRY_D_LOCK_NESTED);
+ 		}
+ 	}
+ 	if (target < dentry) {
+-		spin_lock_nested(&target->d_lock, 2);
+-		spin_lock_nested(&dentry->d_lock, 3);
++		seq_spin_lock_nested(&target->d_lock, 2);
++		seq_spin_lock_nested(&dentry->d_lock, 3);
+ 	} else {
+-		spin_lock_nested(&dentry->d_lock, 2);
+-		spin_lock_nested(&target->d_lock, 3);
++		seq_spin_lock_nested(&dentry->d_lock, 2);
++		seq_spin_lock_nested(&target->d_lock, 3);
+ 	}
+ }
+ 
+@@ -2121,9 +2118,9 @@ static void dentry_unlock_parents_for_mo
+ 					struct dentry *target)
+ {
+ 	if (target->d_parent != dentry->d_parent)
+-		spin_unlock(&dentry->d_parent->d_lock);
++		seq_spin_unlock(&dentry->d_parent->d_lock);
+ 	if (target->d_parent != target)
+-		spin_unlock(&target->d_parent->d_lock);
++		seq_spin_unlock(&target->d_parent->d_lock);
+ }
+ 
+ /*
+@@ -2157,8 +2154,8 @@ static void __d_move(struct dentry * den
+ 
+ 	dentry_lock_for_move(dentry, target);
+ 
+-	write_seqcount_begin(&dentry->d_seq);
+-	write_seqcount_begin(&target->d_seq);
++	write_seqlock_begin(&dentry->d_lock);
++	write_seqlock_begin(&target->d_lock);
+ 
+ 	/* __d_drop does write_seqcount_barrier, but they're OK to nest. */
+ 
+@@ -2193,13 +2190,13 @@ static void __d_move(struct dentry * den
+ 
+ 	list_add(&dentry->d_u.d_child, &dentry->d_parent->d_subdirs);
+ 
+-	write_seqcount_end(&target->d_seq);
+-	write_seqcount_end(&dentry->d_seq);
++	write_seqlock_end(&target->d_lock);
++	write_seqlock_end(&dentry->d_lock);
+ 
+ 	dentry_unlock_parents_for_move(dentry, target);
+-	spin_unlock(&target->d_lock);
++	seq_spin_unlock(&target->d_lock);
+ 	fsnotify_d_move(dentry);
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ }
+ 
+ /*
+@@ -2288,8 +2285,8 @@ static void __d_materialise_dentry(struc
+ 
+ 	dentry_lock_for_move(anon, dentry);
+ 
+-	write_seqcount_begin(&dentry->d_seq);
+-	write_seqcount_begin(&anon->d_seq);
++	write_seqlock_begin(&dentry->d_lock);
++	write_seqlock_begin(&anon->d_lock);
+ 
+ 	dparent = dentry->d_parent;
+ 	aparent = anon->d_parent;
+@@ -2311,11 +2308,11 @@ static void __d_materialise_dentry(struc
+ 	else
+ 		INIT_LIST_HEAD(&anon->d_u.d_child);
+ 
+-	write_seqcount_end(&dentry->d_seq);
+-	write_seqcount_end(&anon->d_seq);
++	write_seqlock_end(&dentry->d_lock);
++	write_seqlock_end(&anon->d_lock);
+ 
+ 	dentry_unlock_parents_for_move(anon, dentry);
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ 
+ 	/* anon->d_lock still locked, returns locked */
+ 	anon->d_flags &= ~DCACHE_DISCONNECTED;
+@@ -2391,10 +2388,10 @@ struct dentry *d_materialise_unique(stru
+ 	else
+ 		BUG_ON(!d_unhashed(actual));
+ 
+-	spin_lock(&actual->d_lock);
++	seq_spin_lock(&actual->d_lock);
+ found:
+ 	_d_rehash(actual);
+-	spin_unlock(&actual->d_lock);
++	seq_spin_unlock(&actual->d_lock);
+ 	spin_unlock(&inode->i_lock);
+ out_nolock:
+ 	if (actual == dentry) {
+@@ -2455,9 +2452,9 @@ static int prepend_path(const struct pat
+ 		}
+ 		parent = dentry->d_parent;
+ 		prefetch(parent);
+-		spin_lock(&dentry->d_lock);
++		seq_spin_lock(&dentry->d_lock);
+ 		error = prepend_name(buffer, buflen, &dentry->d_name);
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 		if (!error)
+ 			error = prepend(buffer, buflen, "/", 1);
+ 		if (error)
+@@ -2682,9 +2679,9 @@ static char *__dentry_path(struct dentry
+ 		int error;
+ 
+ 		prefetch(parent);
+-		spin_lock(&dentry->d_lock);
++		seq_spin_lock(&dentry->d_lock);
+ 		error = prepend_name(&end, &buflen, &dentry->d_name);
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 		if (error != 0 || prepend(&end, &buflen, "/", 1) != 0)
+ 			goto Elong;
+ 
+@@ -2874,7 +2871,7 @@ void d_genocide(struct dentry *root)
+ 	seq = read_seqbegin(&rename_lock);
+ again:
+ 	this_parent = root;
+-	spin_lock(&this_parent->d_lock);
++	seq_spin_lock(&this_parent->d_lock);
+ repeat:
+ 	next = this_parent->d_subdirs.next;
+ resume:
+@@ -2883,23 +2880,23 @@ resume:
+ 		struct dentry *dentry = list_entry(tmp, struct dentry, d_u.d_child);
+ 		next = tmp->next;
+ 
+-		spin_lock_nested(&dentry->d_lock, DENTRY_D_LOCK_NESTED);
++		seq_spin_lock_nested(&dentry->d_lock, DENTRY_D_LOCK_NESTED);
+ 		if (d_unhashed(dentry) || !dentry->d_inode) {
+-			spin_unlock(&dentry->d_lock);
++			seq_spin_unlock(&dentry->d_lock);
+ 			continue;
+ 		}
+ 		if (!list_empty(&dentry->d_subdirs)) {
+-			spin_unlock(&this_parent->d_lock);
+-			spin_release(&dentry->d_lock.dep_map, 1, _RET_IP_);
++			seq_spin_unlock(&this_parent->d_lock);
++			spin_release(&dentry->d_lock.lock.dep_map, 1, _RET_IP_);
+ 			this_parent = dentry;
+-			spin_acquire(&this_parent->d_lock.dep_map, 0, 1, _RET_IP_);
++			spin_acquire(&this_parent->d_lock.lock.dep_map, 0, 1, _RET_IP_);
+ 			goto repeat;
+ 		}
+ 		if (!(dentry->d_flags & DCACHE_GENOCIDE)) {
+ 			dentry->d_flags |= DCACHE_GENOCIDE;
+ 			dentry->d_count--;
+ 		}
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 	}
+ 	if (this_parent != root) {
+ 		struct dentry *child = this_parent;
+@@ -2913,7 +2910,7 @@ resume:
+ 		next = child->d_u.d_child.next;
+ 		goto resume;
+ 	}
+-	spin_unlock(&this_parent->d_lock);
++	seq_spin_unlock(&this_parent->d_lock);
+ 	if (!locked && read_seqretry(&rename_lock, seq))
+ 		goto rename_retry;
+ 	if (locked)
+Index: linux-3.2/fs/dcookies.c
+===================================================================
+--- linux-3.2.orig/fs/dcookies.c
++++ linux-3.2/fs/dcookies.c
+@@ -98,9 +98,9 @@ static struct dcookie_struct *alloc_dcoo
+ 		return NULL;
+ 
+ 	d = path->dentry;
+-	spin_lock(&d->d_lock);
++	seq_spin_lock(&d->d_lock);
+ 	d->d_flags |= DCACHE_COOKIE;
+-	spin_unlock(&d->d_lock);
++	seq_spin_unlock(&d->d_lock);
+ 
+ 	dcs->path = *path;
+ 	path_get(path);
+@@ -267,9 +267,9 @@ static void free_dcookie(struct dcookie_
+ {
+ 	struct dentry *d = dcs->path.dentry;
+ 
+-	spin_lock(&d->d_lock);
++	seq_spin_lock(&d->d_lock);
+ 	d->d_flags &= ~DCACHE_COOKIE;
+-	spin_unlock(&d->d_lock);
++	seq_spin_unlock(&d->d_lock);
+ 
+ 	path_put(&dcs->path);
+ 	kmem_cache_free(dcookie_cache, dcs);
+Index: linux-3.2/fs/exportfs/expfs.c
+===================================================================
+--- linux-3.2.orig/fs/exportfs/expfs.c
++++ linux-3.2/fs/exportfs/expfs.c
+@@ -114,15 +114,15 @@ reconnect_path(struct vfsmount *mnt, str
+ 
+ 		if (!IS_ROOT(pd)) {
+ 			/* must have found a connected parent - great */
+-			spin_lock(&pd->d_lock);
++			seq_spin_lock(&pd->d_lock);
+ 			pd->d_flags &= ~DCACHE_DISCONNECTED;
+-			spin_unlock(&pd->d_lock);
++			seq_spin_unlock(&pd->d_lock);
+ 			noprogress = 0;
+ 		} else if (pd == mnt->mnt_sb->s_root) {
+ 			printk(KERN_ERR "export: Eeek filesystem root is not connected, impossible\n");
+-			spin_lock(&pd->d_lock);
++			seq_spin_lock(&pd->d_lock);
+ 			pd->d_flags &= ~DCACHE_DISCONNECTED;
+-			spin_unlock(&pd->d_lock);
++			seq_spin_unlock(&pd->d_lock);
+ 			noprogress = 0;
+ 		} else {
+ 			/*
+@@ -335,11 +335,11 @@ static int export_encode_fh(struct dentr
+ 	if (connectable && !S_ISDIR(inode->i_mode)) {
+ 		struct inode *parent;
+ 
+-		spin_lock(&dentry->d_lock);
++		seq_spin_lock(&dentry->d_lock);
+ 		parent = dentry->d_parent->d_inode;
+ 		fid->i32.parent_ino = parent->i_ino;
+ 		fid->i32.parent_gen = parent->i_generation;
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 		len = 4;
+ 		type = FILEID_INO32_GEN_PARENT;
+ 	}
+Index: linux-3.2/fs/fat/inode.c
+===================================================================
+--- linux-3.2.orig/fs/fat/inode.c
++++ linux-3.2/fs/fat/inode.c
+@@ -772,9 +772,9 @@ fat_encode_fh(struct dentry *de, __u32 *
+ 	fh[1] = inode->i_generation;
+ 	fh[2] = ipos_h;
+ 	fh[3] = ipos_m | MSDOS_I(inode)->i_logstart;
+-	spin_lock(&de->d_lock);
++	seq_spin_lock(&de->d_lock);
+ 	fh[4] = ipos_l | MSDOS_I(de->d_parent->d_inode)->i_logstart;
+-	spin_unlock(&de->d_lock);
++	seq_spin_unlock(&de->d_lock);
+ 	return 3;
+ }
+ 
+Index: linux-3.2/fs/fat/namei_vfat.c
+===================================================================
+--- linux-3.2.orig/fs/fat/namei_vfat.c
++++ linux-3.2/fs/fat/namei_vfat.c
+@@ -34,10 +34,10 @@
+ static int vfat_revalidate_shortname(struct dentry *dentry)
+ {
+ 	int ret = 1;
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	if (dentry->d_time != dentry->d_parent->d_inode->i_version)
+ 		ret = 0;
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ 	return ret;
+ }
+ 
+Index: linux-3.2/fs/fs-writeback.c
+===================================================================
+--- linux-3.2.orig/fs/fs-writeback.c
++++ linux-3.2/fs/fs-writeback.c
+@@ -1010,7 +1010,7 @@ static noinline void block_dump___mark_i
+ 
+ 		dentry = d_find_alias(inode);
+ 		if (dentry) {
+-			spin_lock(&dentry->d_lock);
++			seq_spin_lock(&dentry->d_lock);
+ 			name = (const char *) dentry->d_name.name;
+ 		}
+ 		printk(KERN_DEBUG
+@@ -1018,7 +1018,7 @@ static noinline void block_dump___mark_i
+ 		       current->comm, task_pid_nr(current), inode->i_ino,
+ 		       name, inode->i_sb->s_id);
+ 		if (dentry) {
+-			spin_unlock(&dentry->d_lock);
++			seq_spin_unlock(&dentry->d_lock);
+ 			dput(dentry);
+ 		}
+ 	}
+Index: linux-3.2/fs/fuse/inode.c
+===================================================================
+--- linux-3.2.orig/fs/fuse/inode.c
++++ linux-3.2/fs/fuse/inode.c
+@@ -652,11 +652,11 @@ static int fuse_encode_fh(struct dentry 
+ 	if (encode_parent) {
+ 		struct inode *parent;
+ 
+-		spin_lock(&dentry->d_lock);
++		seq_spin_lock(&dentry->d_lock);
+ 		parent = dentry->d_parent->d_inode;
+ 		nodeid = get_fuse_inode(parent)->nodeid;
+ 		generation = parent->i_generation;
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 
+ 		fh[3] = (u32)(nodeid >> 32);
+ 		fh[4] = (u32)(nodeid & 0xffffffff);
+Index: linux-3.2/fs/gfs2/export.c
+===================================================================
+--- linux-3.2.orig/fs/gfs2/export.c
++++ linux-3.2/fs/gfs2/export.c
+@@ -53,11 +53,11 @@ static int gfs2_encode_fh(struct dentry 
+ 	if (!connectable || inode == sb->s_root->d_inode)
+ 		return *len;
+ 
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	inode = dentry->d_parent->d_inode;
+ 	ip = GFS2_I(inode);
+ 	igrab(inode);
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ 
+ 	fh[4] = cpu_to_be32(ip->i_no_formal_ino >> 32);
+ 	fh[5] = cpu_to_be32(ip->i_no_formal_ino & 0xFFFFFFFF);
+Index: linux-3.2/fs/isofs/export.c
+===================================================================
+--- linux-3.2.orig/fs/isofs/export.c
++++ linux-3.2/fs/isofs/export.c
+@@ -139,13 +139,13 @@ isofs_export_encode_fh(struct dentry *de
+ 	if (connectable && !S_ISDIR(inode->i_mode)) {
+ 		struct inode *parent;
+ 		struct iso_inode_info *eparent;
+-		spin_lock(&dentry->d_lock);
++		seq_spin_lock(&dentry->d_lock);
+ 		parent = dentry->d_parent->d_inode;
+ 		eparent = ISOFS_I(parent);
+ 		fh32[3] = eparent->i_iget5_block;
+ 		fh16[3] = (__u16)eparent->i_iget5_offset;  /* fh16 [sic] */
+ 		fh32[4] = parent->i_generation;
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 		len = 5;
+ 		type = 2;
+ 	}
+Index: linux-3.2/fs/libfs.c
+===================================================================
+--- linux-3.2.orig/fs/libfs.c
++++ linux-3.2/fs/libfs.c
+@@ -102,21 +102,21 @@ loff_t dcache_dir_lseek(struct file *fil
+ 			struct dentry *cursor = file->private_data;
+ 			loff_t n = file->f_pos - 2;
+ 
+-			spin_lock(&dentry->d_lock);
++			seq_spin_lock(&dentry->d_lock);
+ 			/* d_lock not required for cursor */
+ 			list_del(&cursor->d_u.d_child);
+ 			p = dentry->d_subdirs.next;
+ 			while (n && p != &dentry->d_subdirs) {
+ 				struct dentry *next;
+ 				next = list_entry(p, struct dentry, d_u.d_child);
+-				spin_lock_nested(&next->d_lock, DENTRY_D_LOCK_NESTED);
++				seq_spin_lock_nested(&next->d_lock, DENTRY_D_LOCK_NESTED);
+ 				if (simple_positive(next))
+ 					n--;
+-				spin_unlock(&next->d_lock);
++				seq_spin_unlock(&next->d_lock);
+ 				p = p->next;
+ 			}
+ 			list_add_tail(&cursor->d_u.d_child, p);
+-			spin_unlock(&dentry->d_lock);
++			seq_spin_unlock(&dentry->d_lock);
+ 		}
+ 	}
+ 	mutex_unlock(&dentry->d_inode->i_mutex);
+@@ -159,35 +159,35 @@ int dcache_readdir(struct file * filp, v
+ 			i++;
+ 			/* fallthrough */
+ 		default:
+-			spin_lock(&dentry->d_lock);
++			seq_spin_lock(&dentry->d_lock);
+ 			if (filp->f_pos == 2)
+ 				list_move(q, &dentry->d_subdirs);
+ 
+ 			for (p=q->next; p != &dentry->d_subdirs; p=p->next) {
+ 				struct dentry *next;
+ 				next = list_entry(p, struct dentry, d_u.d_child);
+-				spin_lock_nested(&next->d_lock, DENTRY_D_LOCK_NESTED);
++				seq_spin_lock_nested(&next->d_lock, DENTRY_D_LOCK_NESTED);
+ 				if (!simple_positive(next)) {
+-					spin_unlock(&next->d_lock);
++					seq_spin_unlock(&next->d_lock);
+ 					continue;
+ 				}
+ 
+-				spin_unlock(&next->d_lock);
+-				spin_unlock(&dentry->d_lock);
++				seq_spin_unlock(&next->d_lock);
++				seq_spin_unlock(&dentry->d_lock);
+ 				if (filldir(dirent, next->d_name.name, 
+ 					    next->d_name.len, filp->f_pos, 
+ 					    next->d_inode->i_ino, 
+ 					    dt_type(next->d_inode)) < 0)
+ 					return 0;
+-				spin_lock(&dentry->d_lock);
+-				spin_lock_nested(&next->d_lock, DENTRY_D_LOCK_NESTED);
++				seq_spin_lock(&dentry->d_lock);
++				seq_spin_lock_nested(&next->d_lock, DENTRY_D_LOCK_NESTED);
+ 				/* next is still alive */
+ 				list_move(q, p);
+-				spin_unlock(&next->d_lock);
++				seq_spin_unlock(&next->d_lock);
+ 				p = q;
+ 				filp->f_pos++;
+ 			}
+-			spin_unlock(&dentry->d_lock);
++			seq_spin_unlock(&dentry->d_lock);
+ 	}
+ 	return 0;
+ }
+@@ -281,18 +281,18 @@ int simple_empty(struct dentry *dentry)
+ 	struct dentry *child;
+ 	int ret = 0;
+ 
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	list_for_each_entry(child, &dentry->d_subdirs, d_u.d_child) {
+-		spin_lock_nested(&child->d_lock, DENTRY_D_LOCK_NESTED);
++		seq_spin_lock_nested(&child->d_lock, DENTRY_D_LOCK_NESTED);
+ 		if (simple_positive(child)) {
+-			spin_unlock(&child->d_lock);
++			seq_spin_unlock(&child->d_lock);
+ 			goto out;
+ 		}
+-		spin_unlock(&child->d_lock);
++		seq_spin_unlock(&child->d_lock);
+ 	}
+ 	ret = 1;
+ out:
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ 	return ret;
+ }
+ 
+Index: linux-3.2/fs/namei.c
+===================================================================
+--- linux-3.2.orig/fs/namei.c
++++ linux-3.2/fs/namei.c
+@@ -433,7 +433,7 @@ static int unlazy_walk(struct nameidata 
+ 				nd->root.dentry != fs->root.dentry)
+ 			goto err_root;
+ 	}
+-	spin_lock(&parent->d_lock);
++	seq_spin_lock(&parent->d_lock);
+ 	if (!dentry) {
+ 		if (!__d_rcu_to_refcount(parent, nd->seq))
+ 			goto err_parent;
+@@ -441,7 +441,7 @@ static int unlazy_walk(struct nameidata 
+ 	} else {
+ 		if (dentry->d_parent != parent)
+ 			goto err_parent;
+-		spin_lock_nested(&dentry->d_lock, DENTRY_D_LOCK_NESTED);
++		seq_spin_lock_nested(&dentry->d_lock, DENTRY_D_LOCK_NESTED);
+ 		if (!__d_rcu_to_refcount(dentry, nd->seq))
+ 			goto err_child;
+ 		/*
+@@ -453,9 +453,9 @@ static int unlazy_walk(struct nameidata 
+ 		BUG_ON(!IS_ROOT(dentry) && dentry->d_parent != parent);
+ 		BUG_ON(!parent->d_count);
+ 		parent->d_count++;
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 	}
+-	spin_unlock(&parent->d_lock);
++	seq_spin_unlock(&parent->d_lock);
+ 	if (want_root) {
+ 		path_get(&nd->root);
+ 		seq_spin_unlock(&fs->lock);
+@@ -468,9 +468,9 @@ static int unlazy_walk(struct nameidata 
+ 	return 0;
+ 
+ err_child:
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ err_parent:
+-	spin_unlock(&parent->d_lock);
++	seq_spin_unlock(&parent->d_lock);
+ err_root:
+ 	if (want_root)
+ 		seq_spin_unlock(&fs->lock);
+@@ -517,15 +517,15 @@ static int complete_walk(struct nameidat
+ 		nd->flags &= ~LOOKUP_RCU;
+ 		if (!(nd->flags & LOOKUP_ROOT))
+ 			nd->root.mnt = NULL;
+-		spin_lock(&dentry->d_lock);
++		seq_spin_lock(&dentry->d_lock);
+ 		if (unlikely(!__d_rcu_to_refcount(dentry, nd->seq))) {
+-			spin_unlock(&dentry->d_lock);
++			seq_spin_unlock(&dentry->d_lock);
+ 			rcu_read_unlock();
+ 			br_read_unlock(vfsmount_lock);
+ 			return -ECHILD;
+ 		}
+ 		BUG_ON(nd->inode != dentry->d_inode);
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 		mntget(nd->path.mnt);
+ 		rcu_read_unlock();
+ 		br_read_unlock(vfsmount_lock);
+@@ -569,7 +569,7 @@ static __always_inline void set_root_rcu
+ 		do {
+ 			seq = read_seqbegin(&fs->lock);
+ 			nd->root = fs->root;
+-			nd->seq = __read_seqcount_begin(&nd->root.dentry->d_seq);
++			nd->seq = __read_seqbegin(&nd->root.dentry->d_lock);
+ 		} while (read_seqretry(&fs->lock, seq));
+ 	}
+ }
+@@ -901,7 +901,7 @@ static bool __follow_mount_rcu(struct na
+ 		path->mnt = mounted;
+ 		path->dentry = mounted->mnt_root;
+ 		nd->flags |= LOOKUP_JUMPED;
+-		nd->seq = read_seqcount_begin(&path->dentry->d_seq);
++		nd->seq = read_seqbegin(&path->dentry->d_lock);
+ 		/*
+ 		 * Update the inode too. We don't need to re-check the
+ 		 * dentry sequence number here after this d_inode read,
+@@ -921,7 +921,7 @@ static void follow_mount_rcu(struct name
+ 			break;
+ 		nd->path.mnt = mounted;
+ 		nd->path.dentry = mounted->mnt_root;
+-		nd->seq = read_seqcount_begin(&nd->path.dentry->d_seq);
++		nd->seq = read_seqbegin(&nd->path.dentry->d_lock);
+ 	}
+ }
+ 
+@@ -939,8 +939,8 @@ static int follow_dotdot_rcu(struct name
+ 			struct dentry *parent = old->d_parent;
+ 			unsigned seq;
+ 
+-			seq = read_seqcount_begin(&parent->d_seq);
+-			if (read_seqcount_retry(&old->d_seq, nd->seq))
++			seq = read_seqbegin(&parent->d_lock);
++			if (read_seqretry(&old->d_lock, nd->seq))
+ 				goto failed;
+ 			nd->path.dentry = parent;
+ 			nd->seq = seq;
+@@ -948,7 +948,7 @@ static int follow_dotdot_rcu(struct name
+ 		}
+ 		if (!follow_up_rcu(&nd->path))
+ 			break;
+-		nd->seq = read_seqcount_begin(&nd->path.dentry->d_seq);
++		nd->seq = read_seqbegin(&nd->path.dentry->d_lock);
+ 	}
+ 	follow_mount_rcu(nd);
+ 	nd->inode = nd->path.dentry->d_inode;
+@@ -1134,7 +1134,7 @@ static int do_lookup(struct nameidata *n
+ 			goto unlazy;
+ 
+ 		/* Memory barrier in read_seqcount_begin of child is enough */
+-		if (__read_seqcount_retry(&parent->d_seq, nd->seq))
++		if (__read_seqretry(&parent->d_lock, nd->seq))
+ 			return -ECHILD;
+ 		nd->seq = seq;
+ 
+@@ -1491,7 +1491,7 @@ static int path_init(int dfd, const char
+ 		if (flags & LOOKUP_RCU) {
+ 			br_read_lock(vfsmount_lock);
+ 			rcu_read_lock();
+-			nd->seq = __read_seqcount_begin(&nd->path.dentry->d_seq);
++			nd->seq = __read_seqbegin(&nd->path.dentry->d_lock);
+ 		} else {
+ 			path_get(&nd->path);
+ 		}
+@@ -1521,7 +1521,7 @@ static int path_init(int dfd, const char
+ 			do {
+ 				seq = read_seqbegin(&fs->lock);
+ 				nd->path = fs->pwd;
+-				nd->seq = __read_seqcount_begin(&nd->path.dentry->d_seq);
++				nd->seq = __read_seqbegin(&nd->path.dentry->d_lock);
+ 			} while (read_seqretry(&fs->lock, seq));
+ 		} else {
+ 			get_fs_pwd(current->fs, &nd->path);
+@@ -1550,7 +1550,7 @@ static int path_init(int dfd, const char
+ 		if (flags & LOOKUP_RCU) {
+ 			if (fput_needed)
+ 				*fp = file;
+-			nd->seq = __read_seqcount_begin(&nd->path.dentry->d_seq);
++			nd->seq = __read_seqbegin(&nd->path.dentry->d_lock);
+ 			br_read_lock(vfsmount_lock);
+ 			rcu_read_lock();
+ 		} else {
+@@ -2615,10 +2615,10 @@ SYSCALL_DEFINE2(mkdir, const char __user
+ void dentry_unhash(struct dentry *dentry)
+ {
+ 	shrink_dcache_parent(dentry);
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	if (dentry->d_count == 1)
+ 		__d_drop(dentry);
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ }
+ 
+ int vfs_rmdir(struct inode *dir, struct dentry *dentry)
+Index: linux-3.2/fs/namespace.c
+===================================================================
+--- linux-3.2.orig/fs/namespace.c
++++ linux-3.2/fs/namespace.c
+@@ -560,9 +560,9 @@ static void dentry_reset_mounted(struct 
+ 				return;
+ 		}
+ 	}
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	dentry->d_flags &= ~DCACHE_MOUNTED;
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ }
+ 
+ /*
+@@ -587,9 +587,9 @@ void mnt_set_mountpoint(struct vfsmount 
+ {
+ 	child_mnt->mnt_parent = mntget(mnt);
+ 	child_mnt->mnt_mountpoint = dget(dentry);
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	dentry->d_flags |= DCACHE_MOUNTED;
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ }
+ 
+ /*
+Index: linux-3.2/fs/ncpfs/dir.c
+===================================================================
+--- linux-3.2.orig/fs/ncpfs/dir.c
++++ linux-3.2/fs/ncpfs/dir.c
+@@ -388,7 +388,7 @@ ncp_dget_fpos(struct dentry *dentry, str
+ 	}
+ 
+ 	/* If a pointer is invalid, we search the dentry. */
+-	spin_lock(&parent->d_lock);
++	seq_spin_lock(&parent->d_lock);
+ 	next = parent->d_subdirs.next;
+ 	while (next != &parent->d_subdirs) {
+ 		dent = list_entry(next, struct dentry, d_u.d_child);
+@@ -397,12 +397,12 @@ ncp_dget_fpos(struct dentry *dentry, str
+ 				dget(dent);
+ 			else
+ 				dent = NULL;
+-			spin_unlock(&parent->d_lock);
++			seq_spin_unlock(&parent->d_lock);
+ 			goto out;
+ 		}
+ 		next = next->next;
+ 	}
+-	spin_unlock(&parent->d_lock);
++	seq_spin_unlock(&parent->d_lock);
+ 	return NULL;
+ 
+ out:
+Index: linux-3.2/fs/ncpfs/ncplib_kernel.h
+===================================================================
+--- linux-3.2.orig/fs/ncpfs/ncplib_kernel.h
++++ linux-3.2/fs/ncpfs/ncplib_kernel.h
+@@ -191,7 +191,7 @@ ncp_renew_dentries(struct dentry *parent
+ 	struct list_head *next;
+ 	struct dentry *dentry;
+ 
+-	spin_lock(&parent->d_lock);
++	seq_spin_lock(&parent->d_lock);
+ 	next = parent->d_subdirs.next;
+ 	while (next != &parent->d_subdirs) {
+ 		dentry = list_entry(next, struct dentry, d_u.d_child);
+@@ -203,7 +203,7 @@ ncp_renew_dentries(struct dentry *parent
+ 
+ 		next = next->next;
+ 	}
+-	spin_unlock(&parent->d_lock);
++	seq_spin_unlock(&parent->d_lock);
+ }
+ 
+ static inline void
+@@ -213,7 +213,7 @@ ncp_invalidate_dircache_entries(struct d
+ 	struct list_head *next;
+ 	struct dentry *dentry;
+ 
+-	spin_lock(&parent->d_lock);
++	seq_spin_lock(&parent->d_lock);
+ 	next = parent->d_subdirs.next;
+ 	while (next != &parent->d_subdirs) {
+ 		dentry = list_entry(next, struct dentry, d_u.d_child);
+@@ -221,7 +221,7 @@ ncp_invalidate_dircache_entries(struct d
+ 		ncp_age_dentry(server, dentry);
+ 		next = next->next;
+ 	}
+-	spin_unlock(&parent->d_lock);
++	seq_spin_unlock(&parent->d_lock);
+ }
+ 
+ struct ncp_cache_head {
+Index: linux-3.2/fs/nfs/dir.c
+===================================================================
+--- linux-3.2.orig/fs/nfs/dir.c
++++ linux-3.2/fs/nfs/dir.c
+@@ -1823,9 +1823,9 @@ static int nfs_unlink(struct inode *dir,
+ 	dfprintk(VFS, "NFS: unlink(%s/%ld, %s)\n", dir->i_sb->s_id,
+ 		dir->i_ino, dentry->d_name.name);
+ 
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	if (dentry->d_count > 1) {
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 		/* Start asynchronous writeout of the inode */
+ 		write_inode_now(dentry->d_inode, 0);
+ 		error = nfs_sillyrename(dir, dentry);
+@@ -1835,7 +1835,7 @@ static int nfs_unlink(struct inode *dir,
+ 		__d_drop(dentry);
+ 		need_rehash = 1;
+ 	}
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ 	error = nfs_safe_remove(dentry);
+ 	if (!error || error == -ENOENT) {
+ 		nfs_set_verifier(dentry, nfs_save_change_attribute(dir));
+Index: linux-3.2/fs/nfs/getroot.c
+===================================================================
+--- linux-3.2.orig/fs/nfs/getroot.c
++++ linux-3.2/fs/nfs/getroot.c
+@@ -64,9 +64,9 @@ static int nfs_superblock_set_dummy_root
+ 		 * Oops, since the test for IS_ROOT() will fail.
+ 		 */
+ 		spin_lock(&sb->s_root->d_inode->i_lock);
+-		spin_lock(&sb->s_root->d_lock);
++		seq_spin_lock(&sb->s_root->d_lock);
+ 		list_del_init(&sb->s_root->d_alias);
+-		spin_unlock(&sb->s_root->d_lock);
++		seq_spin_unlock(&sb->s_root->d_lock);
+ 		spin_unlock(&sb->s_root->d_inode->i_lock);
+ 	}
+ 	return 0;
+@@ -126,12 +126,12 @@ struct dentry *nfs_get_root(struct super
+ 	}
+ 
+ 	security_d_instantiate(ret, inode);
+-	spin_lock(&ret->d_lock);
++	seq_spin_lock(&ret->d_lock);
+ 	if (IS_ROOT(ret) && !(ret->d_flags & DCACHE_NFSFS_RENAMED)) {
+ 		ret->d_fsdata = name;
+ 		name = NULL;
+ 	}
+-	spin_unlock(&ret->d_lock);
++	seq_spin_unlock(&ret->d_lock);
+ out:
+ 	if (name)
+ 		kfree(name);
+@@ -250,12 +250,12 @@ struct dentry *nfs4_get_root(struct supe
+ 	}
+ 
+ 	security_d_instantiate(ret, inode);
+-	spin_lock(&ret->d_lock);
++	seq_spin_lock(&ret->d_lock);
+ 	if (IS_ROOT(ret) && !(ret->d_flags & DCACHE_NFSFS_RENAMED)) {
+ 		ret->d_fsdata = name;
+ 		name = NULL;
+ 	}
+-	spin_unlock(&ret->d_lock);
++	seq_spin_unlock(&ret->d_lock);
+ out:
+ 	if (name)
+ 		kfree(name);
+Index: linux-3.2/fs/nfs/namespace.c
+===================================================================
+--- linux-3.2.orig/fs/nfs/namespace.c
++++ linux-3.2/fs/nfs/namespace.c
+@@ -60,7 +60,7 @@ rename_retry:
+ 	seq = read_seqbegin(&rename_lock);
+ 	rcu_read_lock();
+ 	while (1) {
+-		spin_lock(&dentry->d_lock);
++		seq_spin_lock(&dentry->d_lock);
+ 		if (IS_ROOT(dentry))
+ 			break;
+ 		namelen = dentry->d_name.len;
+@@ -70,17 +70,17 @@ rename_retry:
+ 		end -= namelen;
+ 		memcpy(end, dentry->d_name.name, namelen);
+ 		*--end = '/';
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 		dentry = dentry->d_parent;
+ 	}
+ 	if (read_seqretry(&rename_lock, seq)) {
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 		rcu_read_unlock();
+ 		goto rename_retry;
+ 	}
+ 	if (*end != '/') {
+ 		if (--buflen < 0) {
+-			spin_unlock(&dentry->d_lock);
++			seq_spin_unlock(&dentry->d_lock);
+ 			rcu_read_unlock();
+ 			goto Elong;
+ 		}
+@@ -89,7 +89,7 @@ rename_retry:
+ 	*p = end;
+ 	base = dentry->d_fsdata;
+ 	if (!base) {
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 		rcu_read_unlock();
+ 		WARN_ON(1);
+ 		return end;
+@@ -100,17 +100,17 @@ rename_retry:
+ 		namelen--;
+ 	buflen -= namelen;
+ 	if (buflen < 0) {
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 		rcu_read_unlock();
+ 		goto Elong;
+ 	}
+ 	end -= namelen;
+ 	memcpy(end, base, namelen);
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ 	rcu_read_unlock();
+ 	return end;
+ Elong_unlock:
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ 	rcu_read_unlock();
+ 	if (read_seqretry(&rename_lock, seq))
+ 		goto rename_retry;
+Index: linux-3.2/fs/nfs/unlink.c
+===================================================================
+--- linux-3.2.orig/fs/nfs/unlink.c
++++ linux-3.2/fs/nfs/unlink.c
+@@ -156,7 +156,7 @@ static int nfs_do_call_unlink(struct den
+ 		 */
+ 		nfs_free_dname(data);
+ 		ret = nfs_copy_dname(alias, data);
+-		spin_lock(&alias->d_lock);
++		seq_spin_lock(&alias->d_lock);
+ 		if (ret == 0 && alias->d_inode != NULL &&
+ 		    !(alias->d_flags & DCACHE_NFSFS_RENAMED)) {
+ 			devname_garbage = alias->d_fsdata;
+@@ -165,7 +165,7 @@ static int nfs_do_call_unlink(struct den
+ 			ret = 1;
+ 		} else
+ 			ret = 0;
+-		spin_unlock(&alias->d_lock);
++		seq_spin_unlock(&alias->d_lock);
+ 		nfs_dec_sillycount(dir);
+ 		dput(alias);
+ 		/*
+@@ -274,13 +274,13 @@ nfs_async_unlink(struct inode *dir, stru
+ 	data->res.dir_attr = &data->dir_attr;
+ 
+ 	status = -EBUSY;
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	if (dentry->d_flags & DCACHE_NFSFS_RENAMED)
+ 		goto out_unlock;
+ 	dentry->d_flags |= DCACHE_NFSFS_RENAMED;
+ 	devname_garbage = dentry->d_fsdata;
+ 	dentry->d_fsdata = data;
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ 	/*
+ 	 * If we'd displaced old cached devname, free it.  At that
+ 	 * point dentry is definitely not a root, so we won't need
+@@ -290,7 +290,7 @@ nfs_async_unlink(struct inode *dir, stru
+ 		kfree(devname_garbage);
+ 	return 0;
+ out_unlock:
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ 	put_rpccred(data->cred);
+ out_free:
+ 	kfree(data);
+@@ -312,13 +312,13 @@ nfs_complete_unlink(struct dentry *dentr
+ {
+ 	struct nfs_unlinkdata	*data = NULL;
+ 
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	if (dentry->d_flags & DCACHE_NFSFS_RENAMED) {
+ 		dentry->d_flags &= ~DCACHE_NFSFS_RENAMED;
+ 		data = dentry->d_fsdata;
+ 		dentry->d_fsdata = NULL;
+ 	}
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ 
+ 	if (data != NULL && (NFS_STALE(inode) || !nfs_call_unlink(dentry, data)))
+ 		nfs_free_unlinkdata(data);
+@@ -328,17 +328,17 @@ nfs_complete_unlink(struct dentry *dentr
+ static void
+ nfs_cancel_async_unlink(struct dentry *dentry)
+ {
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	if (dentry->d_flags & DCACHE_NFSFS_RENAMED) {
+ 		struct nfs_unlinkdata *data = dentry->d_fsdata;
+ 
+ 		dentry->d_flags &= ~DCACHE_NFSFS_RENAMED;
+ 		dentry->d_fsdata = NULL;
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 		nfs_free_unlinkdata(data);
+ 		return;
+ 	}
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ }
+ 
+ struct nfs_renamedata {
+Index: linux-3.2/fs/nilfs2/namei.c
+===================================================================
+--- linux-3.2.orig/fs/nilfs2/namei.c
++++ linux-3.2/fs/nilfs2/namei.c
+@@ -538,11 +538,11 @@ static int nilfs_encode_fh(struct dentry
+ 	if (connectable && !S_ISDIR(inode->i_mode)) {
+ 		struct inode *parent;
+ 
+-		spin_lock(&dentry->d_lock);
++		seq_spin_lock(&dentry->d_lock);
+ 		parent = dentry->d_parent->d_inode;
+ 		fid->parent_ino = parent->i_ino;
+ 		fid->parent_gen = parent->i_generation;
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 
+ 		type = FILEID_NILFS_WITH_PARENT;
+ 		*lenp = NILFS_FID_SIZE_CONNECTABLE;
+Index: linux-3.2/fs/notify/fsnotify.c
+===================================================================
+--- linux-3.2.orig/fs/notify/fsnotify.c
++++ linux-3.2/fs/notify/fsnotify.c
+@@ -68,19 +68,19 @@ void __fsnotify_update_child_dentry_flag
+ 		/* run all of the children of the original inode and fix their
+ 		 * d_flags to indicate parental interest (their parent is the
+ 		 * original inode) */
+-		spin_lock(&alias->d_lock);
++		seq_spin_lock(&alias->d_lock);
+ 		list_for_each_entry(child, &alias->d_subdirs, d_u.d_child) {
+ 			if (!child->d_inode)
+ 				continue;
+ 
+-			spin_lock_nested(&child->d_lock, DENTRY_D_LOCK_NESTED);
++			seq_spin_lock_nested(&child->d_lock, DENTRY_D_LOCK_NESTED);
+ 			if (watched)
+ 				child->d_flags |= DCACHE_FSNOTIFY_PARENT_WATCHED;
+ 			else
+ 				child->d_flags &= ~DCACHE_FSNOTIFY_PARENT_WATCHED;
+-			spin_unlock(&child->d_lock);
++			seq_spin_unlock(&child->d_lock);
+ 		}
+-		spin_unlock(&alias->d_lock);
++		seq_spin_unlock(&alias->d_lock);
+ 	}
+ 	spin_unlock(&inode->i_lock);
+ }
+Index: linux-3.2/fs/notify/vfsmount_mark.c
+===================================================================
+--- linux-3.2.orig/fs/notify/vfsmount_mark.c
++++ linux-3.2/fs/notify/vfsmount_mark.c
+@@ -35,13 +35,13 @@ void fsnotify_clear_marks_by_mount(struc
+ 	struct hlist_node *pos, *n;
+ 	LIST_HEAD(free_list);
+ 
+-	spin_lock(&mnt->mnt_root->d_lock);
++	seq_spin_lock(&mnt->mnt_root->d_lock);
+ 	hlist_for_each_entry_safe(mark, pos, n, &mnt->mnt_fsnotify_marks, m.m_list) {
+ 		list_add(&mark->m.free_m_list, &free_list);
+ 		hlist_del_init_rcu(&mark->m.m_list);
+ 		fsnotify_get_mark(mark);
+ 	}
+-	spin_unlock(&mnt->mnt_root->d_lock);
++	seq_spin_unlock(&mnt->mnt_root->d_lock);
+ 
+ 	list_for_each_entry_safe(mark, lmark, &free_list, m.free_m_list) {
+ 		fsnotify_destroy_mark(mark);
+@@ -63,7 +63,7 @@ static void fsnotify_recalc_vfsmount_mas
+ 	struct hlist_node *pos;
+ 	__u32 new_mask = 0;
+ 
+-	assert_spin_locked(&mnt->mnt_root->d_lock);
++	assert_seq_spin_locked(&mnt->mnt_root->d_lock);
+ 
+ 	hlist_for_each_entry(mark, pos, &mnt->mnt_fsnotify_marks, m.m_list)
+ 		new_mask |= mark->mask;
+@@ -76,9 +76,9 @@ static void fsnotify_recalc_vfsmount_mas
+  */
+ void fsnotify_recalc_vfsmount_mask(struct vfsmount *mnt)
+ {
+-	spin_lock(&mnt->mnt_root->d_lock);
++	seq_spin_lock(&mnt->mnt_root->d_lock);
+ 	fsnotify_recalc_vfsmount_mask_locked(mnt);
+-	spin_unlock(&mnt->mnt_root->d_lock);
++	seq_spin_unlock(&mnt->mnt_root->d_lock);
+ }
+ 
+ void fsnotify_destroy_vfsmount_mark(struct fsnotify_mark *mark)
+@@ -88,14 +88,14 @@ void fsnotify_destroy_vfsmount_mark(stru
+ 	assert_spin_locked(&mark->lock);
+ 	assert_spin_locked(&mark->group->mark_lock);
+ 
+-	spin_lock(&mnt->mnt_root->d_lock);
++	seq_spin_lock(&mnt->mnt_root->d_lock);
+ 
+ 	hlist_del_init_rcu(&mark->m.m_list);
+ 	mark->m.mnt = NULL;
+ 
+ 	fsnotify_recalc_vfsmount_mask_locked(mnt);
+ 
+-	spin_unlock(&mnt->mnt_root->d_lock);
++	seq_spin_unlock(&mnt->mnt_root->d_lock);
+ }
+ 
+ static struct fsnotify_mark *fsnotify_find_vfsmount_mark_locked(struct fsnotify_group *group,
+@@ -104,7 +104,7 @@ static struct fsnotify_mark *fsnotify_fi
+ 	struct fsnotify_mark *mark;
+ 	struct hlist_node *pos;
+ 
+-	assert_spin_locked(&mnt->mnt_root->d_lock);
++	assert_seq_spin_locked(&mnt->mnt_root->d_lock);
+ 
+ 	hlist_for_each_entry(mark, pos, &mnt->mnt_fsnotify_marks, m.m_list) {
+ 		if (mark->group == group) {
+@@ -124,9 +124,9 @@ struct fsnotify_mark *fsnotify_find_vfsm
+ {
+ 	struct fsnotify_mark *mark;
+ 
+-	spin_lock(&mnt->mnt_root->d_lock);
++	seq_spin_lock(&mnt->mnt_root->d_lock);
+ 	mark = fsnotify_find_vfsmount_mark_locked(group, mnt);
+-	spin_unlock(&mnt->mnt_root->d_lock);
++	seq_spin_unlock(&mnt->mnt_root->d_lock);
+ 
+ 	return mark;
+ }
+@@ -149,7 +149,7 @@ int fsnotify_add_vfsmount_mark(struct fs
+ 	assert_spin_locked(&mark->lock);
+ 	assert_spin_locked(&group->mark_lock);
+ 
+-	spin_lock(&mnt->mnt_root->d_lock);
++	seq_spin_lock(&mnt->mnt_root->d_lock);
+ 
+ 	mark->m.mnt = mnt;
+ 
+@@ -184,7 +184,7 @@ int fsnotify_add_vfsmount_mark(struct fs
+ 	hlist_add_after_rcu(last, &mark->m.m_list);
+ out:
+ 	fsnotify_recalc_vfsmount_mask_locked(mnt);
+-	spin_unlock(&mnt->mnt_root->d_lock);
++	seq_spin_unlock(&mnt->mnt_root->d_lock);
+ 
+ 	return ret;
+ }
+Index: linux-3.2/fs/ocfs2/dcache.c
+===================================================================
+--- linux-3.2.orig/fs/ocfs2/dcache.c
++++ linux-3.2/fs/ocfs2/dcache.c
+@@ -177,16 +177,16 @@ struct dentry *ocfs2_find_local_alias(st
+ 	list_for_each(p, &inode->i_dentry) {
+ 		dentry = list_entry(p, struct dentry, d_alias);
+ 
+-		spin_lock(&dentry->d_lock);
++		seq_spin_lock(&dentry->d_lock);
+ 		if (ocfs2_match_dentry(dentry, parent_blkno, skip_unhashed)) {
+ 			trace_ocfs2_find_local_alias(dentry->d_name.len,
+ 						     dentry->d_name.name);
+ 
+ 			dget_dlock(dentry);
+-			spin_unlock(&dentry->d_lock);
++			seq_spin_unlock(&dentry->d_lock);
+ 			break;
+ 		}
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 
+ 		dentry = NULL;
+ 	}
+Index: linux-3.2/fs/ocfs2/export.c
+===================================================================
+--- linux-3.2.orig/fs/ocfs2/export.c
++++ linux-3.2/fs/ocfs2/export.c
+@@ -214,7 +214,7 @@ static int ocfs2_encode_fh(struct dentry
+ 	if (connectable && !S_ISDIR(inode->i_mode)) {
+ 		struct inode *parent;
+ 
+-		spin_lock(&dentry->d_lock);
++		seq_spin_lock(&dentry->d_lock);
+ 
+ 		parent = dentry->d_parent->d_inode;
+ 		blkno = OCFS2_I(parent)->ip_blkno;
+@@ -224,7 +224,7 @@ static int ocfs2_encode_fh(struct dentry
+ 		fh[4] = cpu_to_le32((u32)(blkno & 0xffffffff));
+ 		fh[5] = cpu_to_le32(generation);
+ 
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 
+ 		len = 6;
+ 		type = 2;
+Index: linux-3.2/fs/reiserfs/inode.c
+===================================================================
+--- linux-3.2.orig/fs/reiserfs/inode.c
++++ linux-3.2/fs/reiserfs/inode.c
+@@ -1614,7 +1614,7 @@ int reiserfs_encode_fh(struct dentry *de
+ 	if (maxlen < 5 || !need_parent)
+ 		return 3;
+ 
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	inode = dentry->d_parent->d_inode;
+ 	data[3] = inode->i_ino;
+ 	data[4] = le32_to_cpu(INODE_PKEY(inode)->k_dir_id);
+@@ -1623,7 +1623,7 @@ int reiserfs_encode_fh(struct dentry *de
+ 		data[5] = inode->i_generation;
+ 		*lenp = 6;
+ 	}
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ 	return *lenp;
+ }
+ 
+Index: linux-3.2/fs/udf/namei.c
+===================================================================
+--- linux-3.2.orig/fs/udf/namei.c
++++ linux-3.2/fs/udf/namei.c
+@@ -1296,13 +1296,13 @@ static int udf_encode_fh(struct dentry *
+ 	fid->udf.generation = inode->i_generation;
+ 
+ 	if (connectable && !S_ISDIR(inode->i_mode)) {
+-		spin_lock(&de->d_lock);
++		seq_spin_lock(&de->d_lock);
+ 		inode = de->d_parent->d_inode;
+ 		location = UDF_I(inode)->i_location;
+ 		fid->udf.parent_block = location.logicalBlockNum;
+ 		fid->udf.parent_partref = location.partitionReferenceNum;
+ 		fid->udf.parent_generation = inode->i_generation;
+-		spin_unlock(&de->d_lock);
++		seq_spin_unlock(&de->d_lock);
+ 		*lenp = 5;
+ 		type = FILEID_UDF_WITH_PARENT;
+ 	}
+Index: linux-3.2/fs/xfs/xfs_export.c
+===================================================================
+--- linux-3.2.orig/fs/xfs/xfs_export.c
++++ linux-3.2/fs/xfs/xfs_export.c
+@@ -97,20 +97,20 @@ xfs_fs_encode_fh(
+ 
+ 	switch (fileid_type) {
+ 	case FILEID_INO32_GEN_PARENT:
+-		spin_lock(&dentry->d_lock);
++		seq_spin_lock(&dentry->d_lock);
+ 		fid->i32.parent_ino = XFS_I(dentry->d_parent->d_inode)->i_ino;
+ 		fid->i32.parent_gen = dentry->d_parent->d_inode->i_generation;
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 		/*FALLTHRU*/
+ 	case FILEID_INO32_GEN:
+ 		fid->i32.ino = XFS_I(inode)->i_ino;
+ 		fid->i32.gen = inode->i_generation;
+ 		break;
+ 	case FILEID_INO32_GEN_PARENT | XFS_FILEID_TYPE_64FLAG:
+-		spin_lock(&dentry->d_lock);
++		seq_spin_lock(&dentry->d_lock);
+ 		fid64->parent_ino = XFS_I(dentry->d_parent->d_inode)->i_ino;
+ 		fid64->parent_gen = dentry->d_parent->d_inode->i_generation;
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 		/*FALLTHRU*/
+ 	case FILEID_INO32_GEN | XFS_FILEID_TYPE_64FLAG:
+ 		fid64->ino = XFS_I(inode)->i_ino;
+Index: linux-3.2/include/linux/dcache.h
+===================================================================
+--- linux-3.2.orig/include/linux/dcache.h
++++ linux-3.2/include/linux/dcache.h
+@@ -116,7 +116,7 @@ full_name_hash(const unsigned char *name
+ struct dentry {
+ 	/* RCU lookup touched fields */
+ 	unsigned int d_flags;		/* protected by d_lock */
+-	seqcount_t d_seq;		/* per dentry seqlock */
++	seqlock_t d_lock;		/* per dentry seqlock */
+ 	struct hlist_bl_node d_hash;	/* lookup hash list */
+ 	struct dentry *d_parent;	/* parent directory */
+ 	struct qstr d_name;
+@@ -126,7 +126,6 @@ struct dentry {
+ 
+ 	/* Ref lookup also touches following */
+ 	unsigned int d_count;		/* protected by d_lock */
+-	spinlock_t d_lock;		/* per dentry lock */
+ 	const struct dentry_operations *d_op;
+ 	struct super_block *d_sb;	/* The root of the dentry tree */
+ 	unsigned long d_time;		/* used by d_revalidate */
+@@ -323,8 +322,8 @@ static inline int __d_rcu_to_refcount(st
+ {
+ 	int ret = 0;
+ 
+-	assert_spin_locked(&dentry->d_lock);
+-	if (!read_seqcount_retry(&dentry->d_seq, seq)) {
++	assert_seq_spin_locked(&dentry->d_lock);
++	if (!read_seqretry(&dentry->d_lock, seq)) {
+ 		ret = 1;
+ 		dentry->d_count++;
+ 	}
+@@ -367,9 +366,9 @@ static inline struct dentry *dget_dlock(
+ static inline struct dentry *dget(struct dentry *dentry)
+ {
+ 	if (dentry) {
+-		spin_lock(&dentry->d_lock);
++		seq_spin_lock(&dentry->d_lock);
+ 		dget_dlock(dentry);
+-		spin_unlock(&dentry->d_lock);
++		seq_spin_unlock(&dentry->d_lock);
+ 	}
+ 	return dentry;
+ }
+@@ -400,9 +399,9 @@ static inline int cant_mount(struct dent
+ 
+ static inline void dont_mount(struct dentry *dentry)
+ {
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	dentry->d_flags |= DCACHE_CANT_MOUNT;
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ }
+ 
+ extern void dput(struct dentry *);
+Index: linux-3.2/include/linux/fs.h
+===================================================================
+--- linux-3.2.orig/include/linux/fs.h
++++ linux-3.2/include/linux/fs.h
+@@ -2603,9 +2603,9 @@ static inline ino_t parent_ino(struct de
+ 	 * Don't strictly need d_lock here? If the parent ino could change
+ 	 * then surely we'd have a deeper race in the caller?
+ 	 */
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	res = dentry->d_parent->d_inode->i_ino;
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ 	return res;
+ }
+ 
+Index: linux-3.2/include/linux/fsnotify_backend.h
+===================================================================
+--- linux-3.2.orig/include/linux/fsnotify_backend.h
++++ linux-3.2/include/linux/fsnotify_backend.h
+@@ -329,7 +329,7 @@ static inline void __fsnotify_update_dca
+ {
+ 	struct dentry *parent;
+ 
+-	assert_spin_locked(&dentry->d_lock);
++	assert_seq_spin_locked(&dentry->d_lock);
+ 
+ 	/*
+ 	 * Serialisation of setting PARENT_WATCHED on the dentries is provided
+@@ -353,9 +353,9 @@ static inline void __fsnotify_d_instanti
+ 	if (!inode)
+ 		return;
+ 
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	__fsnotify_update_dcache_flags(dentry);
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ }
+ 
+ /* called from fsnotify listeners, such as fanotify or dnotify */
+Index: linux-3.2/kernel/cgroup.c
+===================================================================
+--- linux-3.2.orig/kernel/cgroup.c
++++ linux-3.2/kernel/cgroup.c
+@@ -870,29 +870,29 @@ static void cgroup_clear_directory(struc
+ 	struct list_head *node;
+ 
+ 	BUG_ON(!mutex_is_locked(&dentry->d_inode->i_mutex));
+-	spin_lock(&dentry->d_lock);
++	seq_spin_lock(&dentry->d_lock);
+ 	node = dentry->d_subdirs.next;
+ 	while (node != &dentry->d_subdirs) {
+ 		struct dentry *d = list_entry(node, struct dentry, d_u.d_child);
+ 
+-		spin_lock_nested(&d->d_lock, DENTRY_D_LOCK_NESTED);
++		seq_spin_lock_nested(&d->d_lock, DENTRY_D_LOCK_NESTED);
+ 		list_del_init(node);
+ 		if (d->d_inode) {
+ 			/* This should never be called on a cgroup
+ 			 * directory with child cgroups */
+ 			BUG_ON(d->d_inode->i_mode & S_IFDIR);
+ 			dget_dlock(d);
+-			spin_unlock(&d->d_lock);
+-			spin_unlock(&dentry->d_lock);
++			seq_spin_unlock(&d->d_lock);
++			seq_spin_unlock(&dentry->d_lock);
+ 			d_delete(d);
+ 			simple_unlink(dentry->d_inode, d);
+ 			dput(d);
+-			spin_lock(&dentry->d_lock);
++			seq_spin_lock(&dentry->d_lock);
+ 		} else
+-			spin_unlock(&d->d_lock);
++			seq_spin_unlock(&d->d_lock);
+ 		node = dentry->d_subdirs.next;
+ 	}
+-	spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
+ }
+ 
+ /*
+@@ -905,11 +905,11 @@ static void cgroup_d_remove_dir(struct d
+ 	cgroup_clear_directory(dentry);
+ 
+ 	parent = dentry->d_parent;
+-	spin_lock(&parent->d_lock);
+-	spin_lock_nested(&dentry->d_lock, DENTRY_D_LOCK_NESTED);
++	seq_spin_lock(&parent->d_lock);
++	seq_spin_lock_nested(&dentry->d_lock, DENTRY_D_LOCK_NESTED);
+ 	list_del_init(&dentry->d_u.d_child);
+-	spin_unlock(&dentry->d_lock);
+-	spin_unlock(&parent->d_lock);
++	seq_spin_unlock(&dentry->d_lock);
++	seq_spin_unlock(&parent->d_lock);
+ 	remove_dir(dentry);
+ }
+ 
+Index: linux-3.2/net/sunrpc/rpc_pipe.c
+===================================================================
+--- linux-3.2.orig/net/sunrpc/rpc_pipe.c
++++ linux-3.2/net/sunrpc/rpc_pipe.c
+@@ -397,14 +397,14 @@ rpc_info_open(struct inode *inode, struc
+ 	if (!ret) {
+ 		struct seq_file *m = file->private_data;
+ 
+-		spin_lock(&file->f_path.dentry->d_lock);
++		seq_spin_lock(&file->f_path.dentry->d_lock);
+ 		if (!d_unhashed(file->f_path.dentry))
+ 			clnt = RPC_I(inode)->private;
+ 		if (clnt != NULL && atomic_inc_not_zero(&clnt->cl_count)) {
+-			spin_unlock(&file->f_path.dentry->d_lock);
++			seq_spin_unlock(&file->f_path.dentry->d_lock);
+ 			m->private = clnt;
+ 		} else {
+-			spin_unlock(&file->f_path.dentry->d_lock);
++			seq_spin_unlock(&file->f_path.dentry->d_lock);
+ 			single_release(inode, file);
+ 			ret = -EINVAL;
+ 		}
+Index: linux-3.2/security/selinux/selinuxfs.c
+===================================================================
+--- linux-3.2.orig/security/selinux/selinuxfs.c
++++ linux-3.2/security/selinux/selinuxfs.c
+@@ -1194,28 +1194,28 @@ static void sel_remove_entries(struct de
+ {
+ 	struct list_head *node;
+ 
+-	spin_lock(&de->d_lock);
++	seq_spin_lock(&de->d_lock);
+ 	node = de->d_subdirs.next;
+ 	while (node != &de->d_subdirs) {
+ 		struct dentry *d = list_entry(node, struct dentry, d_u.d_child);
+ 
+-		spin_lock_nested(&d->d_lock, DENTRY_D_LOCK_NESTED);
++		seq_spin_lock_nested(&d->d_lock, DENTRY_D_LOCK_NESTED);
+ 		list_del_init(node);
+ 
+ 		if (d->d_inode) {
+ 			dget_dlock(d);
+-			spin_unlock(&de->d_lock);
+-			spin_unlock(&d->d_lock);
++			seq_spin_unlock(&de->d_lock);
++			seq_spin_unlock(&d->d_lock);
+ 			d_delete(d);
+ 			simple_unlink(de->d_inode, d);
+ 			dput(d);
+-			spin_lock(&de->d_lock);
++			seq_spin_lock(&de->d_lock);
+ 		} else
+-			spin_unlock(&d->d_lock);
++			seq_spin_unlock(&d->d_lock);
+ 		node = de->d_subdirs.next;
+ 	}
+ 
+-	spin_unlock(&de->d_lock);
++	seq_spin_unlock(&de->d_lock);
+ }
+ 
+ #define BOOL_DIR_NAME "booleans"
