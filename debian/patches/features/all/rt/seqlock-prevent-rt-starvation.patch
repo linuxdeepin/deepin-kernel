@@ -1,0 +1,56 @@
+Subject: seqlock: Prevent rt starvation
+From: Thomas Gleixner <tglx@linutronix.de>
+Date: Wed, 22 Feb 2012 12:03:30 +0100
+
+If a low prio writer gets preempted while holding the seqlock write
+locked, a high prio reader spins forever on RT.
+
+To prevent this let the reader grab the spinlock, so it blocks and
+eventually boosts the writer. This way the writer can proceed and
+endless spinning is prevented.
+
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Cc: stable-rt@vger.kernel.org
+
+---
+ include/linux/seqlock.h |   23 +++++++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+Index: linux-3.2/include/linux/seqlock.h
+===================================================================
+--- linux-3.2.orig/include/linux/seqlock.h
++++ linux-3.2/include/linux/seqlock.h
+@@ -177,10 +177,33 @@ typedef struct {
+ /*
+  * Read side functions for starting and finalizing a read side section.
+  */
++#ifndef CONFIG_PREEMPT_RT
+ static inline unsigned read_seqbegin(const seqlock_t *sl)
+ {
+ 	return read_seqcount_begin(&sl->seqcount);
+ }
++#else
++/*
++ * Starvation safe read side for RT
++ */
++static inline unsigned read_seqbegin(seqlock_t *sl)
++{
++	unsigned ret;
++
++repeat:
++	ret = sl->seqcount.sequence;
++	if (unlikely(ret & 1)) {
++		/*
++		 * Take the lock and let the writer proceed (i.e. evtl
++		 * boost it), otherwise we could loop here forever.
++		 */
++		spin_lock(&sl->lock);
++		spin_unlock(&sl->lock);
++		goto repeat;
++	}
++	return ret;
++}
++#endif
+ 
+ static inline unsigned read_seqretry(const seqlock_t *sl, unsigned start)
+ {
