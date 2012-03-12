@@ -71,7 +71,13 @@ class Main(object):
         self.dir = tempfile.mkdtemp(prefix='abiupdate')
         try:
             self.log("Retrieve config\n")
-            config = self.get_config()
+
+            try:
+                config = self.get_config()
+            except urllib2.HTTPError as e:
+                self.log("Failed to retrieve %s: %s\n" % (e.filename, e))
+                sys.exit(1)
+
             if self.override_arch:
                 arches = [self.override_arch]
             else:
