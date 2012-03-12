@@ -168,7 +168,7 @@ class ConfigCoreHierarchy(object):
 
             for section in iter(config):
                 if section[0].startswith('featureset-'):
-                    real = (section[-1], None, section[0].lstrip('featureset-'))
+                    real = (section[-1], None, section[0][11:])
                 else:
                     real = (section[-1],) + section[1:]
                 ret[real] = config[section]
