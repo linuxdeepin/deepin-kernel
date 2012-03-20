@@ -1759,7 +1759,7 @@
 +
 +-include ${srctree}/${src}/conf_priv.mk
 --- a/fs/aufs/cpup.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/cpup.c	2012-01-10 02:15:56.545455955 +0000
++++ b/fs/aufs/cpup.c	2012-03-20 03:45:28.417045299 +0000
 @@ -0,0 +1,1079 @@
 +/*
 + * Copyright (C) 2005-2012 Junjiro R. Okajima
@@ -6324,7 +6324,7 @@
 +	return -1;
 +}
 --- a/fs/aufs/dir.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/dir.c	2012-01-10 02:15:56.549455982 +0000
++++ b/fs/aufs/dir.c	2012-03-20 03:45:28.417045299 +0000
 @@ -0,0 +1,634 @@
 +/*
 + * Copyright (C) 2005-2012 Junjiro R. Okajima
@@ -7560,7 +7560,7 @@
 +#endif /* __KERNEL__ */
 +#endif /* __AUFS_DYNOP_H__ */
 --- a/fs/aufs/export.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/export.c	2012-01-10 02:15:56.549455982 +0000
++++ b/fs/aufs/export.c	2012-03-20 03:45:28.417045299 +0000
 @@ -0,0 +1,804 @@
 +/*
 + * Copyright (C) 2005-2012 Junjiro R. Okajima
@@ -9400,7 +9400,7 @@
 +	return ret;
 +}
 --- a/fs/aufs/file.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/file.c	2012-01-10 02:15:56.549455982 +0000
++++ b/fs/aufs/file.c	2012-03-20 03:45:28.417045299 +0000
 @@ -0,0 +1,673 @@
 +/*
 + * Copyright (C) 2005-2012 Junjiro R. Okajima
@@ -11035,8 +11035,8 @@
 +#endif /* __KERNEL__ */
 +#endif /* __AUFS_FSTYPE_H__ */
 --- a/fs/aufs/hfsnotify.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/hfsnotify.c	2012-01-10 02:15:56.553455997 +0000
-@@ -0,0 +1,247 @@
++++ b/fs/aufs/hfsnotify.c	2012-03-11 05:01:22.570973560 +0000
+@@ -0,0 +1,260 @@
 +/*
 + * Copyright (C) 2005-2012 Junjiro R. Okajima
 + *
@@ -11065,15 +11065,17 @@
 +static const __u32 AuHfsnMask = (FS_MOVED_TO | FS_MOVED_FROM | FS_DELETE
 +				 | FS_CREATE | FS_EVENT_ON_CHILD);
 +static DECLARE_WAIT_QUEUE_HEAD(au_hfsn_wq);
++static __cacheline_aligned_in_smp atomic64_t au_hfsn_ifree = ATOMIC64_INIT(0);
 +
 +static void au_hfsn_free_mark(struct fsnotify_mark *mark)
 +{
 +	struct au_hnotify *hn = container_of(mark, struct au_hnotify,
 +					     hn_mark);
 +	AuDbg("here\n");
-+	hn->hn_mark_dead = 1;
-+	smp_mb();
-+	wake_up_all(&au_hfsn_wq);
++	au_cache_free_hnotify(hn);
++	smp_mb__before_atomic_dec();
++	atomic64_dec(&au_hfsn_ifree);
++	wake_up(&au_hfsn_wq);
 +}
 +
 +static int au_hfsn_alloc(struct au_hinode *hinode)
@@ -11088,7 +11090,6 @@
 +	sb = hn->hn_aufs_inode->i_sb;
 +	bindex = au_br_index(sb, hinode->hi_id);
 +	br = au_sbr(sb, bindex);
-+	hn->hn_mark_dead = 0;
 +	mark = &hn->hn_mark;
 +	fsnotify_init_mark(mark, au_hfsn_free_mark);
 +	mark->mask = AuHfsnMask;
@@ -11100,18 +11101,20 @@
 +				 /*mnt*/NULL, /*allow_dups*/1);
 +}
 +
-+static void au_hfsn_free(struct au_hinode *hinode)
++static int au_hfsn_free(struct au_hinode *hinode, struct au_hnotify *hn)
 +{
-+	struct au_hnotify *hn;
 +	struct fsnotify_mark *mark;
++	unsigned long long ull;
 +
-+	hn = hinode->hi_notify;
++	ull = atomic64_inc_return(&au_hfsn_ifree);
++	BUG_ON(!ull);
++
 +	mark = &hn->hn_mark;
 +	fsnotify_destroy_mark(mark);
 +	fsnotify_put_mark(mark);
 +
-+	/* TODO: bad approach */
-+	wait_event(au_hfsn_wq, hn->hn_mark_dead);
++	/* free hn by myself */
++	return 0;
 +}
 +
 +/* ---------------------------------------------------------------------- */
@@ -11275,10 +11278,20 @@
 +	return err;
 +}
 +
++/* ---------------------------------------------------------------------- */
++
++static void au_hfsn_fin(void)
++{
++	AuDbg("au_hfsn_ifree %lld\n", (long long)atomic64_read(&au_hfsn_ifree));
++	wait_event(au_hfsn_wq, !atomic64_read(&au_hfsn_ifree));
++}
++
 +const struct au_hnotify_op au_hnotify_op = {
 +	.ctl		= au_hfsn_ctl,
 +	.alloc		= au_hfsn_alloc,
 +	.free		= au_hfsn_free,
++
++	.fin		= au_hfsn_fin,
 +
 +	.reset_br	= au_hfsn_reset_br,
 +	.fin_br		= au_hfsn_fin_br,
@@ -11345,7 +11358,7 @@
 +	}
 +}
 --- a/fs/aufs/hnotify.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/hnotify.c	2012-01-10 02:15:56.553455997 +0000
++++ b/fs/aufs/hnotify.c	2012-03-11 05:01:22.570973560 +0000
 @@ -0,0 +1,712 @@
 +/*
 + * Copyright (C) 2005-2012 Junjiro R. Okajima
@@ -11407,9 +11420,9 @@
 +
 +	hn = hinode->hi_notify;
 +	if (hn) {
-+		au_hnotify_op.free(hinode);
-+		au_cache_free_hnotify(hn);
 +		hinode->hi_notify = NULL;
++		if (au_hnotify_op.free(hinode, hn))
++			au_cache_free_hnotify(hn);
 +	}
 +}
 +
@@ -12060,7 +12073,7 @@
 +		au_hn_destroy_cache();
 +}
 --- a/fs/aufs/i_op.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/i_op.c	2012-01-10 02:15:56.553455997 +0000
++++ b/fs/aufs/i_op.c	2012-03-20 03:45:28.417045299 +0000
 @@ -0,0 +1,992 @@
 +/*
 + * Copyright (C) 2005-2012 Junjiro R. Okajima
@@ -13055,7 +13068,7 @@
 +	.truncate_range	= aufs_truncate_range
 +};
 --- a/fs/aufs/i_op_add.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/i_op_add.c	2012-01-10 02:15:56.553455997 +0000
++++ b/fs/aufs/i_op_add.c	2012-03-20 03:45:28.425045336 +0000
 @@ -0,0 +1,711 @@
 +/*
 + * Copyright (C) 2005-2012 Junjiro R. Okajima
@@ -14250,8 +14263,8 @@
 +	return err;
 +}
 --- a/fs/aufs/i_op_ren.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/i_op_ren.c	2012-01-10 02:15:56.557456016 +0000
-@@ -0,0 +1,1017 @@
++++ b/fs/aufs/i_op_ren.c	2012-03-11 05:01:22.570973560 +0000
+@@ -0,0 +1,1026 @@
 +/*
 + * Copyright (C) 2005-2012 Junjiro R. Okajima
 + *
@@ -15161,6 +15174,15 @@
 +	} else if (unlikely(d_unhashed(a->dst_dentry)))
 +		goto out_unlock;
 +
++	/*
++	 * is it possible?
++	 * yes, it happend (in linux-3.3-rcN) but I don't know why.
++	 * there may exist a problem somewhere else.
++	 */
++	err = -EINVAL;
++	if (unlikely(a->dst_parent->d_inode == a->src_dentry->d_inode))
++		goto out_unlock;
++
 +	au_fset_ren(a->flags, ISSAMEDIR); /* temporary */
 +	di_write_lock_parent(a->dst_parent);
 +
@@ -16011,8 +16033,8 @@
 +	return au_test_h_perm(h_inode, mask);
 +}
 --- a/fs/aufs/inode.h	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/inode.h	2012-01-10 02:15:56.557456016 +0000
-@@ -0,0 +1,554 @@
++++ b/fs/aufs/inode.h	2012-03-20 03:45:28.425045336 +0000
+@@ -0,0 +1,559 @@
 +/*
 + * Copyright (C) 2005-2012 Junjiro R. Okajima
 + *
@@ -16050,7 +16072,6 @@
 +#ifdef CONFIG_AUFS_HFSNOTIFY
 +	/* never use fsnotify_add_vfsmount_mark() */
 +	struct fsnotify_mark		hn_mark;
-+	int				hn_mark_dead;
 +#endif
 +	struct inode			*hn_aufs_inode;	/* no get/put */
 +#endif
@@ -16470,7 +16491,13 @@
 +struct au_hnotify_op {
 +	void (*ctl)(struct au_hinode *hinode, int do_set);
 +	int (*alloc)(struct au_hinode *hinode);
-+	void (*free)(struct au_hinode *hinode);
++
++	/*
++	 * if it returns true, the the caller should free hinode->hi_notify,
++	 * otherwise ->free() frees it.
++	 */
++	int (*free)(struct au_hinode *hinode,
++		    struct au_hnotify *hn) __must_check;
 +
 +	void (*fin)(void);
 +	int (*init)(void);
@@ -17013,8 +17040,8 @@
 +ccflags-y += -DHFSPLUS_SUPER_MAGIC=0x482b
 +endif
 --- a/fs/aufs/module.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/module.c	2012-01-10 02:15:56.557456016 +0000
-@@ -0,0 +1,195 @@
++++ b/fs/aufs/module.c	2012-03-11 05:01:22.570973560 +0000
+@@ -0,0 +1,196 @@
 +/*
 + * Copyright (C) 2005-2012 Junjiro R. Okajima
 + *
@@ -17082,8 +17109,9 @@
 +{
 +	int i;
 +
-+	/* including AuCache_HNOTIFY */
-+	for (i = 0; i < AuCache_Last; i++)
++	/* excluding AuCache_HNOTIFY */
++	BUILD_BUG_ON(AuCache_HNOTIFY + 1 != AuCache_Last);
++	for (i = 0; i < AuCache_HNOTIFY; i++)
 +		if (au_cachep[i]) {
 +			kmem_cache_destroy(au_cachep[i]);
 +			au_cachep[i] = NULL;
@@ -17211,8 +17239,8 @@
 +module_init(aufs_init);
 +module_exit(aufs_exit);
 --- a/fs/aufs/module.h	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/module.h	2012-01-10 02:15:56.557456016 +0000
-@@ -0,0 +1,107 @@
++++ b/fs/aufs/module.h	2012-03-11 05:01:22.570973560 +0000
+@@ -0,0 +1,105 @@
 +/*
 + * Copyright (C) 2005-2012 Junjiro R. Okajima
 + *
@@ -17289,9 +17317,7 @@
 +	AuCache_FINFO,
 +	AuCache_VDIR,
 +	AuCache_DEHSTR,
-+#ifdef CONFIG_AUFS_HNOTIFY
-+	AuCache_HNOTIFY,
-+#endif
++	AuCache_HNOTIFY, /* must be last */
 +	AuCache_Last
 +};
 +
@@ -20951,7 +20977,7 @@
 +#endif /* __KERNEL__ */
 +#endif /* __AUFS_SPL_H__ */
 --- a/fs/aufs/super.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/super.c	2012-01-10 02:15:56.569456073 +0000
++++ b/fs/aufs/super.c	2012-03-20 03:45:28.425045336 +0000
 @@ -0,0 +1,938 @@
 +/*
 + * Copyright (C) 2005-2012 Junjiro R. Okajima
@@ -23955,7 +23981,7 @@
 +	return 0;
 +}
 --- a/fs/aufs/vfsub.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/vfsub.c	2012-01-10 02:15:56.569456073 +0000
++++ b/fs/aufs/vfsub.c	2012-03-20 03:45:28.425045336 +0000
 @@ -0,0 +1,835 @@
 +/*
 + * Copyright (C) 2005-2012 Junjiro R. Okajima
@@ -24793,7 +24819,7 @@
 +	return err;
 +}
 --- a/fs/aufs/vfsub.h	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/vfsub.h	2012-01-10 02:15:56.569456073 +0000
++++ b/fs/aufs/vfsub.h	2012-03-20 03:45:28.425045336 +0000
 @@ -0,0 +1,232 @@
 +/*
 + * Copyright (C) 2005-2012 Junjiro R. Okajima
@@ -28453,7 +28479,7 @@
 +	return err;
 +}
 --- a/include/linux/aufs_type.h	1970-01-01 01:00:00.000000000 +0100
-+++ b/include/linux/aufs_type.h	2012-01-10 02:15:56.573456100 +0000
++++ b/include/linux/aufs_type.h	2012-03-20 03:45:28.425045336 +0000
 @@ -0,0 +1,233 @@
 +/*
 + * Copyright (C) 2005-2012 Junjiro R. Okajima
@@ -28496,7 +28522,7 @@
 +
 +#include <linux/limits.h>
 +
-+#define AUFS_VERSION	"3.2-20120109"
++#define AUFS_VERSION	"3.2-20120312"
 +
 +/* todo? move this to linux-2.6.19/include/magic.h */
 +#define AUFS_SUPER_MAGIC	('a' << 24 | 'u' << 16 | 'f' << 8 | 's')
