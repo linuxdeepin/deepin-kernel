@@ -1,0 +1,68 @@
+From: Wei Yongjun <yongjun_wei@trendmicro.com.cn>
+Date: Wed, 1 Feb 2012 20:17:23 +0000
+Subject: [PATCH 40/77] net/hyperv: fix the issue that large packets be
+ dropped under bridge
+
+commit 4b8a8bc9249f144803d840f2f7608ee9bbf1ea51 upstream.
+
+The packets with size larger than 1452 will be dropped by bridge
+which with two hyperv netdevice ports. This cause by hyperv netvsc
+driver always copy the trailer padding to the data packet, and then
+the skb received from netdevice may include wrong skb->len (20 bytes
+larger than the real size normally). The captured packet may like
+this:
+
+  Ethernet II, Src: Microsof_00:00:07 (00:15:5d:00:00:07),
+               Dst: HewlettP_00:00:4e (00:1f:29:00:00:4e)
+    Destination: HewlettP_e6:00:4e (00:1f:29:00:00:4e)
+    Source: Microsof_f6:6d:07 (00:15:5d:f6:6d:07)
+    Type: IP (0x0800)
+    Trailer: 1415161718191A1B1C1D1E1F20212223
+    Frame check sequence: 0x24252627 [incorrect, should be 0x7c2e5a5e]
+
+The following command help to reproduction it, and the ping ICMP
+packets will be dropped by bridge.
+  $ ping ip -s 1453
+
+This patch fixed it by removing the trailer padding from the data
+packet.
+
+Signed-off-by: Wei Yongjun <yongjun_wei@trendmicro.com.cn>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/hyperv/rndis_filter.c |   19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+diff --git a/drivers/net/hyperv/rndis_filter.c b/drivers/net/hyperv/rndis_filter.c
+index da181f9..dc2e384 100644
+--- a/drivers/net/hyperv/rndis_filter.c
++++ b/drivers/net/hyperv/rndis_filter.c
+@@ -321,6 +321,25 @@ static void rndis_filter_receive_data(struct rndis_device *dev,
+ 	data_offset = RNDIS_HEADER_SIZE + rndis_pkt->data_offset;
+ 
+ 	pkt->total_data_buflen -= data_offset;
++
++	/*
++	 * Make sure we got a valid RNDIS message, now total_data_buflen
++	 * should be the data packet size plus the trailer padding size
++	 */
++	if (pkt->total_data_buflen < rndis_pkt->data_len) {
++		netdev_err(dev->net_dev->ndev, "rndis message buffer "
++			   "overflow detected (got %u, min %u)"
++			   "...dropping this message!\n",
++			   pkt->total_data_buflen, rndis_pkt->data_len);
++		return;
++	}
++
++	/*
++	 * Remove the rndis trailer padding from rndis packet message
++	 * rndis_pkt->data_len tell us the real data length, we only copy
++	 * the data packet to the stack, without the rndis trailer padding
++	 */
++	pkt->total_data_buflen = rndis_pkt->data_len;
+ 	pkt->data = (void *)((unsigned long)pkt->data + data_offset);
+ 
+ 	pkt->is_data_pkt = true;
+-- 
+1.7.9.5
+

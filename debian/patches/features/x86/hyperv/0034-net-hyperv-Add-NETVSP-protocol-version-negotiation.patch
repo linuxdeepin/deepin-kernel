@@ -1,0 +1,284 @@
+From: Haiyang Zhang <haiyangz@microsoft.com>
+Date: Thu, 15 Dec 2011 13:45:16 -0800
+Subject: [PATCH 34/77] net/hyperv: Add NETVSP protocol version negotiation
+
+commit f157e78de5923dfb209355f3005ce1b5d64f7998 upstream.
+
+Automatically negotiate the highest protocol version mutually recognized by
+both host and guest.
+
+Signed-off-by: Haiyang Zhang <haiyangz@microsoft.com>
+Signed-off-by: K. Y. Srinivasan <kys@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+---
+ drivers/net/hyperv/hyperv_net.h |  101 ++++++++++++++++++++++++++++++++++++---
+ drivers/net/hyperv/netvsc.c     |   82 ++++++++++++++++++++-----------
+ 2 files changed, 149 insertions(+), 34 deletions(-)
+
+diff --git a/drivers/net/hyperv/hyperv_net.h b/drivers/net/hyperv/hyperv_net.h
+index ff1b520..2877670 100644
+--- a/drivers/net/hyperv/hyperv_net.h
++++ b/drivers/net/hyperv/hyperv_net.h
+@@ -134,8 +134,7 @@ int rndis_filter_set_packet_filter(struct rndis_device *dev, u32 new_filter);
+ #define NVSP_INVALID_PROTOCOL_VERSION	((u32)0xFFFFFFFF)
+ 
+ #define NVSP_PROTOCOL_VERSION_1		2
+-#define NVSP_MIN_PROTOCOL_VERSION	NVSP_PROTOCOL_VERSION_1
+-#define NVSP_MAX_PROTOCOL_VERSION	NVSP_PROTOCOL_VERSION_1
++#define NVSP_PROTOCOL_VERSION_2		0x30002
+ 
+ enum {
+ 	NVSP_MSG_TYPE_NONE = 0,
+@@ -160,11 +159,36 @@ enum {
+ 	NVSP_MSG1_TYPE_SEND_RNDIS_PKT,
+ 	NVSP_MSG1_TYPE_SEND_RNDIS_PKT_COMPLETE,
+ 
+-	/*
+-	 * This should be set to the number of messages for the version with
+-	 * the maximum number of messages.
+-	 */
+-	NVSP_NUM_MSG_PER_VERSION		= 9,
++	/* Version 2 messages */
++	NVSP_MSG2_TYPE_SEND_CHIMNEY_DELEGATED_BUF,
++	NVSP_MSG2_TYPE_SEND_CHIMNEY_DELEGATED_BUF_COMP,
++	NVSP_MSG2_TYPE_REVOKE_CHIMNEY_DELEGATED_BUF,
++
++	NVSP_MSG2_TYPE_RESUME_CHIMNEY_RX_INDICATION,
++
++	NVSP_MSG2_TYPE_TERMINATE_CHIMNEY,
++	NVSP_MSG2_TYPE_TERMINATE_CHIMNEY_COMP,
++
++	NVSP_MSG2_TYPE_INDICATE_CHIMNEY_EVENT,
++
++	NVSP_MSG2_TYPE_SEND_CHIMNEY_PKT,
++	NVSP_MSG2_TYPE_SEND_CHIMNEY_PKT_COMP,
++
++	NVSP_MSG2_TYPE_POST_CHIMNEY_RECV_REQ,
++	NVSP_MSG2_TYPE_POST_CHIMNEY_RECV_REQ_COMP,
++
++	NVSP_MSG2_TYPE_ALLOC_RXBUF,
++	NVSP_MSG2_TYPE_ALLOC_RXBUF_COMP,
++
++	NVSP_MSG2_TYPE_FREE_RXBUF,
++
++	NVSP_MSG2_TYPE_SEND_VMQ_RNDIS_PKT,
++	NVSP_MSG2_TYPE_SEND_VMQ_RNDIS_PKT_COMP,
++
++	NVSP_MSG2_TYPE_SEND_NDIS_CONFIG,
++
++	NVSP_MSG2_TYPE_ALLOC_CHIMNEY_HANDLE,
++	NVSP_MSG2_TYPE_ALLOC_CHIMNEY_HANDLE_COMP,
+ };
+ 
+ enum {
+@@ -175,6 +199,7 @@ enum {
+ 	NVSP_STAT_PROTOCOL_TOO_OLD,
+ 	NVSP_STAT_INVALID_RNDIS_PKT,
+ 	NVSP_STAT_BUSY,
++	NVSP_STAT_PROTOCOL_UNSUPPORTED,
+ 	NVSP_STAT_MAX,
+ };
+ 
+@@ -359,9 +384,69 @@ union nvsp_1_message_uber {
+ 						send_rndis_pkt_complete;
+ } __packed;
+ 
++
++/*
++ * Network VSP protocol version 2 messages:
++ */
++struct nvsp_2_vsc_capability {
++	union {
++		u64 data;
++		struct {
++			u64 vmq:1;
++			u64 chimney:1;
++			u64 sriov:1;
++			u64 ieee8021q:1;
++			u64 correlation_id:1;
++		};
++	};
++} __packed;
++
++struct nvsp_2_send_ndis_config {
++	u32 mtu;
++	u32 reserved;
++	struct nvsp_2_vsc_capability capability;
++} __packed;
++
++/* Allocate receive buffer */
++struct nvsp_2_alloc_rxbuf {
++	/* Allocation ID to match the allocation request and response */
++	u32 alloc_id;
++
++	/* Length of the VM shared memory receive buffer that needs to
++	 * be allocated
++	 */
++	u32 len;
++} __packed;
++
++/* Allocate receive buffer complete */
++struct nvsp_2_alloc_rxbuf_comp {
++	/* The NDIS_STATUS code for buffer allocation */
++	u32 status;
++
++	u32 alloc_id;
++
++	/* GPADL handle for the allocated receive buffer */
++	u32 gpadl_handle;
++
++	/* Receive buffer ID */
++	u64 recv_buf_id;
++} __packed;
++
++struct nvsp_2_free_rxbuf {
++	u64 recv_buf_id;
++} __packed;
++
++union nvsp_2_message_uber {
++	struct nvsp_2_send_ndis_config send_ndis_config;
++	struct nvsp_2_alloc_rxbuf alloc_rxbuf;
++	struct nvsp_2_alloc_rxbuf_comp alloc_rxbuf_comp;
++	struct nvsp_2_free_rxbuf free_rxbuf;
++} __packed;
++
+ union nvsp_all_messages {
+ 	union nvsp_message_init_uber init_msg;
+ 	union nvsp_1_message_uber v1_msg;
++	union nvsp_2_message_uber v2_msg;
+ } __packed;
+ 
+ /* ALL Messages */
+@@ -391,6 +476,8 @@ struct nvsp_message {
+ struct netvsc_device {
+ 	struct hv_device *dev;
+ 
++	u32 nvsp_version;
++
+ 	atomic_t num_outstanding_sends;
+ 	bool destroy;
+ 	/*
+diff --git a/drivers/net/hyperv/netvsc.c b/drivers/net/hyperv/netvsc.c
+index bab627f..46828b4 100644
+--- a/drivers/net/hyperv/netvsc.c
++++ b/drivers/net/hyperv/netvsc.c
+@@ -28,6 +28,7 @@
+ #include <linux/io.h>
+ #include <linux/slab.h>
+ #include <linux/netdevice.h>
++#include <linux/if_ether.h>
+ 
+ #include "hyperv_net.h"
+ 
+@@ -260,27 +261,18 @@ exit:
+ }
+ 
+ 
+-static int netvsc_connect_vsp(struct hv_device *device)
++/* Negotiate NVSP protocol version */
++static int negotiate_nvsp_ver(struct hv_device *device,
++			      struct netvsc_device *net_device,
++			      struct nvsp_message *init_packet,
++			      u32 nvsp_ver)
+ {
+ 	int ret, t;
+-	struct netvsc_device *net_device;
+-	struct nvsp_message *init_packet;
+-	int ndis_version;
+-	struct net_device *ndev;
+-
+-	net_device = get_outbound_net_device(device);
+-	if (!net_device)
+-		return -ENODEV;
+-	ndev = net_device->ndev;
+-
+-	init_packet = &net_device->channel_init_pkt;
+ 
+ 	memset(init_packet, 0, sizeof(struct nvsp_message));
+ 	init_packet->hdr.msg_type = NVSP_MSG_TYPE_INIT;
+-	init_packet->msg.init_msg.init.min_protocol_ver =
+-		NVSP_MIN_PROTOCOL_VERSION;
+-	init_packet->msg.init_msg.init.max_protocol_ver =
+-		NVSP_MAX_PROTOCOL_VERSION;
++	init_packet->msg.init_msg.init.min_protocol_ver = nvsp_ver;
++	init_packet->msg.init_msg.init.max_protocol_ver = nvsp_ver;
+ 
+ 	/* Send the init request */
+ 	ret = vmbus_sendpacket(device->channel, init_packet,
+@@ -290,26 +282,62 @@ static int netvsc_connect_vsp(struct hv_device *device)
+ 			       VMBUS_DATA_PACKET_FLAG_COMPLETION_REQUESTED);
+ 
+ 	if (ret != 0)
+-		goto cleanup;
++		return ret;
+ 
+ 	t = wait_for_completion_timeout(&net_device->channel_init_wait, 5*HZ);
+ 
+-	if (t == 0) {
+-		ret = -ETIMEDOUT;
+-		goto cleanup;
+-	}
++	if (t == 0)
++		return -ETIMEDOUT;
+ 
+ 	if (init_packet->msg.init_msg.init_complete.status !=
+-	    NVSP_STAT_SUCCESS) {
+-		ret = -EINVAL;
+-		goto cleanup;
+-	}
++	    NVSP_STAT_SUCCESS)
++		return -EINVAL;
+ 
+-	if (init_packet->msg.init_msg.init_complete.
+-	    negotiated_protocol_ver != NVSP_PROTOCOL_VERSION_1) {
++	if (nvsp_ver != NVSP_PROTOCOL_VERSION_2)
++		return 0;
++
++	/* NVSPv2 only: Send NDIS config */
++	memset(init_packet, 0, sizeof(struct nvsp_message));
++	init_packet->hdr.msg_type = NVSP_MSG2_TYPE_SEND_NDIS_CONFIG;
++	init_packet->msg.v2_msg.send_ndis_config.mtu = ETH_DATA_LEN;
++
++	ret = vmbus_sendpacket(device->channel, init_packet,
++				sizeof(struct nvsp_message),
++				(unsigned long)init_packet,
++				VM_PKT_DATA_INBAND, 0);
++
++	return ret;
++}
++
++static int netvsc_connect_vsp(struct hv_device *device)
++{
++	int ret;
++	struct netvsc_device *net_device;
++	struct nvsp_message *init_packet;
++	int ndis_version;
++	struct net_device *ndev;
++
++	net_device = get_outbound_net_device(device);
++	if (!net_device)
++		return -ENODEV;
++	ndev = net_device->ndev;
++
++	init_packet = &net_device->channel_init_pkt;
++
++	/* Negotiate the latest NVSP protocol supported */
++	if (negotiate_nvsp_ver(device, net_device, init_packet,
++			       NVSP_PROTOCOL_VERSION_2) == 0) {
++		net_device->nvsp_version = NVSP_PROTOCOL_VERSION_2;
++	} else if (negotiate_nvsp_ver(device, net_device, init_packet,
++				    NVSP_PROTOCOL_VERSION_1) == 0) {
++		net_device->nvsp_version = NVSP_PROTOCOL_VERSION_1;
++	} else {
+ 		ret = -EPROTO;
+ 		goto cleanup;
+ 	}
++
++	pr_debug("Negotiated NVSP version:%x\n", net_device->nvsp_version);
++
+ 	/* Send the ndis version */
+ 	memset(init_packet, 0, sizeof(struct nvsp_message));
+ 
+-- 
+1.7.9.5
+
