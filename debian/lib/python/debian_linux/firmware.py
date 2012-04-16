@@ -25,7 +25,7 @@ class FirmwareWhence(list):
         driver = None
         files = {}
         licence = None
-        binary = None
+        binary = []
         desc = None
         source = []
         version = None
@@ -48,9 +48,13 @@ class FirmwareWhence(list):
 
             if line == '\n':
                 # End of field; end of file fields
-                if binary:
-                    files[binary] = FirmwareFile(binary, desc, source, version)
-                binary = None
+                for b in binary:
+                    # XXX The WHENCE file isn't yet consistent in its
+                    # association of binaries and their sources and
+                    # metadata.  This associates all sources and
+                    # metadata in a group with each binary.
+                    files[b] = FirmwareFile(b, desc, source, version)
+                binary = []
                 desc = None
                 source = []
                 version = None
@@ -66,7 +70,7 @@ class FirmwareWhence(list):
                     driver = value.split(' ')[0].lower()
                 elif keyword == 'File':
                     match = re.match(r'(\S+)(?:\s+--\s+(.*))?', value)
-                    binary = match.group(1)
+                    binary.append(match.group(1))
                     desc = match.group(2)
                 elif keyword in ['Info', 'Version']:
                     version = value
@@ -79,7 +83,7 @@ class FirmwareWhence(list):
                            re.sub(r'^(?:[/ ]\*| \*/)?\s*(.*?)\s*$', r'\1', line))
 
         # Finish last section if non-empty
-        if binary:
-            files[binary] = FirmwareFile(binary, desc, source, version)
+        for b in binary:
+            files[b] = FirmwareFile(b, desc, source, version)
         if driver:
             self.append(FirmwareSection(driver, files, licence))
