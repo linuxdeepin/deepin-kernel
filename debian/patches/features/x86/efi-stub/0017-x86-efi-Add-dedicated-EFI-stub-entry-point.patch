@@ -1,0 +1,143 @@
+From: Matt Fleming <matt.fleming@intel.com>
+Date: Sun, 15 Apr 2012 16:06:04 +0100
+Subject: [PATCH 17/17] x86, efi: Add dedicated EFI stub entry point
+
+commit b1994304fc399f5d3a5368c81111d713490c4799 upstream.
+
+The method used to work out whether we were booted by EFI firmware or
+via a boot loader is broken. Because efi_main() is always executed
+when booting from a boot loader we will dereference invalid pointers
+either on the stack (CONFIG_X86_32) or contained in %rdx
+(CONFIG_X86_64) when searching for an EFI System Table signature.
+
+Instead of dereferencing these invalid system table pointers, add a
+new entry point that is only used when booting from EFI firmware, when
+we know the pointer arguments will be valid. With this change legacy
+boot loaders will no longer execute efi_main(), but will instead skip
+EFI stub initialisation completely.
+
+[ hpa: Marking this for urgent/stable since it is a regression when
+  the option is enabled; without the option the patch has no effect ]
+
+Signed-off-by: Matt Fleming <matt.hfleming@intel.com>
+Link: http://lkml.kernel.org/r/1334584744.26997.14.camel@mfleming-mobl1.ger.corp.intel.com
+Reported-by: Jordan Justen <jordan.l.justen@intel.com>
+Signed-off-by: H. Peter Anvin <hpa@linux.intel.com>
+Cc: <stable@vger.kernel.org> v3.3
+---
+ arch/x86/boot/compressed/head_32.S |   14 +++++++++++---
+ arch/x86/boot/compressed/head_64.S |   22 ++++++++++++++++------
+ arch/x86/boot/tools/build.c        |   15 +++++++++++----
+ 3 files changed, 38 insertions(+), 13 deletions(-)
+
+diff --git a/arch/x86/boot/compressed/head_32.S b/arch/x86/boot/compressed/head_32.S
+index a055993..c85e3ac 100644
+--- a/arch/x86/boot/compressed/head_32.S
++++ b/arch/x86/boot/compressed/head_32.S
+@@ -33,6 +33,9 @@
+ 	__HEAD
+ ENTRY(startup_32)
+ #ifdef CONFIG_EFI_STUB
++	jmp	preferred_addr
++
++	.balign	0x10
+ 	/*
+ 	 * We don't need the return address, so set up the stack so
+ 	 * efi_main() can find its arugments.
+@@ -41,12 +44,17 @@ ENTRY(startup_32)
+ 
+ 	call	efi_main
+ 	cmpl	$0, %eax
+-	je	preferred_addr
+ 	movl	%eax, %esi
+-	call	1f
++	jne	2f
+ 1:
++	/* EFI init failed, so hang. */
++	hlt
++	jmp	1b
++2:
++	call	3f
++3:
+ 	popl	%eax
+-	subl	$1b, %eax
++	subl	$3b, %eax
+ 	subl	BP_pref_address(%esi), %eax
+ 	add	BP_code32_start(%esi), %eax
+ 	leal	preferred_addr(%eax), %eax
+diff --git a/arch/x86/boot/compressed/head_64.S b/arch/x86/boot/compressed/head_64.S
+index 558d76c..87e03a1 100644
+--- a/arch/x86/boot/compressed/head_64.S
++++ b/arch/x86/boot/compressed/head_64.S
+@@ -200,18 +200,28 @@ ENTRY(startup_64)
+ 	 * entire text+data+bss and hopefully all of memory.
+ 	 */
+ #ifdef CONFIG_EFI_STUB
+-	pushq	%rsi
++	/*
++	 * The entry point for the PE/COFF executable is 0x210, so only
++	 * legacy boot loaders will execute this jmp.
++	 */
++	jmp	preferred_addr
++
++	.org 0x210
+ 	mov	%rcx, %rdi
+ 	mov	%rdx, %rsi
+ 	call	efi_main
+-	popq	%rsi
+-	cmpq	$0,%rax
+-	je	preferred_addr
+ 	movq	%rax,%rsi
+-	call	1f
++	cmpq	$0,%rax
++	jne	2f
+ 1:
++	/* EFI init failed, so hang. */
++	hlt
++	jmp	1b
++2:
++	call	3f
++3:
+ 	popq	%rax
+-	subq	$1b, %rax
++	subq	$3b, %rax
+ 	subq	BP_pref_address(%rsi), %rax
+ 	add	BP_code32_start(%esi), %eax
+ 	leaq	preferred_addr(%rax), %rax
+diff --git a/arch/x86/boot/tools/build.c b/arch/x86/boot/tools/build.c
+index ed54976..24443a3 100644
+--- a/arch/x86/boot/tools/build.c
++++ b/arch/x86/boot/tools/build.c
+@@ -205,8 +205,13 @@ int main(int argc, char ** argv)
+ 	put_unaligned_le32(file_sz, &buf[pe_header + 0x50]);
+ 
+ #ifdef CONFIG_X86_32
+-	/* Address of entry point */
+-	put_unaligned_le32(i, &buf[pe_header + 0x28]);
++	/*
++	 * Address of entry point.
++	 *
++	 * The EFI stub entry point is +16 bytes from the start of
++	 * the .text section.
++	 */
++	put_unaligned_le32(i + 16, &buf[pe_header + 0x28]);
+ 
+ 	/* .text size */
+ 	put_unaligned_le32(file_sz, &buf[pe_header + 0xb0]);
+@@ -217,9 +222,11 @@ int main(int argc, char ** argv)
+ 	/*
+ 	 * Address of entry point. startup_32 is at the beginning and
+ 	 * the 64-bit entry point (startup_64) is always 512 bytes
+-	 * after.
++	 * after. The EFI stub entry point is 16 bytes after that, as
++	 * the first instruction allows legacy loaders to jump over
++	 * the EFI stub initialisation
+ 	 */
+-	put_unaligned_le32(i + 512, &buf[pe_header + 0x28]);
++	put_unaligned_le32(i + 528, &buf[pe_header + 0x28]);
+ 
+ 	/* .text size */
+ 	put_unaligned_le32(file_sz, &buf[pe_header + 0xc0]);
+-- 
+1.7.10
+
