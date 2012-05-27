@@ -1,0 +1,94 @@
+From: Padmanabh Ratnakar <padmanabh.ratnakar@emulex.com>
+Date: Fri, 25 May 2012 21:28:09 +0530
+Subject: [PATCH 44/58] be2net: Fix VLAN/multicast packet reception
+
+commit 0fc16ebf69fc57b42110712eaaf8a6aa2492afbe upstream.
+
+VLAN and multicast hardware filters are limited and can get
+exhausted in adapters with many PCI functions. If setting
+a VLAN or multicast filter fails due to lack of sufficient
+hardware resources, these packets get dropped. Fix this by
+switching to VLAN or multicast promiscous mode so that these
+packets are not dropped.
+
+Signed-off-by: Padmanabh Ratnakar <padmanabh.ratnakar@emulex.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/ethernet/emulex/benet/be_main.c |   44 ++++++++++++++++++---------
+ 1 file changed, 30 insertions(+), 14 deletions(-)
+
+diff --git a/drivers/net/ethernet/emulex/benet/be_main.c b/drivers/net/ethernet/emulex/benet/be_main.c
+index 376a2fa..34b8ad2 100644
+--- a/drivers/net/ethernet/emulex/benet/be_main.c
++++ b/drivers/net/ethernet/emulex/benet/be_main.c
+@@ -797,22 +797,30 @@ static int be_vid_config(struct be_adapter *adapter, bool vf, u32 vf_num)
+ 	if (adapter->promiscuous)
+ 		return 0;
+ 
+-	if (adapter->vlans_added <= adapter->max_vlans)  {
+-		/* Construct VLAN Table to give to HW */
+-		for (i = 0; i < VLAN_N_VID; i++) {
+-			if (adapter->vlan_tag[i]) {
+-				vtag[ntags] = cpu_to_le16(i);
+-				ntags++;
+-			}
+-		}
+-		status = be_cmd_vlan_config(adapter, adapter->if_handle,
+-					vtag, ntags, 1, 0);
+-	} else {
+-		status = be_cmd_vlan_config(adapter, adapter->if_handle,
+-					NULL, 0, 1, 1);
++	if (adapter->vlans_added > adapter->max_vlans)
++		goto set_vlan_promisc;
++
++	/* Construct VLAN Table to give to HW */
++	for (i = 0; i < VLAN_N_VID; i++)
++		if (adapter->vlan_tag[i])
++			vtag[ntags++] = cpu_to_le16(i);
++
++	status = be_cmd_vlan_config(adapter, adapter->if_handle,
++				    vtag, ntags, 1, 0);
++
++	/* Set to VLAN promisc mode as setting VLAN filter failed */
++	if (status) {
++		dev_info(&adapter->pdev->dev, "Exhausted VLAN HW filters.\n");
++		dev_info(&adapter->pdev->dev, "Disabling HW VLAN filtering.\n");
++		goto set_vlan_promisc;
+ 	}
+ 
+ 	return status;
++
++set_vlan_promisc:
++	status = be_cmd_vlan_config(adapter, adapter->if_handle,
++				    NULL, 0, 1, 1);
++	return status;
+ }
+ 
+ static void be_vlan_add_vid(struct net_device *netdev, u16 vid)
+@@ -854,6 +862,7 @@ static void be_vlan_rem_vid(struct net_device *netdev, u16 vid)
+ static void be_set_rx_mode(struct net_device *netdev)
+ {
+ 	struct be_adapter *adapter = netdev_priv(netdev);
++	int status;
+ 
+ 	if (netdev->flags & IFF_PROMISC) {
+ 		be_cmd_rx_filter(adapter, IFF_PROMISC, ON);
+@@ -900,7 +909,14 @@ static void be_set_rx_mode(struct net_device *netdev)
+ 		}
+ 	}
+ 
+-	be_cmd_rx_filter(adapter, IFF_MULTICAST, ON);
++	status = be_cmd_rx_filter(adapter, IFF_MULTICAST, ON);
++
++	/* Set to MCAST promisc mode if setting MULTICAST address fails */
++	if (status) {
++		dev_info(&adapter->pdev->dev, "Exhausted multicast HW filters.\n");
++		dev_info(&adapter->pdev->dev, "Disabling HW multicast filtering.\n");
++		be_cmd_rx_filter(adapter, IFF_ALLMULTI, ON);
++	}
+ done:
+ 	return;
+ }
+-- 
+1.7.10
+

@@ -1,0 +1,274 @@
+From: Ajit Khaparde <ajit.khaparde@emulex.com>
+Date: Sun, 18 Mar 2012 06:23:11 +0000
+Subject: [PATCH 39/58] be2net: enable WOL by default if h/w supports it
+
+commit 4762f6cec4455f3bbe4ca82c100fe5d85d3c02a2 upstream.
+
+Signed-off-by: Ajit Khaparde <ajit.khaparde@emulex.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/ethernet/emulex/benet/be.h         |   26 ++++++++++-
+ drivers/net/ethernet/emulex/benet/be_cmds.c    |   55 ++++++++++++++++++++++++
+ drivers/net/ethernet/emulex/benet/be_cmds.h    |   28 ++++++++++++
+ drivers/net/ethernet/emulex/benet/be_ethtool.c |   27 +++++-------
+ drivers/net/ethernet/emulex/benet/be_main.c    |   17 ++++++++
+ 5 files changed, 136 insertions(+), 17 deletions(-)
+
+diff --git a/drivers/net/ethernet/emulex/benet/be.h b/drivers/net/ethernet/emulex/benet/be.h
+index ab24e46..cabe1b8 100644
+--- a/drivers/net/ethernet/emulex/benet/be.h
++++ b/drivers/net/ethernet/emulex/benet/be.h
+@@ -52,6 +52,10 @@
+ #define OC_DEVICE_ID3		0xe220	/* Device id for Lancer cards */
+ #define OC_DEVICE_ID4           0xe228   /* Device id for VF in Lancer */
+ #define OC_DEVICE_ID5		0x720	/* Device Id for Skyhawk cards */
++#define OC_SUBSYS_DEVICE_ID1	0xE602
++#define OC_SUBSYS_DEVICE_ID2	0xE642
++#define OC_SUBSYS_DEVICE_ID3	0xE612
++#define OC_SUBSYS_DEVICE_ID4	0xE652
+ 
+ static inline char *nic_name(struct pci_dev *pdev)
+ {
+@@ -365,7 +369,6 @@ struct be_adapter {
+ 	bool fw_timeout;
+ 	u32 port_num;
+ 	bool promiscuous;
+-	bool wol;
+ 	u32 function_mode;
+ 	u32 function_caps;
+ 	u32 rx_fc;		/* Rx flow control */
+@@ -386,6 +389,8 @@ struct be_adapter {
+ 	u32 sli_family;
+ 	u8 hba_port_num;
+ 	u16 pvid;
++	u8 wol_cap;
++	bool wol;
+ };
+ 
+ #define be_physfn(adapter) (!adapter->is_virtfn)
+@@ -549,9 +554,28 @@ static inline bool be_error(struct be_adapter *adapter)
+ 	return adapter->eeh_err || adapter->ue_detected || adapter->fw_timeout;
+ }
+ 
++static inline bool be_is_wol_excluded(struct be_adapter *adapter)
++{
++	struct pci_dev *pdev = adapter->pdev;
++
++	if (!be_physfn(adapter))
++		return true;
++
++	switch (pdev->subsystem_device) {
++	case OC_SUBSYS_DEVICE_ID1:
++	case OC_SUBSYS_DEVICE_ID2:
++	case OC_SUBSYS_DEVICE_ID3:
++	case OC_SUBSYS_DEVICE_ID4:
++		return true;
++	default:
++		return false;
++	}
++}
++
+ extern void be_cq_notify(struct be_adapter *adapter, u16 qid, bool arm,
+ 		u16 num_popped);
+ extern void be_link_status_update(struct be_adapter *adapter, u8 link_status);
+ extern void be_parse_stats(struct be_adapter *adapter);
+ extern int be_load_fw(struct be_adapter *adapter, u8 *func);
++extern bool be_is_wol_supported(struct be_adapter *adapter);
+ #endif				/* BE_H */
+diff --git a/drivers/net/ethernet/emulex/benet/be_cmds.c b/drivers/net/ethernet/emulex/benet/be_cmds.c
+index 398fb5c..d72c2b4 100644
+--- a/drivers/net/ethernet/emulex/benet/be_cmds.c
++++ b/drivers/net/ethernet/emulex/benet/be_cmds.c
+@@ -2418,3 +2418,58 @@ err:
+ 	spin_unlock_bh(&adapter->mcc_lock);
+ 	return status;
+ }
++
++int be_cmd_get_acpi_wol_cap(struct be_adapter *adapter)
++{
++	struct be_mcc_wrb *wrb;
++	struct be_cmd_req_acpi_wol_magic_config_v1 *req;
++	int status;
++	int payload_len = sizeof(*req);
++	struct be_dma_mem cmd;
++
++	memset(&cmd, 0, sizeof(struct be_dma_mem));
++	cmd.size = sizeof(struct be_cmd_resp_acpi_wol_magic_config_v1);
++	cmd.va = pci_alloc_consistent(adapter->pdev, cmd.size,
++					       &cmd.dma);
++	if (!cmd.va) {
++		dev_err(&adapter->pdev->dev,
++				"Memory allocation failure\n");
++		return -ENOMEM;
++	}
++
++	if (mutex_lock_interruptible(&adapter->mbox_lock))
++		return -1;
++
++	wrb = wrb_from_mbox(adapter);
++	if (!wrb) {
++		status = -EBUSY;
++		goto err;
++	}
++
++	req = cmd.va;
++
++	be_wrb_cmd_hdr_prepare(&req->hdr, CMD_SUBSYSTEM_ETH,
++			       OPCODE_ETH_ACPI_WOL_MAGIC_CONFIG,
++			       payload_len, wrb, &cmd);
++
++	req->hdr.version = 1;
++	req->query_options = BE_GET_WOL_CAP;
++
++	status = be_mbox_notify_wait(adapter);
++	if (!status) {
++		struct be_cmd_resp_acpi_wol_magic_config_v1 *resp;
++		resp = (struct be_cmd_resp_acpi_wol_magic_config_v1 *) cmd.va;
++
++		/* the command could succeed misleadingly on old f/w
++		 * which is not aware of the V1 version. fake an error. */
++		if (resp->hdr.response_length < payload_len) {
++			status = -1;
++			goto err;
++		}
++		adapter->wol_cap = resp->wol_settings;
++	}
++err:
++	mutex_unlock(&adapter->mbox_lock);
++	pci_free_consistent(adapter->pdev, cmd.size, cmd.va, cmd.dma);
++	return status;
++}
+diff --git a/drivers/net/ethernet/emulex/benet/be_cmds.h b/drivers/net/ethernet/emulex/benet/be_cmds.h
+index 687c420..345d49e 100644
+--- a/drivers/net/ethernet/emulex/benet/be_cmds.h
++++ b/drivers/net/ethernet/emulex/benet/be_cmds.h
+@@ -1206,6 +1206,33 @@ struct be_cmd_req_acpi_wol_magic_config{
+ 	u8 rsvd2[2];
+ } __packed;
+ 
++struct be_cmd_req_acpi_wol_magic_config_v1 {
++	struct be_cmd_req_hdr hdr;
++	u8 rsvd0[2];
++	u8 query_options;
++	u8 rsvd1[5];
++	u32 rsvd2[288];
++	u8 magic_mac[6];
++	u8 rsvd3[22];
++} __packed;
++
++struct be_cmd_resp_acpi_wol_magic_config_v1 {
++	struct be_cmd_resp_hdr hdr;
++	u8 rsvd0[2];
++	u8 wol_settings;
++	u8 rsvd1[5];
++	u32 rsvd2[295];
++} __packed;
++
++#define BE_GET_WOL_CAP			2
++
++#define BE_WOL_CAP			0x1
++#define BE_PME_D0_CAP			0x8
++#define BE_PME_D1_CAP			0x10
++#define BE_PME_D2_CAP			0x20
++#define BE_PME_D3HOT_CAP		0x40
++#define BE_PME_D3COLD_CAP		0x80
++
+ /********************** LoopBack test *********************/
+ struct be_cmd_req_loopback_test {
+ 	struct be_cmd_req_hdr hdr;
+@@ -1590,4 +1617,5 @@ extern int be_cmd_get_mac_from_list(struct be_adapter *adapter, u32 domain,
+ 				bool *pmac_id_active, u32 *pmac_id, u8 *mac);
+ extern int be_cmd_set_mac_list(struct be_adapter *adapter, u8 *mac_array,
+ 						u8 mac_count, u32 domain);
++extern int be_cmd_get_acpi_wol_cap(struct be_adapter *adapter);
+ 
+diff --git a/drivers/net/ethernet/emulex/benet/be_ethtool.c b/drivers/net/ethernet/emulex/benet/be_ethtool.c
+index d98ad7e..e0eb995 100644
+--- a/drivers/net/ethernet/emulex/benet/be_ethtool.c
++++ b/drivers/net/ethernet/emulex/benet/be_ethtool.c
+@@ -600,26 +600,16 @@ be_set_phys_id(struct net_device *netdev,
+ 	return 0;
+ }
+ 
+-static bool
+-be_is_wol_supported(struct be_adapter *adapter)
+-{
+-	if (!be_physfn(adapter))
+-		return false;
+-	else
+-		return true;
+-}
+ 
+ static void
+ be_get_wol(struct net_device *netdev, struct ethtool_wolinfo *wol)
+ {
+ 	struct be_adapter *adapter = netdev_priv(netdev);
+ 
+-	if (be_is_wol_supported(adapter))
+-		wol->supported = WAKE_MAGIC;
+-
+-	if (adapter->wol)
+-		wol->wolopts = WAKE_MAGIC;
+-	else
++	if (be_is_wol_supported(adapter)) {
++		wol->supported |= WAKE_MAGIC;
++		wol->wolopts |= WAKE_MAGIC;
++	} else
+ 		wol->wolopts = 0;
+ 	memset(&wol->sopass, 0, sizeof(wol->sopass));
+ }
+@@ -630,9 +620,14 @@ be_set_wol(struct net_device *netdev, struct ethtool_wolinfo *wol)
+ 	struct be_adapter *adapter = netdev_priv(netdev);
+ 
+ 	if (wol->wolopts & ~WAKE_MAGIC)
+-		return -EINVAL;
++		return -EOPNOTSUPP;
++
++	if (!be_is_wol_supported(adapter)) {
++		dev_warn(&adapter->pdev->dev, "WOL not supported\n");
++		return -EOPNOTSUPP;
++	}
+ 
+-	if ((wol->wolopts & WAKE_MAGIC) && be_is_wol_supported(adapter))
++	if (wol->wolopts & WAKE_MAGIC)
+ 		adapter->wol = true;
+ 	else
+ 		adapter->wol = false;
+diff --git a/drivers/net/ethernet/emulex/benet/be_main.c b/drivers/net/ethernet/emulex/benet/be_main.c
+index c1b9cdf..70b138f 100644
+--- a/drivers/net/ethernet/emulex/benet/be_main.c
++++ b/drivers/net/ethernet/emulex/benet/be_main.c
+@@ -3236,6 +3236,12 @@ static void __devexit be_remove(struct pci_dev *pdev)
+ 	free_netdev(adapter->netdev);
+ }
+ 
++bool be_is_wol_supported(struct be_adapter *adapter)
++{
++	return ((adapter->wol_cap & BE_WOL_CAP) &&
++		!be_is_wol_excluded(adapter)) ? true : false;
++}
++
+ static int be_get_config(struct be_adapter *adapter)
+ {
+ 	int status;
+@@ -3254,6 +3260,17 @@ static int be_get_config(struct be_adapter *adapter)
+ 	if (status)
+ 		return status;
+ 
++	status = be_cmd_get_acpi_wol_cap(adapter);
++	if (status) {
++		/* in case of a failure to get wol capabillities
++		 * check the exclusion list to determine WOL capability */
++		if (!be_is_wol_excluded(adapter))
++			adapter->wol_cap |= BE_WOL_CAP;
++	}
++
++	if (be_is_wol_supported(adapter))
++		adapter->wol = true;
++
+ 	return 0;
+ }
+ 
+-- 
+1.7.10
+

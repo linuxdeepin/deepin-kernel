@@ -1,0 +1,393 @@
+From: Padmanabh Ratnakar <padmanabh.ratnakar@emulex.com>
+Date: Fri, 25 Nov 2011 05:47:26 +0000
+Subject: [PATCH 11/58] be2net: Move to new SR-IOV implementation in Lancer
+
+commit 590c391dd362479b27a67c8d797ce348c5798b93 upstream.
+
+SR-IOV implementation is Lancer has changed in following ways -
+1)PF driver assigns one MAC addresses for VF using COMMON_SET_IFACE_MAC_LIST.
+2)VF driver queries its MAC address using COMMON_GET_IFACE_MAC_LIST command
+and assigns it to its interface.
+
+Signed-off-by: Mammatha Edhala <mammatha.edhala@emulex.com>
+Signed-off-by: Padmanabh Ratnakar <padmanabh.ratnakar@emulex.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/ethernet/emulex/benet/be_cmds.c |   99 ++++++++++++++++++++++++++-
+ drivers/net/ethernet/emulex/benet/be_cmds.h |   37 +++++++++-
+ drivers/net/ethernet/emulex/benet/be_main.c |   89 +++++++++++++++++-------
+ 3 files changed, 200 insertions(+), 25 deletions(-)
+
+diff --git a/drivers/net/ethernet/emulex/benet/be_cmds.c b/drivers/net/ethernet/emulex/benet/be_cmds.c
+index 64f0c1a..7988798 100644
+--- a/drivers/net/ethernet/emulex/benet/be_cmds.c
++++ b/drivers/net/ethernet/emulex/benet/be_cmds.c
+@@ -609,7 +609,7 @@ int be_cmd_eq_create(struct be_adapter *adapter,
+ 
+ /* Use MCC */
+ int be_cmd_mac_addr_query(struct be_adapter *adapter, u8 *mac_addr,
+-			u8 type, bool permanent, u32 if_handle)
++			u8 type, bool permanent, u32 if_handle, u32 pmac_id)
+ {
+ 	struct be_mcc_wrb *wrb;
+ 	struct be_cmd_req_mac_query *req;
+@@ -631,6 +631,7 @@ int be_cmd_mac_addr_query(struct be_adapter *adapter, u8 *mac_addr,
+ 		req->permanent = 1;
+ 	} else {
+ 		req->if_id = cpu_to_le16((u16) if_handle);
++		req->pmac_id = cpu_to_le32(pmac_id);
+ 		req->permanent = 0;
+ 	}
+ 
+@@ -2280,3 +2281,99 @@ err:
+ 	mutex_unlock(&adapter->mbox_lock);
+ 	return status;
+ }
++
++/* Uses synchronous MCCQ */
++int be_cmd_get_mac_from_list(struct be_adapter *adapter, u32 domain,
++							u32 *pmac_id)
++{
++	struct be_mcc_wrb *wrb;
++	struct be_cmd_req_get_mac_list *req;
++	int status;
++	int mac_count;
++
++	spin_lock_bh(&adapter->mcc_lock);
++
++	wrb = wrb_from_mccq(adapter);
++	if (!wrb) {
++		status = -EBUSY;
++		goto err;
++	}
++	req = embedded_payload(wrb);
++
++	be_wrb_cmd_hdr_prepare(&req->hdr, CMD_SUBSYSTEM_COMMON,
++				OPCODE_COMMON_GET_MAC_LIST, sizeof(*req),
++				wrb, NULL);
++
++	req->hdr.domain = domain;
++
++	status = be_mcc_notify_wait(adapter);
++	if (!status) {
++		struct be_cmd_resp_get_mac_list *resp =
++						embedded_payload(wrb);
++		int i;
++		u8 *ctxt = &resp->context[0][0];
++		status = -EIO;
++		mac_count = resp->mac_count;
++		be_dws_le_to_cpu(&resp->context, sizeof(resp->context));
++		for (i = 0; i < mac_count; i++) {
++			if (!AMAP_GET_BITS(struct amap_get_mac_list_context,
++					   act, ctxt)) {
++				*pmac_id = AMAP_GET_BITS
++					(struct amap_get_mac_list_context,
++					 macid, ctxt);
++				status = 0;
++				break;
++			}
++			ctxt += sizeof(struct amap_get_mac_list_context) / 8;
++		}
++	}
++
++err:
++	spin_unlock_bh(&adapter->mcc_lock);
++	return status;
++}
++
++/* Uses synchronous MCCQ */
++int be_cmd_set_mac_list(struct be_adapter *adapter, u8 *mac_array,
++			u8 mac_count, u32 domain)
++{
++	struct be_mcc_wrb *wrb;
++	struct be_cmd_req_set_mac_list *req;
++	int status;
++	struct be_dma_mem cmd;
++
++	memset(&cmd, 0, sizeof(struct be_dma_mem));
++	cmd.size = sizeof(struct be_cmd_req_set_mac_list);
++	cmd.va = dma_alloc_coherent(&adapter->pdev->dev, cmd.size,
++			&cmd.dma, GFP_KERNEL);
++	if (!cmd.va) {
++		dev_err(&adapter->pdev->dev, "Memory alloc failure\n");
++		return -ENOMEM;
++	}
++
++	spin_lock_bh(&adapter->mcc_lock);
++
++	wrb = wrb_from_mccq(adapter);
++	if (!wrb) {
++		status = -EBUSY;
++		goto err;
++	}
++
++	req = cmd.va;
++	be_wrb_cmd_hdr_prepare(&req->hdr, CMD_SUBSYSTEM_COMMON,
++				OPCODE_COMMON_SET_MAC_LIST, sizeof(*req),
++				wrb, &cmd);
++
++	req->hdr.domain = domain;
++	req->mac_count = mac_count;
++	if (mac_count)
++		memcpy(req->mac, mac_array, ETH_ALEN*mac_count);
++
++	status = be_mcc_notify_wait(adapter);
++
++err:
++	dma_free_coherent(&adapter->pdev->dev, cmd.size,
++				cmd.va, cmd.dma);
++	spin_unlock_bh(&adapter->mcc_lock);
++	return status;
++}
+diff --git a/drivers/net/ethernet/emulex/benet/be_cmds.h b/drivers/net/ethernet/emulex/benet/be_cmds.h
+index ac11246..0b694c6 100644
+--- a/drivers/net/ethernet/emulex/benet/be_cmds.h
++++ b/drivers/net/ethernet/emulex/benet/be_cmds.h
+@@ -189,6 +189,8 @@ struct be_mcc_mailbox {
+ #define OPCODE_COMMON_GET_PHY_DETAILS			102
+ #define OPCODE_COMMON_SET_DRIVER_FUNCTION_CAP		103
+ #define OPCODE_COMMON_GET_CNTL_ADDITIONAL_ATTRIBUTES	121
++#define OPCODE_COMMON_GET_MAC_LIST			147
++#define OPCODE_COMMON_SET_MAC_LIST			148
+ #define OPCODE_COMMON_READ_OBJECT			171
+ #define OPCODE_COMMON_WRITE_OBJECT			172
+ 
+@@ -295,6 +297,7 @@ struct be_cmd_req_mac_query {
+ 	u8 type;
+ 	u8 permanent;
+ 	u16 if_id;
++	u32 pmac_id;
+ } __packed;
+ 
+ struct be_cmd_resp_mac_query {
+@@ -1340,6 +1343,34 @@ struct be_cmd_resp_set_func_cap {
+ 	u8 rsvd[212];
+ };
+ 
++/******************** GET/SET_MACLIST  **************************/
++#define BE_MAX_MAC			64
++struct amap_get_mac_list_context {
++	u8 macid[31];
++	u8 act;
++} __packed;
++
++struct be_cmd_req_get_mac_list {
++	struct be_cmd_req_hdr hdr;
++	u32 rsvd;
++} __packed;
++
++struct be_cmd_resp_get_mac_list {
++	struct be_cmd_resp_hdr hdr;
++	u8 mac_count;
++	u8 rsvd1;
++	u16 rsvd2;
++	u8 context[sizeof(struct amap_get_mac_list_context) / 8][BE_MAX_MAC];
++} __packed;
++
++struct be_cmd_req_set_mac_list {
++	struct be_cmd_req_hdr hdr;
++	u8 mac_count;
++	u8 rsvd1;
++	u16 rsvd2;
++	struct macaddr mac[BE_MAX_MAC];
++} __packed;
++
+ /*************** HW Stats Get v1 **********************************/
+ #define BE_TXP_SW_SZ			48
+ struct be_port_rxf_stats_v1 {
+@@ -1446,7 +1477,7 @@ static inline void *be_erx_stats_from_cmd(struct be_adapter *adapter)
+ extern int be_pci_fnum_get(struct be_adapter *adapter);
+ extern int be_cmd_POST(struct be_adapter *adapter);
+ extern int be_cmd_mac_addr_query(struct be_adapter *adapter, u8 *mac_addr,
+-			u8 type, bool permanent, u32 if_handle);
++			u8 type, bool permanent, u32 if_handle, u32 pmac_id);
+ extern int be_cmd_pmac_add(struct be_adapter *adapter, u8 *mac_addr,
+ 			u32 if_id, u32 *pmac_id, u32 domain);
+ extern int be_cmd_pmac_del(struct be_adapter *adapter, u32 if_id,
+@@ -1542,4 +1573,8 @@ extern int be_cmd_get_cntl_attributes(struct be_adapter *adapter);
+ extern int be_cmd_req_native_mode(struct be_adapter *adapter);
+ extern int be_cmd_get_reg_len(struct be_adapter *adapter, u32 *log_size);
+ extern void be_cmd_get_regs(struct be_adapter *adapter, u32 buf_len, void *buf);
++extern int be_cmd_get_mac_from_list(struct be_adapter *adapter, u32 domain,
++							u32 *pmac_id);
++extern int be_cmd_set_mac_list(struct be_adapter *adapter, u8 *mac_array,
++						u8 mac_count, u32 domain);
+ 
+diff --git a/drivers/net/ethernet/emulex/benet/be_main.c b/drivers/net/ethernet/emulex/benet/be_main.c
+index 93869d4..c6fb7c3 100644
+--- a/drivers/net/ethernet/emulex/benet/be_main.c
++++ b/drivers/net/ethernet/emulex/benet/be_main.c
+@@ -237,7 +237,8 @@ static int be_mac_addr_set(struct net_device *netdev, void *p)
+ 		return -EADDRNOTAVAIL;
+ 
+ 	status = be_cmd_mac_addr_query(adapter, current_mac,
+-			MAC_ADDRESS_TYPE_NETWORK, false, adapter->if_handle);
++				MAC_ADDRESS_TYPE_NETWORK, false,
++				adapter->if_handle, 0);
+ 	if (status)
+ 		goto err;
+ 
+@@ -848,11 +849,18 @@ static int be_set_vf_mac(struct net_device *netdev, int vf, u8 *mac)
+ 	if (!is_valid_ether_addr(mac) || (vf >= num_vfs))
+ 		return -EINVAL;
+ 
+-	status = be_cmd_pmac_del(adapter, adapter->vf_cfg[vf].vf_if_handle,
++	if (lancer_chip(adapter)) {
++		status = be_cmd_set_mac_list(adapter,  mac, 1, vf + 1);
++	} else {
++		status = be_cmd_pmac_del(adapter,
++				adapter->vf_cfg[vf].vf_if_handle,
+ 				adapter->vf_cfg[vf].vf_pmac_id, vf + 1);
+ 
+-	status = be_cmd_pmac_add(adapter, mac, adapter->vf_cfg[vf].vf_if_handle,
++		status = be_cmd_pmac_add(adapter, mac,
++				adapter->vf_cfg[vf].vf_if_handle,
+ 				&adapter->vf_cfg[vf].vf_pmac_id, vf + 1);
++	}
++
+ 	if (status)
+ 		dev_err(&adapter->pdev->dev, "MAC %pM set on VF %d Failed\n",
+ 				mac, vf);
+@@ -2465,13 +2473,18 @@ static inline int be_vf_eth_addr_config(struct be_adapter *adapter)
+ 	be_vf_eth_addr_generate(adapter, mac);
+ 
+ 	for (vf = 0; vf < num_vfs; vf++) {
+-		status = be_cmd_pmac_add(adapter, mac,
++		if (lancer_chip(adapter)) {
++			status = be_cmd_set_mac_list(adapter,  mac, 1, vf + 1);
++		} else {
++			status = be_cmd_pmac_add(adapter, mac,
+ 					adapter->vf_cfg[vf].vf_if_handle,
+ 					&adapter->vf_cfg[vf].vf_pmac_id,
+ 					vf + 1);
++		}
++
+ 		if (status)
+ 			dev_err(&adapter->pdev->dev,
+-				"Mac address add failed for VF %d\n", vf);
++			"Mac address assignment failed for VF %d\n", vf);
+ 		else
+ 			memcpy(adapter->vf_cfg[vf].vf_mac_addr, mac, ETH_ALEN);
+ 
+@@ -2484,9 +2497,14 @@ static void be_vf_clear(struct be_adapter *adapter)
+ {
+ 	u32 vf;
+ 
+-	for (vf = 0; vf < num_vfs; vf++)
+-		be_cmd_pmac_del(adapter, adapter->vf_cfg[vf].vf_if_handle,
+-				adapter->vf_cfg[vf].vf_pmac_id, vf + 1);
++	for (vf = 0; vf < num_vfs; vf++) {
++		if (lancer_chip(adapter))
++			be_cmd_set_mac_list(adapter, NULL, 0, vf + 1);
++		else
++			be_cmd_pmac_del(adapter,
++					adapter->vf_cfg[vf].vf_if_handle,
++					adapter->vf_cfg[vf].vf_pmac_id, vf + 1);
++	}
+ 
+ 	for (vf = 0; vf < num_vfs; vf++)
+ 		be_cmd_if_destroy(adapter, adapter->vf_cfg[vf].vf_if_handle,
+@@ -2527,7 +2545,9 @@ static int be_vf_setup(struct be_adapter *adapter)
+ 
+ 	be_vf_setup_init(adapter);
+ 
+-	cap_flags = en_flags = BE_IF_FLAGS_UNTAGGED | BE_IF_FLAGS_BROADCAST;
++	cap_flags = en_flags = BE_IF_FLAGS_UNTAGGED | BE_IF_FLAGS_BROADCAST |
++				BE_IF_FLAGS_MULTICAST;
++
+ 	for (vf = 0; vf < num_vfs; vf++) {
+ 		status = be_cmd_if_create(adapter, cap_flags, en_flags, NULL,
+ 					&adapter->vf_cfg[vf].vf_if_handle,
+@@ -2536,11 +2556,9 @@ static int be_vf_setup(struct be_adapter *adapter)
+ 			goto err;
+ 	}
+ 
+-	if (!lancer_chip(adapter)) {
+-		status = be_vf_eth_addr_config(adapter);
+-		if (status)
+-			goto err;
+-	}
++	status = be_vf_eth_addr_config(adapter);
++	if (status)
++		goto err;
+ 
+ 	for (vf = 0; vf < num_vfs; vf++) {
+ 		status = be_cmd_link_status_query(adapter, NULL, &lnk_speed,
+@@ -2564,6 +2582,23 @@ static void be_setup_init(struct be_adapter *adapter)
+ 	adapter->eq_next_idx = 0;
+ }
+ 
++static int be_configure_mac_from_list(struct be_adapter *adapter, u8 *mac)
++{
++	u32 pmac_id;
++	int status = be_cmd_get_mac_from_list(adapter, 0, &pmac_id);
++	if (status != 0)
++		goto do_none;
++	status = be_cmd_mac_addr_query(adapter, mac,
++			MAC_ADDRESS_TYPE_NETWORK,
++			false, adapter->if_handle, pmac_id);
++	if (status != 0)
++		goto do_none;
++	status = be_cmd_pmac_add(adapter, mac, adapter->if_handle,
++			&adapter->pmac_id, 0);
++do_none:
++	return status;
++}
++
+ static int be_setup(struct be_adapter *adapter)
+ {
+ 	struct net_device *netdev = adapter->netdev;
+@@ -2591,7 +2626,7 @@ static int be_setup(struct be_adapter *adapter)
+ 
+ 	memset(mac, 0, ETH_ALEN);
+ 	status = be_cmd_mac_addr_query(adapter, mac, MAC_ADDRESS_TYPE_NETWORK,
+-			true /*permanent */, 0);
++			true /*permanent */, 0, 0);
+ 	if (status)
+ 		return status;
+ 	memcpy(adapter->netdev->dev_addr, mac, ETH_ALEN);
+@@ -2618,12 +2653,17 @@ static int be_setup(struct be_adapter *adapter)
+ 			goto err;
+ 	}
+ 
+-	/* For BEx, the VF's permanent mac queried from card is incorrect.
+-	 * Query the mac configued by the PF using if_handle
+-	 */
+-	if (!be_physfn(adapter) && !lancer_chip(adapter)) {
+-		status = be_cmd_mac_addr_query(adapter, mac,
+-			MAC_ADDRESS_TYPE_NETWORK, false, adapter->if_handle);
++	 /* The VF's permanent mac queried from card is incorrect.
++	  * For BEx: Query the mac configued by the PF using if_handle
++	  * For Lancer: Get and use mac_list to obtain mac address.
++	  */
++	if (!be_physfn(adapter)) {
++		if (lancer_chip(adapter))
++			status = be_configure_mac_from_list(adapter, mac);
++		else
++			status = be_cmd_mac_addr_query(adapter, mac,
++					MAC_ADDRESS_TYPE_NETWORK, false,
++					adapter->if_handle, 0);
+ 		if (!status) {
+ 			memcpy(adapter->netdev->dev_addr, mac, ETH_ALEN);
+ 			memcpy(adapter->netdev->perm_addr, mac, ETH_ALEN);
+@@ -2639,12 +2679,15 @@ static int be_setup(struct be_adapter *adapter)
+ 	be_set_rx_mode(adapter->netdev);
+ 
+ 	status = be_cmd_get_flow_control(adapter, &tx_fc, &rx_fc);
+-	if (status)
++	/* For Lancer: It is legal for this cmd to fail on VF */
++	if (status && (be_physfn(adapter) || !lancer_chip(adapter)))
+ 		goto err;
++
+ 	if (rx_fc != adapter->rx_fc || tx_fc != adapter->tx_fc) {
+ 		status = be_cmd_set_flow_control(adapter, adapter->tx_fc,
+ 					adapter->rx_fc);
+-		if (status)
++		/* For Lancer: It is legal for this cmd to fail on VF */
++		if (status && (be_physfn(adapter) || !lancer_chip(adapter)))
+ 			goto err;
+ 	}
+ 
+-- 
+1.7.10
+

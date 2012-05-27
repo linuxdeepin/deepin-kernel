@@ -1,0 +1,90 @@
+From: Sathya Perla <sathya.perla@emulex.com>
+Date: Thu, 23 Feb 2012 18:50:13 +0000
+Subject: [PATCH 33/58] be2net: cancel be_worker during EEH recovery
+
+commit 191eb7563164529bc7d6a693742fe5bed33cf004 upstream.
+
+EEH recovery involves ring cleanup and re-creation. The worker
+thread must not run during EEH cleanup/resume.
+
+Signed-off-by: Sathya Perla <sathya.perla@emulex.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/ethernet/emulex/benet/be.h      |    1 +
+ drivers/net/ethernet/emulex/benet/be_main.c |   13 ++++++++-----
+ 2 files changed, 9 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/net/ethernet/emulex/benet/be.h b/drivers/net/ethernet/emulex/benet/be.h
+index 86f51de..4b1994d 100644
+--- a/drivers/net/ethernet/emulex/benet/be.h
++++ b/drivers/net/ethernet/emulex/benet/be.h
+@@ -304,6 +304,7 @@ struct be_vf_cfg {
+ };
+ 
+ #define BE_FLAGS_LINK_STATUS_INIT		1
++#define BE_FLAGS_WORKER_SCHEDULED		(1 << 3)
+ 
+ struct be_adapter {
+ 	struct pci_dev *pdev;
+diff --git a/drivers/net/ethernet/emulex/benet/be_main.c b/drivers/net/ethernet/emulex/benet/be_main.c
+index 4a3a186..2c146ac 100644
+--- a/drivers/net/ethernet/emulex/benet/be_main.c
++++ b/drivers/net/ethernet/emulex/benet/be_main.c
+@@ -2439,6 +2439,11 @@ static void be_vf_clear(struct be_adapter *adapter)
+ 
+ static int be_clear(struct be_adapter *adapter)
+ {
++	if (adapter->flags & BE_FLAGS_WORKER_SCHEDULED) {
++		cancel_delayed_work_sync(&adapter->work);
++		adapter->flags &= ~BE_FLAGS_WORKER_SCHEDULED;
++	}
++
+ 	if (sriov_enabled(adapter))
+ 		be_vf_clear(adapter);
+ 
+@@ -2640,6 +2645,9 @@ static int be_setup(struct be_adapter *adapter)
+ 			goto err;
+ 	}
+ 
++	schedule_delayed_work(&adapter->work, msecs_to_jiffies(1000));
++	adapter->flags |= BE_FLAGS_WORKER_SCHEDULED;
++
+ 	return 0;
+ err:
+ 	be_clear(adapter);
+@@ -3200,8 +3208,6 @@ static void __devexit be_remove(struct pci_dev *pdev)
+ 	if (!adapter)
+ 		return;
+ 
+-	cancel_delayed_work_sync(&adapter->work);
+-
+ 	unregister_netdev(adapter->netdev);
+ 
+ 	be_clear(adapter);
+@@ -3525,7 +3531,6 @@ static int __devinit be_probe(struct pci_dev *pdev,
+ 	dev_info(&pdev->dev, "%s: %s port %d\n", netdev->name, nic_name(pdev),
+ 		adapter->port_num);
+ 
+-	schedule_delayed_work(&adapter->work, msecs_to_jiffies(100));
+ 	return 0;
+ 
+ unsetup:
+@@ -3555,7 +3560,6 @@ static int be_suspend(struct pci_dev *pdev, pm_message_t state)
+ 	struct be_adapter *adapter = pci_get_drvdata(pdev);
+ 	struct net_device *netdev =  adapter->netdev;
+ 
+-	cancel_delayed_work_sync(&adapter->work);
+ 	if (adapter->wol)
+ 		be_setup_wol(adapter, true);
+ 
+@@ -3604,7 +3608,6 @@ static int be_resume(struct pci_dev *pdev)
+ 	if (adapter->wol)
+ 		be_setup_wol(adapter, false);
+ 
+-	schedule_delayed_work(&adapter->work, msecs_to_jiffies(100));
+ 	return 0;
+ }
+ 
+-- 
+1.7.10
+
