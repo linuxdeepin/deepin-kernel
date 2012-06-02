@@ -99,7 +99,7 @@ class Main(object):
             raise RuntimeError("Can't patch source")
 
     def debian_patch(self):
-        name = "orig-" + self.version_dfsg
+        name = "orig"
         self.log("Patching source with debian patch (series %s)\n" % name)
         fp = file("debian/patches/series/" + name)
         series = PatchSeries(name, "debian/patches", fp)
