@@ -101,7 +101,7 @@ class Main(object):
     def debian_patch(self):
         name = "orig"
         self.log("Patching source with debian patch (series %s)\n" % name)
-        fp = file("debian/patches/series/" + name)
+        fp = file("debian/patches/series-" + name)
         series = PatchSeries(name, "debian/patches", fp)
         series(dir=os.path.join(self.dir, self.orig))
 
