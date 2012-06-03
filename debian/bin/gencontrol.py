@@ -66,14 +66,19 @@ class Gencontrol(Base):
     def do_main_recurse(self, packages, makefile, vars, makeflags, extra):
         # Add featureset source rules
         for featureset in iter(self.config['base', ]['featuresets']):
-            makeflags_featureset = makeflags.copy()
-            makeflags_featureset['FEATURESET'] = featureset
-            cmds_source = ["$(MAKE) -f debian/rules.real source-featureset %s"
-                           % makeflags_featureset]
-            makefile.add('source_%s_real' % featureset, cmds=cmds_source)
-            makefile.add('source_%s' % featureset,
-                         ['source_%s_real' % featureset])
-            makefile.add('source', ['source_%s' % featureset])
+            if featureset == 'none':
+                makefile.add('source_none_real',
+                             cmds=['ln -s source source_none'])
+                makefile.add('source_none', ['source_none_real'])
+            else:
+                makeflags_featureset = makeflags.copy()
+                makeflags_featureset['FEATURESET'] = featureset
+                cmds_source = ["$(MAKE) -f debian/rules.real source-featureset %s"
+                               % makeflags_featureset]
+                makefile.add('source_%s_real' % featureset, cmds=cmds_source)
+                makefile.add('source_%s' % featureset,
+                             ['source_%s_real' % featureset])
+                makefile.add('source', ['source_%s' % featureset])
 
         super(Gencontrol, self).do_main_recurse(packages, makefile, vars, makeflags, extra)
 
