@@ -63,6 +63,20 @@ class Gencontrol(Base):
     def do_main_packages(self, packages, vars, makeflags, extra):
         packages.extend(self.process_packages(self.templates["control.main"], self.vars))
 
+    def do_main_recurse(self, packages, makefile, vars, makeflags, extra):
+        # Add featureset source rules
+        for featureset in iter(self.config['base', ]['featuresets']):
+            makeflags_featureset = makeflags.copy()
+            makeflags_featureset['FEATURESET'] = featureset
+            cmds_source = ["$(MAKE) -f debian/rules.real source-featureset %s"
+                           % makeflags_featureset]
+            makefile.add('source_%s_real' % featureset, cmds=cmds_source)
+            makefile.add('source_%s' % featureset,
+                         ['source_%s_real' % featureset])
+            makefile.add('source', ['source_%s' % featureset])
+
+        super(Gencontrol, self).do_main_recurse(packages, makefile, vars, makeflags, extra)
+
     arch_makeflags = (
         ('kernel-arch', 'KERNEL_ARCH', False),
     )
@@ -91,13 +105,11 @@ class Gencontrol(Base):
         self.merge_packages(packages, packages_headers_arch, arch)
 
         cmds_binary_arch = ["$(MAKE) -f debian/rules.real binary-arch-arch %s" % makeflags]
-        cmds_source = ["$(MAKE) -f debian/rules.real source-arch %s" % makeflags]
         makefile.add('binary-arch_%s_real' % arch, cmds=cmds_binary_arch)
-        makefile.add('source_%s_real' % arch, cmds=cmds_source)
 
         # Shortcut to aid architecture bootstrapping
         makefile.add('binary-libc-dev_%s' % arch,
-                     ['source_%s_real' % arch],
+                     ['source_none_real'],
                      ["$(MAKE) -f debian/rules.real install-libc-dev_%s %s" %
                       (arch, makeflags)])
 
@@ -141,9 +153,7 @@ class Gencontrol(Base):
         self.merge_packages(packages, (package_headers,), arch)
 
         cmds_binary_arch = ["$(MAKE) -f debian/rules.real binary-arch-featureset %s" % makeflags]
-        cmds_source = ["$(MAKE) -f debian/rules.real source-featureset %s" % makeflags]
         makefile.add('binary-arch_%s_%s_real' % (arch, featureset), cmds=cmds_binary_arch)
-        makefile.add('source_%s_%s_real' % (arch, featureset), cmds=cmds_source)
 
     flavour_makeflags_base = (
         ('compiler', 'COMPILER', False),
