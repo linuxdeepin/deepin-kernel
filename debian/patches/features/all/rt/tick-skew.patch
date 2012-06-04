@@ -1,0 +1,103 @@
+From: Mike Galbraith <mgalbraith@suse.de>
+Date: Tue May 8 12:20:58 2012 +0200
+Subject: tick: Add tick skew boot option
+ 
+Let the user decide whether power consumption or jitter is the
+more important consideration for their machines.
+
+Quoting removal commit af5ab277ded04bd9bc6b048c5a2f0e7d70ef0867:
+    
+"Historically, Linux has tried to make the regular timer tick on the
+ various CPUs not happen at the same time, to avoid contention on
+ xtime_lock.
+    
+ Nowadays, with the tickless kernel, this contention no longer happens
+ since time keeping and updating are done differently. In addition,
+ this skew is actually hurting power consumption in a measurable way on
+ many-core systems."
+    
+Problems:
+    
+    - Contrary to the above, systems do encounter contention on both
+      xtime_lock and RCU structure locks when the tick is synchronized.
+    
+    - Moderate sized RT systems suffer intolerable jitter due to the tick
+      being synchronized.
+    
+    - SGI reports the same for their large systems.
+    
+    - Fully utilized systems reap no power saving benefit from skew removal,
+      but do suffer from resulting induced lock contention.
+    
+    - 0209f649 rcu: limit rcu_node leaf-level fanout
+      This patch was born to combat lock contention which testing showed
+      to have been _induced by_ skew removal.  Skew the tick, contention
+      disappeared virtually completely.
+
+[ tglx: build fix ]
+
+Signed-off-by: Mike Galbraith <mgalbraith@suse.de>
+Link: http://lkml.kernel.org/r/1336472458.21924.78.camel@marge.simpson.net
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+
+---
+ Documentation/kernel-parameters.txt |    9 +++++++++
+ kernel/time/tick-sched.c            |   18 ++++++++++++++++++
+ 2 files changed, 27 insertions(+)
+
+Index: linux-3.4/Documentation/kernel-parameters.txt
+===================================================================
+--- linux-3.4.orig/Documentation/kernel-parameters.txt
++++ linux-3.4/Documentation/kernel-parameters.txt
+@@ -2426,6 +2426,15 @@ bytes respectively. Such letter suffixes
+ 
+ 	sched_debug	[KNL] Enables verbose scheduler debug messages.
+ 
++	skew_tick=	[KNL] Offset the periodic timer tick per cpu to mitigate
++			xtime_lock contention on larger systems, and/or RCU lock
++			contention on all systems with CONFIG_MAXSMP set.
++			Format: { "0" | "1" }
++			0 -- disable. (may be 1 via CONFIG_CMDLINE="skew_tick=1"
++			1 -- enable.
++			Note: increases power consumption, thus should only be
++			enabled if running jitter sensitive (HPC/RT) workloads.
++
+ 	security=	[SECURITY] Choose a security module to enable at boot.
+ 			If this boot parameter is not specified, only the first
+ 			security module asking for security registration will be
+Index: linux-3.4/kernel/time/tick-sched.c
+===================================================================
+--- linux-3.4.orig/kernel/time/tick-sched.c
++++ linux-3.4/kernel/time/tick-sched.c
+@@ -814,6 +814,16 @@ static enum hrtimer_restart tick_sched_t
+ 	return HRTIMER_RESTART;
+ }
+ 
++static int sched_skew_tick;
++
++static int __init skew_tick(char *str)
++{
++	get_option(&str, &sched_skew_tick);
++
++	return 0;
++}
++early_param("skew_tick", skew_tick);
++
+ /**
+  * tick_setup_sched_timer - setup the tick emulation timer
+  */
+@@ -831,6 +841,14 @@ void tick_setup_sched_timer(void)
+ 	/* Get the next period (per cpu) */
+ 	hrtimer_set_expires(&ts->sched_timer, tick_init_jiffy_update());
+ 
++	/* Offset the tick to avert xtime_lock contention. */
++	if (sched_skew_tick) {
++		u64 offset = ktime_to_ns(tick_period) >> 1;
++		do_div(offset, num_possible_cpus());
++		offset *= smp_processor_id();
++		hrtimer_add_expires_ns(&ts->sched_timer, offset);
++	}
++
+ 	for (;;) {
+ 		hrtimer_forward(&ts->sched_timer, now, tick_period);
+ 		hrtimer_start_expires(&ts->sched_timer,

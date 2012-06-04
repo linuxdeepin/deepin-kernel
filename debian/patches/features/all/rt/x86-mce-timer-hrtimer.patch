@@ -1,0 +1,147 @@
+From: Thomas Gleixner <tglx@linutronix.de>
+Date: Mon, 13 Dec 2010 16:33:39 +0100
+Subject: x86: Convert mce timer to hrtimer
+
+mce_timer is started in atomic contexts of cpu bringup. This results
+in might_sleep() warnings on RT. Convert mce_timer to a hrtimer to
+avoid this.
+
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+
+---
+ arch/x86/kernel/cpu/mcheck/mce.c |   49 ++++++++++++++++++---------------------
+ 1 file changed, 23 insertions(+), 26 deletions(-)
+
+Index: linux-3.4/arch/x86/kernel/cpu/mcheck/mce.c
+===================================================================
+--- linux-3.4.orig/arch/x86/kernel/cpu/mcheck/mce.c
++++ linux-3.4/arch/x86/kernel/cpu/mcheck/mce.c
+@@ -38,6 +38,7 @@
+ #include <linux/debugfs.h>
+ #include <linux/irq_work.h>
+ #include <linux/export.h>
++#include <linux/jiffies.h>
+ 
+ #include <asm/processor.h>
+ #include <asm/mce.h>
+@@ -1229,17 +1230,14 @@ void mce_log_therm_throt_event(__u64 sta
+  * poller finds an MCE, poll 2x faster.  When the poller finds no more
+  * errors, poll 2x slower (up to check_interval seconds).
+  */
+-static int check_interval = 5 * 60; /* 5 minutes */
++static unsigned long check_interval = 5 * 60; /* 5 minutes */
+ 
+-static DEFINE_PER_CPU(int, mce_next_interval); /* in jiffies */
+-static DEFINE_PER_CPU(struct timer_list, mce_timer);
++static DEFINE_PER_CPU(unsigned long, mce_next_interval); /* in jiffies */
++static DEFINE_PER_CPU(struct hrtimer, mce_timer);
+ 
+-static void mce_start_timer(unsigned long data)
++static enum hrtimer_restart mce_start_timer(struct hrtimer *timer)
+ {
+-	struct timer_list *t = &per_cpu(mce_timer, data);
+-	int *n;
+-
+-	WARN_ON(smp_processor_id() != data);
++	unsigned long *n;
+ 
+ 	if (mce_available(__this_cpu_ptr(&cpu_info))) {
+ 		machine_check_poll(MCP_TIMESTAMP,
+@@ -1252,21 +1250,22 @@ static void mce_start_timer(unsigned lon
+ 	 */
+ 	n = &__get_cpu_var(mce_next_interval);
+ 	if (mce_notify_irq())
+-		*n = max(*n/2, HZ/100);
++		*n = max(*n/2, HZ/100UL);
+ 	else
+-		*n = min(*n*2, (int)round_jiffies_relative(check_interval*HZ));
++		*n = min(*n*2, round_jiffies_relative(check_interval*HZ));
+ 
+-	t->expires = jiffies + *n;
+-	add_timer_on(t, smp_processor_id());
++	hrtimer_forward(timer, timer->base->get_time(),
++			ns_to_ktime(jiffies_to_usecs(*n) * 1000));
++	return HRTIMER_RESTART;
+ }
+ 
+-/* Must not be called in IRQ context where del_timer_sync() can deadlock */
++/* Must not be called in IRQ context where hrtimer_cancel() can deadlock */
+ static void mce_timer_delete_all(void)
+ {
+ 	int cpu;
+ 
+ 	for_each_online_cpu(cpu)
+-		del_timer_sync(&per_cpu(mce_timer, cpu));
++		hrtimer_cancel(&per_cpu(mce_timer, cpu));
+ }
+ 
+ static void mce_do_trigger(struct work_struct *work)
+@@ -1496,10 +1495,11 @@ static void __mcheck_cpu_init_vendor(str
+ 
+ static void __mcheck_cpu_init_timer(void)
+ {
+-	struct timer_list *t = &__get_cpu_var(mce_timer);
+-	int *n = &__get_cpu_var(mce_next_interval);
++	struct hrtimer *t = &__get_cpu_var(mce_timer);
++	unsigned long *n = &__get_cpu_var(mce_next_interval);
+ 
+-	setup_timer(t, mce_start_timer, smp_processor_id());
++	hrtimer_init(t, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
++	t->function = mce_start_timer;
+ 
+ 	if (mce_ignore_ce)
+ 		return;
+@@ -1507,8 +1507,9 @@ static void __mcheck_cpu_init_timer(void
+ 	*n = check_interval * HZ;
+ 	if (!*n)
+ 		return;
+-	t->expires = round_jiffies(jiffies + *n);
+-	add_timer_on(t, smp_processor_id());
++
++	hrtimer_start_range_ns(t, ns_to_ktime(jiffies_to_usecs(*n) * 1000),
++			       0 , HRTIMER_MODE_REL_PINNED);
+ }
+ 
+ /* Handle unconfigured int18 (should never happen) */
+@@ -2160,6 +2161,8 @@ static void __cpuinit mce_disable_cpu(vo
+ 	if (!mce_available(__this_cpu_ptr(&cpu_info)))
+ 		return;
+ 
++	hrtimer_cancel(&__get_cpu_var(mce_timer));
++
+ 	if (!(action & CPU_TASKS_FROZEN))
+ 		cmci_clear();
+ 	for (i = 0; i < banks; i++) {
+@@ -2186,6 +2189,7 @@ static void __cpuinit mce_reenable_cpu(v
+ 		if (b->init)
+ 			wrmsrl(MSR_IA32_MCx_CTL(i), b->ctl);
+ 	}
++	__mcheck_cpu_init_timer();
+ }
+ 
+ /* Get notified when a cpu comes on/off. Be hotplug friendly. */
+@@ -2193,7 +2197,6 @@ static int __cpuinit
+ mce_cpu_callback(struct notifier_block *nfb, unsigned long action, void *hcpu)
+ {
+ 	unsigned int cpu = (unsigned long)hcpu;
+-	struct timer_list *t = &per_cpu(mce_timer, cpu);
+ 
+ 	switch (action) {
+ 	case CPU_ONLINE:
+@@ -2210,16 +2213,10 @@ mce_cpu_callback(struct notifier_block *
+ 		break;
+ 	case CPU_DOWN_PREPARE:
+ 	case CPU_DOWN_PREPARE_FROZEN:
+-		del_timer_sync(t);
+ 		smp_call_function_single(cpu, mce_disable_cpu, &action, 1);
+ 		break;
+ 	case CPU_DOWN_FAILED:
+ 	case CPU_DOWN_FAILED_FROZEN:
+-		if (!mce_ignore_ce && check_interval) {
+-			t->expires = round_jiffies(jiffies +
+-					   __get_cpu_var(mce_next_interval));
+-			add_timer_on(t, cpu);
+-		}
+ 		smp_call_function_single(cpu, mce_reenable_cpu, &action, 1);
+ 		break;
+ 	case CPU_POST_DEAD:
