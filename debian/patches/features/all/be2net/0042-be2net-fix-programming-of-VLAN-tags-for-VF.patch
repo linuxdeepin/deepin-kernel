@@ -1,0 +1,255 @@
+From: Ajit Khaparde <ajit.khaparde@emulex.com>
+Date: Sun, 18 Mar 2012 06:23:41 +0000
+Subject: [PATCH 42/58] be2net: fix programming of VLAN tags for VF
+
+commit f1f3ee1bcc996e21f122442fd8c34de51622c76a upstream.
+
+Signed-off-by: Ajit Khaparde <ajit.khaparde@emulex.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/ethernet/emulex/benet/be.h      |    1 +
+ drivers/net/ethernet/emulex/benet/be_cmds.c |   83 +++++++++++++++++++++++++++
+ drivers/net/ethernet/emulex/benet/be_cmds.h |   55 ++++++++++++++++++
+ drivers/net/ethernet/emulex/benet/be_main.c |   23 ++++++--
+ 4 files changed, 157 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/net/ethernet/emulex/benet/be.h b/drivers/net/ethernet/emulex/benet/be.h
+index 03fc3db..9576ac0 100644
+--- a/drivers/net/ethernet/emulex/benet/be.h
++++ b/drivers/net/ethernet/emulex/benet/be.h
+@@ -303,6 +303,7 @@ struct be_vf_cfg {
+ 	unsigned char mac_addr[ETH_ALEN];
+ 	int if_handle;
+ 	int pmac_id;
++	u16 def_vid;
+ 	u16 vlan_tag;
+ 	u32 tx_rate;
+ };
+diff --git a/drivers/net/ethernet/emulex/benet/be_cmds.c b/drivers/net/ethernet/emulex/benet/be_cmds.c
+index d72c2b4..67b030d 100644
+--- a/drivers/net/ethernet/emulex/benet/be_cmds.c
++++ b/drivers/net/ethernet/emulex/benet/be_cmds.c
+@@ -2419,6 +2419,89 @@ err:
+ 	return status;
+ }
+ 
++int be_cmd_set_hsw_config(struct be_adapter *adapter, u16 pvid,
++			u32 domain, u16 intf_id)
++{
++	struct be_mcc_wrb *wrb;
++	struct be_cmd_req_set_hsw_config *req;
++	void *ctxt;
++	int status;
++
++	spin_lock_bh(&adapter->mcc_lock);
++
++	wrb = wrb_from_mccq(adapter);
++	if (!wrb) {
++		status = -EBUSY;
++		goto err;
++	}
++
++	req = embedded_payload(wrb);
++	ctxt = &req->context;
++
++	be_wrb_cmd_hdr_prepare(&req->hdr, CMD_SUBSYSTEM_COMMON,
++			OPCODE_COMMON_SET_HSW_CONFIG, sizeof(*req), wrb, NULL);
++
++	req->hdr.domain = domain;
++	AMAP_SET_BITS(struct amap_set_hsw_context, interface_id, ctxt, intf_id);
++	if (pvid) {
++		AMAP_SET_BITS(struct amap_set_hsw_context, pvid_valid, ctxt, 1);
++		AMAP_SET_BITS(struct amap_set_hsw_context, pvid, ctxt, pvid);
++	}
++
++	be_dws_cpu_to_le(req->context, sizeof(req->context));
++	status = be_mcc_notify_wait(adapter);
++
++err:
++	spin_unlock_bh(&adapter->mcc_lock);
++	return status;
++}
++
++/* Get Hyper switch config */
++int be_cmd_get_hsw_config(struct be_adapter *adapter, u16 *pvid,
++			u32 domain, u16 intf_id)
++{
++	struct be_mcc_wrb *wrb;
++	struct be_cmd_req_get_hsw_config *req;
++	void *ctxt;
++	int status;
++	u16 vid;
++
++	spin_lock_bh(&adapter->mcc_lock);
++
++	wrb = wrb_from_mccq(adapter);
++	if (!wrb) {
++		status = -EBUSY;
++		goto err;
++	}
++
++	req = embedded_payload(wrb);
++	ctxt = &req->context;
++
++	be_wrb_cmd_hdr_prepare(&req->hdr, CMD_SUBSYSTEM_COMMON,
++			OPCODE_COMMON_GET_HSW_CONFIG, sizeof(*req), wrb, NULL);
++
++	req->hdr.domain = domain;
++	AMAP_SET_BITS(struct amap_get_hsw_req_context, interface_id, ctxt,
++								intf_id);
++	AMAP_SET_BITS(struct amap_get_hsw_req_context, pvid_valid, ctxt, 1);
++	be_dws_cpu_to_le(req->context, sizeof(req->context));
++
++	status = be_mcc_notify_wait(adapter);
++	if (!status) {
++		struct be_cmd_resp_get_hsw_config *resp =
++						embedded_payload(wrb);
++		be_dws_le_to_cpu(&resp->context,
++						sizeof(resp->context));
++		vid = AMAP_GET_BITS(struct amap_get_hsw_resp_context,
++							pvid, &resp->context);
++		*pvid = le16_to_cpu(vid);
++	}
++
++err:
++	spin_unlock_bh(&adapter->mcc_lock);
++	return status;
++}
++
+ int be_cmd_get_acpi_wol_cap(struct be_adapter *adapter)
+ {
+ 	struct be_mcc_wrb *wrb;
+diff --git a/drivers/net/ethernet/emulex/benet/be_cmds.h b/drivers/net/ethernet/emulex/benet/be_cmds.h
+index 345d49e..d5b680c 100644
+--- a/drivers/net/ethernet/emulex/benet/be_cmds.h
++++ b/drivers/net/ethernet/emulex/benet/be_cmds.h
+@@ -191,6 +191,8 @@ struct be_mcc_mailbox {
+ #define OPCODE_COMMON_GET_CNTL_ADDITIONAL_ATTRIBUTES	121
+ #define OPCODE_COMMON_GET_MAC_LIST			147
+ #define OPCODE_COMMON_SET_MAC_LIST			148
++#define OPCODE_COMMON_GET_HSW_CONFIG			152
++#define OPCODE_COMMON_SET_HSW_CONFIG			153
+ #define OPCODE_COMMON_READ_OBJECT			171
+ #define OPCODE_COMMON_WRITE_OBJECT			172
+ 
+@@ -1413,6 +1415,55 @@ struct be_cmd_req_set_mac_list {
+ 	struct macaddr mac[BE_MAX_MAC];
+ } __packed;
+ 
++/*********************** HSW Config ***********************/
++struct amap_set_hsw_context {
++	u8 interface_id[16];
++	u8 rsvd0[14];
++	u8 pvid_valid;
++	u8 rsvd1;
++	u8 rsvd2[16];
++	u8 pvid[16];
++	u8 rsvd3[32];
++	u8 rsvd4[32];
++	u8 rsvd5[32];
++} __packed;
++
++struct be_cmd_req_set_hsw_config {
++	struct be_cmd_req_hdr hdr;
++	u8 context[sizeof(struct amap_set_hsw_context) / 8];
++} __packed;
++
++struct be_cmd_resp_set_hsw_config {
++	struct be_cmd_resp_hdr hdr;
++	u32 rsvd;
++};
++
++struct amap_get_hsw_req_context {
++	u8 interface_id[16];
++	u8 rsvd0[14];
++	u8 pvid_valid;
++	u8 pport;
++} __packed;
++
++struct amap_get_hsw_resp_context {
++	u8 rsvd1[16];
++	u8 pvid[16];
++	u8 rsvd2[32];
++	u8 rsvd3[32];
++	u8 rsvd4[32];
++} __packed;
++
++struct be_cmd_req_get_hsw_config {
++	struct be_cmd_req_hdr hdr;
++	u8 context[sizeof(struct amap_get_hsw_req_context) / 8];
++} __packed;
++
++struct be_cmd_resp_get_hsw_config {
++	struct be_cmd_resp_hdr hdr;
++	u8 context[sizeof(struct amap_get_hsw_resp_context) / 8];
++	u32 rsvd;
++};
++
+ /*************** HW Stats Get v1 **********************************/
+ #define BE_TXP_SW_SZ			48
+ struct be_port_rxf_stats_v1 {
+@@ -1617,5 +1668,9 @@ extern int be_cmd_get_mac_from_list(struct be_adapter *adapter, u32 domain,
+ 				bool *pmac_id_active, u32 *pmac_id, u8 *mac);
+ extern int be_cmd_set_mac_list(struct be_adapter *adapter, u8 *mac_array,
+ 						u8 mac_count, u32 domain);
++extern int be_cmd_set_hsw_config(struct be_adapter *adapter, u16 pvid,
++			u32 domain, u16 intf_id);
++extern int be_cmd_get_hsw_config(struct be_adapter *adapter, u16 *pvid,
++			u32 domain, u16 intf_id);
+ extern int be_cmd_get_acpi_wol_cap(struct be_adapter *adapter);
+ 
+diff --git a/drivers/net/ethernet/emulex/benet/be_main.c b/drivers/net/ethernet/emulex/benet/be_main.c
+index c9a9bf0..2e54335 100644
+--- a/drivers/net/ethernet/emulex/benet/be_main.c
++++ b/drivers/net/ethernet/emulex/benet/be_main.c
+@@ -970,14 +970,21 @@ static int be_set_vf_vlan(struct net_device *netdev,
+ 		return -EINVAL;
+ 
+ 	if (vlan) {
+-		adapter->vf_cfg[vf].vlan_tag = vlan;
+-		adapter->vlans_added++;
++		if (adapter->vf_cfg[vf].vlan_tag != vlan) {
++			/* If this is new value, program it. Else skip. */
++			adapter->vf_cfg[vf].vlan_tag = vlan;
++
++			status = be_cmd_set_hsw_config(adapter, vlan,
++				vf + 1, adapter->vf_cfg[vf].if_handle);
++		}
+ 	} else {
++		/* Reset Transparent Vlan Tagging. */
+ 		adapter->vf_cfg[vf].vlan_tag = 0;
+-		adapter->vlans_added--;
++		vlan = adapter->vf_cfg[vf].def_vid;
++		status = be_cmd_set_hsw_config(adapter, vlan, vf + 1,
++			adapter->vf_cfg[vf].if_handle);
+ 	}
+ 
+-	status = be_vid_config(adapter, true, vf);
+ 
+ 	if (status)
+ 		dev_info(&adapter->pdev->dev,
+@@ -2517,7 +2524,7 @@ static int be_vf_setup(struct be_adapter *adapter)
+ {
+ 	struct be_vf_cfg *vf_cfg;
+ 	u32 cap_flags, en_flags, vf;
+-	u16 lnk_speed;
++	u16 def_vlan, lnk_speed;
+ 	int status;
+ 
+ 	be_vf_setup_init(adapter);
+@@ -2541,6 +2548,12 @@ static int be_vf_setup(struct be_adapter *adapter)
+ 		if (status)
+ 			goto err;
+ 		vf_cfg->tx_rate = lnk_speed * 10;
++
++		status = be_cmd_get_hsw_config(adapter, &def_vlan,
++				vf + 1, vf_cfg->if_handle);
++		if (status)
++			goto err;
++		vf_cfg->def_vid = def_vlan;
+ 	}
+ 	return 0;
+ err:
+-- 
+1.7.10
+

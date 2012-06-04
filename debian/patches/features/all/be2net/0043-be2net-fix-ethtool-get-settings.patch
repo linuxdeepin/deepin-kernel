@@ -1,0 +1,521 @@
+From: Ajit Khaparde <ajitkhaparde@gmail.com>
+Date: Sat, 21 Apr 2012 18:53:22 +0000
+Subject: [PATCH 43/58] be2net: fix ethtool get settings
+
+commit 42f11cf20cc5b76766fd1f0e591eda26283a38ec upstream.
+
+ethtool get settings was not displaying all the settings correctly.
+use the get_phy_info to get more information about the PHY to fix this.
+
+Signed-off-by: Ajit Khaparde <ajit.khaparde@emulex.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/ethernet/emulex/benet/be.h         |   23 ++-
+ drivers/net/ethernet/emulex/benet/be_cmds.c    |   17 +-
+ drivers/net/ethernet/emulex/benet/be_cmds.h    |   36 +++-
+ drivers/net/ethernet/emulex/benet/be_ethtool.c |  245 ++++++++++++++++--------
+ drivers/net/ethernet/emulex/benet/be_main.c    |   20 +-
+ 5 files changed, 239 insertions(+), 102 deletions(-)
+
+diff --git a/drivers/net/ethernet/emulex/benet/be.h b/drivers/net/ethernet/emulex/benet/be.h
+index 9576ac0..ad69cf8 100644
+--- a/drivers/net/ethernet/emulex/benet/be.h
++++ b/drivers/net/ethernet/emulex/benet/be.h
+@@ -313,6 +313,23 @@ struct be_vf_cfg {
+ #define BE_UC_PMAC_COUNT		30
+ #define BE_VF_UC_PMAC_COUNT		2
+ 
++struct phy_info {
++	u8 transceiver;
++	u8 autoneg;
++	u8 fc_autoneg;
++	u8 port_type;
++	u16 phy_type;
++	u16 interface_type;
++	u32 misc_params;
++	u16 auto_speeds_supported;
++	u16 fixed_speeds_supported;
++	int link_speed;
++	int forced_port_speed;
++	u32 dac_cable_len;
++	u32 advertising;
++	u32 supported;
++};
++
+ struct be_adapter {
+ 	struct pci_dev *pdev;
+ 	struct net_device *netdev;
+@@ -377,10 +394,6 @@ struct be_adapter {
+ 	u32 rx_fc;		/* Rx flow control */
+ 	u32 tx_fc;		/* Tx flow control */
+ 	bool stats_cmd_sent;
+-	int link_speed;
+-	u8 port_type;
+-	u8 transceiver;
+-	u8 autoneg;
+ 	u8 generation;		/* BladeEngine ASIC generation */
+ 	u32 flash_status;
+ 	struct completion flash_compl;
+@@ -392,6 +405,7 @@ struct be_adapter {
+ 	u32 sli_family;
+ 	u8 hba_port_num;
+ 	u16 pvid;
++	struct phy_info phy;
+ 	u8 wol_cap;
+ 	bool wol;
+ 	u32 max_pmac_cnt;	/* Max secondary UC MACs programmable */
+@@ -583,4 +597,5 @@ extern void be_link_status_update(struct be_adapter *adapter, u8 link_status);
+ extern void be_parse_stats(struct be_adapter *adapter);
+ extern int be_load_fw(struct be_adapter *adapter, u8 *func);
+ extern bool be_is_wol_supported(struct be_adapter *adapter);
++extern bool be_pause_supported(struct be_adapter *adapter);
+ #endif				/* BE_H */
+diff --git a/drivers/net/ethernet/emulex/benet/be_cmds.c b/drivers/net/ethernet/emulex/benet/be_cmds.c
+index 67b030d..22be08c 100644
+--- a/drivers/net/ethernet/emulex/benet/be_cmds.c
++++ b/drivers/net/ethernet/emulex/benet/be_cmds.c
+@@ -126,7 +126,7 @@ static void be_async_link_state_process(struct be_adapter *adapter,
+ 		struct be_async_event_link_state *evt)
+ {
+ 	/* When link status changes, link speed must be re-queried from FW */
+-	adapter->link_speed = -1;
++	adapter->phy.link_speed = -1;
+ 
+ 	/* For the initial link status do not rely on the ASYNC event as
+ 	 * it may not be received in some cases.
+@@ -153,7 +153,7 @@ static void be_async_grp5_qos_speed_process(struct be_adapter *adapter,
+ {
+ 	if (evt->physical_port == adapter->port_num) {
+ 		/* qos_link_speed is in units of 10 Mbps */
+-		adapter->link_speed = evt->qos_link_speed * 10;
++		adapter->phy.link_speed = evt->qos_link_speed * 10;
+ 	}
+ }
+ 
+@@ -2136,8 +2136,7 @@ err:
+ 	return status;
+ }
+ 
+-int be_cmd_get_phy_info(struct be_adapter *adapter,
+-				struct be_phy_info *phy_info)
++int be_cmd_get_phy_info(struct be_adapter *adapter)
+ {
+ 	struct be_mcc_wrb *wrb;
+ 	struct be_cmd_req_get_phy_info *req;
+@@ -2170,9 +2169,15 @@ int be_cmd_get_phy_info(struct be_adapter *adapter,
+ 	if (!status) {
+ 		struct be_phy_info *resp_phy_info =
+ 				cmd.va + sizeof(struct be_cmd_req_hdr);
+-		phy_info->phy_type = le16_to_cpu(resp_phy_info->phy_type);
+-		phy_info->interface_type =
++		adapter->phy.phy_type = le16_to_cpu(resp_phy_info->phy_type);
++		adapter->phy.interface_type =
+ 			le16_to_cpu(resp_phy_info->interface_type);
++		adapter->phy.auto_speeds_supported =
++			le16_to_cpu(resp_phy_info->auto_speeds_supported);
++		adapter->phy.fixed_speeds_supported =
++			le16_to_cpu(resp_phy_info->fixed_speeds_supported);
++		adapter->phy.misc_params =
++			le32_to_cpu(resp_phy_info->misc_params);
+ 	}
+ 	pci_free_consistent(adapter->pdev, cmd.size,
+ 				cmd.va, cmd.dma);
+diff --git a/drivers/net/ethernet/emulex/benet/be_cmds.h b/drivers/net/ethernet/emulex/benet/be_cmds.h
+index d5b680c..3c54361 100644
+--- a/drivers/net/ethernet/emulex/benet/be_cmds.h
++++ b/drivers/net/ethernet/emulex/benet/be_cmds.h
+@@ -1309,9 +1309,36 @@ enum {
+ 	PHY_TYPE_KX4_10GB,
+ 	PHY_TYPE_BASET_10GB,
+ 	PHY_TYPE_BASET_1GB,
++	PHY_TYPE_BASEX_1GB,
++	PHY_TYPE_SGMII,
+ 	PHY_TYPE_DISABLED = 255
+ };
+ 
++#define BE_SUPPORTED_SPEED_NONE		0
++#define BE_SUPPORTED_SPEED_10MBPS	1
++#define BE_SUPPORTED_SPEED_100MBPS	2
++#define BE_SUPPORTED_SPEED_1GBPS	4
++#define BE_SUPPORTED_SPEED_10GBPS	8
++
++#define BE_AN_EN			0x2
++#define BE_PAUSE_SYM_EN			0x80
++
++/* MAC speed valid values */
++#define SPEED_DEFAULT  0x0
++#define SPEED_FORCED_10GB  0x1
++#define SPEED_FORCED_1GB  0x2
++#define SPEED_AUTONEG_10GB  0x3
++#define SPEED_AUTONEG_1GB  0x4
++#define SPEED_AUTONEG_100MB  0x5
++#define SPEED_AUTONEG_10GB_1GB 0x6
++#define SPEED_AUTONEG_10GB_1GB_100MB 0x7
++#define SPEED_AUTONEG_1GB_100MB  0x8
++#define SPEED_AUTONEG_10MB  0x9
++#define SPEED_AUTONEG_1GB_100MB_10MB 0xa
++#define SPEED_AUTONEG_100MB_10MB 0xb
++#define SPEED_FORCED_100MB  0xc
++#define SPEED_FORCED_10MB  0xd
++
+ struct be_cmd_req_get_phy_info {
+ 	struct be_cmd_req_hdr hdr;
+ 	u8 rsvd0[24];
+@@ -1321,7 +1348,11 @@ struct be_phy_info {
+ 	u16 phy_type;
+ 	u16 interface_type;
+ 	u32 misc_params;
+-	u32 future_use[4];
++	u16 ext_phy_details;
++	u16 rsvd;
++	u16 auto_speeds_supported;
++	u16 fixed_speeds_supported;
++	u32 future_use[2];
+ };
+ 
+ struct be_cmd_resp_get_phy_info {
+@@ -1655,8 +1686,7 @@ extern int be_cmd_get_seeprom_data(struct be_adapter *adapter,
+ 				struct be_dma_mem *nonemb_cmd);
+ extern int be_cmd_set_loopback(struct be_adapter *adapter, u8 port_num,
+ 				u8 loopback_type, u8 enable);
+-extern int be_cmd_get_phy_info(struct be_adapter *adapter,
+-				struct be_phy_info *phy_info);
++extern int be_cmd_get_phy_info(struct be_adapter *adapter);
+ extern int be_cmd_set_qos(struct be_adapter *adapter, u32 bps, u32 domain);
+ extern void be_detect_dump_ue(struct be_adapter *adapter);
+ extern int be_cmd_get_die_temperature(struct be_adapter *adapter);
+diff --git a/drivers/net/ethernet/emulex/benet/be_ethtool.c b/drivers/net/ethernet/emulex/benet/be_ethtool.c
+index e0eb995..076adeb 100644
+--- a/drivers/net/ethernet/emulex/benet/be_ethtool.c
++++ b/drivers/net/ethernet/emulex/benet/be_ethtool.c
+@@ -433,102 +433,193 @@ static int be_get_sset_count(struct net_device *netdev, int stringset)
+ 	}
+ }
+ 
++static u32 be_get_port_type(u32 phy_type, u32 dac_cable_len)
++{
++	u32 port;
++
++	switch (phy_type) {
++	case PHY_TYPE_BASET_1GB:
++	case PHY_TYPE_BASEX_1GB:
++	case PHY_TYPE_SGMII:
++		port = PORT_TP;
++		break;
++	case PHY_TYPE_SFP_PLUS_10GB:
++		port = dac_cable_len ? PORT_DA : PORT_FIBRE;
++		break;
++	case PHY_TYPE_XFP_10GB:
++	case PHY_TYPE_SFP_1GB:
++		port = PORT_FIBRE;
++		break;
++	case PHY_TYPE_BASET_10GB:
++		port = PORT_TP;
++		break;
++	default:
++		port = PORT_OTHER;
++	}
++
++	return port;
++}
++
++static u32 convert_to_et_setting(u32 if_type, u32 if_speeds)
++{
++	u32 val = 0;
++
++	switch (if_type) {
++	case PHY_TYPE_BASET_1GB:
++	case PHY_TYPE_BASEX_1GB:
++	case PHY_TYPE_SGMII:
++		val |= SUPPORTED_TP;
++		if (if_speeds & BE_SUPPORTED_SPEED_1GBPS)
++			val |= SUPPORTED_1000baseT_Full;
++		if (if_speeds & BE_SUPPORTED_SPEED_100MBPS)
++			val |= SUPPORTED_100baseT_Full;
++		if (if_speeds & BE_SUPPORTED_SPEED_10MBPS)
++			val |= SUPPORTED_10baseT_Full;
++		break;
++	case PHY_TYPE_KX4_10GB:
++		val |= SUPPORTED_Backplane;
++		if (if_speeds & BE_SUPPORTED_SPEED_1GBPS)
++			val |= SUPPORTED_1000baseKX_Full;
++		if (if_speeds & BE_SUPPORTED_SPEED_10GBPS)
++			val |= SUPPORTED_10000baseKX4_Full;
++		break;
++	case PHY_TYPE_KR_10GB:
++		val |= SUPPORTED_Backplane |
++				SUPPORTED_10000baseKR_Full;
++		break;
++	case PHY_TYPE_SFP_PLUS_10GB:
++	case PHY_TYPE_XFP_10GB:
++	case PHY_TYPE_SFP_1GB:
++		val |= SUPPORTED_FIBRE;
++		if (if_speeds & BE_SUPPORTED_SPEED_10GBPS)
++			val |= SUPPORTED_10000baseT_Full;
++		if (if_speeds & BE_SUPPORTED_SPEED_1GBPS)
++			val |= SUPPORTED_1000baseT_Full;
++		break;
++	case PHY_TYPE_BASET_10GB:
++		val |= SUPPORTED_TP;
++		if (if_speeds & BE_SUPPORTED_SPEED_10GBPS)
++			val |= SUPPORTED_10000baseT_Full;
++		if (if_speeds & BE_SUPPORTED_SPEED_1GBPS)
++			val |= SUPPORTED_1000baseT_Full;
++		if (if_speeds & BE_SUPPORTED_SPEED_100MBPS)
++			val |= SUPPORTED_100baseT_Full;
++		break;
++	default:
++		val |= SUPPORTED_TP;
++	}
++
++	return val;
++}
++
++static int convert_to_et_speed(u32 be_speed)
++{
++	int et_speed = SPEED_10000;
++
++	switch (be_speed) {
++	case PHY_LINK_SPEED_10MBPS:
++		et_speed = SPEED_10;
++		break;
++	case PHY_LINK_SPEED_100MBPS:
++		et_speed = SPEED_100;
++		break;
++	case PHY_LINK_SPEED_1GBPS:
++		et_speed = SPEED_1000;
++		break;
++	case PHY_LINK_SPEED_10GBPS:
++		et_speed = SPEED_10000;
++		break;
++	}
++
++	return et_speed;
++}
++
++bool be_pause_supported(struct be_adapter *adapter)
++{
++	return (adapter->phy.interface_type == PHY_TYPE_SFP_PLUS_10GB ||
++		adapter->phy.interface_type == PHY_TYPE_XFP_10GB) ?
++		false : true;
++}
++
+ static int be_get_settings(struct net_device *netdev, struct ethtool_cmd *ecmd)
+ {
+ 	struct be_adapter *adapter = netdev_priv(netdev);
+-	struct be_phy_info phy_info;
+-	u8 mac_speed = 0;
++	u8 port_speed = 0;
+ 	u16 link_speed = 0;
+ 	u8 link_status;
++	u32 et_speed = 0;
+ 	int status;
+ 
+-	if ((adapter->link_speed < 0) || (!(netdev->flags & IFF_UP))) {
+-		status = be_cmd_link_status_query(adapter, &mac_speed,
+-						  &link_speed, &link_status, 0);
+-		if (!status)
+-			be_link_status_update(adapter, link_status);
+-
+-		/* link_speed is in units of 10 Mbps */
+-		if (link_speed) {
+-			ethtool_cmd_speed_set(ecmd, link_speed*10);
++	if (adapter->phy.link_speed < 0 || !(netdev->flags & IFF_UP)) {
++		if (adapter->phy.forced_port_speed < 0) {
++			status = be_cmd_link_status_query(adapter, &port_speed,
++						&link_speed, &link_status, 0);
++			if (!status)
++				be_link_status_update(adapter, link_status);
++			if (link_speed)
++				et_speed = link_speed;
++			else
++				et_speed = convert_to_et_speed(port_speed);
+ 		} else {
+-			switch (mac_speed) {
+-			case PHY_LINK_SPEED_10MBPS:
+-				ethtool_cmd_speed_set(ecmd, SPEED_10);
+-				break;
+-			case PHY_LINK_SPEED_100MBPS:
+-				ethtool_cmd_speed_set(ecmd, SPEED_100);
+-				break;
+-			case PHY_LINK_SPEED_1GBPS:
+-				ethtool_cmd_speed_set(ecmd, SPEED_1000);
+-				break;
+-			case PHY_LINK_SPEED_10GBPS:
+-				ethtool_cmd_speed_set(ecmd, SPEED_10000);
+-				break;
+-			case PHY_LINK_SPEED_ZERO:
+-				ethtool_cmd_speed_set(ecmd, 0);
+-				break;
+-			}
++			et_speed = adapter->phy.forced_port_speed;
+ 		}
+ 
+-		status = be_cmd_get_phy_info(adapter, &phy_info);
+-		if (!status) {
+-			switch (phy_info.interface_type) {
+-			case PHY_TYPE_XFP_10GB:
+-			case PHY_TYPE_SFP_1GB:
+-			case PHY_TYPE_SFP_PLUS_10GB:
+-				ecmd->port = PORT_FIBRE;
+-				break;
+-			default:
+-				ecmd->port = PORT_TP;
+-				break;
+-			}
++		ethtool_cmd_speed_set(ecmd, et_speed);
++
++		status = be_cmd_get_phy_info(adapter);
++		if (status)
++			return status;
++
++		ecmd->supported =
++			convert_to_et_setting(adapter->phy.interface_type,
++					adapter->phy.auto_speeds_supported |
++					adapter->phy.fixed_speeds_supported);
++		ecmd->advertising =
++			convert_to_et_setting(adapter->phy.interface_type,
++					adapter->phy.auto_speeds_supported);
+ 
+-			switch (phy_info.interface_type) {
+-			case PHY_TYPE_KR_10GB:
+-			case PHY_TYPE_KX4_10GB:
+-				ecmd->autoneg = AUTONEG_ENABLE;
++		ecmd->port = be_get_port_type(adapter->phy.interface_type,
++					      adapter->phy.dac_cable_len);
++
++		if (adapter->phy.auto_speeds_supported) {
++			ecmd->supported |= SUPPORTED_Autoneg;
++			ecmd->autoneg = AUTONEG_ENABLE;
++			ecmd->advertising |= ADVERTISED_Autoneg;
++		}
++
++		if (be_pause_supported(adapter)) {
++			ecmd->supported |= SUPPORTED_Pause;
++			ecmd->advertising |= ADVERTISED_Pause;
++		}
++
++		switch (adapter->phy.interface_type) {
++		case PHY_TYPE_KR_10GB:
++		case PHY_TYPE_KX4_10GB:
+ 			ecmd->transceiver = XCVR_INTERNAL;
+-				break;
+-			default:
+-				ecmd->autoneg = AUTONEG_DISABLE;
+-				ecmd->transceiver = XCVR_EXTERNAL;
+-				break;
+-			}
++			break;
++		default:
++			ecmd->transceiver = XCVR_EXTERNAL;
++			break;
+ 		}
+ 
+ 		/* Save for future use */
+-		adapter->link_speed = ethtool_cmd_speed(ecmd);
+-		adapter->port_type = ecmd->port;
+-		adapter->transceiver = ecmd->transceiver;
+-		adapter->autoneg = ecmd->autoneg;
++		adapter->phy.link_speed = ethtool_cmd_speed(ecmd);
++		adapter->phy.port_type = ecmd->port;
++		adapter->phy.transceiver = ecmd->transceiver;
++		adapter->phy.autoneg = ecmd->autoneg;
++		adapter->phy.advertising = ecmd->advertising;
++		adapter->phy.supported = ecmd->supported;
+ 	} else {
+-		ethtool_cmd_speed_set(ecmd, adapter->link_speed);
+-		ecmd->port = adapter->port_type;
+-		ecmd->transceiver = adapter->transceiver;
+-		ecmd->autoneg = adapter->autoneg;
++		ethtool_cmd_speed_set(ecmd, adapter->phy.link_speed);
++		ecmd->port = adapter->phy.port_type;
++		ecmd->transceiver = adapter->phy.transceiver;
++		ecmd->autoneg = adapter->phy.autoneg;
++		ecmd->advertising = adapter->phy.advertising;
++		ecmd->supported = adapter->phy.supported;
+ 	}
+ 
+ 	ecmd->duplex = DUPLEX_FULL;
+ 	ecmd->phy_address = adapter->port_num;
+-	switch (ecmd->port) {
+-	case PORT_FIBRE:
+-		ecmd->supported = (SUPPORTED_10000baseT_Full | SUPPORTED_FIBRE);
+-		break;
+-	case PORT_TP:
+-		ecmd->supported = (SUPPORTED_10000baseT_Full | SUPPORTED_TP);
+-		break;
+-	case PORT_AUI:
+-		ecmd->supported = (SUPPORTED_10000baseT_Full | SUPPORTED_AUI);
+-		break;
+-	}
+-
+-	if (ecmd->autoneg) {
+-		ecmd->supported |= SUPPORTED_1000baseT_Full;
+-		ecmd->supported |= SUPPORTED_Autoneg;
+-		ecmd->advertising |= (ADVERTISED_10000baseT_Full |
+-				ADVERTISED_1000baseT_Full);
+-	}
+ 
+ 	return 0;
+ }
+@@ -548,7 +639,7 @@ be_get_pauseparam(struct net_device *netdev, struct ethtool_pauseparam *ecmd)
+ 	struct be_adapter *adapter = netdev_priv(netdev);
+ 
+ 	be_cmd_get_flow_control(adapter, &ecmd->tx_pause, &ecmd->rx_pause);
+-	ecmd->autoneg = 0;
++	ecmd->autoneg = adapter->phy.fc_autoneg;
+ }
+ 
+ static int
+diff --git a/drivers/net/ethernet/emulex/benet/be_main.c b/drivers/net/ethernet/emulex/benet/be_main.c
+index 2e54335..376a2fa 100644
+--- a/drivers/net/ethernet/emulex/benet/be_main.c
++++ b/drivers/net/ethernet/emulex/benet/be_main.c
+@@ -2563,11 +2563,12 @@ err:
+ static void be_setup_init(struct be_adapter *adapter)
+ {
+ 	adapter->vlan_prio_bmap = 0xff;
+-	adapter->link_speed = -1;
++	adapter->phy.link_speed = -1;
+ 	adapter->if_handle = -1;
+ 	adapter->be3_native = false;
+ 	adapter->promiscuous = false;
+ 	adapter->eq_next_idx = 0;
++	adapter->phy.forced_port_speed = -1;
+ }
+ 
+ static int be_add_mac_from_list(struct be_adapter *adapter, u8 *mac)
+@@ -2699,6 +2700,10 @@ static int be_setup(struct be_adapter *adapter)
+ 			goto err;
+ 	}
+ 
++	be_cmd_get_phy_info(adapter);
++	if (be_pause_supported(adapter))
++		adapter->phy.fc_autoneg = 1;
++
+ 	schedule_delayed_work(&adapter->work, msecs_to_jiffies(1000));
+ 	adapter->flags |= BE_FLAGS_WORKER_SCHEDULED;
+ 
+@@ -2752,17 +2757,8 @@ static bool be_flash_redboot(struct be_adapter *adapter,
+ 
+ static bool phy_flashing_required(struct be_adapter *adapter)
+ {
+-	int status = 0;
+-	struct be_phy_info phy_info;
+-
+-	status = be_cmd_get_phy_info(adapter, &phy_info);
+-	if (status)
+-		return false;
+-	if ((phy_info.phy_type == TN_8022) &&
+-		(phy_info.interface_type == PHY_TYPE_BASET_10GB)) {
+-		return true;
+-	}
+-	return false;
++	return (adapter->phy.phy_type == TN_8022 &&
++		adapter->phy.interface_type == PHY_TYPE_BASET_10GB);
+ }
+ 
+ static int be_flash_data(struct be_adapter *adapter,
+-- 
+1.7.10
+

@@ -1,0 +1,1895 @@
+From: Sathya Perla <sathya.perla@emulex.com>
+Date: Thu, 9 Feb 2012 18:05:27 +0000
+Subject: [PATCH 32/58] be2net: event queue re-design
+
+commit 10ef9ab4329edd08bccc7a8d34b96b85714195ce upstream.
+
+v2: Fixed up the bad typecasting pointed out by David...
+
+In the current design 8 TXQs are serviced by 1 EQ, while each RSS queue
+is serviced by a separate EQ. This is being changed as follows:
+
+- Upto 8 EQs will be used (based on the availabilty of msix vectors).
+Each EQ will handle 1 RSS and 1 TX ring. The default non-RSS RX queue and
+MCC queue are handled by the last EQ.
+
+- On cards which provide support, upto 8 RSS rings will be used, instead
+of the current limit of 4.
+
+The new design allows spreading the TX multi-queue completion processing
+across multiple CPUs unlike the previous design.
+
+Signed-off-by: Sathya Perla <sathya.perla@emulex.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/ethernet/emulex/benet/be.h         |   65 +-
+ drivers/net/ethernet/emulex/benet/be_cmds.c    |   31 +-
+ drivers/net/ethernet/emulex/benet/be_cmds.h    |    8 +-
+ drivers/net/ethernet/emulex/benet/be_ethtool.c |   96 +--
+ drivers/net/ethernet/emulex/benet/be_main.c    |  812 +++++++++++-------------
+ 5 files changed, 434 insertions(+), 578 deletions(-)
+
+diff --git a/drivers/net/ethernet/emulex/benet/be.h b/drivers/net/ethernet/emulex/benet/be.h
+index 74aa148..86f51de 100644
+--- a/drivers/net/ethernet/emulex/benet/be.h
++++ b/drivers/net/ethernet/emulex/benet/be.h
+@@ -81,7 +81,7 @@ static inline char *nic_name(struct pci_dev *pdev)
+ #define BE_MIN_MTU		256
+ 
+ #define BE_NUM_VLANS_SUPPORTED	64
+-#define BE_MAX_EQD		96
++#define BE_MAX_EQD		96u
+ #define	BE_MAX_TX_FRAG_COUNT	30
+ 
+ #define EVNT_Q_LEN		1024
+@@ -92,12 +92,16 @@ static inline char *nic_name(struct pci_dev *pdev)
+ #define MCC_Q_LEN		128	/* total size not to exceed 8 pages */
+ #define MCC_CQ_LEN		256
+ 
+-#define MAX_RSS_QS		4	/* BE limit is 4 queues/port */
++#define BE3_MAX_RSS_QS		8
++#define BE2_MAX_RSS_QS		4
++#define MAX_RSS_QS		BE3_MAX_RSS_QS
+ #define MAX_RX_QS		(MAX_RSS_QS + 1) /* RSS qs + 1 def Rx */
++
+ #define MAX_TX_QS		8
+-#define BE_MAX_MSIX_VECTORS	(MAX_RX_QS + 1)/* RX + TX */
++#define MAX_MSIX_VECTORS	MAX_RSS_QS
++#define BE_TX_BUDGET		256
+ #define BE_NAPI_WEIGHT		64
+-#define MAX_RX_POST 		BE_NAPI_WEIGHT /* Frags posted at a time */
++#define MAX_RX_POST		BE_NAPI_WEIGHT /* Frags posted at a time */
+ #define RX_FRAGS_REFILL_WM	(RX_Q_LEN - MAX_RX_POST)
+ 
+ #define FW_VER_LEN		32
+@@ -165,13 +169,16 @@ struct be_eq_obj {
+ 
+ 	/* Adaptive interrupt coalescing (AIC) info */
+ 	bool enable_aic;
+-	u16 min_eqd;		/* in usecs */
+-	u16 max_eqd;		/* in usecs */
+-	u16 cur_eqd;		/* in usecs */
+-	u8  eq_idx;
++	u32 min_eqd;		/* in usecs */
++	u32 max_eqd;		/* in usecs */
++	u32 eqd;		/* configured val when aic is off */
++	u32 cur_eqd;		/* in usecs */
+ 
++	u8 idx;			/* array index */
++	u16 tx_budget;
+ 	struct napi_struct napi;
+-};
++	struct be_adapter *adapter;
++} ____cacheline_aligned_in_smp;
+ 
+ struct be_mcc_obj {
+ 	struct be_queue_info q;
+@@ -197,7 +204,7 @@ struct be_tx_obj {
+ 	/* Remember the skbs that were transmitted */
+ 	struct sk_buff *sent_skb_list[TX_Q_LEN];
+ 	struct be_tx_stats stats;
+-};
++} ____cacheline_aligned_in_smp;
+ 
+ /* Struct to remember the pages posted for rx frags */
+ struct be_rx_page_info {
+@@ -215,8 +222,6 @@ struct be_rx_stats {
+ 	u32 rx_drops_no_skbs;	/* skb allocation errors */
+ 	u32 rx_drops_no_frags;	/* HW has no fetched frags */
+ 	u32 rx_post_fail;	/* page post alloc failures */
+-	u32 rx_polls;		/* NAPI calls */
+-	u32 rx_events;
+ 	u32 rx_compl;
+ 	u32 rx_mcast_pkts;
+ 	u32 rx_compl_err;	/* completions with err set */
+@@ -249,16 +254,13 @@ struct be_rx_obj {
+ 	struct be_queue_info cq;
+ 	struct be_rx_compl_info rxcp;
+ 	struct be_rx_page_info page_info_tbl[RX_Q_LEN];
+-	struct be_eq_obj rx_eq;
+ 	struct be_rx_stats stats;
+ 	u8 rss_id;
+ 	bool rx_post_starved;	/* Zero rx frags have been posted to BE */
+-	u32 cache_line_barrier[16];
+-};
++} ____cacheline_aligned_in_smp;
+ 
+ struct be_drv_stats {
+ 	u32 be_on_die_temperature;
+-	u32 tx_events;
+ 	u32 eth_red_drops;
+ 	u32 rx_drops_no_pbuf;
+ 	u32 rx_drops_no_txpb;
+@@ -320,20 +322,19 @@ struct be_adapter {
+ 	spinlock_t mcc_lock;	/* For serializing mcc cmds to BE card */
+ 	spinlock_t mcc_cq_lock;
+ 
+-	struct msix_entry msix_entries[BE_MAX_MSIX_VECTORS];
+ 	u32 num_msix_vec;
++	u32 num_evt_qs;
++	struct be_eq_obj eq_obj[MAX_MSIX_VECTORS];
++	struct msix_entry msix_entries[MAX_MSIX_VECTORS];
+ 	bool isr_registered;
+ 
+ 	/* TX Rings */
+-	struct be_eq_obj tx_eq;
++	u32 num_tx_qs;
+ 	struct be_tx_obj tx_obj[MAX_TX_QS];
+-	u8 num_tx_qs;
+-
+-	u32 cache_line_break[8];
+ 
+ 	/* Rx rings */
+-	struct be_rx_obj rx_obj[MAX_RX_QS];
+ 	u32 num_rx_qs;
++	struct be_rx_obj rx_obj[MAX_RX_QS];
+ 	u32 big_page_size;	/* Compounded page size shared by rx wrbs */
+ 
+ 	u8 eq_next_idx;
+@@ -404,24 +405,34 @@ struct be_adapter {
+ extern const struct ethtool_ops be_ethtool_ops;
+ 
+ #define msix_enabled(adapter)		(adapter->num_msix_vec > 0)
+-#define tx_stats(txo)			(&txo->stats)
+-#define rx_stats(rxo)			(&rxo->stats)
++#define num_irqs(adapter)		(msix_enabled(adapter) ?	\
++						adapter->num_msix_vec : 1)
++#define tx_stats(txo)			(&(txo)->stats)
++#define rx_stats(rxo)			(&(rxo)->stats)
+ 
+-#define BE_SET_NETDEV_OPS(netdev, ops)	(netdev->netdev_ops = ops)
++/* The default RXQ is the last RXQ */
++#define default_rxo(adpt)		(&adpt->rx_obj[adpt->num_rx_qs - 1])
+ 
+ #define for_all_rx_queues(adapter, rxo, i)				\
+ 	for (i = 0, rxo = &adapter->rx_obj[i]; i < adapter->num_rx_qs;	\
+ 		i++, rxo++)
+ 
+-/* Just skip the first default non-rss queue */
++/* Skip the default non-rss queue (last one)*/
+ #define for_all_rss_queues(adapter, rxo, i)				\
+-	for (i = 0, rxo = &adapter->rx_obj[i+1]; i < (adapter->num_rx_qs - 1);\
++	for (i = 0, rxo = &adapter->rx_obj[i]; i < (adapter->num_rx_qs - 1);\
+ 		i++, rxo++)
+ 
+ #define for_all_tx_queues(adapter, txo, i)				\
+ 	for (i = 0, txo = &adapter->tx_obj[i]; i < adapter->num_tx_qs;	\
+ 		i++, txo++)
+ 
++#define for_all_evt_queues(adapter, eqo, i)				\
++	for (i = 0, eqo = &adapter->eq_obj[i]; i < adapter->num_evt_qs; \
++		i++, eqo++)
++
++#define is_mcc_eqo(eqo)			(eqo->idx == 0)
++#define mcc_eqo(adapter)		(&adapter->eq_obj[0])
++
+ #define PAGE_SHIFT_4K		12
+ #define PAGE_SIZE_4K		(1 << PAGE_SHIFT_4K)
+ 
+diff --git a/drivers/net/ethernet/emulex/benet/be_cmds.c b/drivers/net/ethernet/emulex/benet/be_cmds.c
+index 29dff7d..6432efa 100644
+--- a/drivers/net/ethernet/emulex/benet/be_cmds.c
++++ b/drivers/net/ethernet/emulex/benet/be_cmds.c
+@@ -235,10 +235,10 @@ void be_async_mcc_disable(struct be_adapter *adapter)
+ 	adapter->mcc_obj.rearm_cq = false;
+ }
+ 
+-int be_process_mcc(struct be_adapter *adapter, int *status)
++int be_process_mcc(struct be_adapter *adapter)
+ {
+ 	struct be_mcc_compl *compl;
+-	int num = 0;
++	int num = 0, status = 0;
+ 	struct be_mcc_obj *mcc_obj = &adapter->mcc_obj;
+ 
+ 	spin_lock_bh(&adapter->mcc_cq_lock);
+@@ -252,32 +252,32 @@ int be_process_mcc(struct be_adapter *adapter, int *status)
+ 				be_async_grp5_evt_process(adapter,
+ 				compl->flags, compl);
+ 		} else if (compl->flags & CQE_FLAGS_COMPLETED_MASK) {
+-				*status = be_mcc_compl_process(adapter, compl);
++				status = be_mcc_compl_process(adapter, compl);
+ 				atomic_dec(&mcc_obj->q.used);
+ 		}
+ 		be_mcc_compl_use(compl);
+ 		num++;
+ 	}
+ 
++	if (num)
++		be_cq_notify(adapter, mcc_obj->cq.id, mcc_obj->rearm_cq, num);
++
+ 	spin_unlock_bh(&adapter->mcc_cq_lock);
+-	return num;
++	return status;
+ }
+ 
+ /* Wait till no more pending mcc requests are present */
+ static int be_mcc_wait_compl(struct be_adapter *adapter)
+ {
+ #define mcc_timeout		120000 /* 12s timeout */
+-	int i, num, status = 0;
++	int i, status = 0;
+ 	struct be_mcc_obj *mcc_obj = &adapter->mcc_obj;
+ 
+ 	for (i = 0; i < mcc_timeout; i++) {
+ 		if (be_error(adapter))
+ 			return -EIO;
+ 
+-		num = be_process_mcc(adapter, &status);
+-		if (num)
+-			be_cq_notify(adapter, mcc_obj->cq.id,
+-				mcc_obj->rearm_cq, num);
++		status = be_process_mcc(adapter);
+ 
+ 		if (atomic_read(&mcc_obj->q.used) == 0)
+ 			break;
+@@ -726,9 +726,8 @@ err:
+ }
+ 
+ /* Uses Mbox */
+-int be_cmd_cq_create(struct be_adapter *adapter,
+-		struct be_queue_info *cq, struct be_queue_info *eq,
+-		bool sol_evts, bool no_delay, int coalesce_wm)
++int be_cmd_cq_create(struct be_adapter *adapter, struct be_queue_info *cq,
++		struct be_queue_info *eq, bool no_delay, int coalesce_wm)
+ {
+ 	struct be_mcc_wrb *wrb;
+ 	struct be_cmd_req_cq_create *req;
+@@ -759,7 +758,6 @@ int be_cmd_cq_create(struct be_adapter *adapter,
+ 								ctxt, 1);
+ 		AMAP_SET_BITS(struct amap_cq_context_lancer, eqid,
+ 								ctxt, eq->id);
+-		AMAP_SET_BITS(struct amap_cq_context_lancer, armed, ctxt, 1);
+ 	} else {
+ 		AMAP_SET_BITS(struct amap_cq_context_be, coalescwm, ctxt,
+ 								coalesce_wm);
+@@ -768,11 +766,8 @@ int be_cmd_cq_create(struct be_adapter *adapter,
+ 		AMAP_SET_BITS(struct amap_cq_context_be, count, ctxt,
+ 						__ilog2_u32(cq->len/256));
+ 		AMAP_SET_BITS(struct amap_cq_context_be, valid, ctxt, 1);
+-		AMAP_SET_BITS(struct amap_cq_context_be, solevent,
+-								ctxt, sol_evts);
+ 		AMAP_SET_BITS(struct amap_cq_context_be, eventable, ctxt, 1);
+ 		AMAP_SET_BITS(struct amap_cq_context_be, eqid, ctxt, eq->id);
+-		AMAP_SET_BITS(struct amap_cq_context_be, armed, ctxt, 1);
+ 	}
+ 
+ 	be_dws_cpu_to_le(ctxt, sizeof(req->context));
+@@ -973,7 +968,7 @@ err:
+ /* Uses MCC */
+ int be_cmd_rxq_create(struct be_adapter *adapter,
+ 		struct be_queue_info *rxq, u16 cq_id, u16 frag_size,
+-		u16 max_frame_size, u32 if_id, u32 rss, u8 *rss_id)
++		u32 if_id, u32 rss, u8 *rss_id)
+ {
+ 	struct be_mcc_wrb *wrb;
+ 	struct be_cmd_req_eth_rx_create *req;
+@@ -997,7 +992,7 @@ int be_cmd_rxq_create(struct be_adapter *adapter,
+ 	req->num_pages = 2;
+ 	be_cmd_page_addrs_prepare(req->pages, ARRAY_SIZE(req->pages), q_mem);
+ 	req->interface_id = cpu_to_le32(if_id);
+-	req->max_frame_size = cpu_to_le16(max_frame_size);
++	req->max_frame_size = cpu_to_le16(BE_MAX_JUMBO_FRAME_SIZE);
+ 	req->rss_queue = cpu_to_le32(rss);
+ 
+ 	status = be_mcc_notify_wait(adapter);
+diff --git a/drivers/net/ethernet/emulex/benet/be_cmds.h b/drivers/net/ethernet/emulex/benet/be_cmds.h
+index 5bb66c8..687c420 100644
+--- a/drivers/net/ethernet/emulex/benet/be_cmds.h
++++ b/drivers/net/ethernet/emulex/benet/be_cmds.h
+@@ -1506,8 +1506,7 @@ extern int be_cmd_eq_create(struct be_adapter *adapter,
+ 			struct be_queue_info *eq, int eq_delay);
+ extern int be_cmd_cq_create(struct be_adapter *adapter,
+ 			struct be_queue_info *cq, struct be_queue_info *eq,
+-			bool sol_evts, bool no_delay,
+-			int num_cqe_dma_coalesce);
++			bool no_delay, int num_cqe_dma_coalesce);
+ extern int be_cmd_mccq_create(struct be_adapter *adapter,
+ 			struct be_queue_info *mccq,
+ 			struct be_queue_info *cq);
+@@ -1516,8 +1515,7 @@ extern int be_cmd_txq_create(struct be_adapter *adapter,
+ 			struct be_queue_info *cq);
+ extern int be_cmd_rxq_create(struct be_adapter *adapter,
+ 			struct be_queue_info *rxq, u16 cq_id,
+-			u16 frag_size, u16 max_frame_size, u32 if_id,
+-			u32 rss, u8 *rss_id);
++			u16 frag_size, u32 if_id, u32 rss, u8 *rss_id);
+ extern int be_cmd_q_destroy(struct be_adapter *adapter, struct be_queue_info *q,
+ 			int type);
+ extern int be_cmd_rxq_destroy(struct be_adapter *adapter,
+@@ -1546,7 +1544,7 @@ extern int be_cmd_query_fw_cfg(struct be_adapter *adapter,
+ extern int be_cmd_reset_function(struct be_adapter *adapter);
+ extern int be_cmd_rss_config(struct be_adapter *adapter, u8 *rsstable,
+ 			u16 table_size);
+-extern int be_process_mcc(struct be_adapter *adapter, int *status);
++extern int be_process_mcc(struct be_adapter *adapter);
+ extern int be_cmd_set_beacon_state(struct be_adapter *adapter,
+ 			u8 port_num, u8 beacon, u8 status, u8 state);
+ extern int be_cmd_get_beacon_state(struct be_adapter *adapter,
+diff --git a/drivers/net/ethernet/emulex/benet/be_ethtool.c b/drivers/net/ethernet/emulex/benet/be_ethtool.c
+index 0a5ee22..d98ad7e 100644
+--- a/drivers/net/ethernet/emulex/benet/be_ethtool.c
++++ b/drivers/net/ethernet/emulex/benet/be_ethtool.c
+@@ -37,7 +37,6 @@ enum {DRVSTAT_TX, DRVSTAT_RX, DRVSTAT};
+ 					FIELDINFO(struct be_drv_stats, field)
+ 
+ static const struct be_ethtool_stat et_stats[] = {
+-	{DRVSTAT_INFO(tx_events)},
+ 	{DRVSTAT_INFO(rx_crc_errors)},
+ 	{DRVSTAT_INFO(rx_alignment_symbol_errors)},
+ 	{DRVSTAT_INFO(rx_pause_frames)},
+@@ -126,8 +125,6 @@ static const struct be_ethtool_stat et_stats[] = {
+ static const struct be_ethtool_stat et_rx_stats[] = {
+ 	{DRVSTAT_RX_INFO(rx_bytes)},/* If moving this member see above note */
+ 	{DRVSTAT_RX_INFO(rx_pkts)}, /* If moving this member see above note */
+-	{DRVSTAT_RX_INFO(rx_polls)},
+-	{DRVSTAT_RX_INFO(rx_events)},
+ 	{DRVSTAT_RX_INFO(rx_compl)},
+ 	{DRVSTAT_RX_INFO(rx_mcast_pkts)},
+ 	/* Number of page allocation failures while posting receive buffers
+@@ -154,7 +151,6 @@ static const struct be_ethtool_stat et_tx_stats[] = {
+ 	{DRVSTAT_TX_INFO(tx_reqs)},
+ 	/* Number of TX work request blocks DMAed to HW */
+ 	{DRVSTAT_TX_INFO(tx_wrbs)},
+-	{DRVSTAT_TX_INFO(tx_compl)},
+ 	/* Number of times the TX queue was stopped due to lack
+ 	 * of spaces in the TXQ.
+ 	 */
+@@ -290,86 +286,42 @@ be_get_regs(struct net_device *netdev, struct ethtool_regs *regs, void *buf)
+ 	}
+ }
+ 
+-static int
+-be_get_coalesce(struct net_device *netdev, struct ethtool_coalesce *coalesce)
++static int be_get_coalesce(struct net_device *netdev,
++			   struct ethtool_coalesce *et)
+ {
+ 	struct be_adapter *adapter = netdev_priv(netdev);
+-	struct be_eq_obj *rx_eq = &adapter->rx_obj[0].rx_eq;
+-	struct be_eq_obj *tx_eq = &adapter->tx_eq;
++	struct be_eq_obj *eqo = &adapter->eq_obj[0];
++
+ 
+-	coalesce->rx_coalesce_usecs = rx_eq->cur_eqd;
+-	coalesce->rx_coalesce_usecs_high = rx_eq->max_eqd;
+-	coalesce->rx_coalesce_usecs_low = rx_eq->min_eqd;
++	et->rx_coalesce_usecs = eqo->cur_eqd;
++	et->rx_coalesce_usecs_high = eqo->max_eqd;
++	et->rx_coalesce_usecs_low = eqo->min_eqd;
+ 
+-	coalesce->tx_coalesce_usecs = tx_eq->cur_eqd;
+-	coalesce->tx_coalesce_usecs_high = tx_eq->max_eqd;
+-	coalesce->tx_coalesce_usecs_low = tx_eq->min_eqd;
++	et->tx_coalesce_usecs = eqo->cur_eqd;
++	et->tx_coalesce_usecs_high = eqo->max_eqd;
++	et->tx_coalesce_usecs_low = eqo->min_eqd;
+ 
+-	coalesce->use_adaptive_rx_coalesce = rx_eq->enable_aic;
+-	coalesce->use_adaptive_tx_coalesce = tx_eq->enable_aic;
++	et->use_adaptive_rx_coalesce = eqo->enable_aic;
++	et->use_adaptive_tx_coalesce = eqo->enable_aic;
+ 
+ 	return 0;
+ }
+ 
+-/*
+- * This routine is used to set interrup coalescing delay
++/* TX attributes are ignored. Only RX attributes are considered
++ * eqd cmd is issued in the worker thread.
+  */
+-static int
+-be_set_coalesce(struct net_device *netdev, struct ethtool_coalesce *coalesce)
++static int be_set_coalesce(struct net_device *netdev,
++			   struct ethtool_coalesce *et)
+ {
+ 	struct be_adapter *adapter = netdev_priv(netdev);
+-	struct be_rx_obj *rxo;
+-	struct be_eq_obj *rx_eq;
+-	struct be_eq_obj *tx_eq = &adapter->tx_eq;
+-	u32 rx_max, rx_min, rx_cur;
+-	int status = 0, i;
+-	u32 tx_cur;
+-
+-	if (coalesce->use_adaptive_tx_coalesce == 1)
+-		return -EINVAL;
+-
+-	for_all_rx_queues(adapter, rxo, i) {
+-		rx_eq = &rxo->rx_eq;
+-
+-		if (!rx_eq->enable_aic && coalesce->use_adaptive_rx_coalesce)
+-			rx_eq->cur_eqd = 0;
+-		rx_eq->enable_aic = coalesce->use_adaptive_rx_coalesce;
+-
+-		rx_max = coalesce->rx_coalesce_usecs_high;
+-		rx_min = coalesce->rx_coalesce_usecs_low;
+-		rx_cur = coalesce->rx_coalesce_usecs;
+-
+-		if (rx_eq->enable_aic) {
+-			if (rx_max > BE_MAX_EQD)
+-				rx_max = BE_MAX_EQD;
+-			if (rx_min > rx_max)
+-				rx_min = rx_max;
+-			rx_eq->max_eqd = rx_max;
+-			rx_eq->min_eqd = rx_min;
+-			if (rx_eq->cur_eqd > rx_max)
+-				rx_eq->cur_eqd = rx_max;
+-			if (rx_eq->cur_eqd < rx_min)
+-				rx_eq->cur_eqd = rx_min;
+-		} else {
+-			if (rx_cur > BE_MAX_EQD)
+-				rx_cur = BE_MAX_EQD;
+-			if (rx_eq->cur_eqd != rx_cur) {
+-				status = be_cmd_modify_eqd(adapter, rx_eq->q.id,
+-						rx_cur);
+-				if (!status)
+-					rx_eq->cur_eqd = rx_cur;
+-			}
+-		}
+-	}
+-
+-	tx_cur = coalesce->tx_coalesce_usecs;
+-
+-	if (tx_cur > BE_MAX_EQD)
+-		tx_cur = BE_MAX_EQD;
+-	if (tx_eq->cur_eqd != tx_cur) {
+-		status = be_cmd_modify_eqd(adapter, tx_eq->q.id, tx_cur);
+-		if (!status)
+-			tx_eq->cur_eqd = tx_cur;
++	struct be_eq_obj *eqo;
++	int i;
++
++	for_all_evt_queues(adapter, eqo, i) {
++		eqo->enable_aic = et->use_adaptive_rx_coalesce;
++		eqo->max_eqd = min(et->rx_coalesce_usecs_high, BE_MAX_EQD);
++		eqo->min_eqd = min(et->rx_coalesce_usecs_low, eqo->max_eqd);
++		eqo->eqd = et->rx_coalesce_usecs;
+ 	}
+ 
+ 	return 0;
+diff --git a/drivers/net/ethernet/emulex/benet/be_main.c b/drivers/net/ethernet/emulex/benet/be_main.c
+index 4364f01..4a3a186 100644
+--- a/drivers/net/ethernet/emulex/benet/be_main.c
++++ b/drivers/net/ethernet/emulex/benet/be_main.c
+@@ -144,7 +144,7 @@ static int be_queue_alloc(struct be_adapter *adapter, struct be_queue_info *q,
+ 	mem->va = dma_alloc_coherent(&adapter->pdev->dev, mem->size, &mem->dma,
+ 				     GFP_KERNEL);
+ 	if (!mem->va)
+-		return -1;
++		return -ENOMEM;
+ 	memset(mem->va, 0, mem->size);
+ 	return 0;
+ }
+@@ -988,18 +988,24 @@ static int be_set_vf_tx_rate(struct net_device *netdev,
+ 	return status;
+ }
+ 
+-static void be_rx_eqd_update(struct be_adapter *adapter, struct be_rx_obj *rxo)
++static void be_eqd_update(struct be_adapter *adapter, struct be_eq_obj *eqo)
+ {
+-	struct be_eq_obj *rx_eq = &rxo->rx_eq;
+-	struct be_rx_stats *stats = rx_stats(rxo);
++	struct be_rx_stats *stats = rx_stats(&adapter->rx_obj[eqo->idx]);
+ 	ulong now = jiffies;
+ 	ulong delta = now - stats->rx_jiffies;
+ 	u64 pkts;
+ 	unsigned int start, eqd;
+ 
+-	if (!rx_eq->enable_aic)
++	if (!eqo->enable_aic) {
++		eqd = eqo->eqd;
++		goto modify_eqd;
++	}
++
++	if (eqo->idx >= adapter->num_rx_qs)
+ 		return;
+ 
++	stats = rx_stats(&adapter->rx_obj[eqo->idx]);
++
+ 	/* Wrapped around */
+ 	if (time_before(now, stats->rx_jiffies)) {
+ 		stats->rx_jiffies = now;
+@@ -1018,17 +1024,16 @@ static void be_rx_eqd_update(struct be_adapter *adapter, struct be_rx_obj *rxo)
+ 	stats->rx_pps = (unsigned long)(pkts - stats->rx_pkts_prev) / (delta / HZ);
+ 	stats->rx_pkts_prev = pkts;
+ 	stats->rx_jiffies = now;
+-	eqd = stats->rx_pps / 110000;
+-	eqd = eqd << 3;
+-	if (eqd > rx_eq->max_eqd)
+-		eqd = rx_eq->max_eqd;
+-	if (eqd < rx_eq->min_eqd)
+-		eqd = rx_eq->min_eqd;
++	eqd = (stats->rx_pps / 110000) << 3;
++	eqd = min(eqd, eqo->max_eqd);
++	eqd = max(eqd, eqo->min_eqd);
+ 	if (eqd < 10)
+ 		eqd = 0;
+-	if (eqd != rx_eq->cur_eqd) {
+-		be_cmd_modify_eqd(adapter, rx_eq->q.id, eqd);
+-		rx_eq->cur_eqd = eqd;
++
++modify_eqd:
++	if (eqd != eqo->cur_eqd) {
++		be_cmd_modify_eqd(adapter, eqo->q.id, eqd);
++		eqo->cur_eqd = eqd;
+ 	}
+ }
+ 
+@@ -1056,11 +1061,10 @@ static inline bool csum_passed(struct be_rx_compl_info *rxcp)
+ 				(rxcp->ip_csum || rxcp->ipv6);
+ }
+ 
+-static struct be_rx_page_info *
+-get_rx_page_info(struct be_adapter *adapter,
+-		struct be_rx_obj *rxo,
+-		u16 frag_idx)
++static struct be_rx_page_info *get_rx_page_info(struct be_rx_obj *rxo,
++						u16 frag_idx)
+ {
++	struct be_adapter *adapter = rxo->adapter;
+ 	struct be_rx_page_info *rx_page_info;
+ 	struct be_queue_info *rxq = &rxo->q;
+ 
+@@ -1079,16 +1083,15 @@ get_rx_page_info(struct be_adapter *adapter,
+ }
+ 
+ /* Throwaway the data in the Rx completion */
+-static void be_rx_compl_discard(struct be_adapter *adapter,
+-		struct be_rx_obj *rxo,
+-		struct be_rx_compl_info *rxcp)
++static void be_rx_compl_discard(struct be_rx_obj *rxo,
++				struct be_rx_compl_info *rxcp)
+ {
+ 	struct be_queue_info *rxq = &rxo->q;
+ 	struct be_rx_page_info *page_info;
+ 	u16 i, num_rcvd = rxcp->num_rcvd;
+ 
+ 	for (i = 0; i < num_rcvd; i++) {
+-		page_info = get_rx_page_info(adapter, rxo, rxcp->rxq_idx);
++		page_info = get_rx_page_info(rxo, rxcp->rxq_idx);
+ 		put_page(page_info->page);
+ 		memset(page_info, 0, sizeof(*page_info));
+ 		index_inc(&rxcp->rxq_idx, rxq->len);
+@@ -1099,8 +1102,8 @@ static void be_rx_compl_discard(struct be_adapter *adapter,
+  * skb_fill_rx_data forms a complete skb for an ether frame
+  * indicated by rxcp.
+  */
+-static void skb_fill_rx_data(struct be_adapter *adapter, struct be_rx_obj *rxo,
+-			struct sk_buff *skb, struct be_rx_compl_info *rxcp)
++static void skb_fill_rx_data(struct be_rx_obj *rxo, struct sk_buff *skb,
++			     struct be_rx_compl_info *rxcp)
+ {
+ 	struct be_queue_info *rxq = &rxo->q;
+ 	struct be_rx_page_info *page_info;
+@@ -1108,7 +1111,7 @@ static void skb_fill_rx_data(struct be_adapter *adapter, struct be_rx_obj *rxo,
+ 	u16 hdr_len, curr_frag_len, remaining;
+ 	u8 *start;
+ 
+-	page_info = get_rx_page_info(adapter, rxo, rxcp->rxq_idx);
++	page_info = get_rx_page_info(rxo, rxcp->rxq_idx);
+ 	start = page_address(page_info->page) + page_info->page_offset;
+ 	prefetch(start);
+ 
+@@ -1145,7 +1148,7 @@ static void skb_fill_rx_data(struct be_adapter *adapter, struct be_rx_obj *rxo,
+ 	index_inc(&rxcp->rxq_idx, rxq->len);
+ 	remaining = rxcp->pkt_size - curr_frag_len;
+ 	for (i = 1, j = 0; i < rxcp->num_rcvd; i++) {
+-		page_info = get_rx_page_info(adapter, rxo, rxcp->rxq_idx);
++		page_info = get_rx_page_info(rxo, rxcp->rxq_idx);
+ 		curr_frag_len = min(remaining, rx_frag_size);
+ 
+ 		/* Coalesce all frags from the same physical page in one slot */
+@@ -1173,21 +1176,21 @@ static void skb_fill_rx_data(struct be_adapter *adapter, struct be_rx_obj *rxo,
+ }
+ 
+ /* Process the RX completion indicated by rxcp when GRO is disabled */
+-static void be_rx_compl_process(struct be_adapter *adapter,
+-			struct be_rx_obj *rxo,
+-			struct be_rx_compl_info *rxcp)
++static void be_rx_compl_process(struct be_rx_obj *rxo,
++				struct be_rx_compl_info *rxcp)
+ {
++	struct be_adapter *adapter = rxo->adapter;
+ 	struct net_device *netdev = adapter->netdev;
+ 	struct sk_buff *skb;
+ 
+ 	skb = netdev_alloc_skb_ip_align(netdev, BE_RX_SKB_ALLOC_SIZE);
+ 	if (unlikely(!skb)) {
+ 		rx_stats(rxo)->rx_drops_no_skbs++;
+-		be_rx_compl_discard(adapter, rxo, rxcp);
++		be_rx_compl_discard(rxo, rxcp);
+ 		return;
+ 	}
+ 
+-	skb_fill_rx_data(adapter, rxo, skb, rxcp);
++	skb_fill_rx_data(rxo, skb, rxcp);
+ 
+ 	if (likely((netdev->features & NETIF_F_RXCSUM) && csum_passed(rxcp)))
+ 		skb->ip_summed = CHECKSUM_UNNECESSARY;
+@@ -1195,7 +1198,7 @@ static void be_rx_compl_process(struct be_adapter *adapter,
+ 		skb_checksum_none_assert(skb);
+ 
+ 	skb->protocol = eth_type_trans(skb, netdev);
+-	if (adapter->netdev->features & NETIF_F_RXHASH)
++	if (netdev->features & NETIF_F_RXHASH)
+ 		skb->rxhash = rxcp->rss_hash;
+ 
+ 
+@@ -1206,26 +1209,25 @@ static void be_rx_compl_process(struct be_adapter *adapter,
+ }
+ 
+ /* Process the RX completion indicated by rxcp when GRO is enabled */
+-static void be_rx_compl_process_gro(struct be_adapter *adapter,
+-		struct be_rx_obj *rxo,
+-		struct be_rx_compl_info *rxcp)
++void be_rx_compl_process_gro(struct be_rx_obj *rxo, struct napi_struct *napi,
++			     struct be_rx_compl_info *rxcp)
+ {
++	struct be_adapter *adapter = rxo->adapter;
+ 	struct be_rx_page_info *page_info;
+ 	struct sk_buff *skb = NULL;
+ 	struct be_queue_info *rxq = &rxo->q;
+-	struct be_eq_obj *eq_obj =  &rxo->rx_eq;
+ 	u16 remaining, curr_frag_len;
+ 	u16 i, j;
+ 
+-	skb = napi_get_frags(&eq_obj->napi);
++	skb = napi_get_frags(napi);
+ 	if (!skb) {
+-		be_rx_compl_discard(adapter, rxo, rxcp);
++		be_rx_compl_discard(rxo, rxcp);
+ 		return;
+ 	}
+ 
+ 	remaining = rxcp->pkt_size;
+ 	for (i = 0, j = -1; i < rxcp->num_rcvd; i++) {
+-		page_info = get_rx_page_info(adapter, rxo, rxcp->rxq_idx);
++		page_info = get_rx_page_info(rxo, rxcp->rxq_idx);
+ 
+ 		curr_frag_len = min(remaining, rx_frag_size);
+ 
+@@ -1258,12 +1260,11 @@ static void be_rx_compl_process_gro(struct be_adapter *adapter,
+ 	if (rxcp->vlanf)
+ 		__vlan_hwaccel_put_tag(skb, rxcp->vlan_tag);
+ 
+-	napi_gro_frags(&eq_obj->napi);
++	napi_gro_frags(napi);
+ }
+ 
+-static void be_parse_rx_compl_v1(struct be_adapter *adapter,
+-				struct be_eth_rx_compl *compl,
+-				struct be_rx_compl_info *rxcp)
++static void be_parse_rx_compl_v1(struct be_eth_rx_compl *compl,
++				 struct be_rx_compl_info *rxcp)
+ {
+ 	rxcp->pkt_size =
+ 		AMAP_GET_BITS(struct amap_eth_rx_compl_v1, pktsize, compl);
+@@ -1294,9 +1295,8 @@ static void be_parse_rx_compl_v1(struct be_adapter *adapter,
+ 	rxcp->port = AMAP_GET_BITS(struct amap_eth_rx_compl_v1, port, compl);
+ }
+ 
+-static void be_parse_rx_compl_v0(struct be_adapter *adapter,
+-				struct be_eth_rx_compl *compl,
+-				struct be_rx_compl_info *rxcp)
++static void be_parse_rx_compl_v0(struct be_eth_rx_compl *compl,
++				 struct be_rx_compl_info *rxcp)
+ {
+ 	rxcp->pkt_size =
+ 		AMAP_GET_BITS(struct amap_eth_rx_compl_v0, pktsize, compl);
+@@ -1342,9 +1342,9 @@ static struct be_rx_compl_info *be_rx_compl_get(struct be_rx_obj *rxo)
+ 	be_dws_le_to_cpu(compl, sizeof(*compl));
+ 
+ 	if (adapter->be3_native)
+-		be_parse_rx_compl_v1(adapter, compl, rxcp);
++		be_parse_rx_compl_v1(compl, rxcp);
+ 	else
+-		be_parse_rx_compl_v0(adapter, compl, rxcp);
++		be_parse_rx_compl_v0(compl, rxcp);
+ 
+ 	if (rxcp->vlanf) {
+ 		/* vlanf could be wrongly set in some cards.
+@@ -1383,7 +1383,6 @@ static inline struct page *be_alloc_pages(u32 size, gfp_t gfp)
+ static void be_post_rx_frags(struct be_rx_obj *rxo, gfp_t gfp)
+ {
+ 	struct be_adapter *adapter = rxo->adapter;
+-	struct be_rx_page_info *page_info_tbl = rxo->page_info_tbl;
+ 	struct be_rx_page_info *page_info = NULL, *prev_page_info = NULL;
+ 	struct be_queue_info *rxq = &rxo->q;
+ 	struct page *pagep = NULL;
+@@ -1425,7 +1424,7 @@ static void be_post_rx_frags(struct be_rx_obj *rxo, gfp_t gfp)
+ 
+ 		prev_page_info = page_info;
+ 		queue_head_inc(rxq);
+-		page_info = &page_info_tbl[rxq->head];
++		page_info = &rxo->page_info_tbl[rxq->head];
+ 	}
+ 	if (pagep)
+ 		prev_page_info->last_page_user = true;
+@@ -1487,62 +1486,51 @@ static u16 be_tx_compl_process(struct be_adapter *adapter,
+ 	return num_wrbs;
+ }
+ 
+-static inline struct be_eq_entry *event_get(struct be_eq_obj *eq_obj)
++/* Return the number of events in the event queue */
++static inline int events_get(struct be_eq_obj *eqo)
+ {
+-	struct be_eq_entry *eqe = queue_tail_node(&eq_obj->q);
++	struct be_eq_entry *eqe;
++	int num = 0;
+ 
+-	if (!eqe->evt)
+-		return NULL;
++	do {
++		eqe = queue_tail_node(&eqo->q);
++		if (eqe->evt == 0)
++			break;
+ 
+-	rmb();
+-	eqe->evt = le32_to_cpu(eqe->evt);
+-	queue_tail_inc(&eq_obj->q);
+-	return eqe;
++		rmb();
++		eqe->evt = 0;
++		num++;
++		queue_tail_inc(&eqo->q);
++	} while (true);
++
++	return num;
+ }
+ 
+-static int event_handle(struct be_adapter *adapter,
+-			struct be_eq_obj *eq_obj,
+-			bool rearm)
++static int event_handle(struct be_eq_obj *eqo)
+ {
+-	struct be_eq_entry *eqe;
+-	u16 num = 0;
+-
+-	while ((eqe = event_get(eq_obj)) != NULL) {
+-		eqe->evt = 0;
+-		num++;
+-	}
++	bool rearm = false;
++	int num = events_get(eqo);
+ 
+-	/* Deal with any spurious interrupts that come
+-	 * without events
+-	 */
++	/* Deal with any spurious interrupts that come without events */
+ 	if (!num)
+ 		rearm = true;
+ 
+-	be_eq_notify(adapter, eq_obj->q.id, rearm, true, num);
++	be_eq_notify(eqo->adapter, eqo->q.id, rearm, true, num);
+ 	if (num)
+-		napi_schedule(&eq_obj->napi);
++		napi_schedule(&eqo->napi);
+ 
+ 	return num;
+ }
+ 
+-/* Just read and notify events without processing them.
+- * Used at the time of destroying event queues */
+-static void be_eq_clean(struct be_adapter *adapter,
+-			struct be_eq_obj *eq_obj)
++/* Leaves the EQ is disarmed state */
++static void be_eq_clean(struct be_eq_obj *eqo)
+ {
+-	struct be_eq_entry *eqe;
+-	u16 num = 0;
+-
+-	while ((eqe = event_get(eq_obj)) != NULL) {
+-		eqe->evt = 0;
+-		num++;
+-	}
++	int num = events_get(eqo);
+ 
+-	if (num)
+-		be_eq_notify(adapter, eq_obj->q.id, false, true, num);
++	be_eq_notify(eqo->adapter, eqo->q.id, false, true, num);
+ }
+ 
+-static void be_rx_q_clean(struct be_adapter *adapter, struct be_rx_obj *rxo)
++static void be_rx_cq_clean(struct be_rx_obj *rxo)
+ {
+ 	struct be_rx_page_info *page_info;
+ 	struct be_queue_info *rxq = &rxo->q;
+@@ -1552,14 +1540,14 @@ static void be_rx_q_clean(struct be_adapter *adapter, struct be_rx_obj *rxo)
+ 
+ 	/* First cleanup pending rx completions */
+ 	while ((rxcp = be_rx_compl_get(rxo)) != NULL) {
+-		be_rx_compl_discard(adapter, rxo, rxcp);
+-		be_cq_notify(adapter, rx_cq->id, false, 1);
++		be_rx_compl_discard(rxo, rxcp);
++		be_cq_notify(rxo->adapter, rx_cq->id, false, 1);
+ 	}
+ 
+ 	/* Then free posted rx buffer that were not used */
+ 	tail = (rxq->head + rxq->len - atomic_read(&rxq->used)) % rxq->len;
+ 	for (; atomic_read(&rxq->used) > 0; index_inc(&tail, rxq->len)) {
+-		page_info = get_rx_page_info(adapter, rxo, tail);
++		page_info = get_rx_page_info(rxo, tail);
+ 		put_page(page_info->page);
+ 		memset(page_info, 0, sizeof(*page_info));
+ 	}
+@@ -1615,6 +1603,47 @@ static void be_tx_compl_clean(struct be_adapter *adapter,
+ 	}
+ }
+ 
++static void be_evt_queues_destroy(struct be_adapter *adapter)
++{
++	struct be_eq_obj *eqo;
++	int i;
++
++	for_all_evt_queues(adapter, eqo, i) {
++		be_eq_clean(eqo);
++		if (eqo->q.created)
++			be_cmd_q_destroy(adapter, &eqo->q, QTYPE_EQ);
++		be_queue_free(adapter, &eqo->q);
++	}
++}
++
++static int be_evt_queues_create(struct be_adapter *adapter)
++{
++	struct be_queue_info *eq;
++	struct be_eq_obj *eqo;
++	int i, rc;
++
++	adapter->num_evt_qs = num_irqs(adapter);
++
++	for_all_evt_queues(adapter, eqo, i) {
++		eqo->adapter = adapter;
++		eqo->tx_budget = BE_TX_BUDGET;
++		eqo->idx = i;
++		eqo->max_eqd = BE_MAX_EQD;
++		eqo->enable_aic = true;
++
++		eq = &eqo->q;
++		rc = be_queue_alloc(adapter, eq, EVNT_Q_LEN,
++					sizeof(struct be_eq_entry));
++		if (rc)
++			return rc;
++
++		rc = be_cmd_eq_create(adapter, eq, eqo->cur_eqd);
++		if (rc)
++			return rc;
++	}
++	return rc;
++}
++
+ static void be_mcc_queues_destroy(struct be_adapter *adapter)
+ {
+ 	struct be_queue_info *q;
+@@ -1635,22 +1664,19 @@ static int be_mcc_queues_create(struct be_adapter *adapter)
+ {
+ 	struct be_queue_info *q, *cq;
+ 
+-	/* Alloc MCC compl queue */
+ 	cq = &adapter->mcc_obj.cq;
+ 	if (be_queue_alloc(adapter, cq, MCC_CQ_LEN,
+ 			sizeof(struct be_mcc_compl)))
+ 		goto err;
+ 
+-	/* Ask BE to create MCC compl queue; share TX's eq */
+-	if (be_cmd_cq_create(adapter, cq, &adapter->tx_eq.q, false, true, 0))
++	/* Use the default EQ for MCC completions */
++	if (be_cmd_cq_create(adapter, cq, &mcc_eqo(adapter)->q, true, 0))
+ 		goto mcc_cq_free;
+ 
+-	/* Alloc MCC queue */
+ 	q = &adapter->mcc_obj.q;
+ 	if (be_queue_alloc(adapter, q, MCC_Q_LEN, sizeof(struct be_mcc_wrb)))
+ 		goto mcc_cq_destroy;
+ 
+-	/* Ask BE to create MCC queue */
+ 	if (be_cmd_mccq_create(adapter, q, cq))
+ 		goto mcc_q_free;
+ 
+@@ -1683,14 +1709,6 @@ static void be_tx_queues_destroy(struct be_adapter *adapter)
+ 			be_cmd_q_destroy(adapter, q, QTYPE_CQ);
+ 		be_queue_free(adapter, q);
+ 	}
+-
+-	/* Clear any residual events */
+-	be_eq_clean(adapter, &adapter->tx_eq);
+-
+-	q = &adapter->tx_eq.q;
+-	if (q->created)
+-		be_cmd_q_destroy(adapter, q, QTYPE_EQ);
+-	be_queue_free(adapter, q);
+ }
+ 
+ static int be_num_txqs_want(struct be_adapter *adapter)
+@@ -1703,10 +1721,10 @@ static int be_num_txqs_want(struct be_adapter *adapter)
+ 		return MAX_TX_QS;
+ }
+ 
+-/* One TX event queue is shared by all TX compl qs */
+-static int be_tx_queues_create(struct be_adapter *adapter)
++static int be_tx_cqs_create(struct be_adapter *adapter)
+ {
+-	struct be_queue_info *eq, *q, *cq;
++	struct be_queue_info *cq, *eq;
++	int status;
+ 	struct be_tx_obj *txo;
+ 	u8 i;
+ 
+@@ -1718,192 +1736,109 @@ static int be_tx_queues_create(struct be_adapter *adapter)
+ 		rtnl_unlock();
+ 	}
+ 
+-	adapter->tx_eq.max_eqd = 0;
+-	adapter->tx_eq.min_eqd = 0;
+-	adapter->tx_eq.cur_eqd = 96;
+-	adapter->tx_eq.enable_aic = false;
++	for_all_tx_queues(adapter, txo, i) {
++		cq = &txo->cq;
++		status = be_queue_alloc(adapter, cq, TX_CQ_LEN,
++					sizeof(struct be_eth_tx_compl));
++		if (status)
++			return status;
+ 
+-	eq = &adapter->tx_eq.q;
+-	if (be_queue_alloc(adapter, eq, EVNT_Q_LEN,
+-		sizeof(struct be_eq_entry)))
+-		return -1;
++		/* If num_evt_qs is less than num_tx_qs, then more than
++		 * one txq share an eq
++		 */
++		eq = &adapter->eq_obj[i % adapter->num_evt_qs].q;
++		status = be_cmd_cq_create(adapter, cq, eq, false, 3);
++		if (status)
++			return status;
++	}
++	return 0;
++}
+ 
+-	if (be_cmd_eq_create(adapter, eq, adapter->tx_eq.cur_eqd))
+-		goto err;
+-	adapter->tx_eq.eq_idx = adapter->eq_next_idx++;
++static int be_tx_qs_create(struct be_adapter *adapter)
++{
++	struct be_tx_obj *txo;
++	int i, status;
+ 
+ 	for_all_tx_queues(adapter, txo, i) {
+-		cq = &txo->cq;
+-		if (be_queue_alloc(adapter, cq, TX_CQ_LEN,
+-			sizeof(struct be_eth_tx_compl)))
+-			goto err;
+-
+-		if (be_cmd_cq_create(adapter, cq, eq, false, false, 3))
+-			goto err;
++		status = be_queue_alloc(adapter, &txo->q, TX_Q_LEN,
++					sizeof(struct be_eth_wrb));
++		if (status)
++			return status;
+ 
+-		q = &txo->q;
+-		if (be_queue_alloc(adapter, q, TX_Q_LEN,
+-			sizeof(struct be_eth_wrb)))
+-			goto err;
++		status = be_cmd_txq_create(adapter, &txo->q, &txo->cq);
++		if (status)
++			return status;
+ 	}
+-	return 0;
+ 
+-err:
+-	be_tx_queues_destroy(adapter);
+-	return -1;
++	return 0;
+ }
+ 
+-static void be_rx_queues_destroy(struct be_adapter *adapter)
++static void be_rx_cqs_destroy(struct be_adapter *adapter)
+ {
+ 	struct be_queue_info *q;
+ 	struct be_rx_obj *rxo;
+ 	int i;
+ 
+ 	for_all_rx_queues(adapter, rxo, i) {
+-		be_queue_free(adapter, &rxo->q);
+-
+ 		q = &rxo->cq;
+ 		if (q->created)
+ 			be_cmd_q_destroy(adapter, q, QTYPE_CQ);
+ 		be_queue_free(adapter, q);
+-
+-		q = &rxo->rx_eq.q;
+-		if (q->created)
+-			be_cmd_q_destroy(adapter, q, QTYPE_EQ);
+-		be_queue_free(adapter, q);
+-	}
+-}
+-
+-static u32 be_num_rxqs_want(struct be_adapter *adapter)
+-{
+-	if ((adapter->function_caps & BE_FUNCTION_CAPS_RSS) &&
+-	     !sriov_enabled(adapter) && be_physfn(adapter)) {
+-		return 1 + MAX_RSS_QS; /* one default non-RSS queue */
+-	} else {
+-		dev_warn(&adapter->pdev->dev,
+-			"No support for multiple RX queues\n");
+-		return 1;
+ 	}
+ }
+ 
+-static int be_rx_queues_create(struct be_adapter *adapter)
++static int be_rx_cqs_create(struct be_adapter *adapter)
+ {
+-	struct be_queue_info *eq, *q, *cq;
++	struct be_queue_info *eq, *cq;
+ 	struct be_rx_obj *rxo;
+ 	int rc, i;
+ 
+-	adapter->num_rx_qs = min(be_num_rxqs_want(adapter),
+-				msix_enabled(adapter) ?
+-					adapter->num_msix_vec - 1 : 1);
+-	if (adapter->num_rx_qs != MAX_RX_QS)
+-		dev_warn(&adapter->pdev->dev,
+-			"Can create only %d RX queues", adapter->num_rx_qs);
++	/* We'll create as many RSS rings as there are irqs.
++	 * But when there's only one irq there's no use creating RSS rings
++	 */
++	adapter->num_rx_qs = (num_irqs(adapter) > 1) ?
++				num_irqs(adapter) + 1 : 1;
+ 
+ 	adapter->big_page_size = (1 << get_order(rx_frag_size)) * PAGE_SIZE;
+ 	for_all_rx_queues(adapter, rxo, i) {
+ 		rxo->adapter = adapter;
+-		rxo->rx_eq.max_eqd = BE_MAX_EQD;
+-		rxo->rx_eq.enable_aic = true;
+-
+-		/* EQ */
+-		eq = &rxo->rx_eq.q;
+-		rc = be_queue_alloc(adapter, eq, EVNT_Q_LEN,
+-					sizeof(struct be_eq_entry));
+-		if (rc)
+-			goto err;
+-
+-		rc = be_cmd_eq_create(adapter, eq, rxo->rx_eq.cur_eqd);
+-		if (rc)
+-			goto err;
+-
+-		rxo->rx_eq.eq_idx = adapter->eq_next_idx++;
+-
+-		/* CQ */
+ 		cq = &rxo->cq;
+ 		rc = be_queue_alloc(adapter, cq, RX_CQ_LEN,
+ 				sizeof(struct be_eth_rx_compl));
+ 		if (rc)
+-			goto err;
++			return rc;
+ 
+-		rc = be_cmd_cq_create(adapter, cq, eq, false, false, 3);
++		eq = &adapter->eq_obj[i % adapter->num_evt_qs].q;
++		rc = be_cmd_cq_create(adapter, cq, eq, false, 3);
+ 		if (rc)
+-			goto err;
+-
+-		/* Rx Q - will be created in be_open() */
+-		q = &rxo->q;
+-		rc = be_queue_alloc(adapter, q, RX_Q_LEN,
+-				sizeof(struct be_eth_rx_d));
+-		if (rc)
+-			goto err;
+-
++			return rc;
+ 	}
+ 
+-	return 0;
+-err:
+-	be_rx_queues_destroy(adapter);
+-	return -1;
+-}
++	if (adapter->num_rx_qs != MAX_RX_QS)
++		dev_info(&adapter->pdev->dev,
++			"Created only %d receive queues", adapter->num_rx_qs);
+ 
+-static bool event_peek(struct be_eq_obj *eq_obj)
+-{
+-	struct be_eq_entry *eqe = queue_tail_node(&eq_obj->q);
+-	if (!eqe->evt)
+-		return false;
+-	else
+-		return true;
++	return 0;
+ }
+ 
+ static irqreturn_t be_intx(int irq, void *dev)
+ {
+ 	struct be_adapter *adapter = dev;
+-	struct be_rx_obj *rxo;
+-	int isr, i, tx = 0 , rx = 0;
+-
+-	if (lancer_chip(adapter)) {
+-		if (event_peek(&adapter->tx_eq))
+-			tx = event_handle(adapter, &adapter->tx_eq, false);
+-		for_all_rx_queues(adapter, rxo, i) {
+-			if (event_peek(&rxo->rx_eq))
+-				rx |= event_handle(adapter, &rxo->rx_eq, true);
+-		}
+-
+-		if (!(tx || rx))
+-			return IRQ_NONE;
+-
+-	} else {
+-		isr = ioread32(adapter->csr + CEV_ISR0_OFFSET +
+-			(adapter->tx_eq.q.id / 8) * CEV_ISR_SIZE);
+-		if (!isr)
+-			return IRQ_NONE;
+-
+-		if ((1 << adapter->tx_eq.eq_idx & isr))
+-			event_handle(adapter, &adapter->tx_eq, false);
+-
+-		for_all_rx_queues(adapter, rxo, i) {
+-			if ((1 << rxo->rx_eq.eq_idx & isr))
+-				event_handle(adapter, &rxo->rx_eq, true);
+-		}
+-	}
+-
+-	return IRQ_HANDLED;
+-}
+-
+-static irqreturn_t be_msix_rx(int irq, void *dev)
+-{
+-	struct be_rx_obj *rxo = dev;
+-	struct be_adapter *adapter = rxo->adapter;
++	int num_evts;
+ 
+-	event_handle(adapter, &rxo->rx_eq, true);
+-
+-	return IRQ_HANDLED;
++	/* With INTx only one EQ is used */
++	num_evts = event_handle(&adapter->eq_obj[0]);
++	if (num_evts)
++		return IRQ_HANDLED;
++	else
++		return IRQ_NONE;
+ }
+ 
+-static irqreturn_t be_msix_tx_mcc(int irq, void *dev)
++static irqreturn_t be_msix(int irq, void *dev)
+ {
+-	struct be_adapter *adapter = dev;
+-
+-	event_handle(adapter, &adapter->tx_eq, false);
++	struct be_eq_obj *eqo = dev;
+ 
++	event_handle(eqo);
+ 	return IRQ_HANDLED;
+ }
+ 
+@@ -1912,16 +1847,14 @@ static inline bool do_gro(struct be_rx_compl_info *rxcp)
+ 	return (rxcp->tcpf && !rxcp->err) ? true : false;
+ }
+ 
+-static int be_poll_rx(struct napi_struct *napi, int budget)
++static int be_process_rx(struct be_rx_obj *rxo, struct napi_struct *napi,
++			int budget)
+ {
+-	struct be_eq_obj *rx_eq = container_of(napi, struct be_eq_obj, napi);
+-	struct be_rx_obj *rxo = container_of(rx_eq, struct be_rx_obj, rx_eq);
+ 	struct be_adapter *adapter = rxo->adapter;
+ 	struct be_queue_info *rx_cq = &rxo->cq;
+ 	struct be_rx_compl_info *rxcp;
+ 	u32 work_done;
+ 
+-	rx_stats(rxo)->rx_polls++;
+ 	for (work_done = 0; work_done < budget; work_done++) {
+ 		rxcp = be_rx_compl_get(rxo);
+ 		if (!rxcp)
+@@ -1933,7 +1866,7 @@ static int be_poll_rx(struct napi_struct *napi, int budget)
+ 
+ 		/* Discard compl with partial DMA Lancer B0 */
+ 		if (unlikely(!rxcp->pkt_size)) {
+-			be_rx_compl_discard(adapter, rxo, rxcp);
++			be_rx_compl_discard(rxo, rxcp);
+ 			goto loop_continue;
+ 		}
+ 
+@@ -1942,94 +1875,96 @@ static int be_poll_rx(struct napi_struct *napi, int budget)
+ 		 */
+ 		if (unlikely(rxcp->port != adapter->port_num &&
+ 				!lancer_chip(adapter))) {
+-			be_rx_compl_discard(adapter, rxo, rxcp);
++			be_rx_compl_discard(rxo, rxcp);
+ 			goto loop_continue;
+ 		}
+ 
+ 		if (do_gro(rxcp))
+-			be_rx_compl_process_gro(adapter, rxo, rxcp);
++			be_rx_compl_process_gro(rxo, napi, rxcp);
+ 		else
+-			be_rx_compl_process(adapter, rxo, rxcp);
++			be_rx_compl_process(rxo, rxcp);
+ loop_continue:
+ 		be_rx_stats_update(rxo, rxcp);
+ 	}
+ 
+-	be_cq_notify(adapter, rx_cq->id, false, work_done);
++	if (work_done) {
++		be_cq_notify(adapter, rx_cq->id, true, work_done);
+ 
+-	/* Refill the queue */
+-	if (work_done && atomic_read(&rxo->q.used) < RX_FRAGS_REFILL_WM)
+-		be_post_rx_frags(rxo, GFP_ATOMIC);
+-
+-	/* All consumed */
+-	if (work_done < budget) {
+-		napi_complete(napi);
+-		/* Arm CQ */
+-		be_cq_notify(adapter, rx_cq->id, true, 0);
++		if (atomic_read(&rxo->q.used) < RX_FRAGS_REFILL_WM)
++			be_post_rx_frags(rxo, GFP_ATOMIC);
+ 	}
++
+ 	return work_done;
+ }
+ 
+-/* As TX and MCC share the same EQ check for both TX and MCC completions.
+- * For TX/MCC we don't honour budget; consume everything
+- */
+-static int be_poll_tx_mcc(struct napi_struct *napi, int budget)
++static bool be_process_tx(struct be_adapter *adapter, struct be_tx_obj *txo,
++			  int budget, int idx)
+ {
+-	struct be_eq_obj *tx_eq = container_of(napi, struct be_eq_obj, napi);
+-	struct be_adapter *adapter =
+-		container_of(tx_eq, struct be_adapter, tx_eq);
+-	struct be_mcc_obj *mcc_obj = &adapter->mcc_obj;
+-	struct be_tx_obj *txo;
+ 	struct be_eth_tx_compl *txcp;
+-	int tx_compl, mcc_compl, status = 0;
+-	u8 i;
+-	u16 num_wrbs;
++	int num_wrbs = 0, work_done;
+ 
+-	for_all_tx_queues(adapter, txo, i) {
+-		tx_compl = 0;
+-		num_wrbs = 0;
+-		while ((txcp = be_tx_compl_get(&txo->cq))) {
+-			num_wrbs += be_tx_compl_process(adapter, txo,
++	for (work_done = 0; work_done < budget; work_done++) {
++		txcp = be_tx_compl_get(&txo->cq);
++		if (!txcp)
++			break;
++		num_wrbs += be_tx_compl_process(adapter, txo,
+ 				AMAP_GET_BITS(struct amap_eth_tx_compl,
+ 					wrb_index, txcp));
+-			tx_compl++;
+-		}
+-		if (tx_compl) {
+-			be_cq_notify(adapter, txo->cq.id, true, tx_compl);
+-
+-			atomic_sub(num_wrbs, &txo->q.used);
++	}
+ 
+-			/* As Tx wrbs have been freed up, wake up netdev queue
+-			 * if it was stopped due to lack of tx wrbs.  */
+-			if (__netif_subqueue_stopped(adapter->netdev, i) &&
+-				atomic_read(&txo->q.used) < txo->q.len / 2) {
+-				netif_wake_subqueue(adapter->netdev, i);
+-			}
++	if (work_done) {
++		be_cq_notify(adapter, txo->cq.id, true, work_done);
++		atomic_sub(num_wrbs, &txo->q.used);
+ 
+-			u64_stats_update_begin(&tx_stats(txo)->sync_compl);
+-			tx_stats(txo)->tx_compl += tx_compl;
+-			u64_stats_update_end(&tx_stats(txo)->sync_compl);
++		/* As Tx wrbs have been freed up, wake up netdev queue
++		 * if it was stopped due to lack of tx wrbs.  */
++		if (__netif_subqueue_stopped(adapter->netdev, idx) &&
++			atomic_read(&txo->q.used) < txo->q.len / 2) {
++			netif_wake_subqueue(adapter->netdev, idx);
+ 		}
++
++		u64_stats_update_begin(&tx_stats(txo)->sync_compl);
++		tx_stats(txo)->tx_compl += work_done;
++		u64_stats_update_end(&tx_stats(txo)->sync_compl);
+ 	}
++	return (work_done < budget); /* Done */
++}
+ 
+-	mcc_compl = be_process_mcc(adapter, &status);
++int be_poll(struct napi_struct *napi, int budget)
++{
++	struct be_eq_obj *eqo = container_of(napi, struct be_eq_obj, napi);
++	struct be_adapter *adapter = eqo->adapter;
++	int max_work = 0, work, i;
++	bool tx_done;
+ 
+-	if (mcc_compl) {
+-		be_cq_notify(adapter, mcc_obj->cq.id, true, mcc_compl);
++	/* Process all TXQs serviced by this EQ */
++	for (i = eqo->idx; i < adapter->num_tx_qs; i += adapter->num_evt_qs) {
++		tx_done = be_process_tx(adapter, &adapter->tx_obj[i],
++					eqo->tx_budget, i);
++		if (!tx_done)
++			max_work = budget;
+ 	}
+ 
+-	napi_complete(napi);
++	/* This loop will iterate twice for EQ0 in which
++	 * completions of the last RXQ (default one) are also processed
++	 * For other EQs the loop iterates only once
++	 */
++	for (i = eqo->idx; i < adapter->num_rx_qs; i += adapter->num_evt_qs) {
++		work = be_process_rx(&adapter->rx_obj[i], napi, budget);
++		max_work = max(work, max_work);
++	}
+ 
+-	/* Arm CQ again to regenerate EQEs for Lancer in INTx mode */
+-	if (lancer_chip(adapter) && !msix_enabled(adapter)) {
+-		for_all_tx_queues(adapter, txo, i)
+-			be_cq_notify(adapter, txo->cq.id, true, 0);
++	if (is_mcc_eqo(eqo))
++		be_process_mcc(adapter);
+ 
+-		be_cq_notify(adapter, mcc_obj->cq.id, true, 0);
++	if (max_work < budget) {
++		napi_complete(napi);
++		be_eq_notify(adapter, eqo->q.id, true, false, 0);
++	} else {
++		/* As we'll continue in polling mode, count and clear events */
++		be_eq_notify(adapter, eqo->q.id, false, false, events_get(eqo));
+ 	}
+-
+-	be_eq_notify(adapter, tx_eq->q.id, true, false, 0);
+-	adapter->drv_stats.tx_events++;
+-	return 1;
++	return max_work;
+ }
+ 
+ void be_detect_dump_ue(struct be_adapter *adapter)
+@@ -2104,12 +2039,24 @@ static void be_msix_disable(struct be_adapter *adapter)
+ 	}
+ }
+ 
++static uint be_num_rss_want(struct be_adapter *adapter)
++{
++	if ((adapter->function_caps & BE_FUNCTION_CAPS_RSS) &&
++	     adapter->num_vfs == 0 && be_physfn(adapter) &&
++	     !be_is_mc(adapter))
++		return (adapter->be3_native) ? BE3_MAX_RSS_QS : BE2_MAX_RSS_QS;
++	else
++		return 0;
++}
++
+ static void be_msix_enable(struct be_adapter *adapter)
+ {
+-#define BE_MIN_MSIX_VECTORS	(1 + 1) /* Rx + Tx */
++#define BE_MIN_MSIX_VECTORS		1
+ 	int i, status, num_vec;
+ 
+-	num_vec = be_num_rxqs_want(adapter) + 1;
++	/* If RSS queues are not used, need a vec for default RX Q */
++	num_vec = min(be_num_rss_want(adapter), num_online_cpus());
++	num_vec = max(num_vec, BE_MIN_MSIX_VECTORS);
+ 
+ 	for (i = 0; i < num_vec; i++)
+ 		adapter->msix_entries[i].entry = i;
+@@ -2177,60 +2124,31 @@ static void be_sriov_disable(struct be_adapter *adapter)
+ }
+ 
+ static inline int be_msix_vec_get(struct be_adapter *adapter,
+-					struct be_eq_obj *eq_obj)
+-{
+-	return adapter->msix_entries[eq_obj->eq_idx].vector;
+-}
+-
+-static int be_request_irq(struct be_adapter *adapter,
+-		struct be_eq_obj *eq_obj,
+-		void *handler, char *desc, void *context)
+-{
+-	struct net_device *netdev = adapter->netdev;
+-	int vec;
+-
+-	sprintf(eq_obj->desc, "%s-%s", netdev->name, desc);
+-	vec = be_msix_vec_get(adapter, eq_obj);
+-	return request_irq(vec, handler, 0, eq_obj->desc, context);
+-}
+-
+-static void be_free_irq(struct be_adapter *adapter, struct be_eq_obj *eq_obj,
+-			void *context)
++				struct be_eq_obj *eqo)
+ {
+-	int vec = be_msix_vec_get(adapter, eq_obj);
+-	free_irq(vec, context);
++	return adapter->msix_entries[eqo->idx].vector;
+ }
+ 
+ static int be_msix_register(struct be_adapter *adapter)
+ {
+-	struct be_rx_obj *rxo;
+-	int status, i;
+-	char qname[10];
+-
+-	status = be_request_irq(adapter, &adapter->tx_eq, be_msix_tx_mcc, "tx",
+-				adapter);
+-	if (status)
+-		goto err;
++	struct net_device *netdev = adapter->netdev;
++	struct be_eq_obj *eqo;
++	int status, i, vec;
+ 
+-	for_all_rx_queues(adapter, rxo, i) {
+-		sprintf(qname, "rxq%d", i);
+-		status = be_request_irq(adapter, &rxo->rx_eq, be_msix_rx,
+-				qname, rxo);
++	for_all_evt_queues(adapter, eqo, i) {
++		sprintf(eqo->desc, "%s-q%d", netdev->name, i);
++		vec = be_msix_vec_get(adapter, eqo);
++		status = request_irq(vec, be_msix, 0, eqo->desc, eqo);
+ 		if (status)
+ 			goto err_msix;
+ 	}
+ 
+ 	return 0;
+-
+ err_msix:
+-	be_free_irq(adapter, &adapter->tx_eq, adapter);
+-
+-	for (i--, rxo = &adapter->rx_obj[i]; i >= 0; i--, rxo--)
+-		be_free_irq(adapter, &rxo->rx_eq, rxo);
+-
+-err:
+-	dev_warn(&adapter->pdev->dev,
+-		"MSIX Request IRQ failed - err %d\n", status);
++	for (i--, eqo = &adapter->eq_obj[i]; i >= 0; i--, eqo--)
++		free_irq(be_msix_vec_get(adapter, eqo), eqo);
++	dev_warn(&adapter->pdev->dev, "MSIX Request IRQ failed - err %d\n",
++		status);
+ 	be_msix_disable(adapter);
+ 	return status;
+ }
+@@ -2266,7 +2184,7 @@ done:
+ static void be_irq_unregister(struct be_adapter *adapter)
+ {
+ 	struct net_device *netdev = adapter->netdev;
+-	struct be_rx_obj *rxo;
++	struct be_eq_obj *eqo;
+ 	int i;
+ 
+ 	if (!adapter->isr_registered)
+@@ -2279,16 +2197,14 @@ static void be_irq_unregister(struct be_adapter *adapter)
+ 	}
+ 
+ 	/* MSIx */
+-	be_free_irq(adapter, &adapter->tx_eq, adapter);
+-
+-	for_all_rx_queues(adapter, rxo, i)
+-		be_free_irq(adapter, &rxo->rx_eq, rxo);
++	for_all_evt_queues(adapter, eqo, i)
++		free_irq(be_msix_vec_get(adapter, eqo), eqo);
+ 
+ done:
+ 	adapter->isr_registered = false;
+ }
+ 
+-static void be_rx_queues_clear(struct be_adapter *adapter)
++static void be_rx_qs_destroy(struct be_adapter *adapter)
+ {
+ 	struct be_queue_info *q;
+ 	struct be_rx_obj *rxo;
+@@ -2303,53 +2219,33 @@ static void be_rx_queues_clear(struct be_adapter *adapter)
+ 			 * arrive
+ 			 */
+ 			mdelay(1);
+-			be_rx_q_clean(adapter, rxo);
++			be_rx_cq_clean(rxo);
+ 		}
+-
+-		/* Clear any residual events */
+-		q = &rxo->rx_eq.q;
+-		if (q->created)
+-			be_eq_clean(adapter, &rxo->rx_eq);
++		be_queue_free(adapter, q);
+ 	}
+ }
+ 
+ static int be_close(struct net_device *netdev)
+ {
+ 	struct be_adapter *adapter = netdev_priv(netdev);
+-	struct be_rx_obj *rxo;
+ 	struct be_tx_obj *txo;
+-	struct be_eq_obj *tx_eq = &adapter->tx_eq;
+-	int vec, i;
++	struct be_eq_obj *eqo;
++	int i;
+ 
+ 	be_async_mcc_disable(adapter);
+ 
+ 	if (!lancer_chip(adapter))
+ 		be_intr_set(adapter, false);
+ 
+-	for_all_rx_queues(adapter, rxo, i)
+-		napi_disable(&rxo->rx_eq.napi);
+-
+-	napi_disable(&tx_eq->napi);
+-
+-	if (lancer_chip(adapter)) {
+-		be_cq_notify(adapter, adapter->mcc_obj.cq.id, false, 0);
+-		for_all_rx_queues(adapter, rxo, i)
+-			 be_cq_notify(adapter, rxo->cq.id, false, 0);
+-		for_all_tx_queues(adapter, txo, i)
+-			 be_cq_notify(adapter, txo->cq.id, false, 0);
++	for_all_evt_queues(adapter, eqo, i) {
++		napi_disable(&eqo->napi);
++		if (msix_enabled(adapter))
++			synchronize_irq(be_msix_vec_get(adapter, eqo));
++		else
++			synchronize_irq(netdev->irq);
++		be_eq_clean(eqo);
+ 	}
+ 
+-	if (msix_enabled(adapter)) {
+-		vec = be_msix_vec_get(adapter, tx_eq);
+-		synchronize_irq(vec);
+-
+-		for_all_rx_queues(adapter, rxo, i) {
+-			vec = be_msix_vec_get(adapter, &rxo->rx_eq);
+-			synchronize_irq(vec);
+-		}
+-	} else {
+-		synchronize_irq(netdev->irq);
+-	}
+ 	be_irq_unregister(adapter);
+ 
+ 	/* Wait for all pending tx completions to arrive so that
+@@ -2358,21 +2254,34 @@ static int be_close(struct net_device *netdev)
+ 	for_all_tx_queues(adapter, txo, i)
+ 		be_tx_compl_clean(adapter, txo);
+ 
+-	be_rx_queues_clear(adapter);
++	be_rx_qs_destroy(adapter);
+ 	return 0;
+ }
+ 
+-static int be_rx_queues_setup(struct be_adapter *adapter)
++static int be_rx_qs_create(struct be_adapter *adapter)
+ {
+ 	struct be_rx_obj *rxo;
+ 	int rc, i, j;
+ 	u8 rsstable[128];
+ 
+ 	for_all_rx_queues(adapter, rxo, i) {
++		rc = be_queue_alloc(adapter, &rxo->q, RX_Q_LEN,
++				    sizeof(struct be_eth_rx_d));
++		if (rc)
++			return rc;
++	}
++
++	/* The FW would like the default RXQ to be created first */
++	rxo = default_rxo(adapter);
++	rc = be_cmd_rxq_create(adapter, &rxo->q, rxo->cq.id, rx_frag_size,
++			       adapter->if_handle, false, &rxo->rss_id);
++	if (rc)
++		return rc;
++
++	for_all_rss_queues(adapter, rxo, i) {
+ 		rc = be_cmd_rxq_create(adapter, &rxo->q, rxo->cq.id,
+-			rx_frag_size, BE_MAX_JUMBO_FRAME_SIZE,
+-			adapter->if_handle,
+-			(i > 0) ? 1 : 0/* rss enable */, &rxo->rss_id);
++				       rx_frag_size, adapter->if_handle,
++				       true, &rxo->rss_id);
+ 		if (rc)
+ 			return rc;
+ 	}
+@@ -2386,48 +2295,47 @@ static int be_rx_queues_setup(struct be_adapter *adapter)
+ 			}
+ 		}
+ 		rc = be_cmd_rss_config(adapter, rsstable, 128);
+-
+ 		if (rc)
+ 			return rc;
+ 	}
+ 
+ 	/* First time posting */
+-	for_all_rx_queues(adapter, rxo, i) {
++	for_all_rx_queues(adapter, rxo, i)
+ 		be_post_rx_frags(rxo, GFP_KERNEL);
+-		napi_enable(&rxo->rx_eq.napi);
+-	}
+ 	return 0;
+ }
+ 
+ static int be_open(struct net_device *netdev)
+ {
+ 	struct be_adapter *adapter = netdev_priv(netdev);
+-	struct be_eq_obj *tx_eq = &adapter->tx_eq;
++	struct be_eq_obj *eqo;
+ 	struct be_rx_obj *rxo;
++	struct be_tx_obj *txo;
+ 	u8 link_status;
+ 	int status, i;
+ 
+-	status = be_rx_queues_setup(adapter);
++	status = be_rx_qs_create(adapter);
+ 	if (status)
+ 		goto err;
+ 
+-	napi_enable(&tx_eq->napi);
+-
+ 	be_irq_register(adapter);
+ 
+ 	if (!lancer_chip(adapter))
+ 		be_intr_set(adapter, true);
+ 
+-	/* The evt queues are created in unarmed state; arm them */
+-	for_all_rx_queues(adapter, rxo, i) {
+-		be_eq_notify(adapter, rxo->rx_eq.q.id, true, false, 0);
++	for_all_rx_queues(adapter, rxo, i)
+ 		be_cq_notify(adapter, rxo->cq.id, true, 0);
+-	}
+-	be_eq_notify(adapter, tx_eq->q.id, true, false, 0);
+ 
+-	/* Now that interrupts are on we can process async mcc */
++	for_all_tx_queues(adapter, txo, i)
++		be_cq_notify(adapter, txo->cq.id, true, 0);
++
+ 	be_async_mcc_enable(adapter);
+ 
++	for_all_evt_queues(adapter, eqo, i) {
++		napi_enable(&eqo->napi);
++		be_eq_notify(adapter, eqo->q.id, true, false, 0);
++	}
++
+ 	status = be_cmd_link_status_query(adapter, NULL, NULL,
+ 					  &link_status, 0);
+ 	if (!status)
+@@ -2537,11 +2445,14 @@ static int be_clear(struct be_adapter *adapter)
+ 	be_cmd_if_destroy(adapter, adapter->if_handle,  0);
+ 
+ 	be_mcc_queues_destroy(adapter);
+-	be_rx_queues_destroy(adapter);
++	be_rx_cqs_destroy(adapter);
+ 	be_tx_queues_destroy(adapter);
++	be_evt_queues_destroy(adapter);
+ 
+ 	/* tell fw we're done with firing cmds */
+ 	be_cmd_fw_clean(adapter);
++
++	be_msix_disable(adapter);
+ 	return 0;
+ }
+ 
+@@ -2631,24 +2542,29 @@ static int be_setup(struct be_adapter *adapter)
+ 	struct net_device *netdev = adapter->netdev;
+ 	u32 cap_flags, en_flags;
+ 	u32 tx_fc, rx_fc;
+-	int status, i;
++	int status;
+ 	u8 mac[ETH_ALEN];
+-	struct be_tx_obj *txo;
+ 
+ 	be_setup_init(adapter);
+ 
+ 	be_cmd_req_native_mode(adapter);
+ 
+-	status = be_tx_queues_create(adapter);
+-	if (status != 0)
++	be_msix_enable(adapter);
++
++	status = be_evt_queues_create(adapter);
++	if (status)
+ 		goto err;
+ 
+-	status = be_rx_queues_create(adapter);
+-	if (status != 0)
++	status = be_tx_cqs_create(adapter);
++	if (status)
++		goto err;
++
++	status = be_rx_cqs_create(adapter);
++	if (status)
+ 		goto err;
+ 
+ 	status = be_mcc_queues_create(adapter);
+-	if (status != 0)
++	if (status)
+ 		goto err;
+ 
+ 	memset(mac, 0, ETH_ALEN);
+@@ -2674,12 +2590,6 @@ static int be_setup(struct be_adapter *adapter)
+ 	if (status != 0)
+ 		goto err;
+ 
+-	 for_all_tx_queues(adapter, txo, i) {
+-		status = be_cmd_txq_create(adapter, &txo->q, &txo->cq);
+-		if (status)
+-			goto err;
+-	}
+-
+ 	 /* The VF's permanent mac queried from card is incorrect.
+ 	  * For BEx: Query the mac configued by the PF using if_handle
+ 	  * For Lancer: Get and use mac_list to obtain mac address.
+@@ -2697,6 +2607,10 @@ static int be_setup(struct be_adapter *adapter)
+ 		}
+ 	}
+ 
++	status = be_tx_qs_create(adapter);
++	if (status)
++		goto err;
++
+ 	be_cmd_get_fw_ver(adapter, adapter->fw_ver, NULL);
+ 
+ 	status = be_vid_config(adapter, false, 0);
+@@ -2736,12 +2650,13 @@ err:
+ static void be_netpoll(struct net_device *netdev)
+ {
+ 	struct be_adapter *adapter = netdev_priv(netdev);
+-	struct be_rx_obj *rxo;
++	struct be_eq_obj *eqo;
+ 	int i;
+ 
+-	event_handle(adapter, &adapter->tx_eq, false);
+-	for_all_rx_queues(adapter, rxo, i)
+-		event_handle(adapter, &rxo->rx_eq, true);
++	for_all_evt_queues(adapter, eqo, i)
++		event_handle(eqo);
++
++	return;
+ }
+ #endif
+ 
+@@ -3102,7 +3017,7 @@ static const struct net_device_ops be_netdev_ops = {
+ static void be_netdev_init(struct net_device *netdev)
+ {
+ 	struct be_adapter *adapter = netdev_priv(netdev);
+-	struct be_rx_obj *rxo;
++	struct be_eq_obj *eqo;
+ 	int i;
+ 
+ 	netdev->hw_features |= NETIF_F_SG | NETIF_F_TSO | NETIF_F_TSO6 |
+@@ -3121,16 +3036,12 @@ static void be_netdev_init(struct net_device *netdev)
+ 
+ 	netif_set_gso_max_size(netdev, 65535);
+ 
+-	BE_SET_NETDEV_OPS(netdev, &be_netdev_ops);
++	netdev->netdev_ops = &be_netdev_ops;
+ 
+ 	SET_ETHTOOL_OPS(netdev, &be_ethtool_ops);
+ 
+-	for_all_rx_queues(adapter, rxo, i)
+-		netif_napi_add(netdev, &rxo->rx_eq.napi, be_poll_rx,
+-				BE_NAPI_WEIGHT);
+-
+-	netif_napi_add(netdev, &adapter->tx_eq.napi, be_poll_tx_mcc,
+-		BE_NAPI_WEIGHT);
++	for_all_evt_queues(adapter, eqo, i)
++		netif_napi_add(netdev, &eqo->napi, be_poll, BE_NAPI_WEIGHT);
+ }
+ 
+ static void be_unmap_pci_bars(struct be_adapter *adapter)
+@@ -3301,8 +3212,6 @@ static void __devexit be_remove(struct pci_dev *pdev)
+ 
+ 	be_sriov_disable(adapter);
+ 
+-	be_msix_disable(adapter);
+-
+ 	pci_set_drvdata(pdev, NULL);
+ 	pci_release_regions(pdev);
+ 	pci_disable_device(pdev);
+@@ -3469,6 +3378,7 @@ static void be_worker(struct work_struct *work)
+ 	struct be_adapter *adapter =
+ 		container_of(work, struct be_adapter, work.work);
+ 	struct be_rx_obj *rxo;
++	struct be_eq_obj *eqo;
+ 	int i;
+ 
+ 	if (lancer_chip(adapter))
+@@ -3479,15 +3389,7 @@ static void be_worker(struct work_struct *work)
+ 	/* when interrupts are not yet enabled, just reap any pending
+ 	* mcc completions */
+ 	if (!netif_running(adapter->netdev)) {
+-		int mcc_compl, status = 0;
+-
+-		mcc_compl = be_process_mcc(adapter, &status);
+-
+-		if (mcc_compl) {
+-			struct be_mcc_obj *mcc_obj = &adapter->mcc_obj;
+-			be_cq_notify(adapter, mcc_obj->cq.id, false, mcc_compl);
+-		}
+-
++		be_process_mcc(adapter);
+ 		goto reschedule;
+ 	}
+ 
+@@ -3500,14 +3402,15 @@ static void be_worker(struct work_struct *work)
+ 	}
+ 
+ 	for_all_rx_queues(adapter, rxo, i) {
+-		be_rx_eqd_update(adapter, rxo);
+-
+ 		if (rxo->rx_post_starved) {
+ 			rxo->rx_post_starved = false;
+ 			be_post_rx_frags(rxo, GFP_KERNEL);
+ 		}
+ 	}
+ 
++	for_all_evt_queues(adapter, eqo, i)
++		be_eqd_update(adapter, eqo);
++
+ reschedule:
+ 	adapter->work_counter++;
+ 	schedule_delayed_work(&adapter->work, msecs_to_jiffies(1000));
+@@ -3593,6 +3496,12 @@ static int __devinit be_probe(struct pci_dev *pdev,
+ 	if (status)
+ 		goto ctrl_clean;
+ 
++	/* The INTR bit may be set in the card when probed by a kdump kernel
++	 * after a crash.
++	 */
++	if (!lancer_chip(adapter))
++		be_intr_set(adapter, false);
++
+ 	status = be_stats_init(adapter);
+ 	if (status)
+ 		goto ctrl_clean;
+@@ -3601,14 +3510,6 @@ static int __devinit be_probe(struct pci_dev *pdev,
+ 	if (status)
+ 		goto stats_clean;
+ 
+-	/* The INTR bit may be set in the card when probed by a kdump kernel
+-	 * after a crash.
+-	 */
+-	if (!lancer_chip(adapter))
+-		be_intr_set(adapter, false);
+-
+-	be_msix_enable(adapter);
+-
+ 	INIT_DELAYED_WORK(&adapter->work, be_worker);
+ 	adapter->rx_fc = adapter->tx_fc = true;
+ 
+@@ -3621,7 +3522,8 @@ static int __devinit be_probe(struct pci_dev *pdev,
+ 	if (status != 0)
+ 		goto unsetup;
+ 
+-	dev_info(&pdev->dev, "%s port %d\n", nic_name(pdev), adapter->port_num);
++	dev_info(&pdev->dev, "%s: %s port %d\n", netdev->name, nic_name(pdev),
++		adapter->port_num);
+ 
+ 	schedule_delayed_work(&adapter->work, msecs_to_jiffies(100));
+ 	return 0;
+@@ -3665,7 +3567,6 @@ static int be_suspend(struct pci_dev *pdev, pm_message_t state)
+ 	}
+ 	be_clear(adapter);
+ 
+-	be_msix_disable(adapter);
+ 	pci_save_state(pdev);
+ 	pci_disable_device(pdev);
+ 	pci_set_power_state(pdev, pci_choose_state(pdev, state));
+@@ -3687,7 +3588,6 @@ static int be_resume(struct pci_dev *pdev)
+ 	pci_set_power_state(pdev, 0);
+ 	pci_restore_state(pdev);
+ 
+-	be_msix_enable(adapter);
+ 	/* tell fw we're ready to fire cmds */
+ 	status = be_cmd_fw_init(adapter);
+ 	if (status)
+-- 
+1.7.10
+
