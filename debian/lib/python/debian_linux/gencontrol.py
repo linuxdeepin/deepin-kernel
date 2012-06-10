@@ -114,6 +114,8 @@ class Gencontrol(object):
         pass
 
     def do_main_makefile(self, makefile, makeflags, extra):
+        makeflags = makeflags.copy()
+        makeflags['ALL_FEATURESETS'] = ' '.join(self.config['base', ]['featuresets'])
         makefile.add('binary-indep', cmds=["$(MAKE) -f debian/rules.real binary-indep %s" % makeflags])
 
     def do_main_packages(self, packages, vars, makeflags, extra):
