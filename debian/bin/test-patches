@@ -8,7 +8,7 @@ arch="$(dpkg --print-architecture)"
 kernelabi="$(uname -r)"
 ff="${kernelabi#+([^-])-@(trunk|+([0-9]))-}"
 if [ "x$ff" != "x$kernelabi" ]; then
-    flavour="${ff#@(openvz|vserver|xen)-}"
+    flavour="${ff#@(openvz|rt|vserver|xen)-}"
     if [ "x$flavour" != "x$ff" ]; then
 	featureset="${ff%-$flavour}"
     else
@@ -33,9 +33,9 @@ if [ $# -lt 1 ]; then
     echo >&2 "Usage: $0 [<options>] <patch>..."
     cat >&2 <<EOF
 Options:
-     -f <flavour>     specify the 'flavour' of kernel to build, e.g. 686
+     -f <flavour>     specify the 'flavour' of kernel to build, e.g. 686-pae
      -j <jobs>        specify number of compiler jobs to run in parallel
-     -s <featureset>  specify an optional featureset to apply, e.g. xen
+     -s <featureset>  specify an optional featureset to apply, e.g. rt
 EOF
     exit 2
 fi
@@ -55,23 +55,24 @@ if [ "${version%a~test}" = "$version" ]; then
     dch -v "$version" --distribution UNRELEASED "Testing patches $*"
 fi
 
-restrictfeature=
-series="${version##*-}"
-if [ "$featureset" != none ]; then
-    restrictfeature=" featureset=$featureset"
-    series="${series}-extra"
+# Make new directory for patches
+mkdir -p debian/patches/test
+
+# Ignore user's .quiltrc
+alias quilt='quilt --quiltrc -'
+
+# Try to clean up any previous test patches
+if [ "$featureset" = none ]; then
+    while quilt top 2>/dev/null | grep -q ^test/; do
+        quilt delete
+    done
+else
+    sed -i '/^test\//d' debian/patches/series-${featureset}
 fi
 
-# Copy all patches into a new directory
+# Prepare a new directory for the patches
 rm -rf debian/patches/test/
 mkdir debian/patches/test
-cp -t debian/patches/test/ "$@"
-
-# Generate patch series for the new version
->debian/patches/series/"$series"
-for patch in "$@"; do
-    echo "+ test/$(basename "$patch")${restrictfeature}" >>debian/patches/series/"$series"
-done
 
 # Regenerate control and included rules
 rm debian/control debian/rules.gen
@@ -79,9 +80,17 @@ debian/rules debian/control-real && exit 1 || true
 test -f debian/control
 test -f debian/rules.gen
 
-# Clean and patch source
+# Clean up old build; apply existing patches for featureset
 debian/rules clean
 debian/rules source
+
+# Apply the additional patches
+for patch in "$@"; do
+    patch_abs="$(readlink -f "$patch")"
+    (cd "debian/build/source_${featureset}" && \
+     quilt import -P "test/$(basename "$patch")" "$patch_abs" && \
+     quilt push --fuzz=0)
+done
 
 # Build selected binaries
 fakeroot make -f debian/rules.gen binary-arch_"$arch"_"$featureset"_"$flavour"

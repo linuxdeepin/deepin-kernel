@@ -1,0 +1,332 @@
+From: Vasiliy Kulikov <segooon@gmail.com>
+Date: Tue, 10 Jan 2012 15:11:31 -0800
+Subject: procfs: add hidepid= and gid= mount options
+
+commit 0499680a42141d86417a8fbaa8c8db806bea1201 upstream.
+
+Add support for mount options to restrict access to /proc/PID/
+directories.  The default backward-compatible "relaxed" behaviour is left
+untouched.
+
+The first mount option is called "hidepid" and its value defines how much
+info about processes we want to be available for non-owners:
+
+hidepid=0 (default) means the old behavior - anybody may read all
+world-readable /proc/PID/* files.
+
+hidepid=1 means users may not access any /proc/<pid>/ directories, but
+their own.  Sensitive files like cmdline, sched*, status are now protected
+against other users.  As permission checking done in proc_pid_permission()
+and files' permissions are left untouched, programs expecting specific
+files' modes are not confused.
+
+hidepid=2 means hidepid=1 plus all /proc/PID/ will be invisible to other
+users.  It doesn't mean that it hides whether a process exists (it can be
+learned by other means, e.g.  by kill -0 $PID), but it hides process' euid
+and egid.  It compicates intruder's task of gathering info about running
+processes, whether some daemon runs with elevated privileges, whether
+another user runs some sensitive program, whether other users run any
+program at all, etc.
+
+gid=XXX defines a group that will be able to gather all processes' info
+(as in hidepid=0 mode).  This group should be used instead of putting
+nonroot user in sudoers file or something.  However, untrusted users (like
+daemons, etc.) which are not supposed to monitor the tasks in the whole
+system should not be added to the group.
+
+hidepid=1 or higher is designed to restrict access to procfs files, which
+might reveal some sensitive private information like precise keystrokes
+timings:
+
+http://www.openwall.com/lists/oss-security/2011/11/05/3
+
+hidepid=1/2 doesn't break monitoring userspace tools.  ps, top, pgrep, and
+conky gracefully handle EPERM/ENOENT and behave as if the current user is
+the only user running processes.  pstree shows the process subtree which
+contains "pstree" process.
+
+Note: the patch doesn't deal with setuid/setgid issues of keeping
+preopened descriptors of procfs files (like
+https://lkml.org/lkml/2011/2/7/368).  We rely on that the leaked
+information like the scheduling counters of setuid apps doesn't threaten
+anybody's privacy - only the user started the setuid program may read the
+counters.
+
+Signed-off-by: Vasiliy Kulikov <segoon@openwall.com>
+Cc: Alexey Dobriyan <adobriyan@gmail.com>
+Cc: Al Viro <viro@zeniv.linux.org.uk>
+Cc: Randy Dunlap <rdunlap@xenotime.net>
+Cc: "H. Peter Anvin" <hpa@zytor.com>
+Cc: Greg KH <greg@kroah.com>
+Cc: Theodore Tso <tytso@MIT.EDU>
+Cc: Alan Cox <alan@lxorguk.ukuu.org.uk>
+Cc: James Morris <jmorris@namei.org>
+Cc: Oleg Nesterov <oleg@redhat.com>
+Cc: Hugh Dickins <hughd@google.com>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+[bwh: Backported to 3.2: super_operations::show_options takes a
+ struct vfsmount *, not struct dentry *]
+---
+ Documentation/filesystems/proc.txt |   39 ++++++++++++++++++++
+ fs/proc/base.c                     |   69 +++++++++++++++++++++++++++++++++++-
+ fs/proc/inode.c                    |    8 +++++
+ fs/proc/root.c                     |   21 +++++++++--
+ include/linux/pid_namespace.h      |    2 ++
+ 5 files changed, 135 insertions(+), 4 deletions(-)
+
+--- a/Documentation/filesystems/proc.txt
++++ b/Documentation/filesystems/proc.txt
+@@ -41,6 +41,8 @@
+   3.5	/proc/<pid>/mountinfo - Information about mounts
+   3.6	/proc/<pid>/comm  & /proc/<pid>/task/<tid>/comm
+ 
++  4	Configuring procfs
++  4.1	Mount options
+ 
+ ------------------------------------------------------------------------------
+ Preface
+@@ -1542,3 +1544,40 @@
+ is limited in size compared to the cmdline value, so writing anything longer
+ then the kernel's TASK_COMM_LEN (currently 16 chars) will result in a truncated
+ comm value.
++
++
++------------------------------------------------------------------------------
++Configuring procfs
++------------------------------------------------------------------------------
++
++4.1	Mount options
++---------------------
++
++The following mount options are supported:
++
++	hidepid=	Set /proc/<pid>/ access mode.
++	gid=		Set the group authorized to learn processes information.
++
++hidepid=0 means classic mode - everybody may access all /proc/<pid>/ directories
++(default).
++
++hidepid=1 means users may not access any /proc/<pid>/ directories but their
++own.  Sensitive files like cmdline, sched*, status are now protected against
++other users.  This makes it impossible to learn whether any user runs
++specific program (given the program doesn't reveal itself by its behaviour).
++As an additional bonus, as /proc/<pid>/cmdline is unaccessible for other users,
++poorly written programs passing sensitive information via program arguments are
++now protected against local eavesdroppers.
++
++hidepid=2 means hidepid=1 plus all /proc/<pid>/ will be fully invisible to other
++users.  It doesn't mean that it hides a fact whether a process with a specific
++pid value exists (it can be learned by other means, e.g. by "kill -0 $PID"),
++but it hides process' uid and gid, which may be learned by stat()'ing
++/proc/<pid>/ otherwise.  It greatly complicates an intruder's task of gathering
++information about running processes, whether some daemon runs with elevated
++privileges, whether other user runs some sensitive program, whether other users
++run any program at all, etc.
++
++gid= defines a group authorized to learn processes information otherwise
++prohibited by hidepid=.  If you use some daemon like identd which needs to learn
++information about processes information, just add identd to this group.
+--- a/fs/proc/base.c
++++ b/fs/proc/base.c
+@@ -574,6 +574,50 @@
+ 	return 0;
+ }
+ 
++/*
++ * May current process learn task's sched/cmdline info (for hide_pid_min=1)
++ * or euid/egid (for hide_pid_min=2)?
++ */
++static bool has_pid_permissions(struct pid_namespace *pid,
++				 struct task_struct *task,
++				 int hide_pid_min)
++{
++	if (pid->hide_pid < hide_pid_min)
++		return true;
++	if (in_group_p(pid->pid_gid))
++		return true;
++	return ptrace_may_access(task, PTRACE_MODE_READ);
++}
++
++
++static int proc_pid_permission(struct inode *inode, int mask)
++{
++	struct pid_namespace *pid = inode->i_sb->s_fs_info;
++	struct task_struct *task;
++	bool has_perms;
++
++	task = get_proc_task(inode);
++	has_perms = has_pid_permissions(pid, task, 1);
++	put_task_struct(task);
++
++	if (!has_perms) {
++		if (pid->hide_pid == 2) {
++			/*
++			 * Let's make getdents(), stat(), and open()
++			 * consistent with each other.  If a process
++			 * may not stat() a file, it shouldn't be seen
++			 * in procfs at all.
++			 */
++			return -ENOENT;
++		}
++
++		return -EPERM;
++	}
++	return generic_permission(inode, mask);
++}
++
++
++
+ static const struct inode_operations proc_def_inode_operations = {
+ 	.setattr	= proc_setattr,
+ };
+@@ -1642,6 +1686,7 @@
+ 	struct inode *inode = dentry->d_inode;
+ 	struct task_struct *task;
+ 	const struct cred *cred;
++	struct pid_namespace *pid = dentry->d_sb->s_fs_info;
+ 
+ 	generic_fillattr(inode, stat);
+ 
+@@ -1650,6 +1695,14 @@
+ 	stat->gid = 0;
+ 	task = pid_task(proc_pid(inode), PIDTYPE_PID);
+ 	if (task) {
++		if (!has_pid_permissions(pid, task, 2)) {
++			rcu_read_unlock();
++			/*
++			 * This doesn't prevent learning whether PID exists,
++			 * it only makes getattr() consistent with readdir().
++			 */
++			return -ENOENT;
++		}
+ 		if ((inode->i_mode == (S_IFDIR|S_IRUGO|S_IXUGO)) ||
+ 		    task_dumpable(task)) {
+ 			cred = __task_cred(task);
+@@ -2794,6 +2847,7 @@
+ 	.lookup		= proc_tgid_base_lookup,
+ 	.getattr	= pid_getattr,
+ 	.setattr	= proc_setattr,
++	.permission	= proc_pid_permission,
+ };
+ 
+ static void proc_flush_task_mnt(struct vfsmount *mnt, pid_t pid, pid_t tgid)
+@@ -2997,6 +3051,12 @@
+ 				proc_pid_instantiate, iter.task, NULL);
+ }
+ 
++static int fake_filldir(void *buf, const char *name, int namelen,
++			loff_t offset, u64 ino, unsigned d_type)
++{
++	return 0;
++}
++
+ /* for the /proc/ directory itself, after non-process stuff has been done */
+ int proc_pid_readdir(struct file * filp, void * dirent, filldir_t filldir)
+ {
+@@ -3004,6 +3064,7 @@
+ 	struct task_struct *reaper;
+ 	struct tgid_iter iter;
+ 	struct pid_namespace *ns;
++	filldir_t __filldir;
+ 
+ 	if (filp->f_pos >= PID_MAX_LIMIT + TGID_OFFSET)
+ 		goto out_no_task;
+@@ -3025,8 +3086,13 @@
+ 	for (iter = next_tgid(ns, iter);
+ 	     iter.task;
+ 	     iter.tgid += 1, iter = next_tgid(ns, iter)) {
++		if (has_pid_permissions(ns, iter.task, 2))
++			__filldir = filldir;
++		else
++			__filldir = fake_filldir;
++
+ 		filp->f_pos = iter.tgid + TGID_OFFSET;
+-		if (proc_pid_fill_cache(filp, dirent, filldir, iter) < 0) {
++		if (proc_pid_fill_cache(filp, dirent, __filldir, iter) < 0) {
+ 			put_task_struct(iter.task);
+ 			goto out;
+ 		}
+@@ -3361,6 +3427,7 @@
+ 	.lookup		= proc_task_lookup,
+ 	.getattr	= proc_task_getattr,
+ 	.setattr	= proc_setattr,
++	.permission	= proc_pid_permission,
+ };
+ 
+ static const struct file_operations proc_task_operations = {
+--- a/fs/proc/inode.c
++++ b/fs/proc/inode.c
+@@ -107,6 +107,14 @@
+ 
+ static int proc_show_options(struct seq_file *seq, struct vfsmount *vfs)
+ {
++	struct super_block *sb = vfs->mnt_sb;
++	struct pid_namespace *pid = sb->s_fs_info;
++
++	if (pid->pid_gid)
++		seq_printf(seq, ",gid=%lu", (unsigned long)pid->pid_gid);
++	if (pid->hide_pid != 0)
++		seq_printf(seq, ",hidepid=%u", pid->hide_pid);
++
+ 	return 0;
+ }
+ 
+--- a/fs/proc/root.c
++++ b/fs/proc/root.c
+@@ -38,10 +38,12 @@
+ }
+ 
+ enum {
+-	Opt_err,
++	Opt_gid, Opt_hidepid, Opt_err,
+ };
+ 
+ static const match_table_t tokens = {
++	{Opt_hidepid, "hidepid=%u"},
++	{Opt_gid, "gid=%u"},
+ 	{Opt_err, NULL},
+ };
+ 
+@@ -49,8 +51,7 @@
+ {
+ 	char *p;
+ 	substring_t args[MAX_OPT_ARGS];
+-
+-	pr_debug("proc: options = %s\n", options);
++	int option;
+ 
+ 	if (!options)
+ 		return 1;
+@@ -63,6 +64,20 @@
+ 		args[0].to = args[0].from = 0;
+ 		token = match_token(p, tokens, args);
+ 		switch (token) {
++		case Opt_gid:
++			if (match_int(&args[0], &option))
++				return 0;
++			pid->pid_gid = option;
++			break;
++		case Opt_hidepid:
++			if (match_int(&args[0], &option))
++				return 0;
++			if (option < 0 || option > 2) {
++				pr_err("proc: hidepid value must be between 0 and 2.\n");
++				return 0;
++			}
++			pid->hide_pid = option;
++			break;
+ 		default:
+ 			pr_err("proc: unrecognized mount option \"%s\" "
+ 			       "or missing value\n", p);
+--- a/include/linux/pid_namespace.h
++++ b/include/linux/pid_namespace.h
+@@ -30,6 +30,8 @@
+ #ifdef CONFIG_BSD_PROCESS_ACCT
+ 	struct bsd_acct_struct *bacct;
+ #endif
++	gid_t pid_gid;
++	int hide_pid;
+ };
+ 
+ extern struct pid_namespace init_pid_ns;

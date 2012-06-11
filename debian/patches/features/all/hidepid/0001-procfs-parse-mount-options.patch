@@ -1,0 +1,167 @@
+From: Vasiliy Kulikov <segooon@gmail.com>
+Date: Tue, 10 Jan 2012 15:11:27 -0800
+Subject: procfs: parse mount options
+
+commit 97412950b10e64f347aec4a9b759395c2465adf6 upstream.
+
+Add support for procfs mount options.  Actual mount options are coming in
+the next patches.
+
+Signed-off-by: Vasiliy Kulikov <segoon@openwall.com>
+Cc: Alexey Dobriyan <adobriyan@gmail.com>
+Cc: Al Viro <viro@zeniv.linux.org.uk>
+Cc: Randy Dunlap <rdunlap@xenotime.net>
+Cc: "H. Peter Anvin" <hpa@zytor.com>
+Cc: Greg KH <greg@kroah.com>
+Cc: Theodore Tso <tytso@MIT.EDU>
+Cc: Alan Cox <alan@lxorguk.ukuu.org.uk>
+Cc: James Morris <jmorris@namei.org>
+Cc: Oleg Nesterov <oleg@redhat.com>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+[bwh: Backported to 3.2: super_operations::show_options takes a
+ struct vfsmount *, not struct dentry *]
+---
+ fs/proc/inode.c    |   10 ++++++++++
+ fs/proc/internal.h |    1 +
+ fs/proc/root.c     |   55 ++++++++++++++++++++++++++++++++++++++++++++++++++--
+ 3 files changed, 64 insertions(+), 2 deletions(-)
+
+--- a/fs/proc/inode.c
++++ b/fs/proc/inode.c
+@@ -7,6 +7,7 @@
+ #include <linux/time.h>
+ #include <linux/proc_fs.h>
+ #include <linux/kernel.h>
++#include <linux/pid_namespace.h>
+ #include <linux/mm.h>
+ #include <linux/string.h>
+ #include <linux/stat.h>
+@@ -17,7 +18,9 @@
+ #include <linux/init.h>
+ #include <linux/module.h>
+ #include <linux/sysctl.h>
++#include <linux/seq_file.h>
+ #include <linux/slab.h>
++#include <linux/mount.h>
+ 
+ #include <asm/system.h>
+ #include <asm/uaccess.h>
+@@ -102,12 +105,19 @@
+ 					     init_once);
+ }
+ 
++static int proc_show_options(struct seq_file *seq, struct vfsmount *vfs)
++{
++	return 0;
++}
++
+ static const struct super_operations proc_sops = {
+ 	.alloc_inode	= proc_alloc_inode,
+ 	.destroy_inode	= proc_destroy_inode,
+ 	.drop_inode	= generic_delete_inode,
+ 	.evict_inode	= proc_evict_inode,
+ 	.statfs		= simple_statfs,
++	.remount_fs	= proc_remount,
++	.show_options	= proc_show_options,
+ };
+ 
+ static void __pde_users_dec(struct proc_dir_entry *pde)
+--- a/fs/proc/internal.h
++++ b/fs/proc/internal.h
+@@ -117,6 +117,7 @@
+ 
+ int proc_fill_super(struct super_block *);
+ struct inode *proc_get_inode(struct super_block *, struct proc_dir_entry *);
++int proc_remount(struct super_block *sb, int *flags, char *data);
+ 
+ /*
+  * These are generic /proc routines that use the internal
+--- a/fs/proc/root.c
++++ b/fs/proc/root.c
+@@ -18,6 +18,7 @@
+ #include <linux/bitops.h>
+ #include <linux/mount.h>
+ #include <linux/pid_namespace.h>
++#include <linux/parser.h>
+ 
+ #include "internal.h"
+ 
+@@ -36,6 +37,48 @@
+ 	return err;
+ }
+ 
++enum {
++	Opt_err,
++};
++
++static const match_table_t tokens = {
++	{Opt_err, NULL},
++};
++
++static int proc_parse_options(char *options, struct pid_namespace *pid)
++{
++	char *p;
++	substring_t args[MAX_OPT_ARGS];
++
++	pr_debug("proc: options = %s\n", options);
++
++	if (!options)
++		return 1;
++
++	while ((p = strsep(&options, ",")) != NULL) {
++		int token;
++		if (!*p)
++			continue;
++
++		args[0].to = args[0].from = 0;
++		token = match_token(p, tokens, args);
++		switch (token) {
++		default:
++			pr_err("proc: unrecognized mount option \"%s\" "
++			       "or missing value\n", p);
++			return 0;
++		}
++	}
++
++	return 1;
++}
++
++int proc_remount(struct super_block *sb, int *flags, char *data)
++{
++	struct pid_namespace *pid = sb->s_fs_info;
++	return !proc_parse_options(data, pid);
++}
++
+ static struct dentry *proc_mount(struct file_system_type *fs_type,
+ 	int flags, const char *dev_name, void *data)
+ {
+@@ -43,11 +86,15 @@
+ 	struct super_block *sb;
+ 	struct pid_namespace *ns;
+ 	struct proc_inode *ei;
++	char *options;
+ 
+-	if (flags & MS_KERNMOUNT)
++	if (flags & MS_KERNMOUNT) {
+ 		ns = (struct pid_namespace *)data;
+-	else
++		options = NULL;
++	} else {
+ 		ns = current->nsproxy->pid_ns;
++		options = data;
++	}
+ 
+ 	sb = sget(fs_type, proc_test_super, proc_set_super, ns);
+ 	if (IS_ERR(sb))
+@@ -55,6 +102,10 @@
+ 
+ 	if (!sb->s_root) {
+ 		sb->s_flags = flags;
++		if (!proc_parse_options(options, ns)) {
++			deactivate_locked_super(sb);
++			return ERR_PTR(-EINVAL);
++		}
+ 		err = proc_fill_super(sb);
+ 		if (err) {
+ 			deactivate_locked_super(sb);
