@@ -34,8 +34,7 @@ class Main(object):
 
         self.orig = '%s-%s' % (source, version.upstream)
         self.orig_tar = '%s_%s.orig.tar.gz' % (source, version.upstream)
-        self.tag = 'v' + re.sub(r"^(\d+\.\d+)\.0", r"\1",
-                                version.upstream.replace('~', '-'))
+        self.tag = 'v' + version.linux_upstream_full
 
     def __call__(self):
         import tempfile
@@ -100,9 +99,9 @@ class Main(object):
             raise RuntimeError("Can't patch source")
 
     def debian_patch(self):
-        name = "orig-" + self.version_dfsg
+        name = "orig"
         self.log("Patching source with debian patch (series %s)\n" % name)
-        fp = file("debian/patches/series/" + name)
+        fp = file("debian/patches/series-" + name)
         series = PatchSeries(name, "debian/patches", fp)
         series(dir=os.path.join(self.dir, self.orig))
 

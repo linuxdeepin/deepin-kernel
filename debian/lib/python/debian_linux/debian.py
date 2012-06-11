@@ -110,7 +110,7 @@ class VersionLinux(Version):
 (?P<version>
     \d+\.\d+
 )
-(?:
+(?P<update>
     \.\d+
 )?
 (?:
@@ -150,9 +150,11 @@ $
         self.linux_modifier = d['modifier']
         self.linux_version = d['version']
         if d['modifier'] is not None:
+            assert not d['update']
             self.linux_upstream = u'-'.join((d['version'], d['modifier']))
         else:
             self.linux_upstream = d['version']
+        self.linux_upstream_full = d['version'] + (d['update'] or u'')
         self.linux_dfsg = d['dfsg']
         self.linux_revision_experimental = match.group('revision_experimental') and True
         self.linux_revision_other = match.group('revision_other') and True
