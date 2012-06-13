@@ -60,11 +60,7 @@ class Gencontrol(Base):
             'SOURCEVERSION': self.version.complete,
         })
 
-    def do_main_packages(self, packages, vars, makeflags, extra):
-        packages.extend(self.process_packages(self.templates["control.main"], self.vars))
-
-    def do_main_recurse(self, packages, makefile, vars, makeflags, extra):
-        # Add featureset source rules
+    def do_main_makefile(self, makefile, makeflags, extra):
         for featureset in iter(self.config['base', ]['featuresets']):
             makeflags_featureset = makeflags.copy()
             makeflags_featureset['FEATURESET'] = featureset
@@ -75,7 +71,12 @@ class Gencontrol(Base):
                          ['source_%s_real' % featureset])
             makefile.add('source', ['source_%s' % featureset])
 
-        super(Gencontrol, self).do_main_recurse(packages, makefile, vars, makeflags, extra)
+        makeflags = makeflags.copy()
+        makeflags['ALL_FEATURESETS'] = ' '.join(self.config['base', ]['featuresets'])
+        super(Gencontrol, self).do_main_makefile(makefile, makeflags, extra)
+
+    def do_main_packages(self, packages, vars, makeflags, extra):
+        packages.extend(self.process_packages(self.templates["control.main"], self.vars))
 
     arch_makeflags = (
         ('kernel-arch', 'KERNEL_ARCH', False),
