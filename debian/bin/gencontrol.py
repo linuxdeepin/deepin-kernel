@@ -342,10 +342,10 @@ class Gencontrol(Base):
         cmds_binary_arch = ["$(MAKE) -f debian/rules.real binary-arch-flavour %s" % makeflags]
         if packages_dummy:
             cmds_binary_arch.append("$(MAKE) -f debian/rules.real install-dummy DH_OPTIONS='%s' %s" % (' '.join(["-p%s" % i['Package'] for i in packages_dummy]), makeflags))
-        cmds_build = ["$(MAKE) -f debian/rules.real build %s" % makeflags]
+        cmds_build = ["$(MAKE) -f debian/rules.real build-arch %s" % makeflags]
         cmds_setup = ["$(MAKE) -f debian/rules.real setup-flavour %s" % makeflags]
         makefile.add('binary-arch_%s_%s_%s_real' % (arch, featureset, flavour), cmds=cmds_binary_arch)
-        makefile.add('build_%s_%s_%s_real' % (arch, featureset, flavour), cmds=cmds_build)
+        makefile.add('build-arch_%s_%s_%s_real' % (arch, featureset, flavour), cmds=cmds_build)
         makefile.add('setup_%s_%s_%s_real' % (arch, featureset, flavour), cmds=cmds_setup)
 
     def merge_packages(self, packages, new, arch):
