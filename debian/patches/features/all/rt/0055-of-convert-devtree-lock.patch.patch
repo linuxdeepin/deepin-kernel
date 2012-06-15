@@ -1,0 +1,396 @@
+From 8252ed8e9ef0e6395bc88bd3726f9b4412864a8b Mon Sep 17 00:00:00 2001
+From: Thomas Gleixner <tglx@linutronix.de>
+Date: Mon, 21 Mar 2011 14:35:34 +0100
+Subject: [PATCH 055/271] of-convert-devtree-lock.patch
+
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+---
+ arch/sparc/kernel/prom_common.c |    4 +-
+ drivers/of/base.c               |   92 ++++++++++++++++++++++-----------------
+ include/linux/of.h              |    2 +-
+ 3 files changed, 55 insertions(+), 43 deletions(-)
+
+diff --git a/arch/sparc/kernel/prom_common.c b/arch/sparc/kernel/prom_common.c
+index 741df91..ca73a28 100644
+--- a/arch/sparc/kernel/prom_common.c
++++ b/arch/sparc/kernel/prom_common.c
+@@ -65,7 +65,7 @@ int of_set_property(struct device_node *dp, const char *name, void *val, int len
+ 	err = -ENODEV;
+ 
+ 	mutex_lock(&of_set_property_mutex);
+-	write_lock(&devtree_lock);
++	raw_spin_lock(&devtree_lock);
+ 	prevp = &dp->properties;
+ 	while (*prevp) {
+ 		struct property *prop = *prevp;
+@@ -92,7 +92,7 @@ int of_set_property(struct device_node *dp, const char *name, void *val, int len
+ 		}
+ 		prevp = &(*prevp)->next;
+ 	}
+-	write_unlock(&devtree_lock);
++	raw_spin_unlock(&devtree_lock);
+ 	mutex_unlock(&of_set_property_mutex);
+ 
+ 	/* XXX Upate procfs if necessary... */
+diff --git a/drivers/of/base.c b/drivers/of/base.c
+index 200f2dd..becc6ca 100644
+--- a/drivers/of/base.c
++++ b/drivers/of/base.c
+@@ -54,7 +54,7 @@ static DEFINE_MUTEX(of_aliases_mutex);
+ /* use when traversing tree through the allnext, child, sibling,
+  * or parent members of struct device_node.
+  */
+-DEFINE_RWLOCK(devtree_lock);
++DEFINE_RAW_SPINLOCK(devtree_lock);
+ 
+ int of_n_addr_cells(struct device_node *np)
+ {
+@@ -187,10 +187,11 @@ struct property *of_find_property(const struct device_node *np,
+ 				  int *lenp)
+ {
+ 	struct property *pp;
++	unsigned long flags;
+ 
+-	read_lock(&devtree_lock);
++	raw_spin_lock_irqsave(&devtree_lock, flags);
+ 	pp = __of_find_property(np, name, lenp);
+-	read_unlock(&devtree_lock);
++	raw_spin_unlock_irqrestore(&devtree_lock, flags);
+ 
+ 	return pp;
+ }
+@@ -208,13 +209,13 @@ struct device_node *of_find_all_nodes(struct device_node *prev)
+ {
+ 	struct device_node *np;
+ 
+-	read_lock(&devtree_lock);
++	raw_spin_lock(&devtree_lock);
+ 	np = prev ? prev->allnext : allnodes;
+ 	for (; np != NULL; np = np->allnext)
+ 		if (of_node_get(np))
+ 			break;
+ 	of_node_put(prev);
+-	read_unlock(&devtree_lock);
++	raw_spin_unlock(&devtree_lock);
+ 	return np;
+ }
+ EXPORT_SYMBOL(of_find_all_nodes);
+@@ -273,11 +274,12 @@ static int __of_device_is_compatible(const struct device_node *device,
+ int of_device_is_compatible(const struct device_node *device,
+ 		const char *compat)
+ {
++	unsigned long flags;
+ 	int res;
+ 
+-	read_lock(&devtree_lock);
++	raw_spin_lock_irqsave(&devtree_lock, flags);
+ 	res = __of_device_is_compatible(device, compat);
+-	read_unlock(&devtree_lock);
++	raw_spin_unlock_irqrestore(&devtree_lock, flags);
+ 	return res;
+ }
+ EXPORT_SYMBOL(of_device_is_compatible);
+@@ -339,13 +341,14 @@ EXPORT_SYMBOL(of_device_is_available);
+ struct device_node *of_get_parent(const struct device_node *node)
+ {
+ 	struct device_node *np;
++	unsigned long flags;
+ 
+ 	if (!node)
+ 		return NULL;
+ 
+-	read_lock(&devtree_lock);
++	raw_spin_lock_irqsave(&devtree_lock, flags);
+ 	np = of_node_get(node->parent);
+-	read_unlock(&devtree_lock);
++	raw_spin_unlock_irqrestore(&devtree_lock, flags);
+ 	return np;
+ }
+ EXPORT_SYMBOL(of_get_parent);
+@@ -364,14 +367,15 @@ EXPORT_SYMBOL(of_get_parent);
+ struct device_node *of_get_next_parent(struct device_node *node)
+ {
+ 	struct device_node *parent;
++	unsigned long flags;
+ 
+ 	if (!node)
+ 		return NULL;
+ 
+-	read_lock(&devtree_lock);
++	raw_spin_lock_irqsave(&devtree_lock, flags);
+ 	parent = of_node_get(node->parent);
+ 	of_node_put(node);
+-	read_unlock(&devtree_lock);
++	raw_spin_unlock_irqrestore(&devtree_lock, flags);
+ 	return parent;
+ }
+ 
+@@ -387,14 +391,15 @@ struct device_node *of_get_next_child(const struct device_node *node,
+ 	struct device_node *prev)
+ {
+ 	struct device_node *next;
++	unsigned long flags;
+ 
+-	read_lock(&devtree_lock);
++	raw_spin_lock_irqsave(&devtree_lock, flags);
+ 	next = prev ? prev->sibling : node->child;
+ 	for (; next; next = next->sibling)
+ 		if (of_node_get(next))
+ 			break;
+ 	of_node_put(prev);
+-	read_unlock(&devtree_lock);
++	raw_spin_unlock_irqrestore(&devtree_lock, flags);
+ 	return next;
+ }
+ EXPORT_SYMBOL(of_get_next_child);
+@@ -409,14 +414,15 @@ EXPORT_SYMBOL(of_get_next_child);
+ struct device_node *of_find_node_by_path(const char *path)
+ {
+ 	struct device_node *np = allnodes;
++	unsigned long flags;
+ 
+-	read_lock(&devtree_lock);
++	raw_spin_lock_irqsave(&devtree_lock, flags);
+ 	for (; np; np = np->allnext) {
+ 		if (np->full_name && (of_node_cmp(np->full_name, path) == 0)
+ 		    && of_node_get(np))
+ 			break;
+ 	}
+-	read_unlock(&devtree_lock);
++	raw_spin_unlock_irqrestore(&devtree_lock, flags);
+ 	return np;
+ }
+ EXPORT_SYMBOL(of_find_node_by_path);
+@@ -436,15 +442,16 @@ struct device_node *of_find_node_by_name(struct device_node *from,
+ 	const char *name)
+ {
+ 	struct device_node *np;
++	unsigned long flags;
+ 
+-	read_lock(&devtree_lock);
++	raw_spin_lock_irqsave(&devtree_lock, flags);
+ 	np = from ? from->allnext : allnodes;
+ 	for (; np; np = np->allnext)
+ 		if (np->name && (of_node_cmp(np->name, name) == 0)
+ 		    && of_node_get(np))
+ 			break;
+ 	of_node_put(from);
+-	read_unlock(&devtree_lock);
++	raw_spin_unlock_irqrestore(&devtree_lock, flags);
+ 	return np;
+ }
+ EXPORT_SYMBOL(of_find_node_by_name);
+@@ -465,15 +472,16 @@ struct device_node *of_find_node_by_type(struct device_node *from,
+ 	const char *type)
+ {
+ 	struct device_node *np;
++	unsigned long flags;
+ 
+-	read_lock(&devtree_lock);
++	raw_spin_lock_irqsave(&devtree_lock, flags);
+ 	np = from ? from->allnext : allnodes;
+ 	for (; np; np = np->allnext)
+ 		if (np->type && (of_node_cmp(np->type, type) == 0)
+ 		    && of_node_get(np))
+ 			break;
+ 	of_node_put(from);
+-	read_unlock(&devtree_lock);
++	raw_spin_unlock_irqrestore(&devtree_lock, flags);
+ 	return np;
+ }
+ EXPORT_SYMBOL(of_find_node_by_type);
+@@ -496,8 +504,9 @@ struct device_node *of_find_compatible_node(struct device_node *from,
+ 	const char *type, const char *compatible)
+ {
+ 	struct device_node *np;
++	unsigned long flags;
+ 
+-	read_lock(&devtree_lock);
++	raw_spin_lock_irqsave(&devtree_lock, flags);
+ 	np = from ? from->allnext : allnodes;
+ 	for (; np; np = np->allnext) {
+ 		if (type
+@@ -508,7 +517,7 @@ struct device_node *of_find_compatible_node(struct device_node *from,
+ 			break;
+ 	}
+ 	of_node_put(from);
+-	read_unlock(&devtree_lock);
++	raw_spin_unlock_irqrestore(&devtree_lock, flags);
+ 	return np;
+ }
+ EXPORT_SYMBOL(of_find_compatible_node);
+@@ -530,8 +539,9 @@ struct device_node *of_find_node_with_property(struct device_node *from,
+ {
+ 	struct device_node *np;
+ 	struct property *pp;
++	unsigned long flags;
+ 
+-	read_lock(&devtree_lock);
++	raw_spin_lock_irqsave(&devtree_lock, flags);
+ 	np = from ? from->allnext : allnodes;
+ 	for (; np; np = np->allnext) {
+ 		for (pp = np->properties; pp != 0; pp = pp->next) {
+@@ -543,7 +553,7 @@ struct device_node *of_find_node_with_property(struct device_node *from,
+ 	}
+ out:
+ 	of_node_put(from);
+-	read_unlock(&devtree_lock);
++	raw_spin_unlock_irqrestore(&devtree_lock, flags);
+ 	return np;
+ }
+ EXPORT_SYMBOL(of_find_node_with_property);
+@@ -584,10 +594,11 @@ const struct of_device_id *of_match_node(const struct of_device_id *matches,
+ 					 const struct device_node *node)
+ {
+ 	const struct of_device_id *match;
++	unsigned long flags;
+ 
+-	read_lock(&devtree_lock);
++	raw_spin_lock_irqsave(&devtree_lock, flags);
+ 	match = __of_match_node(matches, node);
+-	read_unlock(&devtree_lock);
++	raw_spin_unlock_irqrestore(&devtree_lock, flags);
+ 	return match;
+ }
+ EXPORT_SYMBOL(of_match_node);
+@@ -608,15 +619,16 @@ struct device_node *of_find_matching_node(struct device_node *from,
+ 					  const struct of_device_id *matches)
+ {
+ 	struct device_node *np;
++	unsigned long flags;
+ 
+-	read_lock(&devtree_lock);
++	raw_spin_lock_irqsave(&devtree_lock, flags);
+ 	np = from ? from->allnext : allnodes;
+ 	for (; np; np = np->allnext) {
+ 		if (__of_match_node(matches, np) && of_node_get(np))
+ 			break;
+ 	}
+ 	of_node_put(from);
+-	read_unlock(&devtree_lock);
++	raw_spin_unlock_irqrestore(&devtree_lock, flags);
+ 	return np;
+ }
+ EXPORT_SYMBOL(of_find_matching_node);
+@@ -659,12 +671,12 @@ struct device_node *of_find_node_by_phandle(phandle handle)
+ {
+ 	struct device_node *np;
+ 
+-	read_lock(&devtree_lock);
++	raw_spin_lock(&devtree_lock);
+ 	for (np = allnodes; np; np = np->allnext)
+ 		if (np->phandle == handle)
+ 			break;
+ 	of_node_get(np);
+-	read_unlock(&devtree_lock);
++	raw_spin_unlock(&devtree_lock);
+ 	return np;
+ }
+ EXPORT_SYMBOL(of_find_node_by_phandle);
+@@ -998,18 +1010,18 @@ int prom_add_property(struct device_node *np, struct property *prop)
+ 	unsigned long flags;
+ 
+ 	prop->next = NULL;
+-	write_lock_irqsave(&devtree_lock, flags);
++	raw_spin_lock_irqsave(&devtree_lock, flags);
+ 	next = &np->properties;
+ 	while (*next) {
+ 		if (strcmp(prop->name, (*next)->name) == 0) {
+ 			/* duplicate ! don't insert it */
+-			write_unlock_irqrestore(&devtree_lock, flags);
++			raw_spin_unlock_irqrestore(&devtree_lock, flags);
+ 			return -1;
+ 		}
+ 		next = &(*next)->next;
+ 	}
+ 	*next = prop;
+-	write_unlock_irqrestore(&devtree_lock, flags);
++	raw_spin_unlock_irqrestore(&devtree_lock, flags);
+ 
+ #ifdef CONFIG_PROC_DEVICETREE
+ 	/* try to add to proc as well if it was initialized */
+@@ -1034,7 +1046,7 @@ int prom_remove_property(struct device_node *np, struct property *prop)
+ 	unsigned long flags;
+ 	int found = 0;
+ 
+-	write_lock_irqsave(&devtree_lock, flags);
++	raw_spin_lock_irqsave(&devtree_lock, flags);
+ 	next = &np->properties;
+ 	while (*next) {
+ 		if (*next == prop) {
+@@ -1047,7 +1059,7 @@ int prom_remove_property(struct device_node *np, struct property *prop)
+ 		}
+ 		next = &(*next)->next;
+ 	}
+-	write_unlock_irqrestore(&devtree_lock, flags);
++	raw_spin_unlock_irqrestore(&devtree_lock, flags);
+ 
+ 	if (!found)
+ 		return -ENODEV;
+@@ -1077,7 +1089,7 @@ int prom_update_property(struct device_node *np,
+ 	unsigned long flags;
+ 	int found = 0;
+ 
+-	write_lock_irqsave(&devtree_lock, flags);
++	raw_spin_lock_irqsave(&devtree_lock, flags);
+ 	next = &np->properties;
+ 	while (*next) {
+ 		if (*next == oldprop) {
+@@ -1091,7 +1103,7 @@ int prom_update_property(struct device_node *np,
+ 		}
+ 		next = &(*next)->next;
+ 	}
+-	write_unlock_irqrestore(&devtree_lock, flags);
++	raw_spin_unlock_irqrestore(&devtree_lock, flags);
+ 
+ 	if (!found)
+ 		return -ENODEV;
+@@ -1121,12 +1133,12 @@ void of_attach_node(struct device_node *np)
+ {
+ 	unsigned long flags;
+ 
+-	write_lock_irqsave(&devtree_lock, flags);
++	raw_spin_lock_irqsave(&devtree_lock, flags);
+ 	np->sibling = np->parent->child;
+ 	np->allnext = allnodes;
+ 	np->parent->child = np;
+ 	allnodes = np;
+-	write_unlock_irqrestore(&devtree_lock, flags);
++	raw_spin_unlock_irqrestore(&devtree_lock, flags);
+ }
+ 
+ /**
+@@ -1140,7 +1152,7 @@ void of_detach_node(struct device_node *np)
+ 	struct device_node *parent;
+ 	unsigned long flags;
+ 
+-	write_lock_irqsave(&devtree_lock, flags);
++	raw_spin_lock_irqsave(&devtree_lock, flags);
+ 
+ 	parent = np->parent;
+ 	if (!parent)
+@@ -1171,7 +1183,7 @@ void of_detach_node(struct device_node *np)
+ 	of_node_set_flag(np, OF_DETACHED);
+ 
+ out_unlock:
+-	write_unlock_irqrestore(&devtree_lock, flags);
++	raw_spin_unlock_irqrestore(&devtree_lock, flags);
+ }
+ #endif /* defined(CONFIG_OF_DYNAMIC) */
+ 
+diff --git a/include/linux/of.h b/include/linux/of.h
+index 4948552..e87303d 100644
+--- a/include/linux/of.h
++++ b/include/linux/of.h
+@@ -71,7 +71,7 @@ struct device_node {
+ extern struct device_node *allnodes;
+ extern struct device_node *of_chosen;
+ extern struct device_node *of_aliases;
+-extern rwlock_t devtree_lock;
++extern raw_spinlock_t devtree_lock;
+ 
+ static inline bool of_have_populated_dt(void)
+ {
+-- 
+1.7.10
+

@@ -1,0 +1,95 @@
+From 1057b762d0b9296e9df793ce4801082b7aa52c42 Mon Sep 17 00:00:00 2001
+From: Thomas Gleixner <tglx@linutronix.de>
+Date: Tue, 28 Feb 2012 18:33:08 +0100
+Subject: [PATCH 019/271] ia64: vsyscall: Use seqcount instead of seqlock
+
+The update of the vdso data happens under xtime_lock, so adding a
+nested lock is pointless. Just use a seqcount to sync the readers.
+
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Cc: Tony Luck <tony.luck@intel.com>
+---
+ arch/ia64/kernel/asm-offsets.c        |    4 ++--
+ arch/ia64/kernel/fsys.S               |    2 +-
+ arch/ia64/kernel/fsyscall_gtod_data.h |    2 +-
+ arch/ia64/kernel/time.c               |   10 +++-------
+ 4 files changed, 7 insertions(+), 11 deletions(-)
+
+diff --git a/arch/ia64/kernel/asm-offsets.c b/arch/ia64/kernel/asm-offsets.c
+index af56501..106aeb6 100644
+--- a/arch/ia64/kernel/asm-offsets.c
++++ b/arch/ia64/kernel/asm-offsets.c
+@@ -269,8 +269,8 @@ void foo(void)
+ 	BLANK();
+ 
+ 	/* used by fsys_gettimeofday in arch/ia64/kernel/fsys.S */
+-	DEFINE(IA64_GTOD_LOCK_OFFSET,
+-		offsetof (struct fsyscall_gtod_data_t, lock));
++	DEFINE(IA64_GTOD_SEQ_OFFSET,
++		offsetof (struct fsyscall_gtod_data_t, seq);
+ 	DEFINE(IA64_GTOD_WALL_TIME_OFFSET,
+ 		offsetof (struct fsyscall_gtod_data_t, wall_time));
+ 	DEFINE(IA64_GTOD_MONO_TIME_OFFSET,
+diff --git a/arch/ia64/kernel/fsys.S b/arch/ia64/kernel/fsys.S
+index 331d42b..fa77de7 100644
+--- a/arch/ia64/kernel/fsys.S
++++ b/arch/ia64/kernel/fsys.S
+@@ -174,7 +174,7 @@ ENTRY(fsys_set_tid_address)
+ 	FSYS_RETURN
+ END(fsys_set_tid_address)
+ 
+-#if IA64_GTOD_LOCK_OFFSET !=0
++#if IA64_GTOD_SEQ_OFFSET !=0
+ #error fsys_gettimeofday incompatible with changes to struct fsyscall_gtod_data_t
+ #endif
+ #if IA64_ITC_JITTER_OFFSET !=0
+diff --git a/arch/ia64/kernel/fsyscall_gtod_data.h b/arch/ia64/kernel/fsyscall_gtod_data.h
+index 57d2ee6..146b15b 100644
+--- a/arch/ia64/kernel/fsyscall_gtod_data.h
++++ b/arch/ia64/kernel/fsyscall_gtod_data.h
+@@ -6,7 +6,7 @@
+  */
+ 
+ struct fsyscall_gtod_data_t {
+-	seqlock_t	lock;
++	seqcount_t	seq;
+ 	struct timespec	wall_time;
+ 	struct timespec monotonic_time;
+ 	cycle_t		clk_mask;
+diff --git a/arch/ia64/kernel/time.c b/arch/ia64/kernel/time.c
+index 43920de..8e991a0 100644
+--- a/arch/ia64/kernel/time.c
++++ b/arch/ia64/kernel/time.c
+@@ -35,9 +35,7 @@
+ 
+ static cycle_t itc_get_cycles(struct clocksource *cs);
+ 
+-struct fsyscall_gtod_data_t fsyscall_gtod_data = {
+-	.lock = __SEQLOCK_UNLOCKED(fsyscall_gtod_data.lock),
+-};
++struct fsyscall_gtod_data_t fsyscall_gtod_data;
+ 
+ struct itc_jitter_data_t itc_jitter_data;
+ 
+@@ -460,9 +458,7 @@ void update_vsyscall_tz(void)
+ void update_vsyscall(struct timespec *wall, struct timespec *wtm,
+ 			struct clocksource *c, u32 mult)
+ {
+-        unsigned long flags;
+-
+-        write_seqlock_irqsave(&fsyscall_gtod_data.lock, flags);
++	write_seqcount_begin(&fsyscall_gtod_data.seq);
+ 
+         /* copy fsyscall clock data */
+         fsyscall_gtod_data.clk_mask = c->mask;
+@@ -485,6 +481,6 @@ void update_vsyscall(struct timespec *wall, struct timespec *wtm,
+ 		fsyscall_gtod_data.monotonic_time.tv_sec++;
+ 	}
+ 
+-        write_sequnlock_irqrestore(&fsyscall_gtod_data.lock, flags);
++	write_seqcount_end(&fsyscall_gtod_data.seq);
+ }
+ 
+-- 
+1.7.10
+

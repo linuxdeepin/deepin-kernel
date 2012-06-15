@@ -1,0 +1,217 @@
+From e2afb78f43acf9c2adc574d8361bb4146afc21f7 Mon Sep 17 00:00:00 2001
+From: Thomas Gleixner <tglx@linutronix.de>
+Date: Thu, 16 Jun 2011 13:26:08 +0200
+Subject: [PATCH 162/271] sched-migrate-disable.patch
+
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+---
+ include/linux/preempt.h |    8 +++++
+ include/linux/sched.h   |   13 +++++--
+ include/linux/smp.h     |    1 -
+ kernel/sched.c          |   88 ++++++++++++++++++++++++++++++++++++++++++++---
+ lib/smp_processor_id.c  |    6 ++--
+ 5 files changed, 104 insertions(+), 12 deletions(-)
+
+diff --git a/include/linux/preempt.h b/include/linux/preempt.h
+index 29db25f..363e5e2 100644
+--- a/include/linux/preempt.h
++++ b/include/linux/preempt.h
+@@ -108,6 +108,14 @@ do { \
+ 
+ #endif /* CONFIG_PREEMPT_COUNT */
+ 
++#ifdef CONFIG_SMP
++extern void migrate_disable(void);
++extern void migrate_enable(void);
++#else
++# define migrate_disable()		do { } while (0)
++# define migrate_enable()		do { } while (0)
++#endif
++
+ #ifdef CONFIG_PREEMPT_RT_FULL
+ # define preempt_disable_rt()		preempt_disable()
+ # define preempt_enable_rt()		preempt_enable()
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+index 6f10df5..712e991 100644
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -1259,6 +1259,7 @@ struct task_struct {
+ #endif
+ 
+ 	unsigned int policy;
++	int migrate_disable;
+ 	cpumask_t cpus_allowed;
+ 
+ #ifdef CONFIG_PREEMPT_RCU
+@@ -1598,9 +1599,6 @@ struct task_struct {
+ #endif
+ };
+ 
+-/* Future-safe accessor for struct task_struct's cpus_allowed. */
+-#define tsk_cpus_allowed(tsk) (&(tsk)->cpus_allowed)
+-
+ #ifdef CONFIG_PREEMPT_RT_FULL
+ static inline bool cur_pf_disabled(void) { return current->pagefault_disabled; }
+ #else
+@@ -2683,6 +2681,15 @@ static inline void set_task_cpu(struct task_struct *p, unsigned int cpu)
+ 
+ #endif /* CONFIG_SMP */
+ 
++/* Future-safe accessor for struct task_struct's cpus_allowed. */
++static inline const struct cpumask *tsk_cpus_allowed(struct task_struct *p)
++{
++	if (p->migrate_disable)
++		return cpumask_of(task_cpu(p));
++
++	return &p->cpus_allowed;
++}
++
+ extern long sched_setaffinity(pid_t pid, const struct cpumask *new_mask);
+ extern long sched_getaffinity(pid_t pid, struct cpumask *mask);
+ 
+diff --git a/include/linux/smp.h b/include/linux/smp.h
+index e6c58d8..94c8430 100644
+--- a/include/linux/smp.h
++++ b/include/linux/smp.h
+@@ -80,7 +80,6 @@ void __smp_call_function_single(int cpuid, struct call_single_data *data,
+ 
+ int smp_call_function_any(const struct cpumask *mask,
+ 			  smp_call_func_t func, void *info, int wait);
+-
+ /*
+  * Generic and arch helpers
+  */
+diff --git a/kernel/sched.c b/kernel/sched.c
+index 2c803b2..cdad99c 100644
+--- a/kernel/sched.c
++++ b/kernel/sched.c
+@@ -6223,11 +6223,12 @@ static inline void sched_init_granularity(void)
+ #ifdef CONFIG_SMP
+ void do_set_cpus_allowed(struct task_struct *p, const struct cpumask *new_mask)
+ {
+-	if (p->sched_class && p->sched_class->set_cpus_allowed)
+-		p->sched_class->set_cpus_allowed(p, new_mask);
+-
++	if (!p->migrate_disable) {
++		if (p->sched_class && p->sched_class->set_cpus_allowed)
++			p->sched_class->set_cpus_allowed(p, new_mask);
++		p->rt.nr_cpus_allowed = cpumask_weight(new_mask);
++	}
+ 	cpumask_copy(&p->cpus_allowed, new_mask);
+-	p->rt.nr_cpus_allowed = cpumask_weight(new_mask);
+ }
+ 
+ /*
+@@ -6278,7 +6279,7 @@ int set_cpus_allowed_ptr(struct task_struct *p, const struct cpumask *new_mask)
+ 	do_set_cpus_allowed(p, new_mask);
+ 
+ 	/* Can the task run on the task's current CPU? If so, we're done */
+-	if (cpumask_test_cpu(task_cpu(p), new_mask))
++	if (cpumask_test_cpu(task_cpu(p), new_mask) || p->migrate_disable)
+ 		goto out;
+ 
+ 	dest_cpu = cpumask_any_and(cpu_active_mask, new_mask);
+@@ -6297,6 +6298,83 @@ out:
+ }
+ EXPORT_SYMBOL_GPL(set_cpus_allowed_ptr);
+ 
++void migrate_disable(void)
++{
++	struct task_struct *p = current;
++	const struct cpumask *mask;
++	unsigned long flags;
++	struct rq *rq;
++
++	preempt_disable();
++	if (p->migrate_disable) {
++		p->migrate_disable++;
++		preempt_enable();
++		return;
++	}
++
++	pin_current_cpu();
++	if (unlikely(!scheduler_running)) {
++		p->migrate_disable = 1;
++		preempt_enable();
++		return;
++	}
++	rq = task_rq_lock(p, &flags);
++	p->migrate_disable = 1;
++	mask = tsk_cpus_allowed(p);
++
++	WARN_ON(!cpumask_test_cpu(smp_processor_id(), mask));
++
++	if (!cpumask_equal(&p->cpus_allowed, mask)) {
++		if (p->sched_class->set_cpus_allowed)
++			p->sched_class->set_cpus_allowed(p, mask);
++		p->rt.nr_cpus_allowed = cpumask_weight(mask);
++	}
++	task_rq_unlock(rq, p, &flags);
++	preempt_enable();
++}
++EXPORT_SYMBOL_GPL(migrate_disable);
++
++void migrate_enable(void)
++{
++	struct task_struct *p = current;
++	const struct cpumask *mask;
++	unsigned long flags;
++	struct rq *rq;
++
++	WARN_ON_ONCE(p->migrate_disable <= 0);
++
++	preempt_disable();
++	if (p->migrate_disable > 1) {
++		p->migrate_disable--;
++		preempt_enable();
++		return;
++	}
++
++	if (unlikely(!scheduler_running)) {
++		p->migrate_disable = 0;
++		unpin_current_cpu();
++		preempt_enable();
++		return;
++	}
++
++	rq = task_rq_lock(p, &flags);
++	p->migrate_disable = 0;
++	mask = tsk_cpus_allowed(p);
++
++	WARN_ON(!cpumask_test_cpu(smp_processor_id(), mask));
++
++	if (!cpumask_equal(&p->cpus_allowed, mask)) {
++		if (p->sched_class->set_cpus_allowed)
++			p->sched_class->set_cpus_allowed(p, mask);
++		p->rt.nr_cpus_allowed = cpumask_weight(mask);
++	}
++
++	task_rq_unlock(rq, p, &flags);
++	unpin_current_cpu();
++	preempt_enable();
++}
++EXPORT_SYMBOL_GPL(migrate_enable);
++
+ /*
+  * Move (not current) task off this cpu, onto dest cpu. We're doing
+  * this because either it can't run here any more (set_cpus_allowed()
+diff --git a/lib/smp_processor_id.c b/lib/smp_processor_id.c
+index 503f087..60a7569 100644
+--- a/lib/smp_processor_id.c
++++ b/lib/smp_processor_id.c
+@@ -39,9 +39,9 @@ notrace unsigned int debug_smp_processor_id(void)
+ 	if (!printk_ratelimit())
+ 		goto out_enable;
+ 
+-	printk(KERN_ERR "BUG: using smp_processor_id() in preemptible [%08x] "
+-			"code: %s/%d\n",
+-			preempt_count() - 1, current->comm, current->pid);
++	printk(KERN_ERR "BUG: using smp_processor_id() in preemptible [%08x %08x] "
++	       "code: %s/%d\n", preempt_count() - 1,
++	       current->migrate_disable, current->comm, current->pid);
+ 	print_symbol("caller is %s\n", (long)__builtin_return_address(0));
+ 	dump_stack();
+ 
+-- 
+1.7.10
+
