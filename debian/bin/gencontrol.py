@@ -86,6 +86,10 @@ class Gencontrol(Base):
         self._setup_makeflags(self.arch_makeflags, makeflags, config_base)
 
     def do_arch_packages(self, packages, makefile, arch, vars, makeflags, extra):
+        # Some userland architectures require kernels from another
+        # (Debian) architecture, e.g. x32/amd64.
+        foreign_kernel = not self.config['base', arch].get('featuresets')
+
         if self.version.linux_modifier is None:
             try:
                 vars['abiname'] = '-%s' % self.config['abi', arch]['abiname']
@@ -93,8 +97,12 @@ class Gencontrol(Base):
                 vars['abiname'] = self.abiname
             makeflags['ABINAME'] = vars['abiname']
 
-        headers_arch = self.templates["control.headers.arch"]
-        packages_headers_arch = self.process_packages(headers_arch, vars)
+        if foreign_kernel:
+            packages_headers_arch = []
+            makeflags['FOREIGN_KERNEL'] = True
+        else:
+            headers_arch = self.templates["control.headers.arch"]
+            packages_headers_arch = self.process_packages(headers_arch, vars)
 
         libc_dev = self.templates["control.libc-dev"]
         packages_headers_arch[0:0] = self.process_packages(libc_dev, {})
