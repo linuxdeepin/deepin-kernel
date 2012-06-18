@@ -1,0 +1,884 @@
+From: Kay Sievers <kay.sievers@vrfy.org>
+Date: Wed, 14 Dec 2011 14:29:38 -0800
+Subject: driver-core: implement 'sysdev' functionality for regular devices
+ and buses
+
+commit ca22e56debc57b47c422b749c93217ba62644be2 upstream.
+
+All sysdev classes and sysdev devices will converted to regular devices
+and buses to properly hook userspace into the event processing.
+
+There is no interesting difference between a 'sysdev' and 'device' which
+would justify to roll an entire own subsystem with different userspace
+export semantics. Userspace relies on events and generic sysfs subsystem
+infrastructure from sysdev devices, which are currently not properly
+available.
+
+Every converted sysdev class will create a regular device with the class
+name in /sys/devices/system and all registered devices will becom a children
+of theses devices.
+
+For compatibility reasons, the sysdev class-wide attributes are created
+at this parent device. (Do not copy that logic for anything new, subsystem-
+wide properties belong to the subsystem, not to some fake parent device
+created in /sys/devices.)
+
+Every sysdev driver is implemented as a simple subsystem interface now,
+and no longer called a driver.
+
+After all sysdev classes are ported to regular driver core entities, the
+sysdev implementation will be entirely removed from the kernel.
+
+Signed-off-by: Kay Sievers <kay.sievers@vrfy.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+---
+ drivers/base/base.h    |   12 +-
+ drivers/base/bus.c     |  293 ++++++++++++++++++++++++++++++++++++++++++++----
+ drivers/base/class.c   |   14 +--
+ drivers/base/core.c    |   85 +++++++++++---
+ drivers/base/init.c    |    1 -
+ drivers/base/sys.c     |   10 +-
+ include/linux/device.h |   78 ++++++++++++-
+ 7 files changed, 431 insertions(+), 62 deletions(-)
+
+diff --git a/drivers/base/base.h b/drivers/base/base.h
+index 21c1b96..7a6ae42 100644
+--- a/drivers/base/base.h
++++ b/drivers/base/base.h
+@@ -4,7 +4,9 @@
+  * struct subsys_private - structure to hold the private to the driver core portions of the bus_type/class structure.
+  *
+  * @subsys - the struct kset that defines this subsystem
+- * @devices_kset - the list of devices associated
++ * @devices_kset - the subsystem's 'devices' directory
++ * @interfaces - list of subsystem interfaces associated
++ * @mutex - protect the devices, and interfaces lists.
+  *
+  * @drivers_kset - the list of drivers associated
+  * @klist_devices - the klist to iterate over the @devices_kset
+@@ -14,10 +16,8 @@
+  * @bus - pointer back to the struct bus_type that this structure is associated
+  *        with.
+  *
+- * @class_interfaces - list of class_interfaces associated
+  * @glue_dirs - "glue" directory to put in-between the parent device to
+  *              avoid namespace conflicts
+- * @class_mutex - mutex to protect the children, devices, and interfaces lists.
+  * @class - pointer back to the struct class that this structure is associated
+  *          with.
+  *
+@@ -28,6 +28,8 @@
+ struct subsys_private {
+ 	struct kset subsys;
+ 	struct kset *devices_kset;
++	struct list_head interfaces;
++	struct mutex mutex;
+ 
+ 	struct kset *drivers_kset;
+ 	struct klist klist_devices;
+@@ -36,9 +38,7 @@ struct subsys_private {
+ 	unsigned int drivers_autoprobe:1;
+ 	struct bus_type *bus;
+ 
+-	struct list_head class_interfaces;
+ 	struct kset glue_dirs;
+-	struct mutex class_mutex;
+ 	struct class *class;
+ };
+ #define to_subsys_private(obj) container_of(obj, struct subsys_private, subsys.kobj)
+@@ -94,7 +94,6 @@ extern int hypervisor_init(void);
+ static inline int hypervisor_init(void) { return 0; }
+ #endif
+ extern int platform_bus_init(void);
+-extern int system_bus_init(void);
+ extern int cpu_dev_init(void);
+ 
+ extern int bus_add_device(struct device *dev);
+@@ -116,6 +115,7 @@ extern char *make_class_name(const char *name, struct kobject *kobj);
+ 
+ extern int devres_release_all(struct device *dev);
+ 
++/* /sys/devices directory */
+ extern struct kset *devices_kset;
+ 
+ #if defined(CONFIG_MODULES) && defined(CONFIG_SYSFS)
+diff --git a/drivers/base/bus.c b/drivers/base/bus.c
+index 000e7b2..99dc592 100644
+--- a/drivers/base/bus.c
++++ b/drivers/base/bus.c
+@@ -16,9 +16,14 @@
+ #include <linux/slab.h>
+ #include <linux/init.h>
+ #include <linux/string.h>
++#include <linux/mutex.h>
+ #include "base.h"
+ #include "power/power.h"
+ 
++/* /sys/devices/system */
++/* FIXME: make static after drivers/base/sys.c is deleted */
++struct kset *system_kset;
++
+ #define to_bus_attr(_attr) container_of(_attr, struct bus_attribute, attr)
+ 
+ /*
+@@ -360,6 +365,47 @@ struct device *bus_find_device_by_name(struct bus_type *bus,
+ }
+ EXPORT_SYMBOL_GPL(bus_find_device_by_name);
+ 
++/**
++ * subsys_find_device_by_id - find a device with a specific enumeration number
++ * @subsys: subsystem
++ * @id: index 'id' in struct device
++ * @hint: device to check first
++ *
++ * Check the hint's next object and if it is a match return it directly,
++ * otherwise, fall back to a full list search. Either way a reference for
++ * the returned object is taken.
++ */
++struct device *subsys_find_device_by_id(struct bus_type *subsys, unsigned int id,
++					struct device *hint)
++{
++	struct klist_iter i;
++	struct device *dev;
++
++	if (!subsys)
++		return NULL;
++
++	if (hint) {
++		klist_iter_init_node(&subsys->p->klist_devices, &i, &hint->p->knode_bus);
++		dev = next_device(&i);
++		if (dev && dev->id == id && get_device(dev)) {
++			klist_iter_exit(&i);
++			return dev;
++		}
++		klist_iter_exit(&i);
++	}
++
++	klist_iter_init_node(&subsys->p->klist_devices, &i, NULL);
++	while ((dev = next_device(&i))) {
++		if (dev->id == id && get_device(dev)) {
++			klist_iter_exit(&i);
++			return dev;
++		}
++	}
++	klist_iter_exit(&i);
++	return NULL;
++}
++EXPORT_SYMBOL_GPL(subsys_find_device_by_id);
++
+ static struct device_driver *next_driver(struct klist_iter *i)
+ {
+ 	struct klist_node *n = klist_next(i);
+@@ -487,38 +533,59 @@ out_put:
+ void bus_probe_device(struct device *dev)
+ {
+ 	struct bus_type *bus = dev->bus;
++	struct subsys_interface *sif;
+ 	int ret;
+ 
+-	if (bus && bus->p->drivers_autoprobe) {
++	if (!bus)
++		return;
++
++	if (bus->p->drivers_autoprobe) {
+ 		ret = device_attach(dev);
+ 		WARN_ON(ret < 0);
+ 	}
++
++	mutex_lock(&bus->p->mutex);
++	list_for_each_entry(sif, &bus->p->interfaces, node)
++		if (sif->add_dev)
++			sif->add_dev(dev, sif);
++	mutex_unlock(&bus->p->mutex);
+ }
+ 
+ /**
+  * bus_remove_device - remove device from bus
+  * @dev: device to be removed
+  *
+- * - Remove symlink from bus's directory.
++ * - Remove device from all interfaces.
++ * - Remove symlink from bus' directory.
+  * - Delete device from bus's list.
+  * - Detach from its driver.
+  * - Drop reference taken in bus_add_device().
+  */
+ void bus_remove_device(struct device *dev)
+ {
+-	if (dev->bus) {
+-		sysfs_remove_link(&dev->kobj, "subsystem");
+-		sysfs_remove_link(&dev->bus->p->devices_kset->kobj,
+-				  dev_name(dev));
+-		device_remove_attrs(dev->bus, dev);
+-		if (klist_node_attached(&dev->p->knode_bus))
+-			klist_del(&dev->p->knode_bus);
+-
+-		pr_debug("bus: '%s': remove device %s\n",
+-			 dev->bus->name, dev_name(dev));
+-		device_release_driver(dev);
+-		bus_put(dev->bus);
+-	}
++	struct bus_type *bus = dev->bus;
++	struct subsys_interface *sif;
++
++	if (!bus)
++		return;
++
++	mutex_lock(&bus->p->mutex);
++	list_for_each_entry(sif, &bus->p->interfaces, node)
++		if (sif->remove_dev)
++			sif->remove_dev(dev, sif);
++	mutex_unlock(&bus->p->mutex);
++
++	sysfs_remove_link(&dev->kobj, "subsystem");
++	sysfs_remove_link(&dev->bus->p->devices_kset->kobj,
++			  dev_name(dev));
++	device_remove_attrs(dev->bus, dev);
++	if (klist_node_attached(&dev->p->knode_bus))
++		klist_del(&dev->p->knode_bus);
++
++	pr_debug("bus: '%s': remove device %s\n",
++		 dev->bus->name, dev_name(dev));
++	device_release_driver(dev);
++	bus_put(dev->bus);
+ }
+ 
+ static int driver_add_attrs(struct bus_type *bus, struct device_driver *drv)
+@@ -847,14 +914,14 @@ static ssize_t bus_uevent_store(struct bus_type *bus,
+ static BUS_ATTR(uevent, S_IWUSR, NULL, bus_uevent_store);
+ 
+ /**
+- * bus_register - register a bus with the system.
++ * __bus_register - register a driver-core subsystem
+  * @bus: bus.
+  *
+  * Once we have that, we registered the bus with the kobject
+  * infrastructure, then register the children subsystems it has:
+- * the devices and drivers that belong to the bus.
++ * the devices and drivers that belong to the subsystem.
+  */
+-int bus_register(struct bus_type *bus)
++int __bus_register(struct bus_type *bus, struct lock_class_key *key)
+ {
+ 	int retval;
+ 	struct subsys_private *priv;
+@@ -898,6 +965,8 @@ int bus_register(struct bus_type *bus)
+ 		goto bus_drivers_fail;
+ 	}
+ 
++	INIT_LIST_HEAD(&priv->interfaces);
++	__mutex_init(&priv->mutex, "subsys mutex", key);
+ 	klist_init(&priv->klist_devices, klist_devices_get, klist_devices_put);
+ 	klist_init(&priv->klist_drivers, NULL, NULL);
+ 
+@@ -927,7 +996,7 @@ out:
+ 	bus->p = NULL;
+ 	return retval;
+ }
+-EXPORT_SYMBOL_GPL(bus_register);
++EXPORT_SYMBOL_GPL(__bus_register);
+ 
+ /**
+  * bus_unregister - remove a bus from the system
+@@ -939,6 +1008,8 @@ EXPORT_SYMBOL_GPL(bus_register);
+ void bus_unregister(struct bus_type *bus)
+ {
+ 	pr_debug("bus: '%s': unregistering\n", bus->name);
++	if (bus->dev_root)
++		device_unregister(bus->dev_root);
+ 	bus_remove_attrs(bus);
+ 	remove_probe_files(bus);
+ 	kset_unregister(bus->p->drivers_kset);
+@@ -1028,10 +1099,194 @@ void bus_sort_breadthfirst(struct bus_type *bus,
+ }
+ EXPORT_SYMBOL_GPL(bus_sort_breadthfirst);
+ 
++/**
++ * subsys_dev_iter_init - initialize subsys device iterator
++ * @iter: subsys iterator to initialize
++ * @subsys: the subsys we wanna iterate over
++ * @start: the device to start iterating from, if any
++ * @type: device_type of the devices to iterate over, NULL for all
++ *
++ * Initialize subsys iterator @iter such that it iterates over devices
++ * of @subsys.  If @start is set, the list iteration will start there,
++ * otherwise if it is NULL, the iteration starts at the beginning of
++ * the list.
++ */
++void subsys_dev_iter_init(struct subsys_dev_iter *iter, struct bus_type *subsys,
++			  struct device *start, const struct device_type *type)
++{
++	struct klist_node *start_knode = NULL;
++
++	if (start)
++		start_knode = &start->p->knode_bus;
++	klist_iter_init_node(&subsys->p->klist_devices, &iter->ki, start_knode);
++	iter->type = type;
++}
++EXPORT_SYMBOL_GPL(subsys_dev_iter_init);
++
++/**
++ * subsys_dev_iter_next - iterate to the next device
++ * @iter: subsys iterator to proceed
++ *
++ * Proceed @iter to the next device and return it.  Returns NULL if
++ * iteration is complete.
++ *
++ * The returned device is referenced and won't be released till
++ * iterator is proceed to the next device or exited.  The caller is
++ * free to do whatever it wants to do with the device including
++ * calling back into subsys code.
++ */
++struct device *subsys_dev_iter_next(struct subsys_dev_iter *iter)
++{
++	struct klist_node *knode;
++	struct device *dev;
++
++	for (;;) {
++		knode = klist_next(&iter->ki);
++		if (!knode)
++			return NULL;
++		dev = container_of(knode, struct device_private, knode_bus)->device;
++		if (!iter->type || iter->type == dev->type)
++			return dev;
++	}
++}
++EXPORT_SYMBOL_GPL(subsys_dev_iter_next);
++
++/**
++ * subsys_dev_iter_exit - finish iteration
++ * @iter: subsys iterator to finish
++ *
++ * Finish an iteration.  Always call this function after iteration is
++ * complete whether the iteration ran till the end or not.
++ */
++void subsys_dev_iter_exit(struct subsys_dev_iter *iter)
++{
++	klist_iter_exit(&iter->ki);
++}
++EXPORT_SYMBOL_GPL(subsys_dev_iter_exit);
++
++int subsys_interface_register(struct subsys_interface *sif)
++{
++	struct bus_type *subsys;
++	struct subsys_dev_iter iter;
++	struct device *dev;
++
++	if (!sif || !sif->subsys)
++		return -ENODEV;
++
++	subsys = bus_get(sif->subsys);
++	if (!subsys)
++		return -EINVAL;
++
++	mutex_lock(&subsys->p->mutex);
++	list_add_tail(&sif->node, &subsys->p->interfaces);
++	if (sif->add_dev) {
++		subsys_dev_iter_init(&iter, subsys, NULL, NULL);
++		while ((dev = subsys_dev_iter_next(&iter)))
++			sif->add_dev(dev, sif);
++		subsys_dev_iter_exit(&iter);
++	}
++	mutex_unlock(&subsys->p->mutex);
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(subsys_interface_register);
++
++void subsys_interface_unregister(struct subsys_interface *sif)
++{
++	struct bus_type *subsys = sif->subsys;
++	struct subsys_dev_iter iter;
++	struct device *dev;
++
++	if (!sif)
++		return;
++
++	mutex_lock(&subsys->p->mutex);
++	list_del_init(&sif->node);
++	if (sif->remove_dev) {
++		subsys_dev_iter_init(&iter, subsys, NULL, NULL);
++		while ((dev = subsys_dev_iter_next(&iter)))
++			sif->remove_dev(dev, sif);
++		subsys_dev_iter_exit(&iter);
++	}
++	mutex_unlock(&subsys->p->mutex);
++
++	bus_put(subsys);
++}
++EXPORT_SYMBOL_GPL(subsys_interface_unregister);
++
++static void system_root_device_release(struct device *dev)
++{
++	kfree(dev);
++}
++/**
++ * subsys_system_register - register a subsystem at /sys/devices/system/
++ * @subsys - system subsystem
++ * @groups - default attributes for the root device
++ *
++ * All 'system' subsystems have a /sys/devices/system/<name> root device
++ * with the name of the subsystem. The root device can carry subsystem-
++ * wide attributes. All registered devices are below this single root
++ * device and are named after the subsystem with a simple enumeration
++ * number appended. The registered devices are not explicitely named;
++ * only 'id' in the device needs to be set.
++ *
++ * Do not use this interface for anything new, it exists for compatibility
++ * with bad ideas only. New subsystems should use plain subsystems; and
++ * add the subsystem-wide attributes should be added to the subsystem
++ * directory itself and not some create fake root-device placed in
++ * /sys/devices/system/<name>.
++ */
++int subsys_system_register(struct bus_type *subsys,
++			   const struct attribute_group **groups)
++{
++	struct device *dev;
++	int err;
++
++	err = bus_register(subsys);
++	if (err < 0)
++		return err;
++
++	dev = kzalloc(sizeof(struct device), GFP_KERNEL);
++	if (!dev) {
++		err = -ENOMEM;
++		goto err_dev;
++	}
++
++	err = dev_set_name(dev, "%s", subsys->name);
++	if (err < 0)
++		goto err_name;
++
++	dev->kobj.parent = &system_kset->kobj;
++	dev->groups = groups;
++	dev->release = system_root_device_release;
++
++	err = device_register(dev);
++	if (err < 0)
++		goto err_dev_reg;
++
++	subsys->dev_root = dev;
++	return 0;
++
++err_dev_reg:
++	put_device(dev);
++	dev = NULL;
++err_name:
++	kfree(dev);
++err_dev:
++	bus_unregister(subsys);
++	return err;
++}
++EXPORT_SYMBOL_GPL(subsys_system_register);
++
+ int __init buses_init(void)
+ {
+ 	bus_kset = kset_create_and_add("bus", &bus_uevent_ops, NULL);
+ 	if (!bus_kset)
+ 		return -ENOMEM;
++
++	system_kset = kset_create_and_add("system", NULL, &devices_kset->kobj);
++	if (!system_kset)
++		return -ENOMEM;
++
+ 	return 0;
+ }
+diff --git a/drivers/base/class.c b/drivers/base/class.c
+index b80d91c..03243d4 100644
+--- a/drivers/base/class.c
++++ b/drivers/base/class.c
+@@ -184,9 +184,9 @@ int __class_register(struct class *cls, struct lock_class_key *key)
+ 	if (!cp)
+ 		return -ENOMEM;
+ 	klist_init(&cp->klist_devices, klist_class_dev_get, klist_class_dev_put);
+-	INIT_LIST_HEAD(&cp->class_interfaces);
++	INIT_LIST_HEAD(&cp->interfaces);
+ 	kset_init(&cp->glue_dirs);
+-	__mutex_init(&cp->class_mutex, "struct class mutex", key);
++	__mutex_init(&cp->mutex, "subsys mutex", key);
+ 	error = kobject_set_name(&cp->subsys.kobj, "%s", cls->name);
+ 	if (error) {
+ 		kfree(cp);
+@@ -460,15 +460,15 @@ int class_interface_register(struct class_interface *class_intf)
+ 	if (!parent)
+ 		return -EINVAL;
+ 
+-	mutex_lock(&parent->p->class_mutex);
+-	list_add_tail(&class_intf->node, &parent->p->class_interfaces);
++	mutex_lock(&parent->p->mutex);
++	list_add_tail(&class_intf->node, &parent->p->interfaces);
+ 	if (class_intf->add_dev) {
+ 		class_dev_iter_init(&iter, parent, NULL, NULL);
+ 		while ((dev = class_dev_iter_next(&iter)))
+ 			class_intf->add_dev(dev, class_intf);
+ 		class_dev_iter_exit(&iter);
+ 	}
+-	mutex_unlock(&parent->p->class_mutex);
++	mutex_unlock(&parent->p->mutex);
+ 
+ 	return 0;
+ }
+@@ -482,7 +482,7 @@ void class_interface_unregister(struct class_interface *class_intf)
+ 	if (!parent)
+ 		return;
+ 
+-	mutex_lock(&parent->p->class_mutex);
++	mutex_lock(&parent->p->mutex);
+ 	list_del_init(&class_intf->node);
+ 	if (class_intf->remove_dev) {
+ 		class_dev_iter_init(&iter, parent, NULL, NULL);
+@@ -490,7 +490,7 @@ void class_interface_unregister(struct class_interface *class_intf)
+ 			class_intf->remove_dev(dev, class_intf);
+ 		class_dev_iter_exit(&iter);
+ 	}
+-	mutex_unlock(&parent->p->class_mutex);
++	mutex_unlock(&parent->p->mutex);
+ 
+ 	class_put(parent);
+ }
+diff --git a/drivers/base/core.c b/drivers/base/core.c
+index 82c8654..a31ea19 100644
+--- a/drivers/base/core.c
++++ b/drivers/base/core.c
+@@ -117,6 +117,56 @@ static const struct sysfs_ops dev_sysfs_ops = {
+ 	.store	= dev_attr_store,
+ };
+ 
++#define to_ext_attr(x) container_of(x, struct dev_ext_attribute, attr)
++
++ssize_t device_store_ulong(struct device *dev,
++			   struct device_attribute *attr,
++			   const char *buf, size_t size)
++{
++	struct dev_ext_attribute *ea = to_ext_attr(attr);
++	char *end;
++	unsigned long new = simple_strtoul(buf, &end, 0);
++	if (end == buf)
++		return -EINVAL;
++	*(unsigned long *)(ea->var) = new;
++	/* Always return full write size even if we didn't consume all */
++	return size;
++}
++EXPORT_SYMBOL_GPL(device_store_ulong);
++
++ssize_t device_show_ulong(struct device *dev,
++			  struct device_attribute *attr,
++			  char *buf)
++{
++	struct dev_ext_attribute *ea = to_ext_attr(attr);
++	return snprintf(buf, PAGE_SIZE, "%lx\n", *(unsigned long *)(ea->var));
++}
++EXPORT_SYMBOL_GPL(device_show_ulong);
++
++ssize_t device_store_int(struct device *dev,
++			 struct device_attribute *attr,
++			 const char *buf, size_t size)
++{
++	struct dev_ext_attribute *ea = to_ext_attr(attr);
++	char *end;
++	long new = simple_strtol(buf, &end, 0);
++	if (end == buf || new > INT_MAX || new < INT_MIN)
++		return -EINVAL;
++	*(int *)(ea->var) = new;
++	/* Always return full write size even if we didn't consume all */
++	return size;
++}
++EXPORT_SYMBOL_GPL(device_store_int);
++
++ssize_t device_show_int(struct device *dev,
++			struct device_attribute *attr,
++			char *buf)
++{
++	struct dev_ext_attribute *ea = to_ext_attr(attr);
++
++	return snprintf(buf, PAGE_SIZE, "%d\n", *(int *)(ea->var));
++}
++EXPORT_SYMBOL_GPL(device_show_int);
+ 
+ /**
+  *	device_release - free device structure.
+@@ -463,7 +513,7 @@ static ssize_t show_dev(struct device *dev, struct device_attribute *attr,
+ static struct device_attribute devt_attr =
+ 	__ATTR(dev, S_IRUGO, show_dev, NULL);
+ 
+-/* kset to create /sys/devices/  */
++/* /sys/devices/ */
+ struct kset *devices_kset;
+ 
+ /**
+@@ -710,6 +760,10 @@ static struct kobject *get_device_parent(struct device *dev,
+ 		return k;
+ 	}
+ 
++	/* subsystems can specify a default root directory for their devices */
++	if (!parent && dev->bus && dev->bus->dev_root)
++		return &dev->bus->dev_root->kobj;
++
+ 	if (parent)
+ 		return &parent->kobj;
+ 	return NULL;
+@@ -730,14 +784,6 @@ static void cleanup_device_parent(struct device *dev)
+ 	cleanup_glue_dir(dev, dev->kobj.parent);
+ }
+ 
+-static void setup_parent(struct device *dev, struct device *parent)
+-{
+-	struct kobject *kobj;
+-	kobj = get_device_parent(dev, parent);
+-	if (kobj)
+-		dev->kobj.parent = kobj;
+-}
+-
+ static int device_add_class_symlinks(struct device *dev)
+ {
+ 	int error;
+@@ -890,6 +936,7 @@ int device_private_init(struct device *dev)
+ int device_add(struct device *dev)
+ {
+ 	struct device *parent = NULL;
++	struct kobject *kobj;
+ 	struct class_interface *class_intf;
+ 	int error = -EINVAL;
+ 
+@@ -913,6 +960,10 @@ int device_add(struct device *dev)
+ 		dev->init_name = NULL;
+ 	}
+ 
++	/* subsystems can specify simple device enumeration */
++	if (!dev_name(dev) && dev->bus && dev->bus->dev_name)
++		dev_set_name(dev, "%s%u", dev->bus->dev_name, dev->id);
++
+ 	if (!dev_name(dev)) {
+ 		error = -EINVAL;
+ 		goto name_error;
+@@ -921,7 +972,9 @@ int device_add(struct device *dev)
+ 	pr_debug("device: '%s': %s\n", dev_name(dev), __func__);
+ 
+ 	parent = get_device(dev->parent);
+-	setup_parent(dev, parent);
++	kobj = get_device_parent(dev, parent);
++	if (kobj)
++		dev->kobj.parent = kobj;
+ 
+ 	/* use parent numa_node */
+ 	if (parent)
+@@ -981,17 +1034,17 @@ int device_add(struct device *dev)
+ 			       &parent->p->klist_children);
+ 
+ 	if (dev->class) {
+-		mutex_lock(&dev->class->p->class_mutex);
++		mutex_lock(&dev->class->p->mutex);
+ 		/* tie the class to the device */
+ 		klist_add_tail(&dev->knode_class,
+ 			       &dev->class->p->klist_devices);
+ 
+ 		/* notify any interfaces that the device is here */
+ 		list_for_each_entry(class_intf,
+-				    &dev->class->p->class_interfaces, node)
++				    &dev->class->p->interfaces, node)
+ 			if (class_intf->add_dev)
+ 				class_intf->add_dev(dev, class_intf);
+-		mutex_unlock(&dev->class->p->class_mutex);
++		mutex_unlock(&dev->class->p->mutex);
+ 	}
+ done:
+ 	put_device(dev);
+@@ -1106,15 +1159,15 @@ void device_del(struct device *dev)
+ 	if (dev->class) {
+ 		device_remove_class_symlinks(dev);
+ 
+-		mutex_lock(&dev->class->p->class_mutex);
++		mutex_lock(&dev->class->p->mutex);
+ 		/* notify any interfaces that the device is now gone */
+ 		list_for_each_entry(class_intf,
+-				    &dev->class->p->class_interfaces, node)
++				    &dev->class->p->interfaces, node)
+ 			if (class_intf->remove_dev)
+ 				class_intf->remove_dev(dev, class_intf);
+ 		/* remove the device from the class list */
+ 		klist_del(&dev->knode_class);
+-		mutex_unlock(&dev->class->p->class_mutex);
++		mutex_unlock(&dev->class->p->mutex);
+ 	}
+ 	device_remove_file(dev, &uevent_attr);
+ 	device_remove_attrs(dev);
+diff --git a/drivers/base/init.c b/drivers/base/init.c
+index c8a934e..c16f0b8 100644
+--- a/drivers/base/init.c
++++ b/drivers/base/init.c
+@@ -31,7 +31,6 @@ void __init driver_init(void)
+ 	 * core core pieces.
+ 	 */
+ 	platform_bus_init();
+-	system_bus_init();
+ 	cpu_dev_init();
+ 	memory_dev_init();
+ }
+diff --git a/drivers/base/sys.c b/drivers/base/sys.c
+index 9dff77b..409f5ce 100644
+--- a/drivers/base/sys.c
++++ b/drivers/base/sys.c
+@@ -126,7 +126,7 @@ void sysdev_class_remove_file(struct sysdev_class *c,
+ }
+ EXPORT_SYMBOL_GPL(sysdev_class_remove_file);
+ 
+-static struct kset *system_kset;
++extern struct kset *system_kset;
+ 
+ int sysdev_class_register(struct sysdev_class *cls)
+ {
+@@ -331,14 +331,6 @@ void sysdev_unregister(struct sys_device *sysdev)
+ EXPORT_SYMBOL_GPL(sysdev_register);
+ EXPORT_SYMBOL_GPL(sysdev_unregister);
+ 
+-int __init system_bus_init(void)
+-{
+-	system_kset = kset_create_and_add("system", NULL, &devices_kset->kobj);
+-	if (!system_kset)
+-		return -ENOMEM;
+-	return 0;
+-}
+-
+ #define to_ext_attr(x) container_of(x, struct sysdev_ext_attribute, attr)
+ 
+ ssize_t sysdev_store_ulong(struct sys_device *sysdev,
+diff --git a/include/linux/device.h b/include/linux/device.h
+index 341fb74..7f9fc15 100644
+--- a/include/linux/device.h
++++ b/include/linux/device.h
+@@ -53,6 +53,8 @@ extern void bus_remove_file(struct bus_type *, struct bus_attribute *);
+  * struct bus_type - The bus type of the device
+  *
+  * @name:	The name of the bus.
++ * @dev_name:	Used for subsystems to enumerate devices like ("foo%u", dev->id).
++ * @dev_root:	Default device to use as the parent.
+  * @bus_attrs:	Default attributes of the bus.
+  * @dev_attrs:	Default attributes of the devices on the bus.
+  * @drv_attrs:	Default attributes of the device drivers on the bus.
+@@ -86,6 +88,8 @@ extern void bus_remove_file(struct bus_type *, struct bus_attribute *);
+  */
+ struct bus_type {
+ 	const char		*name;
++	const char		*dev_name;
++	struct device		*dev_root;
+ 	struct bus_attribute	*bus_attrs;
+ 	struct device_attribute	*dev_attrs;
+ 	struct driver_attribute	*drv_attrs;
+@@ -106,12 +110,30 @@ struct bus_type {
+ 	struct subsys_private *p;
+ };
+ 
+-extern int __must_check bus_register(struct bus_type *bus);
++/* This is a #define to keep the compiler from merging different
++ * instances of the __key variable */
++#define bus_register(subsys)			\
++({						\
++	static struct lock_class_key __key;	\
++	__bus_register(subsys, &__key);	\
++})
++extern int __must_check __bus_register(struct bus_type *bus,
++				       struct lock_class_key *key);
+ extern void bus_unregister(struct bus_type *bus);
+ 
+ extern int __must_check bus_rescan_devices(struct bus_type *bus);
+ 
+ /* iterator helpers for buses */
++struct subsys_dev_iter {
++	struct klist_iter		ki;
++	const struct device_type	*type;
++};
++void subsys_dev_iter_init(struct subsys_dev_iter *iter,
++			 struct bus_type *subsys,
++			 struct device *start,
++			 const struct device_type *type);
++struct device *subsys_dev_iter_next(struct subsys_dev_iter *iter);
++void subsys_dev_iter_exit(struct subsys_dev_iter *iter);
+ 
+ int bus_for_each_dev(struct bus_type *bus, struct device *start, void *data,
+ 		     int (*fn)(struct device *dev, void *data));
+@@ -121,10 +143,10 @@ struct device *bus_find_device(struct bus_type *bus, struct device *start,
+ struct device *bus_find_device_by_name(struct bus_type *bus,
+ 				       struct device *start,
+ 				       const char *name);
+-
++struct device *subsys_find_device_by_id(struct bus_type *bus, unsigned int id,
++					struct device *hint);
+ int bus_for_each_drv(struct bus_type *bus, struct device_driver *start,
+ 		     void *data, int (*fn)(struct device_driver *, void *));
+-
+ void bus_sort_breadthfirst(struct bus_type *bus,
+ 			   int (*compare)(const struct device *a,
+ 					  const struct device *b));
+@@ -256,6 +278,33 @@ struct device *driver_find_device(struct device_driver *drv,
+ 				  int (*match)(struct device *dev, void *data));
+ 
+ /**
++ * struct subsys_interface - interfaces to device functions
++ * @name        name of the device function
++ * @subsystem   subsytem of the devices to attach to
++ * @node        the list of functions registered at the subsystem
++ * @add         device hookup to device function handler
++ * @remove      device hookup to device function handler
++ *
++ * Simple interfaces attached to a subsystem. Multiple interfaces can
++ * attach to a subsystem and its devices. Unlike drivers, they do not
++ * exclusively claim or control devices. Interfaces usually represent
++ * a specific functionality of a subsystem/class of devices.
++ */
++struct subsys_interface {
++	const char *name;
++	struct bus_type *subsys;
++	struct list_head node;
++	int (*add_dev)(struct device *dev, struct subsys_interface *sif);
++	int (*remove_dev)(struct device *dev, struct subsys_interface *sif);
++};
++
++int subsys_interface_register(struct subsys_interface *sif);
++void subsys_interface_unregister(struct subsys_interface *sif);
++
++int subsys_system_register(struct bus_type *subsys,
++			   const struct attribute_group **groups);
++
++/**
+  * struct class - device classes
+  * @name:	Name of the class.
+  * @owner:	The module owner.
+@@ -438,8 +487,28 @@ struct device_attribute {
+ 			 const char *buf, size_t count);
+ };
+ 
++struct dev_ext_attribute {
++	struct device_attribute attr;
++	void *var;
++};
++
++ssize_t device_show_ulong(struct device *dev, struct device_attribute *attr,
++			  char *buf);
++ssize_t device_store_ulong(struct device *dev, struct device_attribute *attr,
++			   const char *buf, size_t count);
++ssize_t device_show_int(struct device *dev, struct device_attribute *attr,
++			char *buf);
++ssize_t device_store_int(struct device *dev, struct device_attribute *attr,
++			 const char *buf, size_t count);
++
+ #define DEVICE_ATTR(_name, _mode, _show, _store) \
+-struct device_attribute dev_attr_##_name = __ATTR(_name, _mode, _show, _store)
++	struct device_attribute dev_attr_##_name = __ATTR(_name, _mode, _show, _store)
++#define DEVICE_ULONG_ATTR(_name, _mode, _var) \
++	struct dev_ext_attribute dev_attr_##_name = \
++		{ __ATTR(_name, _mode, device_show_ulong, device_store_ulong), &(_var) }
++#define DEVICE_INT_ATTR(_name, _mode, _var) \
++	struct dev_ext_attribute dev_attr_##_name = \
++		{ __ATTR(_name, _mode, device_show_ulong, device_store_ulong), &(_var) }
+ 
+ extern int __must_check device_create_file(struct device *device,
+ 					const struct device_attribute *entry);
+@@ -603,6 +672,7 @@ struct device {
+ 	struct device_node	*of_node; /* associated device tree node */
+ 
+ 	dev_t			devt;	/* dev_t, creates the sysfs "dev" */
++	u32			id;	/* device instance */
+ 
+ 	spinlock_t		devres_lock;
+ 	struct list_head	devres_head;
