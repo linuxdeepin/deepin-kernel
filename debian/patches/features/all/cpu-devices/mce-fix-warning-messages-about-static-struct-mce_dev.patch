@@ -1,0 +1,180 @@
+From: Greg Kroah-Hartman <gregkh@suse.de>
+Date: Mon, 16 Jan 2012 14:40:28 -0800
+Subject: mce: fix warning messages about static struct mce_device
+
+commit e032d80774315869aa2285b217fdbbfed86c0b49 upstream.
+
+When suspending, there was a large list of warnings going something like:
+
+	Device 'machinecheck1' does not have a release() function, it is broken and must be fixed
+
+This patch turns the static mce_devices into dynamically allocated, and
+properly frees them when they are removed from the system.  It solves
+the warning messages on my laptop here.
+
+Reported-by: "Srivatsa S. Bhat" <srivatsa.bhat@linux.vnet.ibm.com>
+Reported-by: Linus Torvalds <torvalds@linux-foundation.org>
+Tested-by: Djalal Harouni <tixxdz@opendz.org>
+Cc: Kay Sievers <kay.sievers@vrfy.org>
+Cc: Tony Luck <tony.luck@intel.com>
+Cc: Borislav Petkov <bp@amd64.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+---
+ arch/x86/include/asm/mce.h           |    2 +-
+ arch/x86/kernel/cpu/mcheck/mce.c     |   18 ++++++++++++++----
+ arch/x86/kernel/cpu/mcheck/mce_amd.c |   18 +++++++++++-------
+ 3 files changed, 26 insertions(+), 12 deletions(-)
+
+diff --git a/arch/x86/include/asm/mce.h b/arch/x86/include/asm/mce.h
+index f35ce43..6aefb14 100644
+--- a/arch/x86/include/asm/mce.h
++++ b/arch/x86/include/asm/mce.h
+@@ -151,7 +151,7 @@ static inline void enable_p5_mce(void) {}
+ 
+ void mce_setup(struct mce *m);
+ void mce_log(struct mce *m);
+-DECLARE_PER_CPU(struct device, mce_device);
++extern struct device *mce_device[CONFIG_NR_CPUS];
+ 
+ /*
+  * Maximum banks number.
+diff --git a/arch/x86/kernel/cpu/mcheck/mce.c b/arch/x86/kernel/cpu/mcheck/mce.c
+index 29ba329..5a11ae2 100644
+--- a/arch/x86/kernel/cpu/mcheck/mce.c
++++ b/arch/x86/kernel/cpu/mcheck/mce.c
+@@ -1859,7 +1859,7 @@ static struct bus_type mce_subsys = {
+ 	.dev_name	= "machinecheck",
+ };
+ 
+-DEFINE_PER_CPU(struct device, mce_device);
++struct device *mce_device[CONFIG_NR_CPUS];
+ 
+ __cpuinitdata
+ void (*threshold_cpu_callback)(unsigned long action, unsigned int cpu);
+@@ -2001,19 +2001,27 @@ static struct device_attribute *mce_device_attrs[] = {
+ 
+ static cpumask_var_t mce_device_initialized;
+ 
++static void mce_device_release(struct device *dev)
++{
++	kfree(dev);
++}
++
+ /* Per cpu device init. All of the cpus still share the same ctrl bank: */
+ static __cpuinit int mce_device_create(unsigned int cpu)
+ {
+-	struct device *dev = &per_cpu(mce_device, cpu);
++	struct device *dev;
+ 	int err;
+ 	int i, j;
+ 
+ 	if (!mce_available(&boot_cpu_data))
+ 		return -EIO;
+ 
+-	memset(dev, 0, sizeof(struct device));
++	dev = kzalloc(sizeof *dev, GFP_KERNEL);
++	if (!dev)
++		return -ENOMEM;
+ 	dev->id  = cpu;
+ 	dev->bus = &mce_subsys;
++	dev->release = &mce_device_release;
+ 
+ 	err = device_register(dev);
+ 	if (err)
+@@ -2030,6 +2038,7 @@ static __cpuinit int mce_device_create(unsigned int cpu)
+ 			goto error2;
+ 	}
+ 	cpumask_set_cpu(cpu, mce_device_initialized);
++	mce_device[cpu] = dev;
+ 
+ 	return 0;
+ error2:
+@@ -2046,7 +2055,7 @@ error:
+ 
+ static __cpuinit void mce_device_remove(unsigned int cpu)
+ {
+-	struct device *dev = &per_cpu(mce_device, cpu);
++	struct device *dev = mce_device[cpu];
+ 	int i;
+ 
+ 	if (!cpumask_test_cpu(cpu, mce_device_initialized))
+@@ -2060,6 +2069,7 @@ static __cpuinit void mce_device_remove(unsigned int cpu)
+ 
+ 	device_unregister(dev);
+ 	cpumask_clear_cpu(cpu, mce_device_initialized);
++	mce_device[cpu] = NULL;
+ }
+ 
+ /* Make sure there are no machine checks on offlined CPUs. */
+diff --git a/arch/x86/kernel/cpu/mcheck/mce_amd.c b/arch/x86/kernel/cpu/mcheck/mce_amd.c
+index ba0b94a..786e76a 100644
+--- a/arch/x86/kernel/cpu/mcheck/mce_amd.c
++++ b/arch/x86/kernel/cpu/mcheck/mce_amd.c
+@@ -523,6 +523,7 @@ static __cpuinit int threshold_create_bank(unsigned int cpu, unsigned int bank)
+ {
+ 	int i, err = 0;
+ 	struct threshold_bank *b = NULL;
++	struct device *dev = mce_device[cpu];
+ 	char name[32];
+ 
+ 	sprintf(name, "threshold_bank%i", bank);
+@@ -543,8 +544,7 @@ static __cpuinit int threshold_create_bank(unsigned int cpu, unsigned int bank)
+ 		if (!b)
+ 			goto out;
+ 
+-		err = sysfs_create_link(&per_cpu(mce_device, cpu).kobj,
+-					b->kobj, name);
++		err = sysfs_create_link(&dev->kobj, b->kobj, name);
+ 		if (err)
+ 			goto out;
+ 
+@@ -565,7 +565,7 @@ static __cpuinit int threshold_create_bank(unsigned int cpu, unsigned int bank)
+ 		goto out;
+ 	}
+ 
+-	b->kobj = kobject_create_and_add(name, &per_cpu(mce_device, cpu).kobj);
++	b->kobj = kobject_create_and_add(name, &dev->kobj);
+ 	if (!b->kobj)
+ 		goto out_free;
+ 
+@@ -585,8 +585,9 @@ static __cpuinit int threshold_create_bank(unsigned int cpu, unsigned int bank)
+ 		if (i == cpu)
+ 			continue;
+ 
+-		err = sysfs_create_link(&per_cpu(mce_device, i).kobj,
+-					b->kobj, name);
++		dev = mce_device[i];
++		if (dev)
++			err = sysfs_create_link(&dev->kobj,b->kobj, name);
+ 		if (err)
+ 			goto out;
+ 
+@@ -649,6 +650,7 @@ static void deallocate_threshold_block(unsigned int cpu,
+ static void threshold_remove_bank(unsigned int cpu, int bank)
+ {
+ 	struct threshold_bank *b;
++	struct device *dev;
+ 	char name[32];
+ 	int i = 0;
+ 
+@@ -663,7 +665,7 @@ static void threshold_remove_bank(unsigned int cpu, int bank)
+ #ifdef CONFIG_SMP
+ 	/* sibling symlink */
+ 	if (shared_bank[bank] && b->blocks->cpu != cpu) {
+-		sysfs_remove_link(&per_cpu(mce_device, cpu).kobj, name);
++		sysfs_remove_link(&mce_device[cpu]->kobj, name);
+ 		per_cpu(threshold_banks, cpu)[bank] = NULL;
+ 
+ 		return;
+@@ -675,7 +677,9 @@ static void threshold_remove_bank(unsigned int cpu, int bank)
+ 		if (i == cpu)
+ 			continue;
+ 
+-		sysfs_remove_link(&per_cpu(mce_device, i).kobj, name);
++		dev = mce_device[i];
++		if (dev)
++			sysfs_remove_link(&dev->kobj, name);
+ 		per_cpu(threshold_banks, i)[bank] = NULL;
+ 	}
+ 
