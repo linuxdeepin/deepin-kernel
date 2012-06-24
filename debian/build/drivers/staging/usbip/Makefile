@@ -10,7 +10,7 @@ all:
 	mkdir -p userspace
 	cd userspace && $(srcdir)/configure \
 		--prefix=/usr \
-		--with-tcp-wrappers=no \
+		--with-tcp-wrappers \
 		--with-usbids-dir=/usr/share/misc \
 		--disable-shared
 	$(MAKE) -C userspace
