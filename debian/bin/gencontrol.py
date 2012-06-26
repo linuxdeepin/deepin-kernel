@@ -60,11 +60,7 @@ class Gencontrol(Base):
             'SOURCEVERSION': self.version.complete,
         })
 
-    def do_main_packages(self, packages, vars, makeflags, extra):
-        packages.extend(self.process_packages(self.templates["control.main"], self.vars))
-
-    def do_main_recurse(self, packages, makefile, vars, makeflags, extra):
-        # Add featureset source rules
+    def do_main_makefile(self, makefile, makeflags, extra):
         for featureset in iter(self.config['base', ]['featuresets']):
             makeflags_featureset = makeflags.copy()
             makeflags_featureset['FEATURESET'] = featureset
@@ -75,7 +71,12 @@ class Gencontrol(Base):
                          ['source_%s_real' % featureset])
             makefile.add('source', ['source_%s' % featureset])
 
-        super(Gencontrol, self).do_main_recurse(packages, makefile, vars, makeflags, extra)
+        makeflags = makeflags.copy()
+        makeflags['ALL_FEATURESETS'] = ' '.join(self.config['base', ]['featuresets'])
+        super(Gencontrol, self).do_main_makefile(makefile, makeflags, extra)
+
+    def do_main_packages(self, packages, vars, makeflags, extra):
+        packages.extend(self.process_packages(self.templates["control.main"], self.vars))
 
     arch_makeflags = (
         ('kernel-arch', 'KERNEL_ARCH', False),
@@ -121,34 +122,38 @@ class Gencontrol(Base):
                      ["$(MAKE) -f debian/rules.real install-libc-dev_%s %s" %
                       (arch, makeflags)])
 
-        # Add udebs using kernel-wedge
-        installer_def_dir = 'debian/installer'
-        installer_arch_dir = os.path.join(installer_def_dir, arch)
-        if os.path.isdir(installer_arch_dir):
-            kw_env = os.environ.copy()
-            kw_env['KW_DEFCONFIG_DIR'] = installer_def_dir
-            kw_env['KW_CONFIG_DIR'] = installer_arch_dir
-            kw_proc = subprocess.Popen(
-                ['kernel-wedge', 'gen-control',
-                 self.abiname],
-                stdout=subprocess.PIPE,
-                env=kw_env)
-            udeb_packages = read_control(kw_proc.stdout)
-            kw_proc.wait()
-            if kw_proc.returncode != 0:
-                raise RuntimeError('kernel-wedge exited with code %d' %
-                                   kw_proc.returncode)
+        if self.changelog[0].distribution == 'UNRELEASED' and os.getenv('DEBIAN_KERNEL_DISABLE_INSTALLER'):
+            import warnings
+            warnings.warn(u'Disable building of debug infos on request (DEBIAN_KERNEL_DISABLE_INSTALLER set)')
+        else:
+            # Add udebs using kernel-wedge
+            installer_def_dir = 'debian/installer'
+            installer_arch_dir = os.path.join(installer_def_dir, arch)
+            if os.path.isdir(installer_arch_dir):
+                kw_env = os.environ.copy()
+                kw_env['KW_DEFCONFIG_DIR'] = installer_def_dir
+                kw_env['KW_CONFIG_DIR'] = installer_arch_dir
+                kw_proc = subprocess.Popen(
+                    ['kernel-wedge', 'gen-control',
+                     self.abiname],
+                    stdout=subprocess.PIPE,
+                    env=kw_env)
+                udeb_packages = read_control(kw_proc.stdout)
+                kw_proc.wait()
+                if kw_proc.returncode != 0:
+                    raise RuntimeError('kernel-wedge exited with code %d' %
+                                       kw_proc.returncode)
 
-            self.merge_packages(packages, udeb_packages, arch)
+                self.merge_packages(packages, udeb_packages, arch)
 
-            # These packages must be built after the per-flavour/
-            # per-featureset packages.
-            makefile.add(
-                'binary-arch_%s' % arch,
-                cmds=["$(MAKE) -f debian/rules.real install-udeb_%s %s "
-                        "PACKAGE_NAMES='%s'" %
-                        (arch, makeflags,
-                         ' '.join(p['Package'] for p in udeb_packages))])
+                # These packages must be built after the per-flavour/
+                # per-featureset packages.
+                makefile.add(
+                    'binary-arch_%s' % arch,
+                    cmds=["$(MAKE) -f debian/rules.real install-udeb_%s %s "
+                            "PACKAGE_NAMES='%s'" %
+                            (arch, makeflags,
+                             ' '.join(p['Package'] for p in udeb_packages))])
 
     def do_featureset_setup(self, vars, makeflags, arch, featureset, extra):
         config_base = self.config.merge('base', arch, featureset)
@@ -289,7 +294,7 @@ class Gencontrol(Base):
 
         if build_debug and self.changelog[0].distribution == 'UNRELEASED' and os.getenv('DEBIAN_KERNEL_DISABLE_DEBUG'):
             import warnings
-            warnings.warn(u'Disable building of debug infos on request (DEBIAN_KERNEL_DISABLE_DEBUG)')
+            warnings.warn(u'Disable building of debug infos on request (DEBIAN_KERNEL_DISABLE_DEBUG set)')
             build_debug = False
 
         if build_debug:
@@ -345,10 +350,10 @@ class Gencontrol(Base):
         cmds_binary_arch = ["$(MAKE) -f debian/rules.real binary-arch-flavour %s" % makeflags]
         if packages_dummy:
             cmds_binary_arch.append("$(MAKE) -f debian/rules.real install-dummy DH_OPTIONS='%s' %s" % (' '.join(["-p%s" % i['Package'] for i in packages_dummy]), makeflags))
-        cmds_build = ["$(MAKE) -f debian/rules.real build %s" % makeflags]
+        cmds_build = ["$(MAKE) -f debian/rules.real build-arch %s" % makeflags]
         cmds_setup = ["$(MAKE) -f debian/rules.real setup-flavour %s" % makeflags]
         makefile.add('binary-arch_%s_%s_%s_real' % (arch, featureset, flavour), cmds=cmds_binary_arch)
-        makefile.add('build_%s_%s_%s_real' % (arch, featureset, flavour), cmds=cmds_build)
+        makefile.add('build-arch_%s_%s_%s_real' % (arch, featureset, flavour), cmds=cmds_build)
         makefile.add('setup_%s_%s_%s_real' % (arch, featureset, flavour), cmds=cmds_setup)
 
     def merge_packages(self, packages, new, arch):

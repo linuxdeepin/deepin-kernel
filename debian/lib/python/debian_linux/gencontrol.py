@@ -77,7 +77,7 @@ class MakeFlags(dict):
 
 
 class Gencontrol(object):
-    makefile_targets = ('binary-arch', 'build', 'setup')
+    makefile_targets = ('binary-arch', 'build-arch', 'setup')
 
     def __init__(self, config, templates, version=Version):
         self.config, self.templates = config, templates
@@ -114,8 +114,7 @@ class Gencontrol(object):
         pass
 
     def do_main_makefile(self, makefile, makeflags, extra):
-        makeflags = makeflags.copy()
-        makeflags['ALL_FEATURESETS'] = ' '.join(self.config['base', ]['featuresets'])
+        makefile.add('build-indep', cmds=["$(MAKE) -f debian/rules.real build-indep %s" % makeflags])
         makefile.add('binary-indep', cmds=["$(MAKE) -f debian/rules.real binary-indep %s" % makeflags])
 
     def do_main_packages(self, packages, vars, makeflags, extra):
