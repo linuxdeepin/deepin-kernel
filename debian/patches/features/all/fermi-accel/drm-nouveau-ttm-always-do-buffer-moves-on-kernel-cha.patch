@@ -1,0 +1,99 @@
+From: Ben Skeggs <bskeggs@redhat.com>
+Date: Fri, 16 Mar 2012 12:40:17 +1000
+Subject: [1/9] drm/nouveau/ttm: always do buffer moves on kernel channel
+
+commit accf94969f226ddfe7dd3a6a76ce093ace839b26 upstream.
+
+There was once good reasons for wanting the drm to be able to use M2MF etc
+on user channels, but they're not relevant anymore.  For the general
+buffer move case, we've already lost by transferring between vram/sysmem
+already so the context switching overhead is minimal in comparison.
+
+Signed-off-by: Ben Skeggs <bskeggs@redhat.com>
+---
+ drivers/gpu/drm/nouveau/nouveau_bo.c  |   11 +++--------
+ drivers/gpu/drm/nouveau/nouveau_drv.h |    2 --
+ drivers/gpu/drm/nouveau/nouveau_gem.c |   10 +---------
+ 3 files changed, 4 insertions(+), 19 deletions(-)
+
+diff --git a/drivers/gpu/drm/nouveau/nouveau_bo.c b/drivers/gpu/drm/nouveau/nouveau_bo.c
+index ec54364..7d15a77 100644
+--- a/drivers/gpu/drm/nouveau/nouveau_bo.c
++++ b/drivers/gpu/drm/nouveau/nouveau_bo.c
+@@ -693,16 +693,12 @@ nouveau_bo_move_m2mf(struct ttm_buffer_object *bo, int evict, bool intr,
+ 		     struct ttm_mem_reg *new_mem)
+ {
+ 	struct drm_nouveau_private *dev_priv = nouveau_bdev(bo->bdev);
++	struct nouveau_channel *chan = chan = dev_priv->channel;
+ 	struct nouveau_bo *nvbo = nouveau_bo(bo);
+ 	struct ttm_mem_reg *old_mem = &bo->mem;
+-	struct nouveau_channel *chan;
+ 	int ret;
+ 
+-	chan = nvbo->channel;
+-	if (!chan) {
+-		chan = dev_priv->channel;
+-		mutex_lock_nested(&chan->mutex, NOUVEAU_KCHANNEL_MUTEX);
+-	}
++	mutex_lock_nested(&chan->mutex, NOUVEAU_KCHANNEL_MUTEX);
+ 
+ 	/* create temporary vmas for the transfer and attach them to the
+ 	 * old nouveau_mem node, these will get cleaned up after ttm has
+@@ -734,8 +730,7 @@ nouveau_bo_move_m2mf(struct ttm_buffer_object *bo, int evict, bool intr,
+ 	}
+ 
+ out:
+-	if (chan == dev_priv->channel)
+-		mutex_unlock(&chan->mutex);
++	mutex_unlock(&chan->mutex);
+ 	return ret;
+ }
+ 
+diff --git a/drivers/gpu/drm/nouveau/nouveau_drv.h b/drivers/gpu/drm/nouveau/nouveau_drv.h
+index a184ba3..0df2175 100644
+--- a/drivers/gpu/drm/nouveau/nouveau_drv.h
++++ b/drivers/gpu/drm/nouveau/nouveau_drv.h
+@@ -113,8 +113,6 @@ struct nouveau_bo {
+ 	int pbbo_index;
+ 	bool validate_mapped;
+ 
+-	struct nouveau_channel *channel;
+-
+ 	struct list_head vma_list;
+ 	unsigned page_shift;
+ 
+diff --git a/drivers/gpu/drm/nouveau/nouveau_gem.c b/drivers/gpu/drm/nouveau/nouveau_gem.c
+index 7ce3fde..ed52a6f 100644
+--- a/drivers/gpu/drm/nouveau/nouveau_gem.c
++++ b/drivers/gpu/drm/nouveau/nouveau_gem.c
+@@ -426,9 +426,7 @@ validate_list(struct nouveau_channel *chan, struct list_head *list,
+ 			return ret;
+ 		}
+ 
+-		nvbo->channel = (b->read_domains & (1 << 31)) ? NULL : chan;
+ 		ret = nouveau_bo_validate(nvbo, true, false, false);
+-		nvbo->channel = NULL;
+ 		if (unlikely(ret)) {
+ 			if (ret != -ERESTARTSYS)
+ 				NV_ERROR(dev, "fail ttm_validate\n");
+@@ -678,19 +676,13 @@ nouveau_gem_ioctl_pushbuf(struct drm_device *dev, void *data,
+ 		return PTR_ERR(bo);
+ 	}
+ 
+-	/* Mark push buffers as being used on PFIFO, the validation code
+-	 * will then make sure that if the pushbuf bo moves, that they
+-	 * happen on the kernel channel, which will in turn cause a sync
+-	 * to happen before we try and submit the push buffer.
+-	 */
++	/* Ensure all push buffers are on validate list */
+ 	for (i = 0; i < req->nr_push; i++) {
+ 		if (push[i].bo_index >= req->nr_buffers) {
+ 			NV_ERROR(dev, "push %d buffer not in list\n", i);
+ 			ret = -EINVAL;
+ 			goto out_prevalid;
+ 		}
+-
+-		bo[push[i].bo_index].read_domains |= (1 << 31);
+ 	}
+ 
+ 	/* Validate buffer list */
