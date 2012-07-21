@@ -1,0 +1,106 @@
+From: =?UTF-8?q?Bj=C3=B8rn=20Mork?= <bjorn@mork.no>
+Date: Thu, 19 Jul 2012 06:28:40 +0000
+Subject: net: e100: ucode is optional in some cases
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+commit 8b0d2f9ed3d8e92feada7c5d70fa85be46e6f948 upstream.
+
+commit 9ac32e1b firmware: convert e100 driver to request_firmware()
+
+did a straight conversion of the in-driver ucode to external
+files.  This introduced the possibility of the driver failing
+to enable an interface due to missing ucode. There was no
+evaluation of the importance of the ucode at the time.
+
+Based on comments in earlier versions of this driver, and in
+the source code for the FreeBSD fxp driver, we can assume that
+the ucode implements the "CPU Cycle Saver" feature on supported
+adapters.  Although generally wanted, this is an optional
+feature. The ucode source is not available, preventing it from
+being included in free distributions. This creates unnecessary
+problems for the end users. Doing a network install based on a
+free distribution installer requires the user to download and
+insert the ucode into the installer.
+
+Making the ucode optional when possible improves the user
+experience and driver usability.
+
+The ucode for some adapters include a bugfix, making it
+essential.  We continue to fail for these adapters unless the
+ucode is available.
+
+Signed-off-by: Bjørn Mork <bjorn@mork.no>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/ethernet/intel/e100.c |   40 ++++++++++++++++++++++++++++---------
+ 1 file changed, 31 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/e100.c b/drivers/net/ethernet/intel/e100.c
+index ada720b..535f94f 100644
+--- a/drivers/net/ethernet/intel/e100.c
++++ b/drivers/net/ethernet/intel/e100.c
+@@ -1249,20 +1249,35 @@ static const struct firmware *e100_request_firmware(struct nic *nic)
+ 	const struct firmware *fw = nic->fw;
+ 	u8 timer, bundle, min_size;
+ 	int err = 0;
++	bool required = false;
+ 
+ 	/* do not load u-code for ICH devices */
+ 	if (nic->flags & ich)
+ 		return NULL;
+ 
+-	/* Search for ucode match against h/w revision */
+-	if (nic->mac == mac_82559_D101M)
++	/* Search for ucode match against h/w revision
++	 *
++	 * Based on comments in the source code for the FreeBSD fxp
++	 * driver, the FIRMWARE_D102E ucode includes both CPUSaver and
++	 *
++	 *    "fixes for bugs in the B-step hardware (specifically, bugs
++	 *     with Inline Receive)."
++	 *
++	 * So we must fail if it cannot be loaded.
++	 *
++	 * The other microcode files are only required for the optional
++	 * CPUSaver feature.  Nice to have, but no reason to fail.
++	 */
++	if (nic->mac == mac_82559_D101M) {
+ 		fw_name = FIRMWARE_D101M;
+-	else if (nic->mac == mac_82559_D101S)
++	} else if (nic->mac == mac_82559_D101S) {
+ 		fw_name = FIRMWARE_D101S;
+-	else if (nic->mac == mac_82551_F || nic->mac == mac_82551_10)
++	} else if (nic->mac == mac_82551_F || nic->mac == mac_82551_10) {
+ 		fw_name = FIRMWARE_D102E;
+-	else /* No ucode on other devices */
++		required = true;
++	} else { /* No ucode on other devices */
+ 		return NULL;
++	}
+ 
+ 	/* If the firmware has not previously been loaded, request a pointer
+ 	 * to it. If it was previously loaded, we are reinitializing the
+@@ -1273,10 +1288,17 @@ static const struct firmware *e100_request_firmware(struct nic *nic)
+ 		err = request_firmware(&fw, fw_name, &nic->pdev->dev);
+ 
+ 	if (err) {
+-		netif_err(nic, probe, nic->netdev,
+-			  "Failed to load firmware \"%s\": %d\n",
+-			  fw_name, err);
+-		return ERR_PTR(err);
++		if (required) {
++			netif_err(nic, probe, nic->netdev,
++				  "Failed to load firmware \"%s\": %d\n",
++				  fw_name, err);
++			return ERR_PTR(err);
++		} else {
++			netif_info(nic, probe, nic->netdev,
++				   "CPUSaver disabled. Needs \"%s\": %d\n",
++				   fw_name, err);
++			return NULL;
++		}
+ 	}
+ 
+ 	/* Firmware should be precisely UCODE_SIZE (words) plus three bytes
