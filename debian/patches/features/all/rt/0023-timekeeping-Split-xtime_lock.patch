@@ -9,6 +9,10 @@ code pathes. This is a straight forward split, so we can avoid the
 whole mess with raw seqlocks for RT.
 
 Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+[bwh: Forward-ported to 3.2.24: adjust context; drop changes to
+ ntp_leap_second() function removed by commit
+ 6b43ae8a619d17c4935c3320d2ef9e92bdeed05d ('ntp: Fix leap-second hrtimer
+ livelock')]
 ---
  kernel/time/jiffies.c       |    4 +-
  kernel/time/ntp.c           |   24 ++++++++----
@@ -18,8 +22,6 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  kernel/time/timekeeping.c   |   90 +++++++++++++++++++++++++------------------
  6 files changed, 88 insertions(+), 59 deletions(-)
 
-diff --git a/kernel/time/jiffies.c b/kernel/time/jiffies.c
-index a470154..21940eb 100644
 --- a/kernel/time/jiffies.c
 +++ b/kernel/time/jiffies.c
 @@ -74,9 +74,9 @@ u64 get_jiffies_64(void)
@@ -34,31 +36,9 @@ index a470154..21940eb 100644
  	return ret;
  }
  EXPORT_SYMBOL(get_jiffies_64);
-diff --git a/kernel/time/ntp.c b/kernel/time/ntp.c
-index 4b85a7a..419cbaa 100644
 --- a/kernel/time/ntp.c
 +++ b/kernel/time/ntp.c
-@@ -358,7 +358,8 @@ static enum hrtimer_restart ntp_leap_second(struct hrtimer *timer)
- {
- 	enum hrtimer_restart res = HRTIMER_NORESTART;
- 
--	write_seqlock(&xtime_lock);
-+	raw_spin_lock(&xtime_lock);
-+	write_seqcount_begin(&xtime_seq);
- 
- 	switch (time_state) {
- 	case TIME_OK:
-@@ -388,7 +389,8 @@ static enum hrtimer_restart ntp_leap_second(struct hrtimer *timer)
- 		break;
- 	}
- 
--	write_sequnlock(&xtime_lock);
-+	write_seqcount_end(&xtime_seq);
-+	raw_spin_unlock(&xtime_lock);
- 
- 	return res;
- }
-@@ -663,7 +665,8 @@ int do_adjtimex(struct timex *txc)
+@@ -623,7 +623,8 @@ int do_adjtimex(struct timex *txc)
  
  	getnstimeofday(&ts);
  
@@ -68,7 +48,7 @@ index 4b85a7a..419cbaa 100644
  
  	if (txc->modes & ADJ_ADJTIME) {
  		long save_adjust = time_adjust;
-@@ -705,7 +708,8 @@ int do_adjtimex(struct timex *txc)
+@@ -665,7 +666,8 @@ int do_adjtimex(struct timex *txc)
  	/* fill PPS status fields */
  	pps_fill_timex(txc);
  
@@ -78,7 +58,7 @@ index 4b85a7a..419cbaa 100644
  
  	txc->time.tv_sec = ts.tv_sec;
  	txc->time.tv_usec = ts.tv_nsec;
-@@ -903,7 +907,8 @@ void hardpps(const struct timespec *phase_ts, const struct timespec *raw_ts)
+@@ -863,7 +865,8 @@ void hardpps(const struct timespec *phas
  
  	pts_norm = pps_normalize_ts(*phase_ts);
  
@@ -88,7 +68,7 @@ index 4b85a7a..419cbaa 100644
  
  	/* clear the error bits, they will be set again if needed */
  	time_status &= ~(STA_PPSJITTER | STA_PPSWANDER | STA_PPSERROR);
-@@ -916,7 +921,8 @@ void hardpps(const struct timespec *phase_ts, const struct timespec *raw_ts)
+@@ -876,7 +879,8 @@ void hardpps(const struct timespec *phas
  	 * just start the frequency interval */
  	if (unlikely(pps_fbase.tv_sec == 0)) {
  		pps_fbase = *raw_ts;
@@ -98,7 +78,7 @@ index 4b85a7a..419cbaa 100644
  		return;
  	}
  
-@@ -931,7 +937,8 @@ void hardpps(const struct timespec *phase_ts, const struct timespec *raw_ts)
+@@ -891,7 +895,8 @@ void hardpps(const struct timespec *phas
  		time_status |= STA_PPSJITTER;
  		/* restart the frequency calibration interval */
  		pps_fbase = *raw_ts;
@@ -108,7 +88,7 @@ index 4b85a7a..419cbaa 100644
  		pr_err("hardpps: PPSJITTER: bad pulse\n");
  		return;
  	}
-@@ -948,7 +955,8 @@ void hardpps(const struct timespec *phase_ts, const struct timespec *raw_ts)
+@@ -908,7 +913,8 @@ void hardpps(const struct timespec *phas
  
  	hardpps_update_phase(pts_norm.nsec);
  
@@ -118,8 +98,6 @@ index 4b85a7a..419cbaa 100644
  }
  EXPORT_SYMBOL(hardpps);
  
-diff --git a/kernel/time/tick-common.c b/kernel/time/tick-common.c
-index da6c9ec..39de540 100644
 --- a/kernel/time/tick-common.c
 +++ b/kernel/time/tick-common.c
 @@ -63,13 +63,15 @@ int tick_is_oneshot_available(void)
@@ -140,7 +118,7 @@ index da6c9ec..39de540 100644
  	}
  
  	update_process_times(user_mode(get_irq_regs()));
-@@ -130,9 +132,9 @@ void tick_setup_periodic(struct clock_event_device *dev, int broadcast)
+@@ -130,9 +132,9 @@ void tick_setup_periodic(struct clock_ev
  		ktime_t next;
  
  		do {
@@ -152,22 +130,18 @@ index da6c9ec..39de540 100644
  
  		clockevents_set_mode(dev, CLOCK_EVT_MODE_ONESHOT);
  
-diff --git a/kernel/time/tick-internal.h b/kernel/time/tick-internal.h
-index 4e265b9..c91100d 100644
 --- a/kernel/time/tick-internal.h
 +++ b/kernel/time/tick-internal.h
-@@ -141,4 +141,5 @@ static inline int tick_device_is_functional(struct clock_event_device *dev)
+@@ -141,4 +141,5 @@ static inline int tick_device_is_functio
  #endif
  
  extern void do_timer(unsigned long ticks);
 -extern seqlock_t xtime_lock;
 +extern raw_spinlock_t xtime_lock;
 +extern seqcount_t xtime_seq;
-diff --git a/kernel/time/tick-sched.c b/kernel/time/tick-sched.c
-index c923640..d7abd2f 100644
 --- a/kernel/time/tick-sched.c
 +++ b/kernel/time/tick-sched.c
-@@ -56,7 +56,8 @@ static void tick_do_update_jiffies64(ktime_t now)
+@@ -56,7 +56,8 @@ static void tick_do_update_jiffies64(kti
  		return;
  
  	/* Reevalute with xtime_lock held */
@@ -177,7 +151,7 @@ index c923640..d7abd2f 100644
  
  	delta = ktime_sub(now, last_jiffies_update);
  	if (delta.tv64 >= tick_period.tv64) {
-@@ -79,7 +80,8 @@ static void tick_do_update_jiffies64(ktime_t now)
+@@ -79,7 +80,8 @@ static void tick_do_update_jiffies64(kti
  		/* Keep the tick_next_period variable up to date */
  		tick_next_period = ktime_add(last_jiffies_update, tick_period);
  	}
@@ -187,7 +161,7 @@ index c923640..d7abd2f 100644
  }
  
  /*
-@@ -89,12 +91,14 @@ static ktime_t tick_init_jiffy_update(void)
+@@ -89,12 +91,14 @@ static ktime_t tick_init_jiffy_update(vo
  {
  	ktime_t period;
  
@@ -204,7 +178,7 @@ index c923640..d7abd2f 100644
  	return period;
  }
  
-@@ -345,11 +349,11 @@ void tick_nohz_stop_sched_tick(int inidle)
+@@ -345,11 +349,11 @@ void tick_nohz_stop_sched_tick(int inidl
  	ts->idle_calls++;
  	/* Read jiffies and the time when jiffies were updated last */
  	do {
@@ -218,11 +192,9 @@ index c923640..d7abd2f 100644
  
  	if (rcu_needs_cpu(cpu) || printk_needs_cpu(cpu) ||
  	    arch_needs_cpu(cpu)) {
-diff --git a/kernel/time/timekeeping.c b/kernel/time/timekeeping.c
-index 2378413..da9e1f9 100644
 --- a/kernel/time/timekeeping.c
 +++ b/kernel/time/timekeeping.c
-@@ -139,8 +139,8 @@ static inline s64 timekeeping_get_ns_raw(void)
+@@ -139,8 +139,8 @@ static inline s64 timekeeping_get_ns_raw
   * This read-write spinlock protects us from races in SMP while
   * playing with xtime.
   */
@@ -233,7 +205,7 @@ index 2378413..da9e1f9 100644
  
  /*
   * The current time
-@@ -222,7 +222,7 @@ void getnstimeofday(struct timespec *ts)
+@@ -242,7 +242,7 @@ void getnstimeofday(struct timespec *ts)
  	WARN_ON(timekeeping_suspended);
  
  	do {
@@ -242,7 +214,7 @@ index 2378413..da9e1f9 100644
  
  		*ts = xtime;
  		nsecs = timekeeping_get_ns();
-@@ -230,7 +230,7 @@ void getnstimeofday(struct timespec *ts)
+@@ -250,7 +250,7 @@ void getnstimeofday(struct timespec *ts)
  		/* If arch requires, add in gettimeoffset() */
  		nsecs += arch_gettimeoffset();
  
@@ -251,7 +223,7 @@ index 2378413..da9e1f9 100644
  
  	timespec_add_ns(ts, nsecs);
  }
-@@ -245,14 +245,14 @@ ktime_t ktime_get(void)
+@@ -265,14 +265,14 @@ ktime_t ktime_get(void)
  	WARN_ON(timekeeping_suspended);
  
  	do {
@@ -268,7 +240,7 @@ index 2378413..da9e1f9 100644
  	/*
  	 * Use ktime_set/ktime_add_ns to create a proper ktime on
  	 * 32-bit architectures without CONFIG_KTIME_SCALAR.
-@@ -278,14 +278,14 @@ void ktime_get_ts(struct timespec *ts)
+@@ -298,14 +298,14 @@ void ktime_get_ts(struct timespec *ts)
  	WARN_ON(timekeeping_suspended);
  
  	do {
@@ -285,7 +257,7 @@ index 2378413..da9e1f9 100644
  
  	set_normalized_timespec(ts, ts->tv_sec + tomono.tv_sec,
  				ts->tv_nsec + tomono.tv_nsec + nsecs);
-@@ -313,7 +313,7 @@ void getnstime_raw_and_real(struct timespec *ts_raw, struct timespec *ts_real)
+@@ -333,7 +333,7 @@ void getnstime_raw_and_real(struct times
  	do {
  		u32 arch_offset;
  
@@ -294,7 +266,7 @@ index 2378413..da9e1f9 100644
  
  		*ts_raw = raw_time;
  		*ts_real = xtime;
-@@ -326,7 +326,7 @@ void getnstime_raw_and_real(struct timespec *ts_raw, struct timespec *ts_real)
+@@ -346,7 +346,7 @@ void getnstime_raw_and_real(struct times
  		nsecs_raw += arch_offset;
  		nsecs_real += arch_offset;
  
@@ -303,7 +275,7 @@ index 2378413..da9e1f9 100644
  
  	timespec_add_ns(ts_raw, nsecs_raw);
  	timespec_add_ns(ts_real, nsecs_real);
-@@ -365,7 +365,8 @@ int do_settimeofday(const struct timespec *tv)
+@@ -385,7 +385,8 @@ int do_settimeofday(const struct timespe
  	if ((unsigned long)tv->tv_nsec >= NSEC_PER_SEC)
  		return -EINVAL;
  
@@ -313,9 +285,9 @@ index 2378413..da9e1f9 100644
  
  	timekeeping_forward_now();
  
-@@ -381,7 +382,8 @@ int do_settimeofday(const struct timespec *tv)
- 	update_vsyscall(&xtime, &wall_to_monotonic, timekeeper.clock,
- 				timekeeper.mult);
+@@ -397,7 +398,8 @@ int do_settimeofday(const struct timespe
+ 
+ 	timekeeping_update(true);
  
 -	write_sequnlock_irqrestore(&xtime_lock, flags);
 +	write_seqcount_end(&xtime_seq);
@@ -323,7 +295,7 @@ index 2378413..da9e1f9 100644
  
  	/* signal hrtimers about time change */
  	clock_was_set();
-@@ -405,7 +407,8 @@ int timekeeping_inject_offset(struct timespec *ts)
+@@ -421,7 +423,8 @@ int timekeeping_inject_offset(struct tim
  	if ((unsigned long)ts->tv_nsec >= NSEC_PER_SEC)
  		return -EINVAL;
  
@@ -333,9 +305,9 @@ index 2378413..da9e1f9 100644
  
  	timekeeping_forward_now();
  
-@@ -418,7 +421,8 @@ int timekeeping_inject_offset(struct timespec *ts)
- 	update_vsyscall(&xtime, &wall_to_monotonic, timekeeper.clock,
- 				timekeeper.mult);
+@@ -430,7 +433,8 @@ int timekeeping_inject_offset(struct tim
+ 
+ 	timekeeping_update(true);
  
 -	write_sequnlock_irqrestore(&xtime_lock, flags);
 +	write_seqcount_end(&xtime_seq);
@@ -343,7 +315,7 @@ index 2378413..da9e1f9 100644
  
  	/* signal hrtimers about time change */
  	clock_was_set();
-@@ -490,11 +494,11 @@ void getrawmonotonic(struct timespec *ts)
+@@ -502,11 +506,11 @@ void getrawmonotonic(struct timespec *ts
  	s64 nsecs;
  
  	do {
@@ -357,7 +329,7 @@ index 2378413..da9e1f9 100644
  
  	timespec_add_ns(ts, nsecs);
  }
-@@ -510,11 +514,11 @@ int timekeeping_valid_for_hres(void)
+@@ -522,11 +526,11 @@ int timekeeping_valid_for_hres(void)
  	int ret;
  
  	do {
@@ -371,7 +343,7 @@ index 2378413..da9e1f9 100644
  
  	return ret;
  }
-@@ -572,7 +576,8 @@ void __init timekeeping_init(void)
+@@ -584,7 +588,8 @@ void __init timekeeping_init(void)
  	read_persistent_clock(&now);
  	read_boot_clock(&boot);
  
@@ -381,8 +353,8 @@ index 2378413..da9e1f9 100644
  
  	ntp_init();
  
-@@ -593,7 +598,8 @@ void __init timekeeping_init(void)
- 				-boot.tv_sec, -boot.tv_nsec);
+@@ -606,7 +611,8 @@ void __init timekeeping_init(void)
+ 	update_rt_offset();
  	total_sleep_time.tv_sec = 0;
  	total_sleep_time.tv_nsec = 0;
 -	write_sequnlock_irqrestore(&xtime_lock, flags);
@@ -391,7 +363,7 @@ index 2378413..da9e1f9 100644
  }
  
  /* time in seconds when suspend began */
-@@ -640,7 +646,8 @@ void timekeeping_inject_sleeptime(struct timespec *delta)
+@@ -659,14 +665,16 @@ void timekeeping_inject_sleeptime(struct
  	if (!(ts.tv_sec == 0 && ts.tv_nsec == 0))
  		return;
  
@@ -401,9 +373,8 @@ index 2378413..da9e1f9 100644
  	timekeeping_forward_now();
  
  	__timekeeping_inject_sleeptime(delta);
-@@ -650,7 +657,8 @@ void timekeeping_inject_sleeptime(struct timespec *delta)
- 	update_vsyscall(&xtime, &wall_to_monotonic, timekeeper.clock,
- 				timekeeper.mult);
+ 
+ 	timekeeping_update(true);
  
 -	write_sequnlock_irqrestore(&xtime_lock, flags);
 +	write_seqcount_end(&xtime_seq);
@@ -411,7 +382,7 @@ index 2378413..da9e1f9 100644
  
  	/* signal hrtimers about time change */
  	clock_was_set();
-@@ -673,7 +681,8 @@ static void timekeeping_resume(void)
+@@ -689,7 +697,8 @@ static void timekeeping_resume(void)
  
  	clocksource_resume();
  
@@ -421,17 +392,17 @@ index 2378413..da9e1f9 100644
  
  	if (timespec_compare(&ts, &timekeeping_suspend_time) > 0) {
  		ts = timespec_sub(ts, timekeeping_suspend_time);
-@@ -683,7 +692,8 @@ static void timekeeping_resume(void)
- 	timekeeper.clock->cycle_last = timekeeper.clock->read(timekeeper.clock);
+@@ -700,7 +709,8 @@ static void timekeeping_resume(void)
  	timekeeper.ntp_error = 0;
  	timekeeping_suspended = 0;
+ 	timekeeping_update(false);
 -	write_sequnlock_irqrestore(&xtime_lock, flags);
 +	write_seqcount_end(&xtime_seq);
 +	raw_spin_unlock_irqrestore(&xtime_lock, flags);
  
  	touch_softlockup_watchdog();
  
-@@ -701,7 +711,8 @@ static int timekeeping_suspend(void)
+@@ -718,7 +728,8 @@ static int timekeeping_suspend(void)
  
  	read_persistent_clock(&timekeeping_suspend_time);
  
@@ -441,7 +412,7 @@ index 2378413..da9e1f9 100644
  	timekeeping_forward_now();
  	timekeeping_suspended = 1;
  
-@@ -724,7 +735,8 @@ static int timekeeping_suspend(void)
+@@ -741,7 +752,8 @@ static int timekeeping_suspend(void)
  		timekeeping_suspend_time =
  			timespec_add(timekeeping_suspend_time, delta_delta);
  	}
@@ -451,7 +422,7 @@ index 2378413..da9e1f9 100644
  
  	clockevents_notify(CLOCK_EVT_NOTIFY_SUSPEND, NULL);
  	clocksource_suspend();
-@@ -1101,13 +1113,13 @@ void get_monotonic_boottime(struct timespec *ts)
+@@ -1126,13 +1138,13 @@ void get_monotonic_boottime(struct times
  	WARN_ON(timekeeping_suspended);
  
  	do {
@@ -467,7 +438,7 @@ index 2378413..da9e1f9 100644
  
  	set_normalized_timespec(ts, ts->tv_sec + tomono.tv_sec + sleep.tv_sec,
  			ts->tv_nsec + tomono.tv_nsec + sleep.tv_nsec + nsecs);
-@@ -1158,10 +1170,10 @@ struct timespec current_kernel_time(void)
+@@ -1183,10 +1195,10 @@ struct timespec current_kernel_time(void
  	unsigned long seq;
  
  	do {
@@ -480,7 +451,7 @@ index 2378413..da9e1f9 100644
  
  	return now;
  }
-@@ -1173,11 +1185,11 @@ struct timespec get_monotonic_coarse(void)
+@@ -1198,11 +1210,11 @@ struct timespec get_monotonic_coarse(voi
  	unsigned long seq;
  
  	do {
@@ -494,7 +465,7 @@ index 2378413..da9e1f9 100644
  
  	set_normalized_timespec(&now, now.tv_sec + mono.tv_sec,
  				now.tv_nsec + mono.tv_nsec);
-@@ -1209,11 +1221,11 @@ void get_xtime_and_monotonic_and_sleep_offset(struct timespec *xtim,
+@@ -1234,11 +1246,11 @@ void get_xtime_and_monotonic_and_sleep_o
  	unsigned long seq;
  
  	do {
@@ -507,8 +478,8 @@ index 2378413..da9e1f9 100644
 +	} while (read_seqcount_retry(&xtime_seq, seq));
  }
  
- /**
-@@ -1225,9 +1237,9 @@ ktime_t ktime_get_monotonic_offset(void)
+ #ifdef CONFIG_HIGH_RES_TIMERS
+@@ -1284,9 +1296,9 @@ ktime_t ktime_get_monotonic_offset(void)
  	struct timespec wtom;
  
  	do {
@@ -520,7 +491,7 @@ index 2378413..da9e1f9 100644
  	return timespec_to_ktime(wtom);
  }
  
-@@ -1239,7 +1251,9 @@ ktime_t ktime_get_monotonic_offset(void)
+@@ -1298,7 +1310,9 @@ ktime_t ktime_get_monotonic_offset(void)
   */
  void xtime_update(unsigned long ticks)
  {
@@ -532,6 +503,3 @@ index 2378413..da9e1f9 100644
 +	write_seqcount_end(&xtime_seq);
 +	raw_spin_unlock(&xtime_lock);
  }
--- 
-1.7.10
-

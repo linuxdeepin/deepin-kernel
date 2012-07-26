@@ -1,0 +1,85 @@
+From 331cf8308dcde22597583c4be4eabdc5d168c703 Mon Sep 17 00:00:00 2001
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Wed, 25 Jul 2012 05:26:58 +0100
+Subject: [PATCH 3/4] libsas: Avoid ABI change in 3.2.24
+
+Revert commit 6ef1b512f4e6f936d89aa20be3d97a7ec7c290ac ('libsas: fix
+taskfile corruption in sas_ata_qc_fill_rtf') and fix the bug in a
+different way.
+
+SATA command results must be converted from FIS to ata_taskfile
+format.  This is done in two stages via a temporary buffer in
+struct sata_device, as the source and target addresses aren't
+known at the same time (?).
+
+The old code does conversion and then memcpy(), which is wrong
+because the conversion only assigns some members and the rest
+of the target structure should be left unchanged.
+
+The upstream fix switches this to memcpy() and conversion, but
+that changes the temporary buffer format and makes it larger
+(the ABI change).
+
+This fix changes the memcpy() to write only the target members
+that would be written by the conversion function.
+---
+ drivers/scsi/libsas/sas_ata.c |   15 +++++++++------
+ include/scsi/libsas.h         |    2 +-
+ 2 files changed, 10 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/scsi/libsas/sas_ata.c b/drivers/scsi/libsas/sas_ata.c
+index 4868fc9..c707410 100644
+--- a/drivers/scsi/libsas/sas_ata.c
++++ b/drivers/scsi/libsas/sas_ata.c
+@@ -112,12 +112,12 @@ static void sas_ata_task_done(struct sas_task *task)
+ 	if (stat->stat == SAS_PROTO_RESPONSE || stat->stat == SAM_STAT_GOOD ||
+ 	    ((stat->stat == SAM_STAT_CHECK_CONDITION &&
+ 	      dev->sata_dev.command_set == ATAPI_COMMAND_SET))) {
+-		memcpy(dev->sata_dev.fis, resp->ending_fis, ATA_RESP_FIS_SIZE);
++		ata_tf_from_fis(resp->ending_fis, &dev->sata_dev.tf);
+ 
+ 		if (!link->sactive) {
+-			qc->err_mask |= ac_err_mask(dev->sata_dev.fis[2]);
++			qc->err_mask |= ac_err_mask(dev->sata_dev.tf.command);
+ 		} else {
+-			link->eh_info.err_mask |= ac_err_mask(dev->sata_dev.fis[2]);
++			link->eh_info.err_mask |= ac_err_mask(dev->sata_dev.tf.command);
+ 			if (unlikely(link->eh_info.err_mask))
+ 				qc->flags |= ATA_QCFLAG_FAILED;
+ 		}
+@@ -138,8 +138,8 @@ static void sas_ata_task_done(struct sas_task *task)
+ 				qc->flags |= ATA_QCFLAG_FAILED;
+ 			}
+ 
+-			dev->sata_dev.fis[3] = 0x04; /* status err */
+-			dev->sata_dev.fis[2] = ATA_ERR;
++			dev->sata_dev.tf.feature = 0x04; /* status err */
++			dev->sata_dev.tf.command = ATA_ERR;
+ 		}
+ 	}
+ 
+@@ -252,7 +252,10 @@ static bool sas_ata_qc_fill_rtf(struct ata_queued_cmd *qc)
+ {
+ 	struct domain_device *dev = qc->ap->private_data;
+ 
+-	ata_tf_from_fis(dev->sata_dev.fis, &qc->result_tf);
++	/* Copy only those fields that ata_tf_from_fis() sets */
++	memcpy(&qc->result_tf.hob_nsect, &dev->sata_dev.tf.hob_nsect,
++	       sizeof(dev->sata_dev.tf) -
++	       offsetof(struct ata_taskfile, hob_nsect));
+ 	return true;
+ }
+ 
+diff --git a/include/scsi/libsas.h b/include/scsi/libsas.h
+index 1e100c6..4cd529d 100644
+--- a/include/scsi/libsas.h
++++ b/include/scsi/libsas.h
+@@ -172,7 +172,7 @@ struct sata_device {
+ 
+ 	struct ata_port *ap;
+ 	struct ata_host ata_host;
+-	u8     fis[ATA_RESP_FIS_SIZE];
++	struct ata_taskfile tf;
+ 	u32 sstatus;
+ 	u32 serror;
+ 	u32 scontrol;
