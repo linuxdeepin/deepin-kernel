@@ -205,8 +205,8 @@
 +	When aufs supports Magic SysRq, enabled automatically.
 +endif
 --- a/fs/aufs/Makefile	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/Makefile	2012-07-22 01:31:00.130115298 +0100
-@@ -0,0 +1,45 @@
++++ b/fs/aufs/Makefile	2012-08-01 03:41:52.619414717 +0100
+@@ -0,0 +1,42 @@
 +
 +include ${src}/magic.mk
 +ifeq (${CONFIG_AUFS_FS},m)
@@ -246,9 +246,6 @@
 +aufs-$(CONFIG_AUFS_POLL) += poll.o
 +aufs-$(CONFIG_AUFS_RDU) += rdu.o
 +aufs-$(CONFIG_AUFS_SP_IATTR) += f_op_sp.o
-+ifdef CONFIG_MMU
-+aufs-$(CONFIG_SECURITY) += security.o
-+endif
 +aufs-$(CONFIG_AUFS_BR_HFSPLUS) += hfsplus.o
 +aufs-$(CONFIG_AUFS_DEBUG) += debug.o
 +aufs-$(CONFIG_AUFS_MAGIC_SYSRQ) += sysrq.o
@@ -8382,8 +8379,8 @@
 +	atomic_set(&sbinfo->si_xigen_next, u);
 +}
 --- a/fs/aufs/f_op.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/f_op.c	2012-07-22 01:31:00.162115458 +0100
-@@ -0,0 +1,692 @@
++++ b/fs/aufs/f_op.c	2012-08-01 03:41:52.619414717 +0100
+@@ -0,0 +1,727 @@
 +/*
 + * Copyright (C) 2005-2012 Junjiro R. Okajima
 + *
@@ -8831,6 +8828,41 @@
 + * The similar scenario is applied to aufs_readlink() too.
 + */
 +
++/* cf. linux/include/linux/mman.h: calc_vm_prot_bits() */
++#define AuConv_VM_PROT(f, b)	_calc_vm_trans(f, VM_##b, PROT_##b)
++
++static unsigned long au_arch_prot_conv(unsigned long flags)
++{
++	/* currently ppc64 only */
++#ifdef CONFIG_PPC64
++	/* cf. linux/arch/powerpc/include/asm/mman.h */
++	AuDebugOn(arch_calc_vm_prot_bits(-1) != VM_SAO);
++	return AuConv_VM_PROT(flags, SAO);
++#else
++	AuDebugOn(arch_calc_vm_prot_bits(-1));
++	return 0;
++#endif
++}
++
++static unsigned long au_prot_conv(unsigned long flags)
++{
++	return AuConv_VM_PROT(flags, READ)
++		| AuConv_VM_PROT(flags, WRITE)
++		| AuConv_VM_PROT(flags, EXEC)
++		| au_arch_prot_conv(flags);
++}
++
++/* cf. linux/include/linux/mman.h: calc_vm_flag_bits() */
++#define AuConv_VM_MAP(f, b)	_calc_vm_trans(f, VM_##b, MAP_##b)
++
++static unsigned long au_flag_conv(unsigned long flags)
++{
++	return AuConv_VM_MAP(flags, GROWSDOWN)
++		| AuConv_VM_MAP(flags, DENYWRITE)
++		| AuConv_VM_MAP(flags, EXECUTABLE)
++		| AuConv_VM_MAP(flags, LOCKED);
++}
++
 +static int aufs_mmap(struct file *file, struct vm_area_struct *vma)
 +{
 +	int err;
@@ -8873,8 +8905,8 @@
 +	lockdep_on();
 +
 +	au_vm_file_reset(vma, h_file);
-+	/* todo: bad approach, I am not sure this is really necessary */
-+	err = au_security_mmap_file(h_file, vma);
++	err = security_mmap_file(h_file, au_prot_conv(vma->vm_flags),
++				 au_flag_conv(vma->vm_flags));
 +	if (!err)
 +		err = h_file->f_op->mmap(h_file, vma);
 +	if (unlikely(err))
@@ -10054,8 +10086,8 @@
 +#endif /* CONFIG_AUFS_DEBUG */
 +};
 --- a/fs/aufs/file.h	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/file.h	2012-07-22 01:31:00.162115458 +0100
-@@ -0,0 +1,306 @@
++++ b/fs/aufs/file.h	2012-08-01 03:41:52.619414717 +0100
+@@ -0,0 +1,298 @@
 +/*
 + * Copyright (C) 2005-2012 Junjiro R. Okajima
 + *
@@ -10138,14 +10170,6 @@
 +			  int wlock);
 +int au_do_flush(struct file *file, fl_owner_t id,
 +		int (*flush)(struct file *file, fl_owner_t id));
-+
-+#if defined(CONFIG_SECURITY) && defined(CONFIG_MMU)
-+/* security.c */
-+int au_security_mmap_file(struct file *h_file, struct vm_area_struct *vma);
-+#else
-+AuStubInt0(au_security_mmap_file, struct file *h_file,
-+	   struct vm_area_struct *vma);
-+#endif
 +
 +/* poll.c */
 +#ifdef CONFIG_AUFS_POLL
@@ -12056,8 +12080,8 @@
 +		au_hn_destroy_cache();
 +}
 --- a/fs/aufs/i_op.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/i_op.c	2012-07-22 01:31:00.162115458 +0100
-@@ -0,0 +1,1014 @@
++++ b/fs/aufs/i_op.c	2012-08-01 03:41:52.619414717 +0100
+@@ -0,0 +1,1009 @@
 +/*
 + * Copyright (C) 2005-2012 Junjiro R. Okajima
 + *
@@ -12266,18 +12290,13 @@
 +	ret = d_splice_alias(inode, dentry);
 +	if (unlikely(IS_ERR(ret) && inode)) {
 +		ii_write_unlock(inode);
-+		lc_idx = AuLcNonDir_IIINFO;
-+		if (S_ISLNK(inode->i_mode))
-+			lc_idx = AuLcSymlink_IIINFO;
-+		else if (S_ISDIR(inode->i_mode))
-+			lc_idx = AuLcDir_IIINFO;
-+		au_rw_class(&au_ii(inode)->ii_rwsem, au_lc_key + lc_idx);
 +		iput(inode);
++		inode = NULL;
 +	}
 +
 +out_unlock:
 +	di_write_unlock(dentry);
-+	if (unlikely(IS_ERR(ret) && inode)) {
++	if (inode) {
 +		lc_idx = AuLcNonDir_DIINFO;
 +		if (S_ISLNK(inode->i_mode))
 +			lc_idx = AuLcSymlink_DIINFO;
@@ -15565,8 +15584,8 @@
 +	AuRwDestroy(&iinfo->ii_rwsem);
 +}
 --- a/fs/aufs/inode.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/inode.c	2012-07-22 01:31:00.162115458 +0100
-@@ -0,0 +1,471 @@
++++ b/fs/aufs/inode.c	2012-08-01 04:08:08.827230713 +0100
+@@ -0,0 +1,478 @@
 +/*
 + * Copyright (C) 2005-2012 Junjiro R. Okajima
 + *
@@ -15895,7 +15914,7 @@
 +	struct super_block *sb;
 +	struct mutex *mtx;
 +	ino_t h_ino, ino;
-+	int err;
++	int err, lc_idx;
 +	aufs_bindex_t bstart;
 +
 +	sb = dentry->d_sb;
@@ -15936,6 +15955,13 @@
 +
 +	AuDbg("%lx, new %d\n", inode->i_state, !!(inode->i_state & I_NEW));
 +	if (inode->i_state & I_NEW) {
++		lc_idx = AuLcNonDir_IIINFO;
++		if (S_ISLNK(h_inode->i_mode))
++			lc_idx = AuLcSymlink_IIINFO;
++		else if (S_ISDIR(h_inode->i_mode))
++			lc_idx = AuLcDir_IIINFO;
++		au_rw_class(&au_ii(inode)->ii_rwsem, au_lc_key + lc_idx);
++
 +		ii_write_lock_new_child(inode);
 +		err = set_inode(inode, dentry);
 +		if (!err) {
@@ -19246,7 +19272,7 @@
 +#endif /* __KERNEL__ */
 +#endif /* __AUFS_OPTS_H__ */
 --- a/fs/aufs/plink.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/plink.c	2012-07-22 01:31:00.166115467 +0100
++++ b/fs/aufs/plink.c	2012-08-01 04:08:08.827230713 +0100
 @@ -0,0 +1,511 @@
 +/*
 + * Copyright (C) 2005-2012 Junjiro R. Okajima
@@ -20914,101 +20940,6 @@
 +	spin_lock(&sbinfo->au_si_pid.tree_lock);
 +	p = radix_tree_delete(&sbinfo->au_si_pid.tree, current->pid);
 +	spin_unlock(&sbinfo->au_si_pid.tree_lock);
-+}
---- a/fs/aufs/security.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/security.c	2012-07-22 01:31:00.166115467 +0100
-@@ -0,0 +1,92 @@
-+/*
-+ * Copyright (C) 2012 Junjiro R. Okajima
-+ *
-+ * This program, aufs is free software; you can redistribute it and/or modify
-+ * it under the terms of the GNU General Public License as published by
-+ * the Free Software Foundation; either version 2 of the License, or
-+ * (at your option) any later version.
-+ *
-+ * This program is distributed in the hope that it will be useful,
-+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
-+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-+ * GNU General Public License for more details.
-+ *
-+ * You should have received a copy of the GNU General Public License
-+ * along with this program; if not, write to the Free Software
-+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
-+ */
-+
-+/*
-+ * securityf_file_mmap
-+ */
-+
-+#include <linux/mman.h>
-+#include <linux/security.h>
-+#include "aufs.h"
-+
-+/* cf. linux/include/linux/mman.h: calc_vm_prot_bits() */
-+#define AuConv_VM_PROT(f, b)	_calc_vm_trans(f, VM_##b, PROT_##b)
-+
-+static unsigned long au_arch_prot_conv(unsigned long flags)
-+{
-+	/* currently ppc64 only */
-+#ifdef CONFIG_PPC64
-+	/* cf. linux/arch/powerpc/include/asm/mman.h */
-+	AuDebugOn(arch_calc_vm_prot_bits(-1) != VM_SAO);
-+	return AuConv_VM_PROT(flags, SAO);
-+#else
-+	AuDebugOn(arch_calc_vm_prot_bits(-1));
-+	return 0;
-+#endif
-+}
-+
-+static unsigned long au_prot_conv(unsigned long flags)
-+{
-+	return AuConv_VM_PROT(flags, READ)
-+		| AuConv_VM_PROT(flags, WRITE)
-+		| AuConv_VM_PROT(flags, EXEC)
-+		| au_arch_prot_conv(flags);
-+}
-+
-+/* cf. linux/include/linux/mman.h: calc_vm_flag_bits() */
-+#define AuConv_VM_MAP(f, b)	_calc_vm_trans(f, VM_##b, MAP_##b)
-+
-+static unsigned long au_flag_conv(unsigned long flags)
-+{
-+	return AuConv_VM_MAP(flags, GROWSDOWN)
-+		| AuConv_VM_MAP(flags, DENYWRITE)
-+		| AuConv_VM_MAP(flags, EXECUTABLE)
-+		| AuConv_VM_MAP(flags, LOCKED);
-+}
-+
-+struct au_security_mmap_file_args {
-+	int *errp;
-+	struct file *h_file;
-+	struct vm_area_struct *vma;
-+};
-+
-+/*
-+ * unnecessary to call security_mmap_file() since it doesn't have file as its
-+ * argument.
-+ */
-+static void au_call_security_mmap_file(void *args)
-+{
-+	struct au_security_mmap_file_args *a = args;
-+	*a->errp = security_mmap_file(a->h_file, au_prot_conv(a->vma->vm_flags),
-+				      au_flag_conv(a->vma->vm_flags));
-+}
-+
-+int au_security_mmap_file(struct file *h_file, struct vm_area_struct *vma)
-+{
-+	int err, wkq_err;
-+	struct au_security_mmap_file_args args = {
-+		.errp	= &err,
-+		.h_file	= h_file,
-+		.vma	= vma
-+	};
-+
-+	wkq_err = au_wkq_wait(au_call_security_mmap_file, &args);
-+	if (unlikely(wkq_err))
-+		err = wkq_err;
-+	return err;
 +}
 --- a/fs/aufs/spl.h	1970-01-01 01:00:00.000000000 +0100
 +++ b/fs/aufs/spl.h	2012-01-10 02:15:56.561456041 +0000
@@ -27032,7 +26963,7 @@
 +#endif /* __KERNEL__ */
 +#endif /* __AUFS_WHOUT_H__ */
 --- a/fs/aufs/wkq.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/wkq.c	2012-07-22 01:31:00.166115467 +0100
++++ b/fs/aufs/wkq.c	2012-08-01 04:08:08.831230728 +0100
 @@ -0,0 +1,214 @@
 +/*
 + * Copyright (C) 2005-2012 Junjiro R. Okajima
@@ -28611,7 +28542,7 @@
 +	return err;
 +}
 --- a/include/linux/aufs_type.h	1970-01-01 01:00:00.000000000 +0100
-+++ b/include/linux/aufs_type.h	2012-07-22 01:31:00.166115467 +0100
++++ b/include/linux/aufs_type.h	2012-08-01 03:41:52.619414717 +0100
 @@ -0,0 +1,233 @@
 +/*
 + * Copyright (C) 2005-2012 Junjiro R. Okajima
@@ -28654,7 +28585,7 @@
 +
 +#include <linux/limits.h>
 +
-+#define AUFS_VERSION	"3.x-rcN-20120618"
++#define AUFS_VERSION	"3.5-20120730"
 +
 +/* todo? move this to linux-2.6.19/include/magic.h */
 +#define AUFS_SUPER_MAGIC	('a' << 24 | 'u' << 16 | 'f' << 8 | 's')
