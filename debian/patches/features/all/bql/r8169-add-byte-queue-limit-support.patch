@@ -1,0 +1,85 @@
+From: Igor Maravic <igorm@etf.rs>
+Date: Mon, 5 Mar 2012 00:01:25 +0100
+Subject: r8169: add byte queue limit support.
+
+commit 036dafa28da1e2565a8529de2ae663c37b7a0060 upstream.
+
+Nothing fancy:
+- sent bytes count is notified in the start_xmit path right before
+  updating the owner bit in the hardware Tx descriptor (E. Dumazet)
+- avoid useless tp->dev dereferencing in start_xmit (E. Dumazet)
+
+Use of netdev_reset_queue is favored over proper accounting in
+rtl8169_tx_clear_range since the latter would need more work for the
+same result (nb: said accounting degenerates to nothing in xmit_frags).
+
+Signed-off-by: Igor Maravic <igorm@etf.rs>
+Signed-off-by: Francois Romieu <romieu@fr.zoreil.com>
+Acked-by: Eric Dumazet <eric.dumazet@gmail.com>
+[bwh: Backported to 3.2:
+ - Adjust context
+ - Don't use 64-bit stats]
+---
+--- a/drivers/net/ethernet/realtek/r8169.c
++++ b/drivers/net/ethernet/realtek/r8169.c
+@@ -5340,6 +5340,7 @@
+ {
+ 	rtl8169_tx_clear_range(tp, tp->dirty_tx, NUM_TX_DESC);
+ 	tp->cur_tx = tp->dirty_tx = 0;
++	netdev_reset_queue(tp->dev);
+ }
+ 
+ static void rtl8169_schedule_work(struct net_device *dev, work_func_t task)
+@@ -5552,6 +5553,8 @@
+ 
+ 	txd->opts2 = cpu_to_le32(opts[1]);
+ 
++	netdev_sent_queue(dev, skb->len);
++
+ 	wmb();
+ 
+ 	/* Anti gcc 2.95.3 bugware (sic) */
+@@ -5644,11 +5647,17 @@
+ 	rtl8169_schedule_work(dev, rtl8169_reinit_task);
+ }
+ 
++struct rtl_txc {
++	int packets;
++	int bytes;
++};
++
+ static void rtl8169_tx_interrupt(struct net_device *dev,
+ 				 struct rtl8169_private *tp,
+ 				 void __iomem *ioaddr)
+ {
+ 	unsigned int dirty_tx, tx_left;
++	struct rtl_txc txc = { 0, 0 };
+ 
+ 	dirty_tx = tp->dirty_tx;
+ 	smp_rmb();
+@@ -5667,15 +5676,22 @@
+ 		rtl8169_unmap_tx_skb(&tp->pci_dev->dev, tx_skb,
+ 				     tp->TxDescArray + entry);
+ 		if (status & LastFrag) {
+-			dev->stats.tx_packets++;
+-			dev->stats.tx_bytes += tx_skb->skb->len;
+-			dev_kfree_skb(tx_skb->skb);
++			struct sk_buff *skb = tx_skb->skb;
++
++			txc.packets++;
++			txc.bytes += skb->len;
++			dev_kfree_skb(skb);
+ 			tx_skb->skb = NULL;
+ 		}
+ 		dirty_tx++;
+ 		tx_left--;
+ 	}
+ 
++	dev->stats.tx_packets += txc.packets;
++	dev->stats.tx_bytes += txc.bytes;
++
++	netdev_completed_queue(dev, txc.packets, txc.bytes);
++
+ 	if (tp->dirty_tx != dirty_tx) {
+ 		tp->dirty_tx = dirty_tx;
+ 		/* Sync with rtl8169_start_xmit:

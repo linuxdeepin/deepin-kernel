@@ -1,0 +1,70 @@
+From: Hiroaki SHIMODA <shimoda.hiroaki@gmail.com>
+Date: Wed, 30 May 2012 12:25:19 +0000
+Subject: bql: Avoid unneeded limit decrement.
+
+commit 25426b794efdc70dde7fd3134dc56fac3e7d562d upstream.
+
+When below pattern is observed,
+
+                                               TIME
+       dql_queued()         dql_completed()     |
+      a) initial state                          |
+                                                |
+      b) X bytes queued                         V
+
+      c) Y bytes queued
+                           d) X bytes completed
+      e) Z bytes queued
+                           f) Y bytes completed
+
+a) dql->limit has already some value and there is no in-flight packet.
+b) X bytes queued.
+c) Y bytes queued and excess limit.
+d) X bytes completed and dql->prev_ovlimit is set and also
+   dql->prev_num_queued is set Y.
+e) Z bytes queued.
+f) Y bytes completed. inprogress and prev_inprogress are true.
+
+At f), according to the comment, all_prev_completed becomes
+true and limit should be increased. But POSDIFF() ignores
+(completed == dql->prev_num_queued) case, so limit is decreased.
+
+Signed-off-by: Hiroaki SHIMODA <shimoda.hiroaki@gmail.com>
+Cc: Tom Herbert <therbert@google.com>
+Cc: Eric Dumazet <eric.dumazet@gmail.com>
+Cc: Denys Fedoryshchenko <denys@visp.net.lb>
+Acked-by: Eric Dumazet <edumazet@google.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ lib/dynamic_queue_limits.c |    6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/lib/dynamic_queue_limits.c b/lib/dynamic_queue_limits.c
+index c87eb76..0fafa77 100644
+--- a/lib/dynamic_queue_limits.c
++++ b/lib/dynamic_queue_limits.c
+@@ -11,12 +11,14 @@
+ #include <linux/dynamic_queue_limits.h>
+ 
+ #define POSDIFF(A, B) ((int)((A) - (B)) > 0 ? (A) - (B) : 0)
++#define AFTER_EQ(A, B) ((int)((A) - (B)) >= 0)
+ 
+ /* Records completed count and recalculates the queue limit */
+ void dql_completed(struct dql *dql, unsigned int count)
+ {
+ 	unsigned int inprogress, prev_inprogress, limit;
+-	unsigned int ovlimit, all_prev_completed, completed;
++	unsigned int ovlimit, completed;
++	bool all_prev_completed;
+ 
+ 	/* Can't complete more than what's in queue */
+ 	BUG_ON(count > dql->num_queued - dql->num_completed);
+@@ -26,7 +28,7 @@ void dql_completed(struct dql *dql, unsigned int count)
+ 	ovlimit = POSDIFF(dql->num_queued - dql->num_completed, limit);
+ 	inprogress = dql->num_queued - completed;
+ 	prev_inprogress = dql->prev_num_queued - dql->num_completed;
+-	all_prev_completed = POSDIFF(completed, dql->prev_num_queued);
++	all_prev_completed = AFTER_EQ(completed, dql->prev_num_queued);
+ 
+ 	if ((ovlimit && !inprogress) ||
+ 	    (dql->prev_ovlimit && all_prev_completed)) {
