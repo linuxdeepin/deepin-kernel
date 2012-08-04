@@ -154,7 +154,7 @@ $
             self.linux_upstream = u'-'.join((d['version'], d['modifier']))
         else:
             self.linux_upstream = d['version']
-        self.linux_upstream_full = d['version'] + (d['update'] or u'')
+        self.linux_upstream_full = self.linux_upstream + (d['update'] or u'')
         self.linux_dfsg = d['dfsg']
         self.linux_revision_experimental = match.group('revision_experimental') and True
         self.linux_revision_other = match.group('revision_other') and True
