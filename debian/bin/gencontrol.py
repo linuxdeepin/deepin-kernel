@@ -124,7 +124,7 @@ class Gencontrol(Base):
 
         if self.changelog[0].distribution == 'UNRELEASED' and os.getenv('DEBIAN_KERNEL_DISABLE_INSTALLER'):
             import warnings
-            warnings.warn(u'Disable building of debug infos on request (DEBIAN_KERNEL_DISABLE_INSTALLER set)')
+            warnings.warn(u'Disable building of installer modules on request (DEBIAN_KERNEL_DISABLE_INSTALLER set)')
         else:
             # Add udebs using kernel-wedge
             installer_def_dir = 'debian/installer'
