@@ -1,0 +1,123 @@
+From f9d70983166c1e54362436f2db702f2a6020d097 Mon Sep 17 00:00:00 2001
+From: Peter Zijlstra <peterz@infradead.org>
+Date: Thu, 28 Jul 2011 10:43:51 +0200
+Subject: [PATCH 242/277] mm, rt: kmap_atomic scheduling
+
+In fact, with migrate_disable() existing one could play games with
+kmap_atomic. You could save/restore the kmap_atomic slots on context
+switch (if there are any in use of course), this should be esp easy now
+that we have a kmap_atomic stack.
+
+Something like the below.. it wants replacing all the preempt_disable()
+stuff with pagefault_disable() && migrate_disable() of course, but then
+you can flip kmaps around like below.
+
+Signed-off-by: Peter Zijlstra <a.p.zijlstra@chello.nl>
+[dvhart@linux.intel.com: build fix]
+Link: http://lkml.kernel.org/r/1311842631.5890.208.camel@twins
+---
+ arch/x86/kernel/process_32.c |   36 ++++++++++++++++++++++++++++++++++++
+ include/linux/sched.h        |    5 +++++
+ mm/memory.c                  |    2 ++
+ 3 files changed, 43 insertions(+)
+
+diff --git a/arch/x86/kernel/process_32.c b/arch/x86/kernel/process_32.c
+index ada175e..20f1573 100644
+--- a/arch/x86/kernel/process_32.c
++++ b/arch/x86/kernel/process_32.c
+@@ -39,6 +39,7 @@
+ #include <linux/io.h>
+ #include <linux/kdebug.h>
+ #include <linux/cpuidle.h>
++#include <linux/highmem.h>
+ 
+ #include <asm/pgtable.h>
+ #include <asm/system.h>
+@@ -339,6 +340,41 @@ __switch_to(struct task_struct *prev_p, struct task_struct *next_p)
+ 		     task_thread_info(next_p)->flags & _TIF_WORK_CTXSW_NEXT))
+ 		__switch_to_xtra(prev_p, next_p, tss);
+ 
++#if defined CONFIG_PREEMPT_RT_FULL && defined CONFIG_HIGHMEM
++	/*
++	 * Save @prev's kmap_atomic stack
++	 */
++	prev_p->kmap_idx = __this_cpu_read(__kmap_atomic_idx);
++	if (unlikely(prev_p->kmap_idx)) {
++		int i;
++
++		for (i = 0; i < prev_p->kmap_idx; i++) {
++			int idx = i + KM_TYPE_NR * smp_processor_id();
++
++			pte_t *ptep = kmap_pte - idx;
++			prev_p->kmap_pte[i] = *ptep;
++			kpte_clear_flush(ptep, __fix_to_virt(FIX_KMAP_BEGIN + idx));
++		}
++
++		__this_cpu_write(__kmap_atomic_idx, 0);
++	}
++
++	/*
++	 * Restore @next_p's kmap_atomic stack
++	 */
++	if (unlikely(next_p->kmap_idx)) {
++		int i;
++
++		__this_cpu_write(__kmap_atomic_idx, next_p->kmap_idx);
++
++		for (i = 0; i < next_p->kmap_idx; i++) {
++			int idx = i + KM_TYPE_NR * smp_processor_id();
++
++			set_pte(kmap_pte - idx, next_p->kmap_pte[i]);
++		}
++	}
++#endif
++
+ 	/*
+ 	 * Leave lazy mode, flushing any hypercalls made here.
+ 	 * This must be done before restoring TLS segments so
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+index a867df1..945d230 100644
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -63,6 +63,7 @@ struct sched_param {
+ #include <linux/nodemask.h>
+ #include <linux/mm_types.h>
+ 
++#include <asm/kmap_types.h>
+ #include <asm/system.h>
+ #include <asm/page.h>
+ #include <asm/ptrace.h>
+@@ -1607,6 +1608,10 @@ struct task_struct {
+ 	struct rcu_head put_rcu;
+ 	int softirq_nestcnt;
+ #endif
++#if defined CONFIG_PREEMPT_RT_FULL && defined CONFIG_HIGHMEM
++	int kmap_idx;
++	pte_t kmap_pte[KM_TYPE_NR];
++#endif
+ };
+ 
+ #ifdef CONFIG_PREEMPT_RT_FULL
+diff --git a/mm/memory.c b/mm/memory.c
+index b4e9834..10d95e0 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -3450,6 +3450,7 @@ unlock:
+ #ifdef CONFIG_PREEMPT_RT_FULL
+ void pagefault_disable(void)
+ {
++	migrate_disable();
+ 	current->pagefault_disabled++;
+ 	/*
+ 	 * make sure to have issued the store before a pagefault
+@@ -3467,6 +3468,7 @@ void pagefault_enable(void)
+ 	 */
+ 	barrier();
+ 	current->pagefault_disabled--;
++	migrate_enable();
+ }
+ EXPORT_SYMBOL_GPL(pagefault_enable);
+ #endif
+-- 
+1.7.10
+

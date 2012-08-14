@@ -1,7 +1,7 @@
-From d57329a2347a0c0324638cfb0a6dac6dcd6ff2e2 Mon Sep 17 00:00:00 2001
+From d4a9fc63918b7a646eb7d491e8380082ab5e0b13 Mon Sep 17 00:00:00 2001
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Fri, 3 Jul 2009 08:44:31 -0500
-Subject: [PATCH 134/282] hrtimer: fixup hrtimer callback changes for
+Subject: [PATCH 134/277] hrtimer: fixup hrtimer callback changes for
  preempt-rt
 
 In preempt-rt we can not call the callbacks which take sleeping locks
@@ -12,19 +12,16 @@ delivery problem for real.
 
 Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 Signed-off-by: Ingo Molnar <mingo@elte.hu>
-[bwh: Forward-ported to 3.2.24: move the code added to run_hrtimer_softirq()
- by commit f55a6faa384304c89cfef162768e88374d3312cb ('hrtimer: Provide
- clock_was_set_delayed()')]
 ---
  include/linux/hrtimer.h  |    3 +
- kernel/hrtimer.c         |  190 +++++++++++++++++++++++++++++++++++++++++-----
+ kernel/hrtimer.c         |  194 +++++++++++++++++++++++++++++++++++++++++-----
  kernel/sched.c           |    2 +
  kernel/time/tick-sched.c |    1 +
  kernel/watchdog.c        |    1 +
- 5 files changed, 179 insertions(+), 18 deletions(-)
+ 5 files changed, 181 insertions(+), 20 deletions(-)
 
 diff --git a/include/linux/hrtimer.h b/include/linux/hrtimer.h
-index e8b395d..0e37086 100644
+index 75b2545..26b008b 100644
 --- a/include/linux/hrtimer.h
 +++ b/include/linux/hrtimer.h
 @@ -111,6 +111,8 @@ struct hrtimer {
@@ -45,7 +42,7 @@ index e8b395d..0e37086 100644
  	ktime_t			(*get_time)(void);
  	ktime_t			softirq_time;
 diff --git a/kernel/hrtimer.c b/kernel/hrtimer.c
-index 905e2cd2..1dd627b 100644
+index 45b923b..392fa07 100644
 --- a/kernel/hrtimer.c
 +++ b/kernel/hrtimer.c
 @@ -589,8 +589,7 @@ static int hrtimer_reprogram(struct hrtimer *timer,
@@ -74,7 +71,7 @@ index 905e2cd2..1dd627b 100644
  {
 +#ifdef CONFIG_PREEMPT_RT_BASE
 +again:
-+	if (base->cpu_base->hres_active && hrtimer_reprogram(timer, base)) {
+ 	if (base->cpu_base->hres_active && hrtimer_reprogram(timer, base)) {
 +		/*
 +		 * Move softirq based timers away from the rbtree in
 +		 * case it expired already. Otherwise we would have a
@@ -93,12 +90,12 @@ index 905e2cd2..1dd627b 100644
 +			return 1;
 +		}
 +#else
- 	if (base->cpu_base->hres_active && hrtimer_reprogram(timer, base)) {
++	if (base->cpu_base->hres_active && hrtimer_reprogram(timer, base)) {
 +#endif
  		if (wakeup) {
  			raw_spin_unlock(&base->cpu_base->lock);
  			raise_softirq_irqoff(HRTIMER_SOFTIRQ);
-@@ -733,6 +757,11 @@ static inline int hrtimer_enqueue_reprogram(struct hrtimer *timer,
+@@ -743,6 +767,11 @@ static inline int hrtimer_enqueue_reprogram(struct hrtimer *timer,
  }
  static inline void hrtimer_init_hres(struct hrtimer_cpu_base *base) { }
  static inline void retrigger_next_event(void *arg) { }
@@ -110,7 +107,7 @@ index 905e2cd2..1dd627b 100644
  
  #endif /* CONFIG_HIGH_RES_TIMERS */
  
-@@ -864,9 +893,9 @@ void hrtimer_wait_for_timer(const struct hrtimer *timer)
+@@ -874,9 +903,9 @@ void hrtimer_wait_for_timer(const struct hrtimer *timer)
  {
  	struct hrtimer_clock_base *base = timer->base;
  
@@ -122,7 +119,7 @@ index 905e2cd2..1dd627b 100644
  }
  
  #else
-@@ -916,6 +945,11 @@ static void __remove_hrtimer(struct hrtimer *timer,
+@@ -926,6 +955,11 @@ static void __remove_hrtimer(struct hrtimer *timer,
  	if (!(timer->state & HRTIMER_STATE_ENQUEUED))
  		goto out;
  
@@ -134,7 +131,7 @@ index 905e2cd2..1dd627b 100644
  	next_timer = timerqueue_getnext(&base->active);
  	timerqueue_del(&base->active, &timer->node);
  	if (&timer->node == next_timer) {
-@@ -1178,6 +1212,7 @@ static void __hrtimer_init(struct hrtimer *timer, clockid_t clock_id,
+@@ -1188,6 +1222,7 @@ static void __hrtimer_init(struct hrtimer *timer, clockid_t clock_id,
  
  	base = hrtimer_clockid_to_base(clock_id);
  	timer->base = &cpu_base->clock_base[base];
@@ -142,7 +139,7 @@ index 905e2cd2..1dd627b 100644
  	timerqueue_init(&timer->node);
  
  #ifdef CONFIG_TIMER_STATS
-@@ -1261,10 +1296,118 @@ static void __run_hrtimer(struct hrtimer *timer, ktime_t *now)
+@@ -1271,10 +1306,118 @@ static void __run_hrtimer(struct hrtimer *timer, ktime_t *now)
  	timer->state &= ~HRTIMER_STATE_CALLBACK;
  }
  
@@ -263,7 +260,7 @@ index 905e2cd2..1dd627b 100644
  /*
   * High resolution timer interrupt
   * Called with interrupts disabled
-@@ -1273,7 +1416,7 @@ void hrtimer_interrupt(struct clock_event_device *dev)
+@@ -1283,7 +1426,7 @@ void hrtimer_interrupt(struct clock_event_device *dev)
  {
  	struct hrtimer_cpu_base *cpu_base = &__get_cpu_var(hrtimer_bases);
  	ktime_t expires_next, now, entry_time, delta;
@@ -272,7 +269,7 @@ index 905e2cd2..1dd627b 100644
  
  	BUG_ON(!cpu_base->hres_active);
  	cpu_base->nr_events++;
-@@ -1340,7 +1483,10 @@ retry:
+@@ -1349,7 +1492,10 @@ retry:
  				break;
  			}
  
@@ -284,7 +281,7 @@ index 905e2cd2..1dd627b 100644
  		}
  	}
  
-@@ -1355,6 +1501,10 @@ retry:
+@@ -1364,6 +1510,10 @@ retry:
  	if (expires_next.tv64 == KTIME_MAX ||
  	    !tick_program_event(expires_next, 0)) {
  		cpu_base->hang_detected = 0;
@@ -295,44 +292,37 @@ index 905e2cd2..1dd627b 100644
  		return;
  	}
  
-@@ -1430,24 +1580,24 @@ void hrtimer_peek_ahead_timers(void)
+@@ -1444,6 +1594,12 @@ void hrtimer_peek_ahead_timers(void)
  	local_irq_restore(flags);
  }
  
--static void run_hrtimer_softirq(struct softirq_action *h)
--{
--	struct hrtimer_cpu_base *cpu_base = &__get_cpu_var(hrtimer_bases);
--
--	if (cpu_base->clock_was_set) {
--		cpu_base->clock_was_set = 0;
--		clock_was_set();
--	}
--
++#else /* CONFIG_HIGH_RES_TIMERS */
++
++static inline void __hrtimer_peek_ahead_timers(void) { }
++
++#endif	/* !CONFIG_HIGH_RES_TIMERS */
++
+ static void run_hrtimer_softirq(struct softirq_action *h)
+ {
+ 	struct hrtimer_cpu_base *cpu_base = &__get_cpu_var(hrtimer_bases);
+@@ -1453,15 +1609,9 @@ static void run_hrtimer_softirq(struct softirq_action *h)
+ 		clock_was_set();
+ 	}
+ 
 -	hrtimer_peek_ahead_timers();
--}
--
- #else /* CONFIG_HIGH_RES_TIMERS */
- 
- static inline void __hrtimer_peek_ahead_timers(void) { }
- 
- #endif	/* !CONFIG_HIGH_RES_TIMERS */
- 
-+static void run_hrtimer_softirq(struct softirq_action *h)
-+{
-+	struct hrtimer_cpu_base *cpu_base = &__get_cpu_var(hrtimer_bases);
-+
-+	if (cpu_base->clock_was_set) {
-+		cpu_base->clock_was_set = 0;
-+		clock_was_set();
-+	}
-+
 +	hrtimer_rt_run_pending();
-+}
-+
+ }
+ 
+-#else /* CONFIG_HIGH_RES_TIMERS */
+-
+-static inline void __hrtimer_peek_ahead_timers(void) { }
+-
+-#endif	/* !CONFIG_HIGH_RES_TIMERS */
+-
  /*
   * Called from timer softirq every jiffy, expire hrtimers:
   *
-@@ -1473,7 +1623,7 @@ void hrtimer_run_queues(void)
+@@ -1494,7 +1644,7 @@ void hrtimer_run_queues(void)
  	struct timerqueue_node *node;
  	struct hrtimer_cpu_base *cpu_base = &__get_cpu_var(hrtimer_bases);
  	struct hrtimer_clock_base *base;
@@ -341,7 +331,7 @@ index 905e2cd2..1dd627b 100644
  
  	if (hrtimer_hres_active())
  		return;
-@@ -1498,12 +1648,16 @@ void hrtimer_run_queues(void)
+@@ -1519,12 +1669,16 @@ void hrtimer_run_queues(void)
  					hrtimer_get_expires_tv64(timer))
  				break;
  
@@ -360,7 +350,7 @@ index 905e2cd2..1dd627b 100644
  }
  
  /*
-@@ -1525,6 +1679,7 @@ static enum hrtimer_restart hrtimer_wakeup(struct hrtimer *timer)
+@@ -1546,6 +1700,7 @@ static enum hrtimer_restart hrtimer_wakeup(struct hrtimer *timer)
  void hrtimer_init_sleeper(struct hrtimer_sleeper *sl, struct task_struct *task)
  {
  	sl->timer.function = hrtimer_wakeup;
@@ -368,7 +358,7 @@ index 905e2cd2..1dd627b 100644
  	sl->task = task;
  }
  EXPORT_SYMBOL_GPL(hrtimer_init_sleeper);
-@@ -1663,6 +1818,7 @@ static void __cpuinit init_hrtimers_cpu(int cpu)
+@@ -1684,6 +1839,7 @@ static void __cpuinit init_hrtimers_cpu(int cpu)
  	for (i = 0; i < HRTIMER_MAX_CLOCK_BASES; i++) {
  		cpu_base->clock_base[i].cpu_base = cpu_base;
  		timerqueue_init_head(&cpu_base->clock_base[i].active);
@@ -376,7 +366,7 @@ index 905e2cd2..1dd627b 100644
  	}
  
  	hrtimer_init_hres(cpu_base);
-@@ -1781,9 +1937,7 @@ void __init hrtimers_init(void)
+@@ -1802,9 +1958,7 @@ void __init hrtimers_init(void)
  	hrtimer_cpu_notify(&hrtimers_nb, (unsigned long)CPU_UP_PREPARE,
  			  (void *)(long)smp_processor_id());
  	register_cpu_notifier(&hrtimers_nb);
@@ -387,7 +377,7 @@ index 905e2cd2..1dd627b 100644
  
  /**
 diff --git a/kernel/sched.c b/kernel/sched.c
-index f2fc6ee..057e72d 100644
+index 86cc07e..25d1af9 100644
 --- a/kernel/sched.c
 +++ b/kernel/sched.c
 @@ -189,6 +189,7 @@ void init_rt_bandwidth(struct rt_bandwidth *rt_b, u64 period, u64 runtime)
@@ -398,7 +388,7 @@ index f2fc6ee..057e72d 100644
  	rt_b->rt_period_timer.function = sched_rt_period_timer;
  }
  
-@@ -1277,6 +1278,7 @@ static void init_rq_hrtick(struct rq *rq)
+@@ -1274,6 +1275,7 @@ static void init_rq_hrtick(struct rq *rq)
  
  	hrtimer_init(&rq->hrtick_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
  	rq->hrtick_timer.function = hrtick;
@@ -407,10 +397,10 @@ index f2fc6ee..057e72d 100644
  #else	/* CONFIG_SCHED_HRTICK */
  static inline void hrtick_clear(struct rq *rq)
 diff --git a/kernel/time/tick-sched.c b/kernel/time/tick-sched.c
-index d7abd2f..a2c2a64 100644
+index 9964bda..548d311 100644
 --- a/kernel/time/tick-sched.c
 +++ b/kernel/time/tick-sched.c
-@@ -802,6 +802,7 @@ void tick_setup_sched_timer(void)
+@@ -805,6 +805,7 @@ void tick_setup_sched_timer(void)
  	 * Emulate tick processing via per-CPU hrtimers:
  	 */
  	hrtimer_init(&ts->sched_timer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS);

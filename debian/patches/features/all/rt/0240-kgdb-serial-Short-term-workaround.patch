@@ -1,0 +1,119 @@
+From 9f9c398eeaf057addbbda9b301e657e3e42af6e7 Mon Sep 17 00:00:00 2001
+From: Jason Wessel <jason.wessel@windriver.com>
+Date: Thu, 28 Jul 2011 12:42:23 -0500
+Subject: [PATCH 240/277] kgdb/serial: Short term workaround
+
+On 07/27/2011 04:37 PM, Thomas Gleixner wrote:
+>  - KGDB (not yet disabled) is reportedly unusable on -rt right now due
+>    to missing hacks in the console locking which I dropped on purpose.
+>
+
+To work around this in the short term you can use this patch, in
+addition to the clocksource watchdog patch that Thomas brewed up.
+
+Comments are welcome of course.  Ultimately the right solution is to
+change separation between the console and the HW to have a polled mode
++ work queue so as not to introduce any kind of latency.
+
+Thanks,
+Jason.
+---
+ drivers/tty/serial/8250.c |   13 +++++++++----
+ include/linux/kdb.h       |    2 ++
+ kernel/debug/kdb/kdb_io.c |    6 ++----
+ 3 files changed, 13 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/tty/serial/8250.c b/drivers/tty/serial/8250.c
+index a3d3404..f15a1df 100644
+--- a/drivers/tty/serial/8250.c
++++ b/drivers/tty/serial/8250.c
+@@ -38,6 +38,7 @@
+ #include <linux/nmi.h>
+ #include <linux/mutex.h>
+ #include <linux/slab.h>
++#include <linux/kdb.h>
+ 
+ #include <asm/io.h>
+ #include <asm/irq.h>
+@@ -2856,10 +2857,14 @@ serial8250_console_write(struct console *co, const char *s, unsigned int count)
+ 
+ 	touch_nmi_watchdog();
+ 
+-	if (up->port.sysrq || oops_in_progress)
+-		locked = spin_trylock_irqsave(&up->port.lock, flags);
+-	else
+-		spin_lock_irqsave(&up->port.lock, flags);
++	if (unlikely(in_kdb_printk())) {
++		locked = 0;
++	} else {
++		if (up->port.sysrq || oops_in_progress)
++			locked = spin_trylock_irqsave(&up->port.lock, flags);
++		else
++			spin_lock_irqsave(&up->port.lock, flags);
++	}
+ 
+ 	/*
+ 	 *	First save the IER then disable the interrupts
+diff --git a/include/linux/kdb.h b/include/linux/kdb.h
+index 0647258..0d1ebfc 100644
+--- a/include/linux/kdb.h
++++ b/include/linux/kdb.h
+@@ -150,12 +150,14 @@ extern int kdb_register(char *, kdb_func_t, char *, char *, short);
+ extern int kdb_register_repeat(char *, kdb_func_t, char *, char *,
+ 			       short, kdb_repeat_t);
+ extern int kdb_unregister(char *);
++#define in_kdb_printk() (kdb_trap_printk)
+ #else /* ! CONFIG_KGDB_KDB */
+ #define kdb_printf(...)
+ #define kdb_init(x)
+ #define kdb_register(...)
+ #define kdb_register_repeat(...)
+ #define kdb_uregister(x)
++#define in_kdb_printk() (0)
+ #endif	/* CONFIG_KGDB_KDB */
+ enum {
+ 	KDB_NOT_INITIALIZED,
+diff --git a/kernel/debug/kdb/kdb_io.c b/kernel/debug/kdb/kdb_io.c
+index 4802eb5..5b7455f 100644
+--- a/kernel/debug/kdb/kdb_io.c
++++ b/kernel/debug/kdb/kdb_io.c
+@@ -553,7 +553,6 @@ int vkdb_printf(const char *fmt, va_list ap)
+ 	int diag;
+ 	int linecount;
+ 	int logging, saved_loglevel = 0;
+-	int saved_trap_printk;
+ 	int got_printf_lock = 0;
+ 	int retlen = 0;
+ 	int fnd, len;
+@@ -564,8 +563,6 @@ int vkdb_printf(const char *fmt, va_list ap)
+ 	unsigned long uninitialized_var(flags);
+ 
+ 	preempt_disable();
+-	saved_trap_printk = kdb_trap_printk;
+-	kdb_trap_printk = 0;
+ 
+ 	/* Serialize kdb_printf if multiple cpus try to write at once.
+ 	 * But if any cpu goes recursive in kdb, just print the output,
+@@ -821,7 +818,6 @@ kdb_print_out:
+ 	} else {
+ 		__release(kdb_printf_lock);
+ 	}
+-	kdb_trap_printk = saved_trap_printk;
+ 	preempt_enable();
+ 	return retlen;
+ }
+@@ -831,9 +827,11 @@ int kdb_printf(const char *fmt, ...)
+ 	va_list ap;
+ 	int r;
+ 
++	kdb_trap_printk++;
+ 	va_start(ap, fmt);
+ 	r = vkdb_printf(fmt, ap);
+ 	va_end(ap);
++	kdb_trap_printk--;
+ 
+ 	return r;
+ }
+-- 
+1.7.10
+
