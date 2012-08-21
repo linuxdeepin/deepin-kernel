@@ -66,7 +66,7 @@ class Main(object):
         self.log('Using source name %s, version %s, dfsg %s\n' % (source, version.upstream, self.version_dfsg))
 
         self.orig = '%s-%s' % (source, version.upstream)
-        self.orig_tar = '%s_%s.orig.tar.gz' % (source, version.upstream)
+        self.orig_tar = '%s_%s.orig.tar.xz' % (source, version.upstream)
         self.tag = 'v' + re.sub(r"^(\d+\.\d+)\.0", r"\1",
                                 version.upstream.replace('~', '-'))
 
@@ -92,7 +92,7 @@ class Main(object):
                                          '--prefix=temp/', self.tag],
                                         cwd=input_repo,
                                         stdout=subprocess.PIPE)
-        extract_proc = subprocess.Popen(['tar', '-xf', '-'], cwd=self.dir,
+        extract_proc = subprocess.Popen(['tar', '-xaf', '-'], cwd=self.dir,
                                         stdin=archive_proc.stdout)
 
         ret1 = archive_proc.wait()
@@ -102,15 +102,11 @@ class Main(object):
 
     def upstream_extract(self, input_tar):
         self.log("Extracting tarball %s\n" % input_tar)
-        match = re.match(r'(^|.*/)(?P<dir>linux-\d+\.\d+(\.\d+)?(-\S+)?)\.tar(\.(?P<extension>(bz2|gz)))?$', input_tar)
+        match = re.match(r'(^|.*/)(?P<dir>linux-\d+\.\d+(\.\d+)?(-\S+)?)\.tar(\.(?P<extension>(bz2|gz|xz)))?$', input_tar)
         if not match:
             raise RuntimeError("Can't identify name of tarball")
 
-        cmdline = ['tar', '-xf', input_tar, '-C', self.dir]
-        if match.group('extension') == 'bz2':
-            cmdline.append('-j')
-        elif match.group('extension') == 'gz':
-            cmdline.append('-z')
+        cmdline = ['tar', '-xaf', input_tar, '-C', self.dir]
 
         if subprocess.Popen(cmdline).wait():
             raise RuntimeError("Can't extract tarball")
@@ -119,7 +115,7 @@ class Main(object):
 
     def upstream_patch(self, input_patch):
         self.log("Patching source with %s\n" % input_patch)
-        match = re.match(r'(^|.*/)patch-\d+\.\d+\.\d+(-\S+?)?(\.(?P<extension>(bz2|gz)))?$', input_patch)
+        match = re.match(r'(^|.*/)patch-\d+\.\d+\.\d+(-\S+?)?(\.(?P<extension>(bz2|gz|xz)))?$', input_patch)
         if not match:
             raise RuntimeError("Can't identify name of patch")
         cmdline = []
@@ -127,6 +123,8 @@ class Main(object):
             cmdline.append('bzcat')
         elif match.group('extension') == 'gz':
             cmdline.append('zcat')
+        elif match.group('extension') == 'xz':
+            cmdline.append('xzcat')
         else:
             cmdline.append('cat')
         cmdline.append(input_patch)
@@ -177,7 +175,7 @@ class Main(object):
         except OSError:
             pass
         self.log("Generate tarball %s\n" % out)
-        cmdline = ['tar -czf', out, '-C', self.dir, self.orig]
+        cmdline = ['tar -caf', out, '-C', self.dir, self.orig]
         try:
             if os.spawnv(os.P_WAIT, '/bin/sh', ['sh', '-c', ' '.join(cmdline)]):
                 raise RuntimeError("Can't patch source")
