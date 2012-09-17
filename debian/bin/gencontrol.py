@@ -274,7 +274,7 @@ class Gencontrol(Base):
             p = self.process_packages(self.templates['control.xen-linux-system'], vars)
             l = PackageRelationGroup()
             for xen_flavour in config_entry_xen['flavours']:
-                l.append("xen-hypervisor-%s" % xen_flavour)
+                l.append("xen-system-%s" % xen_flavour)
             p[0]['Depends'].append(l)
             packages_dummy.extend(p)
 
