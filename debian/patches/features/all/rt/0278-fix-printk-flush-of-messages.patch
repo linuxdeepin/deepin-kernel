@@ -1,0 +1,154 @@
+From 3d4ae200c6efd224d2204803ae054e8b296d5c1b Mon Sep 17 00:00:00 2001
+From: Frank Rowand <frank.rowand@am.sony.com>
+Date: Wed, 16 May 2012 18:05:53 -0700
+Subject: [PATCH 278/279] fix printk flush of messages
+
+Reverse preempt-rt-allow-immediate-magic-sysrq-output-for-preempt_rt_full.patch
+
+The problem addressed by that patch does not exist after applying
+console-make-rt-friendly-update.patch
+
+Signed-off-by: Frank Rowand <frank.rowand@am.sony.com>
+Link: http://lkml.kernel.org/r/4FB44EF1.9050809@am.sony.com
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ drivers/tty/serial/cpm_uart/cpm_uart_core.c |    2 +-
+ drivers/tty/sysrq.c                         |   23 -----------------------
+ include/linux/sysrq.h                       |    5 -----
+ kernel/printk.c                             |    5 ++---
+ lib/Kconfig.debug                           |   22 ----------------------
+ 5 files changed, 3 insertions(+), 54 deletions(-)
+
+diff --git a/drivers/tty/serial/cpm_uart/cpm_uart_core.c b/drivers/tty/serial/cpm_uart/cpm_uart_core.c
+index a8b0559..b418947 100644
+--- a/drivers/tty/serial/cpm_uart/cpm_uart_core.c
++++ b/drivers/tty/serial/cpm_uart/cpm_uart_core.c
+@@ -1226,7 +1226,7 @@ static void cpm_uart_console_write(struct console *co, const char *s,
+ {
+ 	struct uart_cpm_port *pinfo = &cpm_uart_ports[co->index];
+ 	unsigned long flags;
+-	int nolock = oops_in_progress || sysrq_in_progress;
++	int nolock = oops_in_progress;
+ 
+ 	if (unlikely(nolock)) {
+ 		local_irq_save(flags);
+diff --git a/drivers/tty/sysrq.c b/drivers/tty/sysrq.c
+index 5219738..43db715 100644
+--- a/drivers/tty/sysrq.c
++++ b/drivers/tty/sysrq.c
+@@ -492,23 +492,6 @@ static void __sysrq_put_key_op(int key, struct sysrq_key_op *op_p)
+                 sysrq_key_table[i] = op_p;
+ }
+ 
+-#ifdef CONFIG_MAGIC_SYSRQ_FORCE_PRINTK
+-
+-int sysrq_in_progress;
+-
+-static void set_sysrq_in_progress(int value)
+-{
+-	sysrq_in_progress = value;
+-}
+-
+-#else
+-
+-static void set_sysrq_in_progress(int value)
+-{
+-}
+-
+-#endif
+-
+ void __handle_sysrq(int key, bool check_mask)
+ {
+ 	struct sysrq_key_op *op_p;
+@@ -517,9 +500,6 @@ void __handle_sysrq(int key, bool check_mask)
+ 	unsigned long flags;
+ 
+ 	spin_lock_irqsave(&sysrq_key_table_lock, flags);
+-
+-	set_sysrq_in_progress(1);
+-
+ 	/*
+ 	 * Raise the apparent loglevel to maximum so that the sysrq header
+ 	 * is shown to provide the user with positive feedback.  We do not
+@@ -561,9 +541,6 @@ void __handle_sysrq(int key, bool check_mask)
+ 		printk("\n");
+ 		console_loglevel = orig_log_level;
+ 	}
+-
+-	set_sysrq_in_progress(0);
+-
+ 	spin_unlock_irqrestore(&sysrq_key_table_lock, flags);
+ }
+ 
+diff --git a/include/linux/sysrq.h b/include/linux/sysrq.h
+index d224c0b..7faf933 100644
+--- a/include/linux/sysrq.h
++++ b/include/linux/sysrq.h
+@@ -38,11 +38,6 @@ struct sysrq_key_op {
+ 	int enable_mask;
+ };
+ 
+-#ifdef CONFIG_MAGIC_SYSRQ_FORCE_PRINTK
+-extern int sysrq_in_progress;
+-#else
+-#define sysrq_in_progress 0
+-#endif
+ #ifdef CONFIG_MAGIC_SYSRQ
+ 
+ /* Generic SysRq interface -- you may call it from any device driver, supplying
+diff --git a/kernel/printk.c b/kernel/printk.c
+index 66e83e5..85d8795 100644
+--- a/kernel/printk.c
++++ b/kernel/printk.c
+@@ -21,7 +21,6 @@
+ #include <linux/tty.h>
+ #include <linux/tty_driver.h>
+ #include <linux/console.h>
+-#include <linux/sysrq.h>
+ #include <linux/init.h>
+ #include <linux/jiffies.h>
+ #include <linux/nmi.h>
+@@ -835,8 +834,8 @@ static int console_trylock_for_printk(unsigned int cpu, unsigned long flags)
+ {
+ 	int retval = 0, wake = 0;
+ #ifdef CONFIG_PREEMPT_RT_FULL
+-	int lock = (!early_boot_irqs_disabled && !irqs_disabled_flags(flags) &&
+-		(preempt_count() <= 1)) || sysrq_in_progress;
++	int lock = !early_boot_irqs_disabled && !irqs_disabled_flags(flags) &&
++		(preempt_count() <= 1);
+ #else
+ 	int lock = 1;
+ #endif
+diff --git a/lib/Kconfig.debug b/lib/Kconfig.debug
+index 13a937b..c347db3 100644
+--- a/lib/Kconfig.debug
++++ b/lib/Kconfig.debug
+@@ -62,28 +62,6 @@ config MAGIC_SYSRQ
+ 	  keys are documented in <file:Documentation/sysrq.txt>. Don't say Y
+ 	  unless you really know what this hack does.
+ 
+-config MAGIC_SYSRQ_FORCE_PRINTK
+-	bool "Force printk from Magic SysRq"
+-	depends on MAGIC_SYSRQ && PREEMPT_RT_FULL
+-	default n
+-	help
+-	  Allow the output from Magic SysRq to be output immediately, even if
+-	  this causes large latencies.  This can cause performance problems
+-	  for real-time processes.
+-
+-	  If PREEMPT_RT_FULL, printk() will not try to acquire the console lock
+-	  when interrupts or preemption are disabled.  If the console lock is
+-	  not acquired the printk() output will be buffered, but will not be
+-	  output immediately.  Some drivers call into the Magic SysRq code
+-	  with interrupts or preemption disabled, so the output of Magic SysRq
+-	  will be buffered instead of printing immediately if this option is
+-	  not selected.
+-
+-	  Even with this option selected, Magic SysRq output will be delayed
+-	  if the attempt to acquire the console lock fails.
+-
+-	  Don't say Y unless you really know what this hack does.
+-
+ config STRIP_ASM_SYMS
+ 	bool "Strip assembler-generated symbols during link"
+ 	default n
