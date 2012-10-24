@@ -1,0 +1,68 @@
+Subject: softirq: Fix unplug deadlock
+From: Peter Zijlstra <peterz@infradead.org>
+Date: Fri, 30 Sep 2011 15:59:16 +0200
+
+Subject: [RT] softirq: Fix unplug deadlock
+From: Peter Zijlstra <a.p.zijlstra@chello.nl>
+Date: Fri Sep 30 15:52:14 CEST 2011
+
+If ksoftirqd gets woken during hot-unplug, __thread_do_softirq() will
+call pin_current_cpu() which will block on the held cpu_hotplug.lock.
+Moving the offline check in __thread_do_softirq() before the
+pin_current_cpu() call doesn't work, since the wakeup can happen
+before we mark the cpu offline.
+
+So here we have the ksoftirq thread stuck until hotplug finishes, but
+then the ksoftirq CPU_DOWN notifier issues kthread_stop() which will
+wait for the ksoftirq thread to go away -- while holding the hotplug
+lock.
+
+Sort this by delaying the kthread_stop() until CPU_POST_DEAD, which is
+outside of the cpu_hotplug.lock, but still serialized by the
+cpu_add_remove_lock.
+
+Signed-off-by: Peter Zijlstra <a.p.zijlstra@chello.nl>
+Cc: rostedt <rostedt@goodmis.org>
+Cc: Clark Williams <williams@redhat.com>
+Link: http://lkml.kernel.org/r/1317391156.12973.3.camel@twins
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+---
+ kernel/softirq.c |    8 ++------
+ 1 file changed, 2 insertions(+), 6 deletions(-)
+
+Index: linux-stable/kernel/softirq.c
+===================================================================
+--- linux-stable.orig/kernel/softirq.c
++++ linux-stable/kernel/softirq.c
+@@ -1087,9 +1087,8 @@ static int __cpuinit cpu_callback(struct
+ 	int hotcpu = (unsigned long)hcpu;
+ 	struct task_struct *p;
+ 
+-	switch (action) {
++	switch (action & ~CPU_TASKS_FROZEN) {
+ 	case CPU_UP_PREPARE:
+-	case CPU_UP_PREPARE_FROZEN:
+ 		p = kthread_create_on_node(run_ksoftirqd,
+ 					   hcpu,
+ 					   cpu_to_node(hotcpu),
+@@ -1102,19 +1101,16 @@ static int __cpuinit cpu_callback(struct
+   		per_cpu(ksoftirqd, hotcpu) = p;
+  		break;
+ 	case CPU_ONLINE:
+-	case CPU_ONLINE_FROZEN:
+ 		wake_up_process(per_cpu(ksoftirqd, hotcpu));
+ 		break;
+ #ifdef CONFIG_HOTPLUG_CPU
+ 	case CPU_UP_CANCELED:
+-	case CPU_UP_CANCELED_FROZEN:
+ 		if (!per_cpu(ksoftirqd, hotcpu))
+ 			break;
+ 		/* Unbind so it can run.  Fall thru. */
+ 		kthread_bind(per_cpu(ksoftirqd, hotcpu),
+ 			     cpumask_any(cpu_online_mask));
+-	case CPU_DEAD:
+-	case CPU_DEAD_FROZEN: {
++	case CPU_POST_DEAD: {
+ 		static const struct sched_param param = {
+ 			.sched_priority = MAX_RT_PRIO-1
+ 		};
