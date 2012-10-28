@@ -1,0 +1,214 @@
+Subject: mm: Enable SLUB for RT
+From: Thomas Gleixner <tglx@linutronix.de>
+Date: Thu, 25 Oct 2012 10:32:35 +0100
+
+Make SLUB RT aware and remove the restriction in Kconfig.
+
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+---
+ init/Kconfig |    1 
+ mm/slub.c    |   64 ++++++++++++++++++++++++++++++++++++-----------------------
+ 2 files changed, 40 insertions(+), 25 deletions(-)
+
+Index: linux-stable/init/Kconfig
+===================================================================
+--- linux-stable.orig/init/Kconfig
++++ linux-stable/init/Kconfig
+@@ -1442,7 +1442,6 @@ config SLAB
+ 
+ config SLUB
+ 	bool "SLUB (Unqueued Allocator)"
+-	depends on !PREEMPT_RT_FULL
+ 	help
+ 	   SLUB is a slab allocator that minimizes cache line usage
+ 	   instead of managing queues of cached objects (SLAB approach).
+Index: linux-stable/mm/slub.c
+===================================================================
+--- linux-stable.orig/mm/slub.c
++++ linux-stable/mm/slub.c
+@@ -31,6 +31,7 @@
+ #include <linux/fault-inject.h>
+ #include <linux/stacktrace.h>
+ #include <linux/prefetch.h>
++#include <linux/locallock.h>
+ 
+ #include <trace/events/kmem.h>
+ 
+@@ -225,6 +226,8 @@ static inline void stat(const struct kme
+ #endif
+ }
+ 
++static DEFINE_LOCAL_IRQ_LOCK(slub_lock);
++
+ /********************************************************************
+  * 			Core slab cache functions
+  *******************************************************************/
+@@ -1278,7 +1281,7 @@ static struct page *allocate_slab(struct
+ 	flags &= gfp_allowed_mask;
+ 
+ 	if (flags & __GFP_WAIT)
+-		local_irq_enable();
++		local_unlock_irq(slub_lock);
+ 
+ 	flags |= s->allocflags;
+ 
+@@ -1318,7 +1321,7 @@ static struct page *allocate_slab(struct
+ 	}
+ 
+ 	if (flags & __GFP_WAIT)
+-		local_irq_disable();
++		local_lock_irq(slub_lock);
+ 	if (!page)
+ 		return NULL;
+ 
+@@ -1871,10 +1874,10 @@ redo:
+  *
+  * This function must be called with interrupt disabled.
+  */
+-static void unfreeze_partials(struct kmem_cache *s)
++static void unfreeze_partials(struct kmem_cache *s, unsigned int cpu)
+ {
+ 	struct kmem_cache_node *n = NULL, *n2 = NULL;
+-	struct kmem_cache_cpu *c = this_cpu_ptr(s->cpu_slab);
++	struct kmem_cache_cpu *c = per_cpu_ptr(s->cpu_slab, cpu);
+ 	struct page *page, *discard_page = NULL;
+ 
+ 	while ((page = c->partial)) {
+@@ -1959,9 +1962,9 @@ int put_cpu_partial(struct kmem_cache *s
+ 				 * partial array is full. Move the existing
+ 				 * set to the per node partial list.
+ 				 */
+-				local_irq_save(flags);
+-				unfreeze_partials(s);
+-				local_irq_restore(flags);
++				local_lock_irqsave(slub_lock, flags);
++				unfreeze_partials(s, smp_processor_id());
++				local_unlock_irqrestore(slub_lock, flags);
+ 				pobjects = 0;
+ 				pages = 0;
+ 				stat(s, CPU_PARTIAL_DRAIN);
+@@ -2002,17 +2005,10 @@ static inline void __flush_cpu_slab(stru
+ 		if (c->page)
+ 			flush_slab(s, c);
+ 
+-		unfreeze_partials(s);
++		unfreeze_partials(s, cpu);
+ 	}
+ }
+ 
+-static void flush_cpu_slab(void *d)
+-{
+-	struct kmem_cache *s = d;
+-
+-	__flush_cpu_slab(s, smp_processor_id());
+-}
+-
+ static bool has_cpu_slab(int cpu, void *info)
+ {
+ 	struct kmem_cache *s = info;
+@@ -2021,10 +2017,29 @@ static bool has_cpu_slab(int cpu, void *
+ 	return c->page || c->partial;
+ }
+ 
++#ifndef CONFIG_PREEMPT_RT_FULL
++static void flush_cpu_slab(void *d)
++{
++	struct kmem_cache *s = d;
++
++	__flush_cpu_slab(s, smp_processor_id());
++}
++
+ static void flush_all(struct kmem_cache *s)
+ {
+ 	on_each_cpu_cond(has_cpu_slab, flush_cpu_slab, s, 1, GFP_ATOMIC);
+ }
++#else
++static void flush_all(struct kmem_cache *s)
++{
++	int cpu;
++
++	for_each_online_cpu(cpu) {
++		if (has_cpu_slab(cpu, s))
++			__flush_cpu_slab(s, cpu);
++	}
++}
++#endif
+ 
+ /*
+  * Check if the objects in a per cpu structure fit numa
+@@ -2201,7 +2216,7 @@ static void *__slab_alloc(struct kmem_ca
+ 	struct page *page;
+ 	unsigned long flags;
+ 
+-	local_irq_save(flags);
++	local_lock_irqsave(slub_lock, flags);
+ #ifdef CONFIG_PREEMPT
+ 	/*
+ 	 * We may have been preempted and rescheduled on a different
+@@ -2262,7 +2277,7 @@ load_freelist:
+ 	VM_BUG_ON(!c->page->frozen);
+ 	c->freelist = get_freepointer(s, freelist);
+ 	c->tid = next_tid(c->tid);
+-	local_irq_restore(flags);
++	local_unlock_irqrestore(slub_lock, flags);
+ 	return freelist;
+ 
+ new_slab:
+@@ -2281,7 +2296,7 @@ new_slab:
+ 		if (!(gfpflags & __GFP_NOWARN) && printk_ratelimit())
+ 			slab_out_of_memory(s, gfpflags, node);
+ 
+-		local_irq_restore(flags);
++		local_unlock_irqrestore(slub_lock, flags);
+ 		return NULL;
+ 	}
+ 
+@@ -2296,7 +2311,7 @@ new_slab:
+ 	deactivate_slab(s, page, get_freepointer(s, freelist));
+ 	c->page = NULL;
+ 	c->freelist = NULL;
+-	local_irq_restore(flags);
++	local_unlock_irqrestore(slub_lock, flags);
+ 	return freelist;
+ }
+ 
+@@ -2488,7 +2503,8 @@ static void __slab_free(struct kmem_cach
+ 				 * Otherwise the list_lock will synchronize with
+ 				 * other processors updating the list of slabs.
+ 				 */
+-				spin_lock_irqsave(&n->list_lock, flags);
++				local_spin_lock_irqsave(slub_lock,
++							&n->list_lock, flags);
+ 
+ 			}
+ 		}
+@@ -2538,7 +2554,7 @@ static void __slab_free(struct kmem_cach
+ 			stat(s, FREE_ADD_PARTIAL);
+ 		}
+ 	}
+-	spin_unlock_irqrestore(&n->list_lock, flags);
++	local_spin_unlock_irqrestore(slub_lock, &n->list_lock, flags);
+ 	return;
+ 
+ slab_empty:
+@@ -2552,7 +2568,7 @@ slab_empty:
+ 		/* Slab must be on the full list */
+ 		remove_full(s, page);
+ 
+-	spin_unlock_irqrestore(&n->list_lock, flags);
++	local_spin_unlock_irqrestore(slub_lock, &n->list_lock, flags);
+ 	stat(s, FREE_SLAB);
+ 	discard_slab(s, page);
+ }
+@@ -4002,9 +4018,9 @@ static int __cpuinit slab_cpuup_callback
+ 	case CPU_DEAD_FROZEN:
+ 		mutex_lock(&slab_mutex);
+ 		list_for_each_entry(s, &slab_caches, list) {
+-			local_irq_save(flags);
++			local_lock_irqsave(slub_lock, flags);
+ 			__flush_cpu_slab(s, cpu);
+-			local_irq_restore(flags);
++			local_unlock_irqrestore(slub_lock, flags);
+ 		}
+ 		mutex_unlock(&slab_mutex);
+ 		break;
