@@ -1,0 +1,54 @@
+Subject: softirq: Fix nohz pending issue for real
+From: Thomas Gleixner <tglx@linutronix.de>
+Date: Mon, 12 Nov 2012 22:07:34 +0100
+
+We really need to iterate through all softirqs to find a potentially
+blocked runner.
+
+T1 runs softirq X (that cleared pending bit for X)
+
+Interrupt raises softirq Y
+
+T1 gets blocked on a lock and lock owner is not runnable
+
+T1 schedules out
+
+CPU goes idle and complains about pending softirq Y.
+
+Now iterating over all softirqs lets us find the runner for X and
+eliminate Y from the to warn about list as well.
+
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+---
+ kernel/softirq.c |   13 ++++---------
+ 1 file changed, 4 insertions(+), 9 deletions(-)
+
+Index: linux-stable/kernel/softirq.c
+===================================================================
+--- linux-stable.orig/kernel/softirq.c
++++ linux-stable/kernel/softirq.c
+@@ -100,20 +100,15 @@ void softirq_check_pending_idle(void)
+ {
+ 	static int rate_limit;
+ 	struct softirq_runner *sr = &__get_cpu_var(softirq_runners);
+-	u32 warnpending, pending = local_softirq_pending();
++	u32 warnpending = local_softirq_pending();
++	int i;
+ 
+ 	if (rate_limit >= 10)
+ 		return;
+ 
+-	warnpending = pending;
+-
+-	while (pending) {
+-		struct task_struct *tsk;
+-		int i = __ffs(pending);
+-
+-		pending &= ~(1 << i);
++	for (i = 0; i < NR_SOFTIRQS; i++) {
++		struct task_struct *tsk = sr->runner[i];
+ 
+-		tsk = sr->runner[i];
+ 		/*
+ 		 * The wakeup code in rtmutex.c wakes up the task
+ 		 * _before_ it sets pi_blocked_on to NULL under
