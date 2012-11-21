@@ -122,9 +122,12 @@ class Gencontrol(Base):
                      ["$(MAKE) -f debian/rules.real install-libc-dev_%s %s" %
                       (arch, makeflags)])
 
-        if self.changelog[0].distribution == 'UNRELEASED' and os.getenv('DEBIAN_KERNEL_DISABLE_INSTALLER'):
-            import warnings
-            warnings.warn(u'Disable building of installer modules on request (DEBIAN_KERNEL_DISABLE_INSTALLER set)')
+        if os.getenv('DEBIAN_KERNEL_DISABLE_INSTALLER'):
+            if self.changelog[0].distribution == 'UNRELEASED':
+                import warnings
+                warnings.warn(u'Disable installer modules on request (DEBIAN_KERNEL_DISABLE_INSTALLER set)')
+            else:
+                raise RuntimeError(u'Unable to disable installer modules in release build (DEBIAN_KERNEL_DISABLE_INSTALLER set)')
         else:
             # Add udebs using kernel-wedge
             installer_def_dir = 'debian/installer'
@@ -292,10 +295,13 @@ class Gencontrol(Base):
 
         build_debug = config_entry_build.get('debug-info')
 
-        if build_debug and self.changelog[0].distribution == 'UNRELEASED' and os.getenv('DEBIAN_KERNEL_DISABLE_DEBUG'):
-            import warnings
-            warnings.warn(u'Disable building of debug infos on request (DEBIAN_KERNEL_DISABLE_DEBUG set)')
-            build_debug = False
+        if os.getenv('DEBIAN_KERNEL_DISABLE_DEBUG'):
+            if self.changelog[0].distribution == 'UNRELEASED':
+                import warnings
+                warnings.warn(u'Disable debug infos on request (DEBIAN_KERNEL_DISABLE_DEBUG set)')
+                build_debug = False
+            else:
+                raise RuntimeError(u'Unable to disable debug infos in release build (DEBIAN_KERNEL_DISABLE_DEBUG set)')
 
         if build_debug:
             makeflags['DEBUG'] = True
