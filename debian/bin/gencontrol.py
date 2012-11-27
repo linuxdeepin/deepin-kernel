@@ -266,10 +266,7 @@ class Gencontrol(Base):
         packages_dummy = []
         packages_own = []
 
-        if config_entry_image['type'] == 'plain-s390-tape':
-            image = self.templates["control.image.type-standalone"]
-        else:
-            image = self.templates["control.image.type-%s" % config_entry_image['type']]
+        image = self.templates["control.image.type-%s" % config_entry_image['type']]
 
         config_entry_xen = self.config.merge('xen', arch, featureset, flavour)
         if config_entry_xen:
