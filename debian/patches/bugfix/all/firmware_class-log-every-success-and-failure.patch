@@ -1,0 +1,95 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Subject: firmware_class: Log every success and failure against given device
+Date: Sun, 09 Dec 2012 16:02:00 +0000
+
+The hundreds of users of request_firmware() have nearly as many
+different log formats for reporting failures.  They also have only the
+vaguest hint as to what went wrong; only firmware_class really knows
+that.  Therefore, add specific log messages for the failure modes that
+aren't currently logged.
+
+In case of a driver that tries multiple names, this may result in the
+impression that it failed to initialise.  Therefore, also log successes.
+
+Change existing log messages to consistently use the given device, not
+the temporary child device we create.
+
+This makes many error messages in drivers redundant, which will be
+removed in later patches.
+
+--- a/drivers/base/firmware_class.c
++++ b/drivers/base/firmware_class.c
+@@ -251,7 +251,8 @@ static ssize_t firmware_loading_store(st
+ 						 fw_priv->nr_pages,
+ 						 0, PAGE_KERNEL_RO);
+ 			if (!fw_priv->fw->data) {
+-				dev_err(dev, "%s: vmap() failed\n", __func__);
++				dev_err(dev->parent, "%s: vmap() failed\n",
++					__func__);
+ 				goto err;
+ 			}
+ 			/* Pages are now owned by 'struct firmware' */
+@@ -266,9 +267,14 @@ static ssize_t firmware_loading_store(st
+ 		}
+ 		/* fallthrough */
+ 	default:
+-		dev_err(dev, "%s: unexpected value (%d)\n", __func__, loading);
+-		/* fallthrough */
++		dev_err(dev->parent, "%s: unexpected value (%d)\n",
++			__func__, loading);
++		goto err;
+ 	case -1:
++		dev_err(dev->parent,
++			"firmware: agent aborted loading %s (not found?)\n",
++			fw_priv->fw_id);
++		/* fallthrough */
+ 	err:
+ 		fw_load_abort(fw_priv);
+ 		break;
+@@ -431,6 +437,9 @@ static void firmware_class_timeout(u_lon
+ {
+ 	struct firmware_priv *fw_priv = (struct firmware_priv *) data;
+ 
++	dev_err(fw_priv->dev.parent,
++		"firmware: agent did not handle request for %s\n",
++		fw_priv->fw_id);
+ 	fw_load_abort(fw_priv);
+ }
+ 
+@@ -530,7 +539,8 @@ static int _request_firmware(const struc
+ 	}
+ 
+ 	if (fw_get_builtin_firmware(firmware, name)) {
+-		dev_dbg(device, "firmware: using built-in firmware %s\n", name);
++		dev_info(device, "firmware: using built-in firmware %s\n",
++			 name);
+ 		return 0;
+ 	}
+ 
+@@ -564,8 +574,15 @@ static int _request_firmware(const struc
+ 	del_timer_sync(&fw_priv->timeout);
+ 
+ 	mutex_lock(&fw_lock);
+-	if (!fw_priv->fw->size || test_bit(FW_STATUS_ABORT, &fw_priv->status))
++	if (test_bit(FW_STATUS_ABORT, &fw_priv->status)) {
++		/* failure has already been logged */
+ 		retval = -ENOENT;
++	} else if (!fw_priv->fw->size) {
++		dev_err(device,
++			"firmware: agent loaded no data for %s (not found?)\n",
++			name);
++		retval = -ENOENT;
++	}
+ 	fw_priv->fw = NULL;
+ 	mutex_unlock(&fw_lock);
+ 
+@@ -575,6 +592,9 @@ out:
+ 	if (retval) {
+ 		release_firmware(firmware);
+ 		*firmware_p = NULL;
++	} else {
++		dev_info(device, "firmware: agent loaded %s into memory\n",
++			 name);
+ 	}
+ 
+ 	return retval;
