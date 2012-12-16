@@ -60,7 +60,10 @@ class Gencontrol(Base):
         })
 
     def do_main_makefile(self, makefile, makeflags, extra):
-        for featureset in iter(self.config['base', ]['featuresets']):
+        fs_enabled = [featureset
+                      for featureset in self.config['base', ]['featuresets']
+                      if self.config.merge('base', None, featureset).get('enabled', True)]
+        for featureset in fs_enabled:
             makeflags_featureset = makeflags.copy()
             makeflags_featureset['FEATURESET'] = featureset
             cmds_source = ["$(MAKE) -f debian/rules.real source-featureset %s"
@@ -71,7 +74,7 @@ class Gencontrol(Base):
             makefile.add('source', ['source_%s' % featureset])
 
         makeflags = makeflags.copy()
-        makeflags['ALL_FEATURESETS'] = ' '.join(self.config['base', ]['featuresets'])
+        makeflags['ALL_FEATURESETS'] = ' '.join(fs_enabled)
         super(Gencontrol, self).do_main_makefile(makefile, makeflags, extra)
 
     def do_main_packages(self, packages, vars, makeflags, extra):
