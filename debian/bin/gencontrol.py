@@ -39,6 +39,7 @@ class gencontrol(object):
     def do_main_setup(self, vars, makeflags):
         makeflags.update({
             'VERSION': self.version.linux_version,
+            'VERSION_DEBIAN': self.version.complete,
             'UPSTREAMVERSION': self.version.linux_upstream,
         })
 
