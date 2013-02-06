@@ -1,0 +1,591 @@
+From f19ae4812408f2c8b3f79396e28a6a994cf713ef Mon Sep 17 00:00:00 2001
+From: Julien Cristau <jcristau@debian.org>
+Date: Wed, 22 Aug 2012 19:17:05 +0200
+Subject: [PATCH 7/7] Revert "drm: base prime/dma-buf support (v5)"
+
+This reverts commit 3248877ea1796915419fba7c89315fdbf00cb56a.
+---
+ drivers/gpu/drm/Kconfig     |    1 -
+ drivers/gpu/drm/Makefile    |    2 +-
+ drivers/gpu/drm/drm_drv.c   |    4 -
+ drivers/gpu/drm/drm_fops.c  |    7 -
+ drivers/gpu/drm/drm_gem.c   |    9 --
+ drivers/gpu/drm/drm_prime.c |  304 -------------------------------------------
+ include/drm/drm.h           |   14 +-
+ include/drm/drmP.h          |   62 ---------
+ 8 files changed, 2 insertions(+), 401 deletions(-)
+ delete mode 100644 drivers/gpu/drm/drm_prime.c
+
+diff --git a/drivers/gpu/drm/Kconfig b/drivers/gpu/drm/Kconfig
+index e354bc0..cc11488 100644
+--- a/drivers/gpu/drm/Kconfig
++++ b/drivers/gpu/drm/Kconfig
+@@ -9,7 +9,6 @@ menuconfig DRM
+ 	depends on (AGP || AGP=n) && !EMULATED_CMPXCHG && MMU
+ 	select I2C
+ 	select I2C_ALGOBIT
+-	select DMA_SHARED_BUFFER
+ 	help
+ 	  Kernel-level support for the Direct Rendering Infrastructure (DRI)
+ 	  introduced in XFree86 4.0. If you say Y here, you need to select
+diff --git a/drivers/gpu/drm/Makefile b/drivers/gpu/drm/Makefile
+index c20da5b..a858532 100644
+--- a/drivers/gpu/drm/Makefile
++++ b/drivers/gpu/drm/Makefile
+@@ -12,7 +12,7 @@ drm-y       :=	drm_auth.o drm_buffer.o drm_bufs.o drm_cache.o \
+ 		drm_platform.o drm_sysfs.o drm_hashtab.o drm_mm.o \
+ 		drm_crtc.o drm_modes.o drm_edid.o \
+ 		drm_info.o drm_debugfs.o drm_encoder_slave.o \
+-		drm_trace_points.o drm_global.o drm_prime.o
++		drm_trace_points.o drm_global.o
+ 
+ drm-$(CONFIG_COMPAT) += drm_ioc32.o
+ 
+diff --git a/drivers/gpu/drm/drm_drv.c b/drivers/gpu/drm/drm_drv.c
+index 6116e3b..0b65fbc 100644
+--- a/drivers/gpu/drm/drm_drv.c
++++ b/drivers/gpu/drm/drm_drv.c
+@@ -136,10 +136,6 @@ static struct drm_ioctl_desc drm_ioctls[] = {
+ 	DRM_IOCTL_DEF(DRM_IOCTL_GEM_OPEN, drm_gem_open_ioctl, DRM_AUTH|DRM_UNLOCKED),
+ 
+ 	DRM_IOCTL_DEF(DRM_IOCTL_MODE_GETRESOURCES, drm_mode_getresources, DRM_CONTROL_ALLOW|DRM_UNLOCKED),
+-
+-	DRM_IOCTL_DEF(DRM_IOCTL_PRIME_HANDLE_TO_FD, drm_prime_handle_to_fd_ioctl, DRM_AUTH|DRM_UNLOCKED),
+-	DRM_IOCTL_DEF(DRM_IOCTL_PRIME_FD_TO_HANDLE, drm_prime_fd_to_handle_ioctl, DRM_AUTH|DRM_UNLOCKED),
+-
+ 	DRM_IOCTL_DEF(DRM_IOCTL_MODE_GETPLANERESOURCES, drm_mode_getplane_res, DRM_MASTER|DRM_CONTROL_ALLOW|DRM_UNLOCKED),
+ 	DRM_IOCTL_DEF(DRM_IOCTL_MODE_GETCRTC, drm_mode_getcrtc, DRM_CONTROL_ALLOW|DRM_UNLOCKED),
+ 	DRM_IOCTL_DEF(DRM_IOCTL_MODE_SETCRTC, drm_mode_setcrtc, DRM_MASTER|DRM_CONTROL_ALLOW|DRM_UNLOCKED),
+diff --git a/drivers/gpu/drm/drm_fops.c b/drivers/gpu/drm/drm_fops.c
+index 123de28..0db8d56 100644
+--- a/drivers/gpu/drm/drm_fops.c
++++ b/drivers/gpu/drm/drm_fops.c
+@@ -271,9 +271,6 @@ static int drm_open_helper(struct inode *inode, struct file *filp,
+ 	if (dev->driver->driver_features & DRIVER_GEM)
+ 		drm_gem_open(dev, priv);
+ 
+-	if (drm_core_check_feature(dev, DRIVER_PRIME))
+-		drm_prime_init_file_private(&priv->prime);
+-
+ 	if (dev->driver->open) {
+ 		ret = dev->driver->open(dev, priv);
+ 		if (ret < 0)
+@@ -574,10 +571,6 @@ int drm_release(struct inode *inode, struct file *filp)
+ 
+ 	if (dev->driver->postclose)
+ 		dev->driver->postclose(dev, file_priv);
+-
+-	if (drm_core_check_feature(dev, DRIVER_PRIME))
+-		drm_prime_destroy_file_private(&file_priv->prime);
+-
+ 	kfree(file_priv);
+ 
+ 	/* ========================================================
+diff --git a/drivers/gpu/drm/drm_gem.c b/drivers/gpu/drm/drm_gem.c
+index 83114b5..0ef358e 100644
+--- a/drivers/gpu/drm/drm_gem.c
++++ b/drivers/gpu/drm/drm_gem.c
+@@ -35,7 +35,6 @@
+ #include <linux/mman.h>
+ #include <linux/pagemap.h>
+ #include <linux/shmem_fs.h>
+-#include <linux/dma-buf.h>
+ #include "drmP.h"
+ 
+ /** @file drm_gem.c
+@@ -233,10 +232,6 @@ drm_gem_handle_delete(struct drm_file *filp, u32 handle)
+ 	idr_remove(&filp->object_idr, handle);
+ 	spin_unlock(&filp->table_lock);
+ 
+-	if (obj->import_attach)
+-		drm_prime_remove_imported_buf_handle(&filp->prime,
+-				obj->import_attach->dmabuf);
+-
+ 	if (dev->driver->gem_close_object)
+ 		dev->driver->gem_close_object(obj, filp);
+ 	drm_gem_object_handle_unreference_unlocked(obj);
+@@ -532,10 +527,6 @@ drm_gem_object_release_handle(int id, void *ptr, void *data)
+ 	struct drm_gem_object *obj = ptr;
+ 	struct drm_device *dev = obj->dev;
+ 
+-	if (obj->import_attach)
+-		drm_prime_remove_imported_buf_handle(&file_priv->prime,
+-				obj->import_attach->dmabuf);
+-
+ 	if (dev->driver->gem_close_object)
+ 		dev->driver->gem_close_object(obj, file_priv);
+ 
+diff --git a/drivers/gpu/drm/drm_prime.c b/drivers/gpu/drm/drm_prime.c
+deleted file mode 100644
+index 1bdf2b5..0000000
+--- a/drivers/gpu/drm/drm_prime.c
++++ /dev/null
+@@ -1,304 +0,0 @@
+-/*
+- * Copyright © 2012 Red Hat
+- *
+- * Permission is hereby granted, free of charge, to any person obtaining a
+- * copy of this software and associated documentation files (the "Software"),
+- * to deal in the Software without restriction, including without limitation
+- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+- * and/or sell copies of the Software, and to permit persons to whom the
+- * Software is furnished to do so, subject to the following conditions:
+- *
+- * The above copyright notice and this permission notice (including the next
+- * paragraph) shall be included in all copies or substantial portions of the
+- * Software.
+- *
+- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+- * IN THE SOFTWARE.
+- *
+- * Authors:
+- *      Dave Airlie <airlied@redhat.com>
+- *      Rob Clark <rob.clark@linaro.org>
+- *
+- */
+-
+-#include <linux/export.h>
+-#include <linux/dma-buf.h>
+-#include "drmP.h"
+-
+-/*
+- * DMA-BUF/GEM Object references and lifetime overview:
+- *
+- * On the export the dma_buf holds a reference to the exporting GEM
+- * object. It takes this reference in handle_to_fd_ioctl, when it
+- * first calls .prime_export and stores the exporting GEM object in
+- * the dma_buf priv. This reference is released when the dma_buf
+- * object goes away in the driver .release function.
+- *
+- * On the import the importing GEM object holds a reference to the
+- * dma_buf (which in turn holds a ref to the exporting GEM object).
+- * It takes that reference in the fd_to_handle ioctl.
+- * It calls dma_buf_get, creates an attachment to it and stores the
+- * attachment in the GEM object. When this attachment is destroyed
+- * when the imported object is destroyed, we remove the attachment
+- * and drop the reference to the dma_buf.
+- *
+- * Thus the chain of references always flows in one direction
+- * (avoiding loops): importing_gem -> dmabuf -> exporting_gem
+- *
+- * Self-importing: if userspace is using PRIME as a replacement for flink
+- * then it will get a fd->handle request for a GEM object that it created.
+- * Drivers should detect this situation and return back the gem object
+- * from the dma-buf private.
+- */
+-
+-struct drm_prime_member {
+-	struct list_head entry;
+-	struct dma_buf *dma_buf;
+-	uint32_t handle;
+-};
+-
+-int drm_gem_prime_handle_to_fd(struct drm_device *dev,
+-		struct drm_file *file_priv, uint32_t handle, uint32_t flags,
+-		int *prime_fd)
+-{
+-	struct drm_gem_object *obj;
+-	void *buf;
+-
+-	obj = drm_gem_object_lookup(dev, file_priv, handle);
+-	if (!obj)
+-		return -ENOENT;
+-
+-	mutex_lock(&file_priv->prime.lock);
+-	/* re-export the original imported object */
+-	if (obj->import_attach) {
+-		get_dma_buf(obj->import_attach->dmabuf);
+-		*prime_fd = dma_buf_fd(obj->import_attach->dmabuf, flags);
+-		drm_gem_object_unreference_unlocked(obj);
+-		mutex_unlock(&file_priv->prime.lock);
+-		return 0;
+-	}
+-
+-	if (obj->export_dma_buf) {
+-		get_dma_buf(obj->export_dma_buf);
+-		*prime_fd = dma_buf_fd(obj->export_dma_buf, flags);
+-		drm_gem_object_unreference_unlocked(obj);
+-	} else {
+-		buf = dev->driver->gem_prime_export(dev, obj, flags);
+-		if (IS_ERR(buf)) {
+-			/* normally the created dma-buf takes ownership of the ref,
+-			 * but if that fails then drop the ref
+-			 */
+-			drm_gem_object_unreference_unlocked(obj);
+-			mutex_unlock(&file_priv->prime.lock);
+-			return PTR_ERR(buf);
+-		}
+-		obj->export_dma_buf = buf;
+-		*prime_fd = dma_buf_fd(buf, flags);
+-	}
+-	mutex_unlock(&file_priv->prime.lock);
+-	return 0;
+-}
+-EXPORT_SYMBOL(drm_gem_prime_handle_to_fd);
+-
+-int drm_gem_prime_fd_to_handle(struct drm_device *dev,
+-		struct drm_file *file_priv, int prime_fd, uint32_t *handle)
+-{
+-	struct dma_buf *dma_buf;
+-	struct drm_gem_object *obj;
+-	int ret;
+-
+-	dma_buf = dma_buf_get(prime_fd);
+-	if (IS_ERR(dma_buf))
+-		return PTR_ERR(dma_buf);
+-
+-	mutex_lock(&file_priv->prime.lock);
+-
+-	ret = drm_prime_lookup_imported_buf_handle(&file_priv->prime,
+-			dma_buf, handle);
+-	if (!ret) {
+-		ret = 0;
+-		goto out_put;
+-	}
+-
+-	/* never seen this one, need to import */
+-	obj = dev->driver->gem_prime_import(dev, dma_buf);
+-	if (IS_ERR(obj)) {
+-		ret = PTR_ERR(obj);
+-		goto out_put;
+-	}
+-
+-	ret = drm_gem_handle_create(file_priv, obj, handle);
+-	drm_gem_object_unreference_unlocked(obj);
+-	if (ret)
+-		goto out_put;
+-
+-	ret = drm_prime_add_imported_buf_handle(&file_priv->prime,
+-			dma_buf, *handle);
+-	if (ret)
+-		goto fail;
+-
+-	mutex_unlock(&file_priv->prime.lock);
+-	return 0;
+-
+-fail:
+-	/* hmm, if driver attached, we are relying on the free-object path
+-	 * to detach.. which seems ok..
+-	 */
+-	drm_gem_object_handle_unreference_unlocked(obj);
+-out_put:
+-	dma_buf_put(dma_buf);
+-	mutex_unlock(&file_priv->prime.lock);
+-	return ret;
+-}
+-EXPORT_SYMBOL(drm_gem_prime_fd_to_handle);
+-
+-int drm_prime_handle_to_fd_ioctl(struct drm_device *dev, void *data,
+-				 struct drm_file *file_priv)
+-{
+-	struct drm_prime_handle *args = data;
+-	uint32_t flags;
+-
+-	if (!drm_core_check_feature(dev, DRIVER_PRIME))
+-		return -EINVAL;
+-
+-	if (!dev->driver->prime_handle_to_fd)
+-		return -ENOSYS;
+-
+-	/* check flags are valid */
+-	if (args->flags & ~DRM_CLOEXEC)
+-		return -EINVAL;
+-
+-	/* we only want to pass DRM_CLOEXEC which is == O_CLOEXEC */
+-	flags = args->flags & DRM_CLOEXEC;
+-
+-	return dev->driver->prime_handle_to_fd(dev, file_priv,
+-			args->handle, flags, &args->fd);
+-}
+-
+-int drm_prime_fd_to_handle_ioctl(struct drm_device *dev, void *data,
+-				 struct drm_file *file_priv)
+-{
+-	struct drm_prime_handle *args = data;
+-
+-	if (!drm_core_check_feature(dev, DRIVER_PRIME))
+-		return -EINVAL;
+-
+-	if (!dev->driver->prime_fd_to_handle)
+-		return -ENOSYS;
+-
+-	return dev->driver->prime_fd_to_handle(dev, file_priv,
+-			args->fd, &args->handle);
+-}
+-
+-/*
+- * drm_prime_pages_to_sg
+- *
+- * this helper creates an sg table object from a set of pages
+- * the driver is responsible for mapping the pages into the
+- * importers address space
+- */
+-struct sg_table *drm_prime_pages_to_sg(struct page **pages, int nr_pages)
+-{
+-	struct sg_table *sg = NULL;
+-	struct scatterlist *iter;
+-	int i;
+-	int ret;
+-
+-	sg = kmalloc(sizeof(struct sg_table), GFP_KERNEL);
+-	if (!sg)
+-		goto out;
+-
+-	ret = sg_alloc_table(sg, nr_pages, GFP_KERNEL);
+-	if (ret)
+-		goto out;
+-
+-	for_each_sg(sg->sgl, iter, nr_pages, i)
+-		sg_set_page(iter, pages[i], PAGE_SIZE, 0);
+-
+-	return sg;
+-out:
+-	kfree(sg);
+-	return NULL;
+-}
+-EXPORT_SYMBOL(drm_prime_pages_to_sg);
+-
+-/* helper function to cleanup a GEM/prime object */
+-void drm_prime_gem_destroy(struct drm_gem_object *obj, struct sg_table *sg)
+-{
+-	struct dma_buf_attachment *attach;
+-	struct dma_buf *dma_buf;
+-	attach = obj->import_attach;
+-	if (sg)
+-		dma_buf_unmap_attachment(attach, sg, DMA_BIDIRECTIONAL);
+-	dma_buf = attach->dmabuf;
+-	dma_buf_detach(attach->dmabuf, attach);
+-	/* remove the reference */
+-	dma_buf_put(dma_buf);
+-}
+-EXPORT_SYMBOL(drm_prime_gem_destroy);
+-
+-void drm_prime_init_file_private(struct drm_prime_file_private *prime_fpriv)
+-{
+-	INIT_LIST_HEAD(&prime_fpriv->head);
+-	mutex_init(&prime_fpriv->lock);
+-}
+-EXPORT_SYMBOL(drm_prime_init_file_private);
+-
+-void drm_prime_destroy_file_private(struct drm_prime_file_private *prime_fpriv)
+-{
+-	struct drm_prime_member *member, *safe;
+-	list_for_each_entry_safe(member, safe, &prime_fpriv->head, entry) {
+-		list_del(&member->entry);
+-		kfree(member);
+-	}
+-}
+-EXPORT_SYMBOL(drm_prime_destroy_file_private);
+-
+-int drm_prime_add_imported_buf_handle(struct drm_prime_file_private *prime_fpriv, struct dma_buf *dma_buf, uint32_t handle)
+-{
+-	struct drm_prime_member *member;
+-
+-	member = kmalloc(sizeof(*member), GFP_KERNEL);
+-	if (!member)
+-		return -ENOMEM;
+-
+-	member->dma_buf = dma_buf;
+-	member->handle = handle;
+-	list_add(&member->entry, &prime_fpriv->head);
+-	return 0;
+-}
+-EXPORT_SYMBOL(drm_prime_add_imported_buf_handle);
+-
+-int drm_prime_lookup_imported_buf_handle(struct drm_prime_file_private *prime_fpriv, struct dma_buf *dma_buf, uint32_t *handle)
+-{
+-	struct drm_prime_member *member;
+-
+-	list_for_each_entry(member, &prime_fpriv->head, entry) {
+-		if (member->dma_buf == dma_buf) {
+-			*handle = member->handle;
+-			return 0;
+-		}
+-	}
+-	return -ENOENT;
+-}
+-EXPORT_SYMBOL(drm_prime_lookup_imported_buf_handle);
+-
+-void drm_prime_remove_imported_buf_handle(struct drm_prime_file_private *prime_fpriv, struct dma_buf *dma_buf)
+-{
+-	struct drm_prime_member *member, *safe;
+-
+-	mutex_lock(&prime_fpriv->lock);
+-	list_for_each_entry_safe(member, safe, &prime_fpriv->head, entry) {
+-		if (member->dma_buf == dma_buf) {
+-			list_del(&member->entry);
+-			kfree(member);
+-		}
+-	}
+-	mutex_unlock(&prime_fpriv->lock);
+-}
+-EXPORT_SYMBOL(drm_prime_remove_imported_buf_handle);
+diff --git a/include/drm/drm.h b/include/drm/drm.h
+index 64ff02d..34a7b89 100644
+--- a/include/drm/drm.h
++++ b/include/drm/drm.h
+@@ -617,17 +617,6 @@ struct drm_get_cap {
+ 	__u64 value;
+ };
+ 
+-#define DRM_CLOEXEC O_CLOEXEC
+-struct drm_prime_handle {
+-	__u32 handle;
+-
+-	/** Flags.. only applicable for handle->fd */
+-	__u32 flags;
+-
+-	/** Returned dmabuf file descriptor */
+-	__s32 fd;
+-};
+-
+ #include "drm_mode.h"
+ 
+ #define DRM_IOCTL_BASE			'd'
+@@ -684,8 +673,7 @@ struct drm_prime_handle {
+ #define DRM_IOCTL_UNLOCK		DRM_IOW( 0x2b, struct drm_lock)
+ #define DRM_IOCTL_FINISH		DRM_IOW( 0x2c, struct drm_lock)
+ 
+-#define DRM_IOCTL_PRIME_HANDLE_TO_FD    DRM_IOWR(0x2d, struct drm_prime_handle)
+-#define DRM_IOCTL_PRIME_FD_TO_HANDLE    DRM_IOWR(0x2e, struct drm_prime_handle)
++#define DRM_IOCTL_GEM_PRIME_OPEN        DRM_IOWR(0x2e, struct drm_gem_open)
+ 
+ #define DRM_IOCTL_AGP_ACQUIRE		DRM_IO(  0x30)
+ #define DRM_IOCTL_AGP_RELEASE		DRM_IO(  0x31)
+diff --git a/include/drm/drmP.h b/include/drm/drmP.h
+index dd73104..574bd1c 100644
+--- a/include/drm/drmP.h
++++ b/include/drm/drmP.h
+@@ -91,7 +91,6 @@ struct drm_device;
+ #define DRM_UT_CORE 		0x01
+ #define DRM_UT_DRIVER		0x02
+ #define DRM_UT_KMS		0x04
+-#define DRM_UT_PRIME		0x08
+ /*
+  * Three debug levels are defined.
+  * drm_core, drm_driver, drm_kms
+@@ -151,7 +150,6 @@ int drm_err(const char *func, const char *format, ...);
+ #define DRIVER_IRQ_VBL2    0x800
+ #define DRIVER_GEM         0x1000
+ #define DRIVER_MODESET     0x2000
+-#define DRIVER_PRIME       0x4000
+ 
+ #define DRIVER_BUS_PCI 0x1
+ #define DRIVER_BUS_PLATFORM 0x2
+@@ -217,11 +215,6 @@ int drm_err(const char *func, const char *format, ...);
+ 		drm_ut_debug_printk(DRM_UT_KMS, DRM_NAME, 		\
+ 					 __func__, fmt, ##args);	\
+ 	} while (0)
+-#define DRM_DEBUG_PRIME(fmt, args...)					\
+-	do {								\
+-		drm_ut_debug_printk(DRM_UT_PRIME, DRM_NAME,		\
+-					__func__, fmt, ##args);		\
+-	} while (0)
+ #define DRM_LOG(fmt, args...)						\
+ 	do {								\
+ 		drm_ut_debug_printk(DRM_UT_CORE, NULL,			\
+@@ -245,7 +238,6 @@ int drm_err(const char *func, const char *format, ...);
+ #else
+ #define DRM_DEBUG_DRIVER(fmt, args...) do { } while (0)
+ #define DRM_DEBUG_KMS(fmt, args...)	do { } while (0)
+-#define DRM_DEBUG_PRIME(fmt, args...)	do { } while (0)
+ #define DRM_DEBUG(fmt, arg...)		 do { } while (0)
+ #define DRM_LOG(fmt, arg...)		do { } while (0)
+ #define DRM_LOG_KMS(fmt, args...) do { } while (0)
+@@ -418,12 +410,6 @@ struct drm_pending_event {
+ 	void (*destroy)(struct drm_pending_event *event);
+ };
+ 
+-/* initial implementaton using a linked list - todo hashtab */
+-struct drm_prime_file_private {
+-	struct list_head head;
+-	struct mutex lock;
+-};
+-
+ /** File private data */
+ struct drm_file {
+ 	int authenticated;
+@@ -451,8 +437,6 @@ struct drm_file {
+ 	wait_queue_head_t event_wait;
+ 	struct list_head event_list;
+ 	int event_space;
+-
+-	struct drm_prime_file_private prime;
+ };
+ 
+ /** Wait queue */
+@@ -668,12 +652,6 @@ struct drm_gem_object {
+ 	uint32_t pending_write_domain;
+ 
+ 	void *driver_private;
+-
+-	/* dma buf exported from this GEM object */
+-	struct dma_buf *export_dma_buf;
+-
+-	/* dma buf attachment backing this object */
+-	struct dma_buf_attachment *import_attach;
+ };
+ 
+ #include "drm_crtc.h"
+@@ -912,20 +890,6 @@ struct drm_driver {
+ 	int (*gem_open_object) (struct drm_gem_object *, struct drm_file *);
+ 	void (*gem_close_object) (struct drm_gem_object *, struct drm_file *);
+ 
+-	/* prime: */
+-	/* export handle -> fd (see drm_gem_prime_handle_to_fd() helper) */
+-	int (*prime_handle_to_fd)(struct drm_device *dev, struct drm_file *file_priv,
+-				uint32_t handle, uint32_t flags, int *prime_fd);
+-	/* import fd -> handle (see drm_gem_prime_fd_to_handle() helper) */
+-	int (*prime_fd_to_handle)(struct drm_device *dev, struct drm_file *file_priv,
+-				int prime_fd, uint32_t *handle);
+-	/* export GEM -> dmabuf */
+-	struct dma_buf * (*gem_prime_export)(struct drm_device *dev,
+-				struct drm_gem_object *obj, int flags);
+-	/* import dmabuf -> GEM */
+-	struct drm_gem_object * (*gem_prime_import)(struct drm_device *dev,
+-				struct dma_buf *dma_buf);
+-
+ 	/* vga arb irq handler */
+ 	void (*vgaarb_irq)(struct drm_device *dev, bool state);
+ 
+@@ -1545,32 +1509,6 @@ extern int drm_vblank_info(struct seq_file *m, void *data);
+ extern int drm_clients_info(struct seq_file *m, void* data);
+ extern int drm_gem_name_info(struct seq_file *m, void *data);
+ 
+-
+-extern int drm_gem_prime_handle_to_fd(struct drm_device *dev,
+-		struct drm_file *file_priv, uint32_t handle, uint32_t flags,
+-		int *prime_fd);
+-extern int drm_gem_prime_fd_to_handle(struct drm_device *dev,
+-		struct drm_file *file_priv, int prime_fd, uint32_t *handle);
+-
+-extern int drm_prime_handle_to_fd_ioctl(struct drm_device *dev, void *data,
+-					struct drm_file *file_priv);
+-extern int drm_prime_fd_to_handle_ioctl(struct drm_device *dev, void *data,
+-					struct drm_file *file_priv);
+-
+-extern struct sg_table *drm_prime_pages_to_sg(struct page **pages, int nr_pages);
+-extern void drm_prime_gem_destroy(struct drm_gem_object *obj, struct sg_table *sg);
+-
+-
+-void drm_prime_init_file_private(struct drm_prime_file_private *prime_fpriv);
+-void drm_prime_destroy_file_private(struct drm_prime_file_private *prime_fpriv);
+-int drm_prime_add_imported_buf_handle(struct drm_prime_file_private *prime_fpriv, struct dma_buf *dma_buf, uint32_t handle);
+-int drm_prime_lookup_imported_buf_handle(struct drm_prime_file_private *prime_fpriv, struct dma_buf *dma_buf, uint32_t *handle);
+-void drm_prime_remove_imported_buf_handle(struct drm_prime_file_private *prime_fpriv, struct dma_buf *dma_buf);
+-
+-int drm_prime_add_dma_buf(struct drm_device *dev, struct drm_gem_object *obj);
+-int drm_prime_lookup_obj(struct drm_device *dev, struct dma_buf *buf,
+-			 struct drm_gem_object **obj);
+-
+ #if DRM_DEBUG_CODE
+ extern int drm_vma_info(struct seq_file *m, void *data);
+ #endif
+-- 
+1.7.10.4
+
