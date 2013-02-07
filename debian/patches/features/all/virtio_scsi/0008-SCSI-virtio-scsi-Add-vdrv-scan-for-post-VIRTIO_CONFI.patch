@@ -1,0 +1,92 @@
+From: Nicholas Bellinger <nab@linux-iscsi.org>
+Date: Wed, 11 Jul 2012 21:22:16 +0000
+Subject: [08/12] [SCSI] virtio-scsi: Add vdrv->scan for post
+ VIRTIO_CONFIG_S_DRIVER_OK LUN scanning
+
+commit 59057fbc37178f10a196ab7ec170b80273f75a47 upstream.
+
+This patch changes virtio-scsi to use a new virtio_driver->scan() callback
+so that scsi_scan_host() can be properly invoked once virtio_dev_probe() has
+set add_status(dev, VIRTIO_CONFIG_S_DRIVER_OK) to signal active virtio-ring
+operation, instead of from within virtscsi_probe().
+
+This fixes a bug where SCSI LUN scanning for both virtio-scsi-raw and
+virtio-scsi/tcm_vhost setups was happening before VIRTIO_CONFIG_S_DRIVER_OK
+had been set, causing VIRTIO_SCSI_S_BAD_TARGET to occur.  This fixes a bug
+with virtio-scsi/tcm_vhost where LUN scan was not detecting LUNs.
+
+Tested with virtio-scsi-raw + virtio-scsi/tcm_vhost w/ IBLOCK on 3.5-rc2 code.
+
+Signed-off-by: Nicholas Bellinger <nab@linux-iscsi.org>
+Acked-by: Paolo Bonzini <pbonzini@redhat.com>
+Signed-off-by: James Bottomley <JBottomley@Parallels.com>
+[bwh: Backported to 3.2: adjust context]
+---
+ drivers/scsi/virtio_scsi.c |   15 ++++++++++++---
+ drivers/virtio/virtio.c    |    5 ++++-
+ include/linux/virtio.h     |    1 +
+ 3 files changed, 17 insertions(+), 4 deletions(-)
+
+--- a/drivers/scsi/virtio_scsi.c
++++ b/drivers/scsi/virtio_scsi.c
+@@ -571,6 +571,13 @@ static struct virtio_scsi_target_state *
+ 	return tgt;
+ }
+ 
++static void virtscsi_scan(struct virtio_device *vdev)
++{
++	struct Scsi_Host *shost = (struct Scsi_Host *)vdev->priv;
++
++	scsi_scan_host(shost);
++}
++
+ static void virtscsi_remove_vqs(struct virtio_device *vdev)
+ {
+ 	struct Scsi_Host *sh = virtio_scsi_host(vdev);
+@@ -677,9 +684,10 @@ static int __devinit virtscsi_probe(stru
+ 	err = scsi_add_host(shost, &vdev->dev);
+ 	if (err)
+ 		goto scsi_add_host_failed;
+-
+-	scsi_scan_host(shost);
+-
++	/*
++	 * scsi_scan_host() happens in virtscsi_scan() via virtio_driver->scan()
++	 * after VIRTIO_CONFIG_S_DRIVER_OK has been set..
++	 */
+ 	return 0;
+ 
+ scsi_add_host_failed:
+@@ -735,6 +743,7 @@ static struct virtio_driver virtio_scsi_
+ 	.driver.owner = THIS_MODULE,
+ 	.id_table = id_table,
+ 	.probe = virtscsi_probe,
++	.scan = virtscsi_scan,
+ #if 0
+ 	.freeze = virtscsi_freeze,
+ 	.restore = virtscsi_restore,
+--- a/drivers/virtio/virtio.c
++++ b/drivers/virtio/virtio.c
+@@ -140,8 +140,11 @@ static int virtio_dev_probe(struct devic
+ 	err = drv->probe(dev);
+ 	if (err)
+ 		add_status(dev, VIRTIO_CONFIG_S_FAILED);
+-	else
++	else {
+ 		add_status(dev, VIRTIO_CONFIG_S_DRIVER_OK);
++		if (drv->scan)
++			drv->scan(dev);
++	}
+ 
+ 	return err;
+ }
+--- a/include/linux/virtio.h
++++ b/include/linux/virtio.h
+@@ -148,6 +148,7 @@ struct virtio_driver {
+ 	const unsigned int *feature_table;
+ 	unsigned int feature_table_size;
+ 	int (*probe)(struct virtio_device *dev);
++	void (*scan)(struct virtio_device *dev);
+ 	void (*remove)(struct virtio_device *dev);
+ 	void (*config_changed)(struct virtio_device *dev);
+ };

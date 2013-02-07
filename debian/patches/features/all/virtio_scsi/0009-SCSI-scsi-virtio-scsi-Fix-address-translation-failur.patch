@@ -1,0 +1,54 @@
+From: Wang Sen <senwang@linux.vnet.ibm.com>
+Date: Mon, 30 Jul 2012 14:25:06 +0800
+Subject: [09/12] [SCSI] scsi: virtio-scsi: Fix address translation failure of
+ HighMem pages used by sg list
+
+commit 27e99ade81368e6fdda3212bff9345177cf9e57a upstream.
+
+When using the commands below to write some data to a virtio-scsi LUN of the
+QEMU guest(32-bit) with 1G physical memory(qemu -m 1024), the qemu will crash.
+
+        # sudo mkfs.ext4 /dev/sdb  (/dev/sdb is the virtio-scsi LUN.)
+        # sudo mount /dev/sdb /mnt
+        # dd if=/dev/zero of=/mnt/file bs=1M count=1024
+
+In current implementation, sg_set_buf is called to add buffers to sg list which
+is put into the virtqueue eventually. But if there are some HighMem pages in
+table->sgl you can not get virtual address by sg_virt. So, sg_virt(sg_elem) may
+return NULL value. This will cause QEMU exit when virtqueue_map_sg is called
+in QEMU because an invalid GPA is passed by virtqueue.
+
+Two solutions are discussed here:
+http://lkml.indiana.edu/hypermail/linux/kernel/1207.3/00675.html
+
+Finally, value assignment approach was adopted because:
+
+Value assignment creates a well-formed scatterlist, because the termination
+marker in source sg_list has been set in blk_rq_map_sg(). The last entry of the
+source sg_list is just copied to the the last entry in destination list.  Note
+that, for now, virtio_ring does not care about the form of the scatterlist and
+simply processes the first out_num + in_num consecutive elements of the sg[]
+array.
+
+I have tested the patch on my workstation. QEMU would not crash any more.
+
+Signed-off-by: Wang Sen <senwang@linux.vnet.ibm.com>
+Acked-by: Paolo Bonzini <pbonzini@redhat.com>
+Signed-off-by: James Bottomley <JBottomley@Parallels.com>
+---
+ drivers/scsi/virtio_scsi.c |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/scsi/virtio_scsi.c b/drivers/scsi/virtio_scsi.c
+index c7030fb..3e79a2f 100644
+--- a/drivers/scsi/virtio_scsi.c
++++ b/drivers/scsi/virtio_scsi.c
+@@ -331,7 +331,7 @@ static void virtscsi_map_sgl(struct scatterlist *sg, unsigned int *p_idx,
+ 	int i;
+ 
+ 	for_each_sg(table->sgl, sg_elem, table->nents, i)
+-		sg_set_buf(&sg[idx++], sg_virt(sg_elem), sg_elem->length);
++		sg[idx++] = *sg_elem;
+ 
+ 	*p_idx = idx;
+ }
