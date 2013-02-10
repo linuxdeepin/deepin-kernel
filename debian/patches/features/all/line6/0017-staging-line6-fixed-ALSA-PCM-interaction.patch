@@ -1,0 +1,346 @@
+From: Markus Grabner <grabner@icg.tugraz.at>
+Date: Sat, 10 Dec 2011 02:12:32 +0100
+Subject: [017/106] staging: line6: fixed ALSA/PCM interaction
+
+commit 6b02a17ee5cd5d200dbe4a285a4e750f70884967 upstream.
+
+The PCM subsystem in the Line6 driver is mainly used for PCM playback and
+capture by ALSA, but also has other tasks, most notably providing a
+low-latency software monitor for devices which don't support hardware
+monitoring (e.g., the TonePort series). This patch makes ALSA "play nicely"
+with the other components, i.e., prevents it from resetting the isochronous
+USB transfer while other PCM tasks (software monitoring) are running.
+
+Signed-off-by: Markus Grabner <grabner@icg.tugraz.at>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+---
+ drivers/staging/line6/capture.c  |   46 ++++++++++++++++++++-------
+ drivers/staging/line6/capture.h  |    2 ++
+ drivers/staging/line6/pcm.c      |   65 ++++++++++++++++++++++++++------------
+ drivers/staging/line6/playback.c |   46 ++++++++++++++++++++-------
+ drivers/staging/line6/playback.h |    2 ++
+ drivers/staging/line6/revision.h |    2 +-
+ 6 files changed, 118 insertions(+), 45 deletions(-)
+
+diff --git a/drivers/staging/line6/capture.c b/drivers/staging/line6/capture.c
+index 8f59ff3..127f952 100644
+--- a/drivers/staging/line6/capture.c
++++ b/drivers/staging/line6/capture.c
+@@ -193,6 +193,31 @@ void line6_capture_check_period(struct snd_line6_pcm *line6pcm, int length)
+ 	}
+ }
+ 
++int line6_alloc_capture_buffer(struct snd_line6_pcm *line6pcm)
++{
++	/* We may be invoked multiple times in a row so allocate once only */
++	if (line6pcm->buffer_in)
++		return 0;
++
++	line6pcm->buffer_in =
++		kmalloc(LINE6_ISO_BUFFERS * LINE6_ISO_PACKETS *
++			line6pcm->max_packet_size, GFP_KERNEL);
++
++	if (!line6pcm->buffer_in) {
++		dev_err(line6pcm->line6->ifcdev,
++			"cannot malloc capture buffer\n");
++		return -ENOMEM;
++	}
++
++	return 0;
++}
++
++void line6_free_capture_buffer(struct snd_line6_pcm *line6pcm)
++{
++	kfree(line6pcm->buffer_in);
++	line6pcm->buffer_in = NULL;
++}
++
+ /*
+  * Callback for completed capture URB.
+  */
+@@ -316,16 +341,11 @@ static int snd_line6_capture_hw_params(struct snd_pcm_substream *substream,
+ 	}
+ 	/* -- [FD] end */
+ 
+-	/* We may be invoked multiple times in a row so allocate once only */
+-	if (!line6pcm->buffer_in)
+-		line6pcm->buffer_in =
+-			kmalloc(LINE6_ISO_BUFFERS * LINE6_ISO_PACKETS *
+-				line6pcm->max_packet_size, GFP_KERNEL);
++	if ((line6pcm->flags & MASK_CAPTURE) == 0) {
++		ret = line6_alloc_capture_buffer(line6pcm);
+ 
+-	if (!line6pcm->buffer_in) {
+-		dev_err(line6pcm->line6->ifcdev,
+-			"cannot malloc capture buffer\n");
+-		return -ENOMEM;
++		if (ret < 0)
++			return ret;
+ 	}
+ 
+ 	ret = snd_pcm_lib_malloc_pages(substream,
+@@ -342,9 +362,11 @@ static int snd_line6_capture_hw_free(struct snd_pcm_substream *substream)
+ {
+ 	struct snd_line6_pcm *line6pcm = snd_pcm_substream_chip(substream);
+ 
+-	line6_unlink_wait_clear_audio_in_urbs(line6pcm);
+-	kfree(line6pcm->buffer_in);
+-	line6pcm->buffer_in = NULL;
++	if ((line6pcm->flags & MASK_CAPTURE) == 0) {
++		line6_unlink_wait_clear_audio_in_urbs(line6pcm);
++		line6_free_capture_buffer(line6pcm);
++	}
++
+ 	return snd_pcm_lib_free_pages(substream);
+ }
+ 
+diff --git a/drivers/staging/line6/capture.h b/drivers/staging/line6/capture.h
+index a7509fb..366cbaa 100644
+--- a/drivers/staging/line6/capture.h
++++ b/drivers/staging/line6/capture.h
+@@ -19,11 +19,13 @@
+ 
+ extern struct snd_pcm_ops snd_line6_capture_ops;
+ 
++extern int line6_alloc_capture_buffer(struct snd_line6_pcm *line6pcm);
+ extern void line6_capture_copy(struct snd_line6_pcm *line6pcm, char *fbuf,
+ 			       int fsize);
+ extern void line6_capture_check_period(struct snd_line6_pcm *line6pcm,
+ 				       int length);
+ extern int line6_create_audio_in_urbs(struct snd_line6_pcm *line6pcm);
++extern void line6_free_capture_buffer(struct snd_line6_pcm *line6pcm);
+ extern int line6_submit_audio_in_all_urbs(struct snd_line6_pcm *line6pcm);
+ extern void line6_unlink_audio_in_urbs(struct snd_line6_pcm *line6pcm);
+ extern void line6_unlink_wait_clear_audio_in_urbs(struct snd_line6_pcm
+diff --git a/drivers/staging/line6/pcm.c b/drivers/staging/line6/pcm.c
+index 68727b2..37675e6 100644
+--- a/drivers/staging/line6/pcm.c
++++ b/drivers/staging/line6/pcm.c
+@@ -86,17 +86,22 @@ static DEVICE_ATTR(impulse_period, S_IWUSR | S_IRUGO, pcm_get_impulse_period,
+ 
+ #endif
+ 
++static bool test_flags(unsigned long flags0, unsigned long flags1,
++		       unsigned long mask)
++{
++	return ((flags0 & mask) == 0) && ((flags1 & mask) != 0);
++}
++
+ int line6_pcm_start(struct snd_line6_pcm *line6pcm, int channels)
+ {
+ 	unsigned long flags_old =
+ 	    __sync_fetch_and_or(&line6pcm->flags, channels);
+ 	unsigned long flags_new = flags_old | channels;
+ 	int err = 0;
+-
++	
+ 	line6pcm->prev_fbuf = NULL;
+ 
+-	if (((flags_old & MASK_CAPTURE) == 0) &&
+-	    ((flags_new & MASK_CAPTURE) != 0)) {
++	if (test_flags(flags_old, flags_new, MASK_CAPTURE)) {
+ 		/*
+ 		   Waiting for completion of active URBs in the stop handler is
+ 		   a bug, we therefore report an error if capturing is restarted
+@@ -105,34 +110,47 @@ int line6_pcm_start(struct snd_line6_pcm *line6pcm, int channels)
+ 		if (line6pcm->active_urb_in | line6pcm->unlink_urb_in)
+ 			return -EBUSY;
+ 
++		if (!(flags_new & MASK_PCM_ALSA_CAPTURE)) {
++			err = line6_alloc_capture_buffer(line6pcm);
++
++			if (err < 0)
++				goto pcm_start_error;
++		}
++
+ 		line6pcm->count_in = 0;
+ 		line6pcm->prev_fsize = 0;
+ 		err = line6_submit_audio_in_all_urbs(line6pcm);
+ 
+-		if (err < 0) {
+-			__sync_fetch_and_and(&line6pcm->flags, ~channels);
+-			return err;
+-		}
++		if (err < 0)
++			goto pcm_start_error;
+ 	}
+ 
+-	if (((flags_old & MASK_PLAYBACK) == 0) &&
+-	    ((flags_new & MASK_PLAYBACK) != 0)) {
++	if (test_flags(flags_old, flags_new, MASK_PLAYBACK)) {
+ 		/*
+ 		   See comment above regarding PCM restart.
+ 		 */
+ 		if (line6pcm->active_urb_out | line6pcm->unlink_urb_out)
+ 			return -EBUSY;
+ 
++		if (!(flags_new & MASK_PCM_ALSA_PLAYBACK)) {
++			err = line6_alloc_playback_buffer(line6pcm);
++
++			if (err < 0)
++				goto pcm_start_error;
++		}
++
+ 		line6pcm->count_out = 0;
+ 		err = line6_submit_audio_out_all_urbs(line6pcm);
+ 
+-		if (err < 0) {
+-			__sync_fetch_and_and(&line6pcm->flags, ~channels);
+-			return err;
+-		}
++		if (err < 0)
++			goto pcm_start_error;
+ 	}
+ 
+ 	return 0;
++
++pcm_start_error:
++	__sync_fetch_and_and(&line6pcm->flags, ~channels);
++	return err;
+ }
+ 
+ int line6_pcm_stop(struct snd_line6_pcm *line6pcm, int channels)
+@@ -141,14 +159,18 @@ int line6_pcm_stop(struct snd_line6_pcm *line6pcm, int channels)
+ 	    __sync_fetch_and_and(&line6pcm->flags, ~channels);
+ 	unsigned long flags_new = flags_old & ~channels;
+ 
+-	if (((flags_old & MASK_CAPTURE) != 0) &&
+-	    ((flags_new & MASK_CAPTURE) == 0)) {
++	if (test_flags(flags_new, flags_old, MASK_CAPTURE)) {
+ 		line6_unlink_audio_in_urbs(line6pcm);
++
++		if (!(flags_old & MASK_PCM_ALSA_CAPTURE))
++			line6_free_capture_buffer(line6pcm);
+ 	}
+ 
+-	if (((flags_old & MASK_PLAYBACK) != 0) &&
+-	    ((flags_new & MASK_PLAYBACK) == 0)) {
++	if (test_flags(flags_new, flags_old, MASK_PLAYBACK)) {
+ 		line6_unlink_audio_out_urbs(line6pcm);
++
++		if (!(flags_old & MASK_PCM_ALSA_PLAYBACK))
++			line6_free_playback_buffer(line6pcm);
+ 	}
+ 
+ 	return 0;
+@@ -476,18 +498,21 @@ int snd_line6_prepare(struct snd_pcm_substream *substream)
+ 
+ 	switch (substream->stream) {
+ 	case SNDRV_PCM_STREAM_PLAYBACK:
+-		line6_unlink_wait_clear_audio_out_urbs(line6pcm);
++		if ((line6pcm->flags & MASK_PLAYBACK) == 0)
++			line6_unlink_wait_clear_audio_out_urbs(line6pcm);
++
+ 		break;
+ 
+ 	case SNDRV_PCM_STREAM_CAPTURE:
+-		line6_unlink_wait_clear_audio_in_urbs(line6pcm);
++		if ((line6pcm->flags & MASK_CAPTURE) == 0)
++			line6_unlink_wait_clear_audio_in_urbs(line6pcm);
++
+ 		break;
+ 
+ 	default:
+ 		MISSING_CASE;
+ 	}
+ 
+-
+ 	if (!test_and_set_bit(BIT_PREPARED, &line6pcm->flags)) {
+ 		line6pcm->count_out = 0;
+ 		line6pcm->pos_out = 0;
+diff --git a/drivers/staging/line6/playback.c b/drivers/staging/line6/playback.c
+index 9a51b92..4152db2 100644
+--- a/drivers/staging/line6/playback.c
++++ b/drivers/staging/line6/playback.c
+@@ -351,6 +351,31 @@ void line6_unlink_wait_clear_audio_out_urbs(struct snd_line6_pcm *line6pcm)
+ 	wait_clear_audio_out_urbs(line6pcm);
+ }
+ 
++int line6_alloc_playback_buffer(struct snd_line6_pcm *line6pcm)
++{
++	/* We may be invoked multiple times in a row so allocate once only */
++	if (line6pcm->buffer_out)
++		return 0;
++
++	line6pcm->buffer_out =
++		kmalloc(LINE6_ISO_BUFFERS * LINE6_ISO_PACKETS *
++			line6pcm->max_packet_size, GFP_KERNEL);
++
++	if (!line6pcm->buffer_out) {
++		dev_err(line6pcm->line6->ifcdev,
++			"cannot malloc playback buffer\n");
++		return -ENOMEM;
++	}
++
++	return 0;
++}
++
++void line6_free_playback_buffer(struct snd_line6_pcm *line6pcm)
++{
++	kfree(line6pcm->buffer_out);
++	line6pcm->buffer_out = NULL;
++}
++
+ /*
+ 	Callback for completed playback URB.
+ */
+@@ -459,16 +484,11 @@ static int snd_line6_playback_hw_params(struct snd_pcm_substream *substream,
+ 	}
+ 	/* -- [FD] end */
+ 
+-	/* We may be invoked multiple times in a row so allocate once only */
+-	if (!line6pcm->buffer_out)
+-		line6pcm->buffer_out =
+-			kmalloc(LINE6_ISO_BUFFERS * LINE6_ISO_PACKETS *
+-				line6pcm->max_packet_size, GFP_KERNEL);
++	if ((line6pcm->flags & MASK_PLAYBACK) == 0) {
++		ret = line6_alloc_playback_buffer(line6pcm);
+ 
+-	if (!line6pcm->buffer_out) {
+-		dev_err(line6pcm->line6->ifcdev,
+-			"cannot malloc playback buffer\n");
+-		return -ENOMEM;
++		if (ret < 0)
++			return ret;
+ 	}
+ 
+ 	ret = snd_pcm_lib_malloc_pages(substream,
+@@ -485,9 +505,11 @@ static int snd_line6_playback_hw_free(struct snd_pcm_substream *substream)
+ {
+ 	struct snd_line6_pcm *line6pcm = snd_pcm_substream_chip(substream);
+ 
+-	line6_unlink_wait_clear_audio_out_urbs(line6pcm);
+-	kfree(line6pcm->buffer_out);
+-	line6pcm->buffer_out = NULL;
++	if ((line6pcm->flags & MASK_PLAYBACK) == 0) {
++		line6_unlink_wait_clear_audio_out_urbs(line6pcm);
++		line6_free_playback_buffer(line6pcm);
++	}
++
+ 	return snd_pcm_lib_free_pages(substream);
+ }
+ 
+diff --git a/drivers/staging/line6/playback.h b/drivers/staging/line6/playback.h
+index f2fc8c0..02487ff 100644
+--- a/drivers/staging/line6/playback.h
++++ b/drivers/staging/line6/playback.h
+@@ -29,7 +29,9 @@
+ 
+ extern struct snd_pcm_ops snd_line6_playback_ops;
+ 
++extern int line6_alloc_playback_buffer(struct snd_line6_pcm *line6pcm);
+ extern int line6_create_audio_out_urbs(struct snd_line6_pcm *line6pcm);
++extern void line6_free_playback_buffer(struct snd_line6_pcm *line6pcm);
+ extern int line6_submit_audio_out_all_urbs(struct snd_line6_pcm *line6pcm);
+ extern void line6_unlink_audio_out_urbs(struct snd_line6_pcm *line6pcm);
+ extern void line6_unlink_wait_clear_audio_out_urbs(struct snd_line6_pcm
+diff --git a/drivers/staging/line6/revision.h b/drivers/staging/line6/revision.h
+index 350d0df..b4eee2b 100644
+--- a/drivers/staging/line6/revision.h
++++ b/drivers/staging/line6/revision.h
+@@ -1,4 +1,4 @@
+ #ifndef DRIVER_REVISION
+ /* current subversion revision */
+-#define DRIVER_REVISION " (revision 690)"
++#define DRIVER_REVISION " (904)"
+ #endif
