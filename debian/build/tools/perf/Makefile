@@ -38,6 +38,7 @@ ifdef KERNEL_ARCH_PERF
 	-mkdir out
 	# upstream makefile is broken
 	cp -al $(top_srcdir)/tools/perf/Documentation doc
+	cp -al $(top_srcdir)/tools/perf/config config
 	+$(MAKE_PERF) -C $(top_srcdir)/tools/perf O=$(CURDIR)/out all VERSION=$(VERSION)
 	+$(MAKE_PERF) -C doc man VERSION=$(VERSION)
 endif
