@@ -4,10 +4,10 @@ import sys
 sys.path.append("debian/lib/python")
 
 from debian_linux.debian import *
-from debian_linux.gencontrol import PackagesList, Makefile, MakeFlags
+from debian_linux.gencontrol import PackagesList, Makefile, MakeFlags, Gencontrol
 from debian_linux.utils import *
 
-class gencontrol(object):
+class gencontrol(Gencontrol):
     makefile_targets = ('binary-arch', 'build')
 
     def __init__(self, underlay = None):
@@ -59,64 +59,6 @@ class gencontrol(object):
             'version': version.linux_version,
             'source_upstream': version.upstream,
         }
-
-    def process_relation(self, key, e, in_e, vars):
-        import copy
-        dep = copy.deepcopy(in_e[key])
-        for groups in dep:
-            for item in groups:
-                item.name = self.substitute(item.name, vars)
-        e[key] = dep
-
-    def process_description(self, e, in_e, vars):
-        in_desc = in_e['Description']
-        desc = in_desc.__class__()
-        desc.short = self.substitute(in_desc.short, vars)
-        for i in in_desc.long:
-            desc.append(self.substitute(i, vars))
-        e['Description'] = desc
-
-    def process_package(self, in_entry, vars):
-        e = Package()
-        for key, value in in_entry.iteritems():
-            if isinstance(value, PackageRelation):
-                self.process_relation(key, e, in_entry, vars)
-            elif key == 'Description':
-                self.process_description(e, in_entry, vars)
-            elif key[:2] == 'X-':
-                pass
-            else:
-                e[key] = self.substitute(value, vars)
-        return e
-
-    def process_packages(self, in_entries, vars):
-        entries = []
-        for i in in_entries:
-            entries.append(self.process_package(i, vars))
-        return entries
-
-    def substitute(self, s, vars):
-        if isinstance(s, (list, tuple)):
-            for i in xrange(len(s)):
-                s[i] = self.substitute(s[i], vars)
-            return s
-        def subst(match):
-            return vars[match.group(1)]
-        return re.sub(r'@([a-z_]+)@', subst, s)
-
-    def write_control(self, list):
-        self.write_rfc822(file("debian/control", 'w'), list)
-
-    def write_makefile(self, makefile):
-        f = file("debian/rules.gen", 'w')
-        makefile.write(f)
-        f.close()
-
-    def write_rfc822(self, f, list):
-        for entry in list:
-            for key, value in entry.iteritems():
-                f.write("%s: %s\n" % (key, value))
-            f.write('\n')
 
 if __name__ == '__main__':
     gencontrol()()
