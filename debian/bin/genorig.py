@@ -61,8 +61,10 @@ class Main(object):
         extract_proc = subprocess.Popen(['tar', '-xaf', '-'], cwd=self.dir,
                                         stdin=archive_proc.stdout)
 
-        if extract_proc.wait():
-            raise RuntimeError("Can't extract tarball")
+        ret1 = archive_proc.wait()
+        ret2 = extract_proc.wait()
+        if ret1 or ret2:
+            raise RuntimeError("Can't create archive")
 
     def upstream_extract(self, input_tar):
         self.log("Extracting tarball %s\n" % input_tar)
