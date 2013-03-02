@@ -58,7 +58,7 @@ class Main(object):
                                          '--prefix=%s/' % self.orig, self.tag],
                                         cwd=input_repo,
                                         stdout=subprocess.PIPE)
-        extract_proc = subprocess.Popen(['tar', '-xf', '-'], cwd=self.dir,
+        extract_proc = subprocess.Popen(['tar', '-xaf', '-'], cwd=self.dir,
                                         stdin=archive_proc.stdout)
 
         if extract_proc.wait():
@@ -66,15 +66,11 @@ class Main(object):
 
     def upstream_extract(self, input_tar):
         self.log("Extracting tarball %s\n" % input_tar)
-        match = re.match(r'(^|.*/)(?P<dir>linux-\d+\.\d+(\.\d+)?(-\S+)?)\.tar(\.(?P<extension>(bz2|gz)))?$', input_tar)
+        match = re.match(r'(^|.*/)(?P<dir>linux-\d+\.\d+(\.\d+)?(-\S+)?)\.tar(\.(?P<extension>(bz2|gz|xz)))?$', input_tar)
         if not match:
             raise RuntimeError("Can't identify name of tarball")
 
-        cmdline = ['tar', '-xf', input_tar, '-C', self.dir]
-        if match.group('extension') == 'bz2':
-            cmdline.append('-j')
-        elif match.group('extension') == 'gz':
-            cmdline.append('-z')
+        cmdline = ['tar', '-xaf', input_tar, '-C', self.dir]
 
         if subprocess.Popen(cmdline).wait():
             raise RuntimeError("Can't extract tarball")
@@ -83,7 +79,7 @@ class Main(object):
 
     def upstream_patch(self, input_patch):
         self.log("Patching source with %s\n" % input_patch)
-        match = re.match(r'(^|.*/)patch-\d+\.\d+\.\d+(-\S+?)?(\.(?P<extension>(bz2|gz)))?$', input_patch)
+        match = re.match(r'(^|.*/)patch-\d+\.\d+\.\d+(-\S+?)?(\.(?P<extension>(bz2|gz|xz)))?$', input_patch)
         if not match:
             raise RuntimeError("Can't identify name of patch")
         cmdline = []
@@ -91,6 +87,8 @@ class Main(object):
             cmdline.append('bzcat')
         elif match.group('extension') == 'gz':
             cmdline.append('zcat')
+        elif match.group('extension') == 'xz':
+            cmdline.append('xzcat')
         else:
             cmdline.append('cat')
         cmdline.append(input_patch)
