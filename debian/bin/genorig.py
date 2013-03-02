@@ -67,8 +67,7 @@ class Main(object):
 
         self.orig = '%s-%s' % (source, version.upstream)
         self.orig_tar = '%s_%s.orig.tar.xz' % (source, version.upstream)
-        self.tag = 'v' + re.sub(r"^(\d+\.\d+)\.0", r"\1",
-                                version.upstream.replace('~', '-'))
+        self.tag = 'v' + version.linux_upstream_full
 
     def __call__(self):
         import tempfile
