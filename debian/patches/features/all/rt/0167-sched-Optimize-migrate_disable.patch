@@ -1,0 +1,70 @@
+From 71adcda458eaa8d36e2950b55e7b6890ddbd5899 Mon Sep 17 00:00:00 2001
+From: Peter Zijlstra <a.p.zijlstra@chello.nl>
+Date: Thu, 11 Aug 2011 15:03:35 +0200
+Subject: [PATCH 167/303] sched: Optimize migrate_disable
+
+Change from task_rq_lock() to raw_spin_lock(&rq->lock) to avoid a few
+atomic ops. See comment on why it should be safe.
+
+Signed-off-by: Peter Zijlstra <a.p.zijlstra@chello.nl>
+Link: http://lkml.kernel.org/n/tip-cbz6hkl5r5mvwtx5s3tor2y6@git.kernel.org
+---
+ kernel/sched.c |   24 ++++++++++++++++++++----
+ 1 file changed, 20 insertions(+), 4 deletions(-)
+
+diff --git a/kernel/sched.c b/kernel/sched.c
+index 026cde6..0c6556d 100644
+--- a/kernel/sched.c
++++ b/kernel/sched.c
+@@ -6512,7 +6512,19 @@ void migrate_disable(void)
+ 		preempt_enable();
+ 		return;
+ 	}
+-	rq = task_rq_lock(p, &flags);
++
++	/*
++	 * Since this is always current we can get away with only locking
++	 * rq->lock, the ->cpus_allowed value can normally only be changed
++	 * while holding both p->pi_lock and rq->lock, but seeing that this
++	 * it current, we cannot actually be waking up, so all code that
++	 * relies on serialization against p->pi_lock is out of scope.
++	 *
++	 * Taking rq->lock serializes us against things like
++	 * set_cpus_allowed_ptr() that can still happen concurrently.
++	 */
++	rq = this_rq();
++	raw_spin_lock_irqsave(&rq->lock, flags);
+ 	p->migrate_disable = 1;
+ 	mask = tsk_cpus_allowed(p);
+ 
+@@ -6523,7 +6535,7 @@ void migrate_disable(void)
+ 			p->sched_class->set_cpus_allowed(p, mask);
+ 		p->rt.nr_cpus_allowed = cpumask_weight(mask);
+ 	}
+-	task_rq_unlock(rq, p, &flags);
++	raw_spin_unlock_irqrestore(&rq->lock, flags);
+ 	preempt_enable();
+ }
+ EXPORT_SYMBOL_GPL(migrate_disable);
+@@ -6551,7 +6563,11 @@ void migrate_enable(void)
+ 		return;
+ 	}
+ 
+-	rq = task_rq_lock(p, &flags);
++	/*
++	 * See comment in migrate_disable().
++	 */
++	rq = this_rq();
++	raw_spin_lock_irqsave(&rq->lock, flags);
+ 	p->migrate_disable = 0;
+ 	mask = tsk_cpus_allowed(p);
+ 
+@@ -6563,7 +6579,7 @@ void migrate_enable(void)
+ 		p->rt.nr_cpus_allowed = cpumask_weight(mask);
+ 	}
+ 
+-	task_rq_unlock(rq, p, &flags);
++	raw_spin_unlock_irqrestore(&rq->lock, flags);
+ 	unpin_current_cpu();
+ 	preempt_enable();
+ }
