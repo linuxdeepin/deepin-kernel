@@ -4,14 +4,12 @@ Date: Sat, 18 Jun 2011 19:44:43 +0200
 
 Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 ---
- mm/slab.c |  154 ++++++++++++++++++++++++++++++++++++++++++--------------------
- 1 file changed, 105 insertions(+), 49 deletions(-)
+ mm/slab.c |  163 +++++++++++++++++++++++++++++++++++++++++++-------------------
+ 1 file changed, 114 insertions(+), 49 deletions(-)
 
-Index: linux-stable/mm/slab.c
-===================================================================
---- linux-stable.orig/mm/slab.c
-+++ linux-stable/mm/slab.c
-@@ -117,6 +117,7 @@
+--- a/mm/slab.c
++++ b/mm/slab.c
+@@ -116,6 +116,7 @@
  #include	<linux/kmemcheck.h>
  #include	<linux/memory.h>
  #include	<linux/prefetch.h>
@@ -19,7 +17,7 @@ Index: linux-stable/mm/slab.c
  
  #include	<net/sock.h>
  
-@@ -703,12 +704,40 @@ static void slab_set_debugobj_lock_class
+@@ -696,12 +697,49 @@ static void slab_set_debugobj_lock_class
  #endif
  
  static DEFINE_PER_CPU(struct delayed_work, slab_reap_work);
@@ -38,11 +36,20 @@ Index: linux-stable/mm/slab.c
 +{
 +	unsigned int i;
 +
-+	for_each_online_cpu(i) {
-+		spin_lock_irq(&per_cpu(slab_lock, i).lock);
++	get_cpu_light();
++	for_each_online_cpu(i)
 +		func(arg, i);
-+		spin_unlock_irq(&per_cpu(slab_lock, i).lock);
-+	}
++	put_cpu_light();
++}
++
++static void lock_slab_on(unsigned int cpu)
++{
++	local_lock_irq_on(slab_lock, cpu);
++}
++
++static void unlock_slab_on(unsigned int cpu)
++{
++	local_unlock_irq_on(slab_lock, cpu);
 +}
 +#endif
  
@@ -60,7 +67,7 @@ Index: linux-stable/mm/slab.c
  static inline struct kmem_cache *__find_general_cachep(size_t size,
  							gfp_t gfpflags)
  {
-@@ -1175,9 +1204,10 @@ static void reap_alien(struct kmem_cache
+@@ -1171,9 +1209,10 @@ static void reap_alien(struct kmem_cache
  	if (l3->alien) {
  		struct array_cache *ac = l3->alien[node];
  
@@ -73,7 +80,7 @@ Index: linux-stable/mm/slab.c
  		}
  	}
  }
-@@ -1192,9 +1222,9 @@ static void drain_alien_cache(struct kme
+@@ -1188,9 +1227,9 @@ static void drain_alien_cache(struct kme
  	for_each_online_node(i) {
  		ac = alien[i];
  		if (ac) {
@@ -85,7 +92,7 @@ Index: linux-stable/mm/slab.c
  		}
  	}
  }
-@@ -1273,11 +1303,11 @@ static int init_cache_nodelists_node(int
+@@ -1269,11 +1308,11 @@ static int init_cache_nodelists_node(int
  			cachep->nodelists[node] = l3;
  		}
  
@@ -99,7 +106,7 @@ Index: linux-stable/mm/slab.c
  	}
  	return 0;
  }
-@@ -1302,7 +1332,7 @@ static void __cpuinit cpuup_canceled(lon
+@@ -1298,7 +1337,7 @@ static void __cpuinit cpuup_canceled(lon
  		if (!l3)
  			goto free_array_cache;
  
@@ -108,7 +115,7 @@ Index: linux-stable/mm/slab.c
  
  		/* Free limit for this kmem_list3 */
  		l3->free_limit -= cachep->batchcount;
-@@ -1310,7 +1340,7 @@ static void __cpuinit cpuup_canceled(lon
+@@ -1306,7 +1345,7 @@ static void __cpuinit cpuup_canceled(lon
  			free_block(cachep, nc->entry, nc->avail, node);
  
  		if (!cpumask_empty(mask)) {
@@ -117,7 +124,7 @@ Index: linux-stable/mm/slab.c
  			goto free_array_cache;
  		}
  
-@@ -1324,7 +1354,7 @@ static void __cpuinit cpuup_canceled(lon
+@@ -1320,7 +1359,7 @@ static void __cpuinit cpuup_canceled(lon
  		alien = l3->alien;
  		l3->alien = NULL;
  
@@ -126,7 +133,7 @@ Index: linux-stable/mm/slab.c
  
  		kfree(shared);
  		if (alien) {
-@@ -1398,7 +1428,7 @@ static int __cpuinit cpuup_prepare(long 
+@@ -1394,7 +1433,7 @@ static int __cpuinit cpuup_prepare(long
  		l3 = cachep->nodelists[node];
  		BUG_ON(!l3);
  
@@ -135,7 +142,7 @@ Index: linux-stable/mm/slab.c
  		if (!l3->shared) {
  			/*
  			 * We are serialised from CPU_DEAD or
-@@ -1413,7 +1443,7 @@ static int __cpuinit cpuup_prepare(long 
+@@ -1409,7 +1448,7 @@ static int __cpuinit cpuup_prepare(long
  			alien = NULL;
  		}
  #endif
@@ -144,16 +151,16 @@ Index: linux-stable/mm/slab.c
  		kfree(shared);
  		free_alien_cache(alien);
  		if (cachep->flags & SLAB_DEBUG_OBJECTS)
-@@ -1604,6 +1634,8 @@ void __init kmem_cache_init(void)
+@@ -1612,6 +1651,8 @@ void __init kmem_cache_init(void)
  	if (num_possible_nodes() == 1)
  		use_alien_caches = 0;
  
 +	local_irq_lock_init(slab_lock);
 +
- 	for (i = 0; i < NUM_INIT_LISTS; i++) {
+ 	for (i = 0; i < NUM_INIT_LISTS; i++)
  		kmem_list3_init(&initkmem_list3[i]);
- 		if (i < MAX_NUMNODES)
-@@ -2614,7 +2646,7 @@ __kmem_cache_create (const char *name, s
+ 
+@@ -2533,7 +2574,7 @@ __kmem_cache_create (struct kmem_cache *
  #if DEBUG
  static void check_irq_off(void)
  {
@@ -162,7 +169,7 @@ Index: linux-stable/mm/slab.c
  }
  
  static void check_irq_on(void)
-@@ -2649,26 +2681,37 @@ static void drain_array(struct kmem_cach
+@@ -2568,26 +2609,37 @@ static void drain_array(struct kmem_cach
  			struct array_cache *ac,
  			int force, int node);
  
@@ -205,7 +212,7 @@ Index: linux-stable/mm/slab.c
  	check_irq_on();
  	for_each_online_node(node) {
  		l3 = cachep->nodelists[node];
-@@ -2699,10 +2742,10 @@ static int drain_freelist(struct kmem_ca
+@@ -2618,10 +2670,10 @@ static int drain_freelist(struct kmem_ca
  	nr_freed = 0;
  	while (nr_freed < tofree && !list_empty(&l3->slabs_free)) {
  
@@ -218,7 +225,7 @@ Index: linux-stable/mm/slab.c
  			goto out;
  		}
  
-@@ -2716,7 +2759,7 @@ static int drain_freelist(struct kmem_ca
+@@ -2635,7 +2687,7 @@ static int drain_freelist(struct kmem_ca
  		 * to the cache.
  		 */
  		l3->free_objects -= cache->num;
@@ -227,7 +234,7 @@ Index: linux-stable/mm/slab.c
  		slab_destroy(cache, slabp);
  		nr_freed++;
  	}
-@@ -3011,7 +3054,7 @@ static int cache_grow(struct kmem_cache 
+@@ -2910,7 +2962,7 @@ static int cache_grow(struct kmem_cache
  	offset *= cachep->colour_off;
  
  	if (local_flags & __GFP_WAIT)
@@ -236,7 +243,7 @@ Index: linux-stable/mm/slab.c
  
  	/*
  	 * The test for missing atomic flag is performed here, rather than
-@@ -3041,7 +3084,7 @@ static int cache_grow(struct kmem_cache 
+@@ -2940,7 +2992,7 @@ static int cache_grow(struct kmem_cache
  	cache_init_objs(cachep, slabp);
  
  	if (local_flags & __GFP_WAIT)
@@ -245,7 +252,7 @@ Index: linux-stable/mm/slab.c
  	check_irq_off();
  	spin_lock(&l3->list_lock);
  
-@@ -3055,7 +3098,7 @@ opps1:
+@@ -2954,7 +3006,7 @@ opps1:
  	kmem_freepages(cachep, objp);
  failed:
  	if (local_flags & __GFP_WAIT)
@@ -254,7 +261,7 @@ Index: linux-stable/mm/slab.c
  	return 0;
  }
  
-@@ -3469,11 +3512,11 @@ retry:
+@@ -3368,11 +3420,11 @@ retry:
  		 * set and go into memory reserves if necessary.
  		 */
  		if (local_flags & __GFP_WAIT)
@@ -268,8 +275,8 @@ Index: linux-stable/mm/slab.c
  		if (obj) {
  			/*
  			 * Insert into the appropriate per node queues
-@@ -3591,7 +3634,7 @@ __cache_alloc_node(struct kmem_cache *ca
- 		return NULL;
+@@ -3492,7 +3544,7 @@ slab_alloc_node(struct kmem_cache *cache
+ 	cachep = memcg_kmem_get_cache(cachep, flags);
  
  	cache_alloc_debugcheck_before(cachep, flags);
 -	local_irq_save(save_flags);
@@ -277,7 +284,7 @@ Index: linux-stable/mm/slab.c
  
  	if (nodeid == NUMA_NO_NODE)
  		nodeid = slab_node;
-@@ -3616,7 +3659,7 @@ __cache_alloc_node(struct kmem_cache *ca
+@@ -3517,7 +3569,7 @@ slab_alloc_node(struct kmem_cache *cache
  	/* ___cache_alloc_node can fall back to other nodes */
  	ptr = ____cache_alloc_node(cachep, flags, nodeid);
    out:
@@ -286,8 +293,8 @@ Index: linux-stable/mm/slab.c
  	ptr = cache_alloc_debugcheck_after(cachep, flags, ptr, caller);
  	kmemleak_alloc_recursive(ptr, cachep->object_size, 1, cachep->flags,
  				 flags);
-@@ -3676,9 +3719,9 @@ __cache_alloc(struct kmem_cache *cachep,
- 		return NULL;
+@@ -3579,9 +3631,9 @@ slab_alloc(struct kmem_cache *cachep, gf
+ 	cachep = memcg_kmem_get_cache(cachep, flags);
  
  	cache_alloc_debugcheck_before(cachep, flags);
 -	local_irq_save(save_flags);
@@ -298,31 +305,31 @@ Index: linux-stable/mm/slab.c
  	objp = cache_alloc_debugcheck_after(cachep, flags, objp, caller);
  	kmemleak_alloc_recursive(objp, cachep->object_size, 1, cachep->flags,
  				 flags);
-@@ -3994,9 +4037,9 @@ void kmem_cache_free(struct kmem_cache *
+@@ -3898,9 +3950,9 @@ void kmem_cache_free(struct kmem_cache *
  	debug_check_no_locks_freed(objp, cachep->object_size);
  	if (!(cachep->flags & SLAB_DEBUG_OBJECTS))
  		debug_check_no_obj_freed(objp, cachep->object_size);
 -	local_irq_save(flags);
 +	local_lock_irqsave(slab_lock, flags);
- 	__cache_free(cachep, objp, __builtin_return_address(0));
+ 	__cache_free(cachep, objp, _RET_IP_);
 -	local_irq_restore(flags);
 +	local_unlock_irqrestore(slab_lock, flags);
  
  	trace_kmem_cache_free(_RET_IP_, objp);
  }
-@@ -4025,9 +4068,9 @@ void kfree(const void *objp)
+@@ -3929,9 +3981,9 @@ void kfree(const void *objp)
  	debug_check_no_locks_freed(objp, c->object_size);
  
  	debug_check_no_obj_freed(objp, c->object_size);
 -	local_irq_save(flags);
 +	local_lock_irqsave(slab_lock, flags);
- 	__cache_free(c, (void *)objp, __builtin_return_address(0));
+ 	__cache_free(c, (void *)objp, _RET_IP_);
 -	local_irq_restore(flags);
 +	local_unlock_irqrestore(slab_lock, flags);
  }
  EXPORT_SYMBOL(kfree);
  
-@@ -4070,7 +4113,7 @@ static int alloc_kmemlist(struct kmem_ca
+@@ -3968,7 +4020,7 @@ static int alloc_kmemlist(struct kmem_ca
  		if (l3) {
  			struct array_cache *shared = l3->shared;
  
@@ -331,7 +338,7 @@ Index: linux-stable/mm/slab.c
  
  			if (shared)
  				free_block(cachep, shared->entry,
-@@ -4083,7 +4126,7 @@ static int alloc_kmemlist(struct kmem_ca
+@@ -3981,7 +4033,7 @@ static int alloc_kmemlist(struct kmem_ca
  			}
  			l3->free_limit = (1 + nr_cpus_node(node)) *
  					cachep->batchcount + cachep->num;
@@ -340,7 +347,7 @@ Index: linux-stable/mm/slab.c
  			kfree(shared);
  			free_alien_cache(new_alien);
  			continue;
-@@ -4130,17 +4173,28 @@ struct ccupdate_struct {
+@@ -4028,17 +4080,28 @@ struct ccupdate_struct {
  	struct array_cache *new[0];
  };
  
@@ -353,13 +360,13 @@ Index: linux-stable/mm/slab.c
 -	check_irq_off();
 -	old = cpu_cache_get(new->cachep);
 +	old = cpu_cache_get_on_cpu(new->cachep, cpu);
-+
-+	new->cachep->array[cpu] = new->new[cpu];
-+	new->new[cpu] = old;
-+}
  
 -	new->cachep->array[smp_processor_id()] = new->new[smp_processor_id()];
 -	new->new[smp_processor_id()] = old;
++	new->cachep->array[cpu] = new->new[cpu];
++	new->new[cpu] = old;
++}
++
 +#ifndef CONFIG_PREEMPT_RT_BASE
 +static void do_ccupdate_local(void *info)
 +{
@@ -373,8 +380,8 @@ Index: linux-stable/mm/slab.c
 +#endif
  
  /* Always called with the slab_mutex held */
- static int do_tune_cpucache(struct kmem_cache *cachep, int limit,
-@@ -4166,7 +4220,7 @@ static int do_tune_cpucache(struct kmem_
+ static int __do_tune_cpucache(struct kmem_cache *cachep, int limit,
+@@ -4064,7 +4127,7 @@ static int __do_tune_cpucache(struct kme
  	}
  	new->cachep = cachep;
  
@@ -383,7 +390,7 @@ Index: linux-stable/mm/slab.c
  
  	check_irq_on();
  	cachep->batchcount = batchcount;
-@@ -4177,9 +4231,11 @@ static int do_tune_cpucache(struct kmem_
+@@ -4075,9 +4138,11 @@ static int __do_tune_cpucache(struct kme
  		struct array_cache *ccold = new->new[i];
  		if (!ccold)
  			continue;
@@ -397,7 +404,7 @@ Index: linux-stable/mm/slab.c
  		kfree(ccold);
  	}
  	kfree(new);
-@@ -4255,7 +4311,7 @@ static void drain_array(struct kmem_cach
+@@ -4192,7 +4257,7 @@ static void drain_array(struct kmem_cach
  	if (ac->touched && !force) {
  		ac->touched = 0;
  	} else {
@@ -406,7 +413,7 @@ Index: linux-stable/mm/slab.c
  		if (ac->avail) {
  			tofree = force ? ac->avail : (ac->limit + 4) / 5;
  			if (tofree > ac->avail)
-@@ -4265,7 +4321,7 @@ static void drain_array(struct kmem_cach
+@@ -4202,7 +4267,7 @@ static void drain_array(struct kmem_cach
  			memmove(ac->entry, &(ac->entry[tofree]),
  				sizeof(void *) * ac->avail);
  		}
@@ -415,7 +422,7 @@ Index: linux-stable/mm/slab.c
  	}
  }
  
-@@ -4404,7 +4460,7 @@ static int s_show(struct seq_file *m, vo
+@@ -4295,7 +4360,7 @@ void get_slabinfo(struct kmem_cache *cac
  			continue;
  
  		check_irq_on();
@@ -424,7 +431,7 @@ Index: linux-stable/mm/slab.c
  
  		list_for_each_entry(slabp, &l3->slabs_full, list) {
  			if (slabp->inuse != cachep->num && !error)
-@@ -4429,7 +4485,7 @@ static int s_show(struct seq_file *m, vo
+@@ -4320,7 +4385,7 @@ void get_slabinfo(struct kmem_cache *cac
  		if (l3->shared)
  			shared_avail += l3->shared->avail;
  
@@ -433,7 +440,7 @@ Index: linux-stable/mm/slab.c
  	}
  	num_slabs += active_slabs;
  	num_objs = num_slabs * cachep->num;
-@@ -4658,13 +4714,13 @@ static int leaks_show(struct seq_file *m
+@@ -4520,13 +4585,13 @@ static int leaks_show(struct seq_file *m
  			continue;
  
  		check_irq_on();

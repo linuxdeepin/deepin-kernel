@@ -24,17 +24,14 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 
 ---
  include/linux/rcupdate.h |    6 ------
- kernel/rcutree.c         |    7 ++++++-
- kernel/rcutree.h         |    1 +
- kernel/rcutree_plugin.h  |    2 +-
+ kernel/rcutree.c         |    9 ++++++++-
+ kernel/rcutree_plugin.h  |    7 ++++++-
  kernel/softirq.c         |   20 +++++++++++++-------
- 5 files changed, 21 insertions(+), 15 deletions(-)
+ 4 files changed, 27 insertions(+), 15 deletions(-)
 
-Index: linux-stable/include/linux/rcupdate.h
-===================================================================
---- linux-stable.orig/include/linux/rcupdate.h
-+++ linux-stable/include/linux/rcupdate.h
-@@ -195,13 +195,7 @@ static inline int rcu_preempt_depth(void
+--- a/include/linux/rcupdate.h
++++ b/include/linux/rcupdate.h
+@@ -220,13 +220,7 @@ static inline int rcu_preempt_depth(void
  
  /* Internal to kernel */
  extern void rcu_sched_qs(int cpu);
@@ -48,16 +45,16 @@ Index: linux-stable/include/linux/rcupdate.h
  extern void rcu_check_callbacks(int cpu, int user);
  struct notifier_block;
  extern void rcu_idle_enter(void);
-Index: linux-stable/kernel/rcutree.c
-===================================================================
---- linux-stable.orig/kernel/rcutree.c
-+++ linux-stable/kernel/rcutree.c
-@@ -182,7 +182,12 @@ void rcu_sched_qs(int cpu)
+--- a/kernel/rcutree.c
++++ b/kernel/rcutree.c
+@@ -181,7 +181,14 @@ void rcu_sched_qs(int cpu)
  	rdp->passed_quiesce = 1;
  }
  
 -#ifndef CONFIG_PREEMPT_RT_FULL
 +#ifdef CONFIG_PREEMPT_RT_FULL
++static void rcu_preempt_qs(int cpu);
++
 +void rcu_bh_qs(int cpu)
 +{
 +	rcu_preempt_qs(cpu);
@@ -66,23 +63,9 @@ Index: linux-stable/kernel/rcutree.c
  void rcu_bh_qs(int cpu)
  {
  	struct rcu_data *rdp = &per_cpu(rcu_bh_data, cpu);
-Index: linux-stable/kernel/rcutree.h
-===================================================================
---- linux-stable.orig/kernel/rcutree.h
-+++ linux-stable/kernel/rcutree.h
-@@ -463,6 +463,7 @@ DECLARE_PER_CPU(char, rcu_cpu_has_work);
- /* Forward declarations for rcutree_plugin.h */
- static void rcu_bootup_announce(void);
- long rcu_batches_completed(void);
-+static void rcu_preempt_qs(int cpu);
- static void rcu_preempt_note_context_switch(int cpu);
- static int rcu_preempt_blocked_readers_cgp(struct rcu_node *rnp);
- #ifdef CONFIG_HOTPLUG_CPU
-Index: linux-stable/kernel/rcutree_plugin.h
-===================================================================
---- linux-stable.orig/kernel/rcutree_plugin.h
-+++ linux-stable/kernel/rcutree_plugin.h
-@@ -1727,7 +1727,7 @@ static void __cpuinit rcu_prepare_kthrea
+--- a/kernel/rcutree_plugin.h
++++ b/kernel/rcutree_plugin.h
+@@ -1519,7 +1519,7 @@ static void __cpuinit rcu_prepare_kthrea
  
  #endif /* #else #ifdef CONFIG_RCU_BOOST */
  
@@ -91,11 +74,35 @@ Index: linux-stable/kernel/rcutree_plugin.h
  
  /*
   * Check to see if any future RCU-related work will need to be done
-Index: linux-stable/kernel/softirq.c
-===================================================================
---- linux-stable.orig/kernel/softirq.c
-+++ linux-stable/kernel/softirq.c
-@@ -139,7 +139,7 @@ static void wakeup_softirqd(void)
+@@ -1535,6 +1535,9 @@ int rcu_needs_cpu(int cpu, unsigned long
+ 	*delta_jiffies = ULONG_MAX;
+ 	return rcu_cpu_has_callbacks(cpu);
+ }
++#endif	/* !defined(CONFIG_RCU_FAST_NO_HZ) || defined(CONFIG_PREEMPT_RT_FULL) */
++
++#if !defined(CONFIG_RCU_FAST_NO_HZ)
+ 
+ /*
+  * Because we do not have RCU_FAST_NO_HZ, don't bother initializing for it.
+@@ -1651,6 +1654,7 @@ static bool rcu_cpu_has_nonlazy_callback
+ 	       rcu_preempt_cpu_has_nonlazy_callbacks(cpu);
+ }
+ 
++#ifndef CONFIG_PREEMPT_RT_FULL
+ /*
+  * Allow the CPU to enter dyntick-idle mode if either: (1) There are no
+  * callbacks on this CPU, (2) this CPU has not yet attempted to enter
+@@ -1694,6 +1698,7 @@ int rcu_needs_cpu(int cpu, unsigned long
+ 	}
+ 	return 0;
+ }
++#endif	/* #ifndef CONFIG_PREEMPT_RT_FULL */
+ 
+ /*
+  * Handler for smp_call_function_single().  The only point of this
+--- a/kernel/softirq.c
++++ b/kernel/softirq.c
+@@ -142,7 +142,7 @@ static void wakeup_softirqd(void)
  		wake_up_process(tsk);
  }
  
@@ -104,7 +111,7 @@ Index: linux-stable/kernel/softirq.c
  {
  	struct softirq_action *h = softirq_vec;
  	unsigned int prev_count = preempt_count();
-@@ -162,7 +162,8 @@ static void handle_pending_softirqs(u32 
+@@ -165,7 +165,8 @@ static void handle_pending_softirqs(u32
  			       prev_count, (unsigned int) preempt_count());
  			preempt_count() = prev_count;
  		}
@@ -114,7 +121,7 @@ Index: linux-stable/kernel/softirq.c
  	}
  	local_irq_disable();
  }
-@@ -322,7 +323,7 @@ restart:
+@@ -325,7 +326,7 @@ restart:
  	/* Reset the pending bitmask before enabling irqs */
  	set_softirq_pending(0);
  
@@ -123,7 +130,7 @@ Index: linux-stable/kernel/softirq.c
  
  	pending = local_softirq_pending();
  	if (pending && --max_restart)
-@@ -393,7 +394,12 @@ static inline void ksoftirqd_clr_sched_p
+@@ -376,7 +377,12 @@ static void ksoftirqd_clr_sched_params(u
  static DEFINE_LOCAL_IRQ_LOCK(local_softirq_lock);
  static DEFINE_PER_CPU(struct task_struct *, local_softirq_runner);
  
@@ -137,7 +144,7 @@ Index: linux-stable/kernel/softirq.c
  
  void __init softirq_early_init(void)
  {
-@@ -464,7 +470,7 @@ EXPORT_SYMBOL(in_serving_softirq);
+@@ -447,7 +453,7 @@ EXPORT_SYMBOL(in_serving_softirq);
   * Called with bh and local interrupts disabled. For full RT cpu must
   * be pinned.
   */
@@ -146,7 +153,7 @@ Index: linux-stable/kernel/softirq.c
  {
  	u32 pending = local_softirq_pending();
  	int cpu = smp_processor_id();
-@@ -478,7 +484,7 @@ static void __do_softirq(void)
+@@ -461,7 +467,7 @@ static void __do_softirq(void)
  
  	lockdep_softirq_enter();
  
@@ -155,7 +162,7 @@ Index: linux-stable/kernel/softirq.c
  
  	pending = local_softirq_pending();
  	if (pending)
-@@ -517,7 +523,7 @@ static int __thread_do_softirq(int cpu)
+@@ -500,7 +506,7 @@ static int __thread_do_softirq(int cpu)
  	 * schedule!
  	 */
  	if (local_softirq_pending())

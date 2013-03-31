@@ -8,14 +8,12 @@ call free_pages_bulk() outside of the percpu page allocator locks.
 Signed-off-by: Peter Zijlstra <a.p.zijlstra@chello.nl>
 Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 ---
- mm/page_alloc.c |   81 +++++++++++++++++++++++++++++++++++++++++---------------
- 1 file changed, 60 insertions(+), 21 deletions(-)
+ mm/page_alloc.c |   98 +++++++++++++++++++++++++++++++++++++++-----------------
+ 1 file changed, 69 insertions(+), 29 deletions(-)
 
-Index: linux-stable/mm/page_alloc.c
-===================================================================
---- linux-stable.orig/mm/page_alloc.c
-+++ linux-stable/mm/page_alloc.c
-@@ -637,7 +637,7 @@ static inline int free_pages_check(struc
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -625,7 +625,7 @@ static inline int free_pages_check(struc
  }
  
  /*
@@ -24,7 +22,7 @@ Index: linux-stable/mm/page_alloc.c
   * Assumes all pages on list are in same zone, and of same order.
   * count is the number of pages to free.
   *
-@@ -648,16 +648,42 @@ static inline int free_pages_check(struc
+@@ -636,16 +636,50 @@ static inline int free_pages_check(struc
   * pinned" detection logic.
   */
  static void free_pcppages_bulk(struct zone *zone, int count,
@@ -43,16 +41,24 @@ Index: linux-stable/mm/page_alloc.c
  
 +	while (!list_empty(list)) {
 +		struct page *page = list_first_entry(list, struct page, lru);
++		int mt;	/* migratetype of the to-be-freed page */
 +
 +		/* must delete as __free_one_page list manipulates */
 +		list_del(&page->lru);
++
++		mt = get_freepage_migratetype(page);
 +		/* MIGRATE_MOVABLE list may include MIGRATE_RESERVEs */
-+		__free_one_page(page, zone, 0, page_private(page));
-+		trace_mm_page_pcpu_drain(page, 0, page_private(page));
++		__free_one_page(page, zone, 0, mt);
++		trace_mm_page_pcpu_drain(page, 0, mt);
++		if (likely(get_pageblock_migratetype(page) != MIGRATE_ISOLATE)) {
++			__mod_zone_page_state(zone, NR_FREE_PAGES, 1);
++			if (is_migrate_cma(mt))
++				__mod_zone_page_state(zone, NR_FREE_CMA_PAGES, 1);
++		}
++
 +		to_free--;
 +	}
 +	WARN_ON(to_free != 0);
-+	__mod_zone_page_state(zone, NR_FREE_PAGES, count);
 +	spin_unlock_irqrestore(&zone->lock, flags);
 +}
 +
@@ -71,7 +77,7 @@ Index: linux-stable/mm/page_alloc.c
  	while (to_free) {
  		struct page *page;
  		struct list_head *list;
-@@ -673,7 +699,7 @@ static void free_pcppages_bulk(struct zo
+@@ -661,7 +695,7 @@ static void free_pcppages_bulk(struct zo
  			batch_free++;
  			if (++migratetype == MIGRATE_PCPTYPES)
  				migratetype = 0;
@@ -80,19 +86,27 @@ Index: linux-stable/mm/page_alloc.c
  		} while (list_empty(list));
  
  		/* This is the only non-empty list. Free them all. */
-@@ -682,27 +708,24 @@ static void free_pcppages_bulk(struct zo
+@@ -669,36 +703,26 @@ static void free_pcppages_bulk(struct zo
+ 			batch_free = to_free;
  
  		do {
+-			int mt;	/* migratetype of the to-be-freed page */
+-
  			page = list_last_entry(list, struct page, lru);
 -			/* must delete as __free_one_page list manipulates */
  			list_del(&page->lru);
+-			mt = get_freepage_migratetype(page);
 -			/* MIGRATE_MOVABLE list may include MIGRATE_RESERVEs */
--			__free_one_page(page, zone, 0, page_private(page));
--			trace_mm_page_pcpu_drain(page, 0, page_private(page));
+-			__free_one_page(page, zone, 0, mt);
+-			trace_mm_page_pcpu_drain(page, 0, mt);
+-			if (likely(get_pageblock_migratetype(page) != MIGRATE_ISOLATE)) {
+-				__mod_zone_page_state(zone, NR_FREE_PAGES, 1);
+-				if (is_migrate_cma(mt))
+-					__mod_zone_page_state(zone, NR_FREE_CMA_PAGES, 1);
+-			}
 +			list_add(&page->lru, dst);
  		} while (--to_free && --batch_free && !list_empty(list));
  	}
--	__mod_zone_page_state(zone, NR_FREE_PAGES, count);
 -	spin_unlock(&zone->lock);
  }
  
@@ -107,13 +121,14 @@ Index: linux-stable/mm/page_alloc.c
  	zone->pages_scanned = 0;
  
  	__free_one_page(page, zone, order, migratetype);
- 	__mod_zone_page_state(zone, NR_FREE_PAGES, 1 << order);
+ 	if (unlikely(migratetype != MIGRATE_ISOLATE))
+ 		__mod_zone_freepage_state(zone, 1 << order, migratetype);
 -	spin_unlock(&zone->lock);
 +	spin_unlock_irqrestore(&zone->lock, flags);
  }
  
  static bool free_pages_prepare(struct page *page, unsigned int order)
-@@ -1168,6 +1191,7 @@ static int rmqueue_bulk(struct zone *zon
+@@ -1180,6 +1204,7 @@ static int rmqueue_bulk(struct zone *zon
  void drain_zone_pages(struct zone *zone, struct per_cpu_pages *pcp)
  {
  	unsigned long flags;
@@ -121,7 +136,7 @@ Index: linux-stable/mm/page_alloc.c
  	int to_drain;
  
  	local_lock_irqsave(pa_lock, flags);
-@@ -1176,10 +1200,11 @@ void drain_zone_pages(struct zone *zone,
+@@ -1188,10 +1213,11 @@ void drain_zone_pages(struct zone *zone,
  	else
  		to_drain = pcp->count;
  	if (to_drain > 0) {
@@ -134,7 +149,7 @@ Index: linux-stable/mm/page_alloc.c
  }
  #endif
  
-@@ -1198,16 +1223,21 @@ static void drain_pages(unsigned int cpu
+@@ -1210,16 +1236,21 @@ static void drain_pages(unsigned int cpu
  	for_each_populated_zone(zone) {
  		struct per_cpu_pageset *pset;
  		struct per_cpu_pages *pcp;
@@ -158,7 +173,7 @@ Index: linux-stable/mm/page_alloc.c
  	}
  }
  
-@@ -1348,8 +1378,15 @@ void free_hot_cold_page(struct page *pag
+@@ -1357,8 +1388,15 @@ void free_hot_cold_page(struct page *pag
  		list_add(&page->lru, &pcp->lists[migratetype]);
  	pcp->count++;
  	if (pcp->count >= pcp->high) {
@@ -175,7 +190,13 @@ Index: linux-stable/mm/page_alloc.c
  	}
  
  out:
-@@ -5888,14 +5925,16 @@ static int __meminit __zone_pcp_update(v
+@@ -5977,20 +6015,22 @@ static int __meminit __zone_pcp_update(v
+ {
+ 	struct zone *zone = data;
+ 	int cpu;
+-	unsigned long batch = zone_batchsize(zone), flags;
++	unsigned long flags;
+ 
  	for_each_possible_cpu(cpu) {
  		struct per_cpu_pageset *pset;
  		struct per_cpu_pages *pcp;
@@ -187,11 +208,12 @@ Index: linux-stable/mm/page_alloc.c
  		cpu_lock_irqsave(cpu, flags);
 -		if (pcp->count > 0)
 -			free_pcppages_bulk(zone, pcp->count, pcp);
--		setup_pageset(pset, batch);
 +		if (pcp->count > 0) {
 +			isolate_pcp_pages(pcp->count, pcp, &dst);
 +			free_pcppages_bulk(zone, pcp->count, &dst);
 +		}
+ 		drain_zonestat(zone, pset);
+-		setup_pageset(pset, batch);
  		cpu_unlock_irqrestore(cpu, flags);
  	}
  	return 0;
