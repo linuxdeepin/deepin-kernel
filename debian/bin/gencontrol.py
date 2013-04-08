@@ -152,13 +152,15 @@ class Gencontrol(Base):
                 self.merge_packages(packages, udeb_packages, arch)
 
                 # These packages must be built after the per-flavour/
-                # per-featureset packages.
-                makefile.add(
-                    'binary-arch_%s' % arch,
-                    cmds=["$(MAKE) -f debian/rules.real install-udeb_%s %s "
-                            "PACKAGE_NAMES='%s'" %
-                            (arch, makeflags,
-                             ' '.join(p['Package'] for p in udeb_packages))])
+                # per-featureset packages.  Also, this won't work
+                # correctly with an empty package list.
+                if udeb_packages:
+                    makefile.add(
+                        'binary-arch_%s' % arch,
+                        cmds=["$(MAKE) -f debian/rules.real install-udeb_%s %s "
+                              "PACKAGE_NAMES='%s'" %
+                              (arch, makeflags,
+                               ' '.join(p['Package'] for p in udeb_packages))])
 
     def do_featureset_setup(self, vars, makeflags, arch, featureset, extra):
         config_base = self.config.merge('base', arch, featureset)
