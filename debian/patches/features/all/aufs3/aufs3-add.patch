@@ -79,8 +79,8 @@
 +		When the aufs mount option 'noxino' is specified, it
 +		will be empty. About XINO files, see the aufs manual.
 --- a/Documentation/filesystems/aufs/README	1970-01-01 01:00:00.000000000 +0100
-+++ b/Documentation/filesystems/aufs/README	2013-05-09 01:36:20.741181631 +0100
-@@ -0,0 +1,337 @@
++++ b/Documentation/filesystems/aufs/README	2013-05-12 01:53:46.851187256 +0100
+@@ -0,0 +1,343 @@
 +
 +Aufs3 -- advanced multi layered unification filesystem version 3.x
 +http://aufs.sf.net
@@ -242,7 +242,7 @@
 +Make sure you have git-checkout'ed the correct branch.
 +
 +For aufs3-linux tree,
-+- enable CONFIG_EXPERIMENTAL and CONFIG_AUFS_FS.
++- enable CONFIG_AUFS_FS.
 +- set other aufs configurations if necessary.
 +
 +For aufs3-standalone tree,
@@ -258,10 +258,13 @@
 +  CONFIG_AUFS_FS=m. otherwise you don't need ./aufs3-standalone.patch.
 +- copy ./{Documentation,fs,include/uapi/linux/aufs_type.h} files to your
 +  kernel source tree. Never copy $PWD/include/uapi/linux/Kbuild.
-+- enable CONFIG_EXPERIMENTAL and CONFIG_AUFS_FS, you can select either
++- enable CONFIG_AUFS_FS, you can select either
 +  =m or =y.
 +- and build your kernel as usual.
 +- install the built kernel.
++  Note: Since linux-3.9, every filesystem module requires an alias
++  "fs-<fsname>". You should make sure that "fs-aufs" is listed in your
++  modules.aliases file if you set CONFIG_AUFS_FS=m.
 +- install the header files too by "make headers_install" to the
 +  directory where you specify. By default, it is $PWD/usr.
 +  "make help" shows a brief note for headers_install.
@@ -279,6 +282,9 @@
 +  Note: You should read $PWD/fs/aufs/Kconfig carefully which describes
 +  every aufs configurations.
 +- build the module by simple "make".
++  Note: Since linux-3.9, every filesystem module requires an alias
++  "fs-<fsname>". You should make sure that "fs-aufs" is listed in your
++  modules.aliases file.
 +- you can specify ${KDIR} make variable which points to your kernel
 +  source tree.
 +- install the files
@@ -1386,11 +1392,10 @@
 +/new.
 +Otherwise from /new.
 --- a/fs/aufs/Kconfig	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/Kconfig	2012-01-10 02:15:56.000000000 +0000
-@@ -0,0 +1,203 @@
++++ b/fs/aufs/Kconfig	2013-05-12 01:53:46.855187256 +0100
+@@ -0,0 +1,202 @@
 +config AUFS_FS
 +	tristate "Aufs (Advanced multi layered unification filesystem) support"
-+	depends on EXPERIMENTAL
 +	help
 +	Aufs is a stackable unification filesystem such as Unionfs,
 +	which unifies several directories and provides a merged single
@@ -1700,7 +1705,7 @@
 +#endif /* __KERNEL__ */
 +#endif /* __AUFS_H__ */
 --- a/fs/aufs/branch.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/branch.c	2013-05-09 01:36:20.741181631 +0100
++++ b/fs/aufs/branch.c	2013-05-12 01:53:46.855187256 +0100
 @@ -0,0 +1,1213 @@
 +/*
 + * Copyright (C) 2005-2013 Junjiro R. Okajima
@@ -2717,7 +2722,7 @@
 +	do_file_list_for_each_entry(sb, f) {
 +		if (au_fi(f)
 +		    && file_count(f)
-+		    && !special_file(f->f_dentry->d_inode->i_mode)) {
++		    && !special_file(file_inode(f)->i_mode)) {
 +			get_file(f);
 +			*p++ = f;
 +			n++;
@@ -2782,7 +2787,7 @@
 +			goto out_array;
 +		}
 +
-+		inode = file->f_dentry->d_inode;
++		inode = file_inode(file);
 +		hfile = &au_fi(file)->fi_htop;
 +		hf = hfile->hf_file;
 +		if (!S_ISREG(inode->i_mode)
@@ -3215,8 +3220,8 @@
 +
 +-include ${srctree}/${src}/conf_priv.mk
 --- a/fs/aufs/cpup.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/cpup.c	2013-05-09 01:36:20.741181631 +0100
-@@ -0,0 +1,1221 @@
++++ b/fs/aufs/cpup.c	2013-05-12 01:53:46.855187256 +0100
+@@ -0,0 +1,1220 @@
 +/*
 + * Copyright (C) 2005-2013 Junjiro R. Okajima
 + *
@@ -3519,7 +3524,7 @@
 +			ia->ia_size = dst->f_pos;
 +			ia->ia_valid = ATTR_SIZE | ATTR_FILE;
 +			ia->ia_file = dst;
-+			h_mtx = &dst->f_dentry->d_inode->i_mutex;
++			h_mtx = &file_inode(dst)->i_mutex;
 +			mutex_lock_nested(h_mtx, AuLsc_I_CHILD2);
 +			err = vfsub_notify_change(&dst->f_path, ia);
 +			mutex_unlock(h_mtx);
@@ -3637,9 +3642,8 @@
 +{
 +	int err, rerr;
 +	loff_t l;
-+	struct dentry *h_src_dentry;
++	struct path h_path;
 +	struct inode *h_src_inode;
-+	struct vfsmount *h_src_mnt;
 +
 +	err = 0;
 +	h_src_inode = au_h_iptr(basic->dentry->d_inode, basic->bsrc);
@@ -3651,10 +3655,10 @@
 +		mutex_lock_nested(&h_src_inode->i_mutex, AuLsc_I_CHILD);
 +		au_pin_hdir_unlock(pin);
 +
-+		h_src_dentry = au_h_dptr(basic->dentry, basic->bsrc);
-+		h_src_mnt = au_sbr_mnt(basic->dentry->d_sb, basic->bsrc);
++		h_path.dentry = au_h_dptr(basic->dentry, basic->bsrc);
++		h_path.mnt = au_sbr_mnt(basic->dentry->d_sb, basic->bsrc);
 +		h_src_attr->iflags = h_src_inode->i_flags;
-+		err = vfs_getattr(h_src_mnt, h_src_dentry, &h_src_attr->st);
++		err = vfs_getattr(&h_path, &h_src_attr->st);
 +		if (unlikely(err)) {
 +			mutex_unlock(&h_src_inode->i_mutex);
 +			goto out;
@@ -4526,7 +4530,7 @@
 +#endif /* __KERNEL__ */
 +#endif /* __AUFS_CPUP_H__ */
 --- a/fs/aufs/dbgaufs.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/dbgaufs.c	2013-05-09 01:36:20.741181631 +0100
++++ b/fs/aufs/dbgaufs.c	2013-05-12 01:53:46.855187256 +0100
 @@ -0,0 +1,433 @@
 +/*
 + * Copyright (C) 2005-2013 Junjiro R. Okajima
@@ -4593,7 +4597,7 @@
 +	if (!xf)
 +		goto out;
 +
-+	err = vfs_getattr(xf->f_vfsmnt, xf->f_dentry, &st);
++	err = vfs_getattr(&xf->f_path, &st);
 +	if (!err) {
 +		if (do_fcnt)
 +			p->n = snprintf
@@ -5357,8 +5361,8 @@
 +#endif /* __KERNEL__ */
 +#endif /* __AUFS_DCSUB_H__ */
 --- a/fs/aufs/debug.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/debug.c	2013-05-09 01:36:20.741181631 +0100
-@@ -0,0 +1,493 @@
++++ b/fs/aufs/debug.c	2013-05-12 01:53:46.859187256 +0100
+@@ -0,0 +1,491 @@
 +/*
 + * Copyright (C) 2005-2013 Junjiro R. Okajima
 + *
@@ -5402,17 +5406,16 @@
 +{
 +	unsigned long ul, n;
 +	struct hlist_head *head;
-+	struct au_vdir_wh *tpos;
-+	struct hlist_node *pos;
++	struct au_vdir_wh *pos;
 +
 +	n = whlist->nh_num;
 +	head = whlist->nh_head;
 +	for (ul = 0; ul < n; ul++) {
-+		hlist_for_each_entry(tpos, pos, head, wh_hash)
++		hlist_for_each_entry(pos, head, wh_hash)
 +			dpri("b%d, %.*s, %d\n",
-+			     tpos->wh_bindex,
-+			     tpos->wh_str.len, tpos->wh_str.name,
-+			     tpos->wh_str.len);
++			     pos->wh_bindex,
++			     pos->wh_str.len, pos->wh_str.name,
++			     pos->wh_str.len);
 +		head++;
 +	}
 +}
@@ -5499,10 +5502,9 @@
 +void au_dpri_dalias(struct inode *inode)
 +{
 +	struct dentry *d;
-+	struct hlist_node *p;
 +
 +	spin_lock(&inode->i_lock);
-+	hlist_for_each_entry(d, p, &inode->i_dentry, d_alias)
++	hlist_for_each_entry(d, &inode->i_dentry, d_alias)
 +		au_dpri_dentry(d);
 +	spin_unlock(&inode->i_lock);
 +}
@@ -6098,8 +6100,8 @@
 +#endif /* __KERNEL__ */
 +#endif /* __AUFS_DEBUG_H__ */
 --- a/fs/aufs/dentry.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/dentry.c	2013-05-09 01:36:20.741181631 +0100
-@@ -0,0 +1,1064 @@
++++ b/fs/aufs/dentry.c	2013-05-12 01:53:46.859187256 +0100
+@@ -0,0 +1,1065 @@
 +/*
 + * Copyright (C) 2005-2013 Junjiro R. Okajima
 + *
@@ -7161,8 +7163,9 @@
 +}
 +
 +const struct dentry_operations aufs_dop = {
-+	.d_revalidate	= aufs_d_revalidate,
-+	.d_release	= aufs_d_release
++	.d_revalidate		= aufs_d_revalidate,
++	.d_weak_revalidate	= aufs_d_revalidate,
++	.d_release		= aufs_d_release
 +};
 --- a/fs/aufs/dentry.h	1970-01-01 01:00:00.000000000 +0100
 +++ b/fs/aufs/dentry.h	2013-05-09 01:36:20.741181631 +0100
@@ -7948,8 +7951,8 @@
 +	return -1;
 +}
 --- a/fs/aufs/dir.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/dir.c	2013-05-04 18:39:11.235157327 +0100
-@@ -0,0 +1,633 @@
++++ b/fs/aufs/dir.c	2013-05-12 01:53:46.859187256 +0100
+@@ -0,0 +1,630 @@
 +/*
 + * Copyright (C) 2005-2013 Junjiro R. Okajima
 + *
@@ -8012,19 +8015,16 @@
 +
 +	sz = 0;
 +	if (file) {
-+		AuDebugOn(!file->f_dentry);
-+		AuDebugOn(!file->f_dentry->d_inode);
-+		AuDebugOn(!S_ISDIR(file->f_dentry->d_inode->i_mode));
++		AuDebugOn(!file_inode(file));
++		AuDebugOn(!S_ISDIR(file_inode(file)->i_mode));
 +
 +		bend = au_fbend_dir(file);
 +		for (bindex = au_fbstart(file);
 +		     bindex <= bend && sz < KMALLOC_MAX_SIZE;
 +		     bindex++) {
 +			h_file = au_hf_dir(file, bindex);
-+			if (h_file
-+			    && h_file->f_dentry
-+			    && h_file->f_dentry->d_inode)
-+				sz += i_size_read(h_file->f_dentry->d_inode);
++			if (h_file && file_inode(h_file))
++				sz += vfsub_f_size_read(h_file);
 +		}
 +	} else {
 +		AuDebugOn(!dentry);
@@ -8262,7 +8262,7 @@
 +		goto out;
 +
 +	sb = file->f_dentry->d_sb;
-+	inode = file->f_dentry->d_inode;
++	inode = file_inode(file);
 +	bend = au_fbend_dir(file);
 +	for (bindex = au_fbstart(file); !err && bindex <= bend; bindex++) {
 +		h_file = au_hf_dir(file, bindex);
@@ -8435,7 +8435,7 @@
 +
 +	err = 0;
 +	if (!au_opt_test(au_mntflags(dentry->d_sb), UDBA_NONE)
-+	    && !h_file->f_dentry->d_inode->i_nlink)
++	    && !file_inode(h_file)->i_nlink)
 +		goto out_put;
 +
 +	do {
@@ -9185,8 +9185,8 @@
 +#endif /* __KERNEL__ */
 +#endif /* __AUFS_DYNOP_H__ */
 --- a/fs/aufs/export.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/export.c	2013-05-09 01:36:20.741181631 +0100
-@@ -0,0 +1,827 @@
++++ b/fs/aufs/export.c	2013-05-12 01:53:46.859187256 +0100
+@@ -0,0 +1,826 @@
 +/*
 + * Copyright (C) 2005-2013 Junjiro R. Okajima
 + *
@@ -9351,7 +9351,7 @@
 +	file = sbinfo->si_xigen;
 +	BUG_ON(!file);
 +
-+	if (i_size_read(file->f_dentry->d_inode)
++	if (vfsub_f_size_read(file)
 +	    < pos + sizeof(inode->i_generation)) {
 +		inode->i_generation = atomic_inc_return(&sbinfo->si_xigen_next);
 +		sz = xino_fwrite(sbinfo->si_xwrite, file, &inode->i_generation,
@@ -9415,7 +9415,6 @@
 +	struct dentry *dentry, *d;
 +	struct inode *inode;
 +	unsigned int sigen;
-+	struct hlist_node *p;
 +
 +	dentry = NULL;
 +	inode = ilookup(sb, ino);
@@ -9434,7 +9433,7 @@
 +		dentry = d_find_alias(inode);
 +	else {
 +		spin_lock(&inode->i_lock);
-+		hlist_for_each_entry(d, p, &inode->i_dentry, d_alias) {
++		hlist_for_each_entry(d, &inode->i_dentry, d_alias) {
 +			spin_lock(&d->d_lock);
 +			if (!au_test_anon(d)
 +			    && d->d_parent->d_inode->i_ino == dir_ino) {
@@ -10015,8 +10014,8 @@
 +	atomic_set(&sbinfo->si_xigen_next, u);
 +}
 --- a/fs/aufs/f_op.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/f_op.c	2013-05-04 18:39:11.235157327 +0100
-@@ -0,0 +1,723 @@
++++ b/fs/aufs/f_op.c	2013-05-12 01:53:46.863187256 +0100
+@@ -0,0 +1,720 @@
 +/*
 + * Copyright (C) 2005-2013 Junjiro R. Okajima
 + *
@@ -10162,7 +10161,7 @@
 +	/* todo: necessary? */
 +	/* file->f_ra = h_file->f_ra; */
 +	/* update without lock, I don't think it a problem */
-+	fsstack_copy_attr_atime(dentry->d_inode, h_file->f_dentry->d_inode);
++	fsstack_copy_attr_atime(dentry->d_inode, file_inode(h_file));
 +	fput(h_file);
 +
 +out:
@@ -10229,7 +10228,7 @@
 +	err = vfsub_write_u(h_file, buf, count, ppos);
 +	ii_write_lock_child(inode);
 +	au_cpup_attr_timesizes(inode);
-+	inode->i_mode = h_file->f_dentry->d_inode->i_mode;
++	inode->i_mode = file_inode(h_file)->i_mode;
 +	ii_write_unlock(inode);
 +	fput(h_file);
 +
@@ -10297,7 +10296,7 @@
 +	/* todo: necessary? */
 +	/* file->f_ra = h_file->f_ra; */
 +	/* update without lock, I don't think it a problem */
-+	fsstack_copy_attr_atime(dentry->d_inode, h_file->f_dentry->d_inode);
++	fsstack_copy_attr_atime(dentry->d_inode, file_inode(h_file));
 +	fput(h_file);
 +
 +out:
@@ -10342,7 +10341,7 @@
 +	err = au_do_aio(h_file, MAY_WRITE, kio, iov, nv, pos);
 +	ii_write_lock_child(inode);
 +	au_cpup_attr_timesizes(inode);
-+	inode->i_mode = h_file->f_dentry->d_inode->i_mode;
++	inode->i_mode = file_inode(h_file)->i_mode;
 +	ii_write_unlock(inode);
 +	fput(h_file);
 +
@@ -10385,7 +10384,7 @@
 +	/* todo: necessasry? */
 +	/* file->f_ra = h_file->f_ra; */
 +	/* update without lock, I don't think it a problem */
-+	fsstack_copy_attr_atime(dentry->d_inode, h_file->f_dentry->d_inode);
++	fsstack_copy_attr_atime(dentry->d_inode, file_inode(h_file));
 +	fput(h_file);
 +
 +out:
@@ -10430,7 +10429,7 @@
 +	err = vfsub_splice_from(pipe, h_file, ppos, len, flags);
 +	ii_write_lock_child(inode);
 +	au_cpup_attr_timesizes(inode);
-+	inode->i_mode = h_file->f_dentry->d_inode->i_mode;
++	inode->i_mode = file_inode(h_file)->i_mode;
 +	ii_write_unlock(inode);
 +	fput(h_file);
 +
@@ -10546,8 +10545,7 @@
 +
 +	au_vm_prfile_set(vma, file);
 +	/* update without lock, I don't think it a problem */
-+	fsstack_copy_attr_atime(file->f_dentry->d_inode,
-+				h_file->f_dentry->d_inode);
++	fsstack_copy_attr_atime(file_inode(file), file_inode(h_file));
 +	goto out_fput; /* success */
 +
 +out_reset:
@@ -10642,11 +10640,9 @@
 +	err = -ENOSYS;
 +	h_file = au_hf_top(file);
 +	if (h_file->f_op && h_file->f_op->aio_fsync) {
-+		struct dentry *h_d;
 +		struct mutex *h_mtx;
 +
-+		h_d = h_file->f_dentry;
-+		h_mtx = &h_d->d_inode->i_mutex;
++		h_mtx = &file_inode(h_file)->i_mutex;
 +		if (!is_sync_kiocb(kio)) {
 +			get_file(h_file);
 +			fput(file);
@@ -10741,7 +10737,7 @@
 +#endif
 +};
 --- a/fs/aufs/f_op_sp.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/f_op_sp.c	2013-05-09 01:36:20.745181631 +0100
++++ b/fs/aufs/f_op_sp.c	2013-05-12 01:53:46.863187256 +0100
 @@ -0,0 +1,295 @@
 +/*
 + * Copyright (C) 2005-2013 Junjiro R. Okajima
@@ -10974,12 +10970,12 @@
 +
 +	sb = dentry->d_sb;
 +	h_file = au_hf_top(file);
-+	h_inode = h_file->f_dentry->d_inode;
++	h_inode = file_inode(h_file);
 +	di_read_unlock(dentry, AuLock_IR);
 +	fi_write_unlock(file);
 +	si_read_unlock(sb);
 +	/* open this fifo in aufs */
-+	err = h_inode->i_fop->open(file->f_dentry->d_inode, file);
++	err = h_inode->i_fop->open(file_inode(file), file);
 +	si_noflush_read_lock(sb);
 +	fi_write_lock(file);
 +	di_read_lock_child(dentry, AuLock_IR);
@@ -11039,8 +11035,8 @@
 +	return ret;
 +}
 --- a/fs/aufs/file.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/file.c	2013-05-09 01:36:20.745181631 +0100
-@@ -0,0 +1,692 @@
++++ b/fs/aufs/file.c	2013-05-12 01:53:46.863187256 +0100
+@@ -0,0 +1,688 @@
 +/*
 + * Copyright (C) 2005-2013 Junjiro R. Okajima
 + *
@@ -11389,13 +11385,11 @@
 +		int (*flush)(struct file *file, fl_owner_t id))
 +{
 +	int err;
-+	struct dentry *dentry;
 +	struct super_block *sb;
 +	struct inode *inode;
 +
-+	dentry = file->f_dentry;
-+	sb = dentry->d_sb;
-+	inode = dentry->d_inode;
++	inode = file_inode(file);
++	sb = inode->i_sb;
 +	si_noflush_read_lock(sb);
 +	fi_read_lock(file);
 +	ii_read_lock_child(inode);
@@ -11521,8 +11515,7 @@
 +		for (finfo->fi_btop = 0; finfo->fi_btop <= bend;
 +		     finfo->fi_btop++, p++)
 +			if (p->hf_file) {
-+				if (p->hf_file->f_dentry
-+				    && p->hf_file->f_dentry->d_inode)
++				if (file_inode(p->hf_file))
 +					break;
 +				else
 +					au_hfput(p, file);
@@ -11540,8 +11533,7 @@
 +	for (fidir->fd_bbot = bend; fidir->fd_bbot >= finfo->fi_btop;
 +	     fidir->fd_bbot--, p--)
 +		if (p->hf_file) {
-+			if (p->hf_file->f_dentry
-+			    && p->hf_file->f_dentry->d_inode)
++			if (file_inode(p->hf_file))
 +				break;
 +			else
 +				au_hfput(p, file);
@@ -13036,8 +13028,8 @@
 +	}
 +}
 --- a/fs/aufs/hnotify.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/hnotify.c	2013-05-04 18:39:11.235157327 +0100
-@@ -0,0 +1,713 @@
++++ b/fs/aufs/hnotify.c	2013-05-12 01:53:46.863187256 +0100
+@@ -0,0 +1,712 @@
 +/*
 + * Copyright (C) 2005-2013 Junjiro R. Okajima
 + *
@@ -13240,7 +13232,6 @@
 +	int err;
 +	struct dentry *d;
 +	struct qstr *dname;
-+	struct hlist_node *p;
 +
 +	err = 1;
 +	if (unlikely(inode->i_ino == AUFS_ROOT_INO)) {
@@ -13253,7 +13244,7 @@
 +		AuDebugOn(!name);
 +		au_iigen_dec(inode);
 +		spin_lock(&inode->i_lock);
-+		hlist_for_each_entry(d, p, &inode->i_dentry, d_alias) {
++		hlist_for_each_entry(d, &inode->i_dentry, d_alias) {
 +			spin_lock(&d->d_lock);
 +			dname = &d->d_name;
 +			if (dname->len != nlen
@@ -13752,7 +13743,7 @@
 +		au_hn_destroy_cache();
 +}
 --- a/fs/aufs/i_op.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/i_op.c	2013-05-09 01:36:20.745181631 +0100
++++ b/fs/aufs/i_op.c	2013-05-12 01:53:46.863187256 +0100
 @@ -0,0 +1,1107 @@
 +/*
 + * Copyright (C) 2005-2013 Junjiro R. Okajima
@@ -14629,8 +14620,7 @@
 +	unsigned char udba_none, positive;
 +	struct super_block *sb, *h_sb;
 +	struct inode *inode;
-+	struct vfsmount *h_mnt;
-+	struct dentry *h_dentry;
++	struct path h_path;
 +
 +	sb = dentry->d_sb;
 +	inode = dentry->d_inode;
@@ -14663,30 +14653,31 @@
 +		di_read_lock_child(dentry, AuLock_IR);
 +
 +	bindex = au_ibstart(inode);
-+	h_mnt = au_sbr_mnt(sb, bindex);
-+	h_sb = h_mnt->mnt_sb;
++	h_path.mnt = au_sbr_mnt(sb, bindex);
++	h_sb = h_path.mnt->mnt_sb;
 +	if (!au_test_fs_bad_iattr(h_sb) && udba_none)
 +		goto out_fill; /* success */
 +
-+	h_dentry = NULL;
++	h_path.dentry = NULL;
 +	if (au_dbstart(dentry) == bindex)
-+		h_dentry = dget(au_h_dptr(dentry, bindex));
++		h_path.dentry = dget(au_h_dptr(dentry, bindex));
 +	else if (au_opt_test(mnt_flags, PLINK) && au_plink_test(inode)) {
-+		h_dentry = au_plink_lkup(inode, bindex);
-+		if (IS_ERR(h_dentry))
++		h_path.dentry = au_plink_lkup(inode, bindex);
++		if (IS_ERR(h_path.dentry))
 +			goto out_fill; /* pretending success */
 +	}
 +	/* illegally overlapped or something */
-+	if (unlikely(!h_dentry))
++	if (unlikely(!h_path.dentry))
 +		goto out_fill; /* pretending success */
 +
-+	positive = !!h_dentry->d_inode;
++	positive = !!h_path.dentry->d_inode;
 +	if (positive)
-+		err = vfs_getattr(h_mnt, h_dentry, st);
-+	dput(h_dentry);
++		err = vfs_getattr(&h_path, st);
++	dput(h_path.dentry);
 +	if (!err) {
 +		if (positive)
-+			au_refresh_iattr(inode, st, h_dentry->d_inode->i_nlink);
++			au_refresh_iattr(inode, st,
++					 h_path.dentry->d_inode->i_nlink);
 +		goto out_fill; /* success */
 +	}
 +	AuTraceErr(err);
@@ -18947,8 +18938,8 @@
 +ccflags-y += -DHFSPLUS_SUPER_MAGIC=0x482b
 +endif
 --- a/fs/aufs/module.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/module.c	2013-05-04 18:39:11.239157326 +0100
-@@ -0,0 +1,202 @@
++++ b/fs/aufs/module.c	2013-05-12 01:53:46.863187256 +0100
+@@ -0,0 +1,203 @@
 +/*
 + * Copyright (C) 2005-2013 Junjiro R. Okajima
 + *
@@ -19054,6 +19045,7 @@
 +MODULE_DESCRIPTION(AUFS_NAME
 +	" -- Advanced multi layered unification filesystem");
 +MODULE_VERSION(AUFS_VERSION);
++MODULE_ALIAS_FS(AUFS_NAME);
 +
 +/* this module parameter has no meaning when SYSFS is disabled */
 +int sysaufs_brs = 1;
@@ -21172,8 +21164,8 @@
 +#endif /* __KERNEL__ */
 +#endif /* __AUFS_OPTS_H__ */
 --- a/fs/aufs/plink.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/plink.c	2013-05-09 01:36:20.745181631 +0100
-@@ -0,0 +1,523 @@
++++ b/fs/aufs/plink.c	2013-05-12 01:53:46.867187257 +0100
+@@ -0,0 +1,520 @@
 +/*
 + * Copyright (C) 2005-2013 Junjiro R. Okajima
 + *
@@ -21301,7 +21293,6 @@
 +	int i;
 +	struct au_sbinfo *sbinfo;
 +	struct hlist_head *plink_hlist;
-+	struct hlist_node *pos;
 +	struct pseudo_link *plink;
 +
 +	SiMustAnyLock(sb);
@@ -21313,7 +21304,7 @@
 +	for (i = 0; i < AuPlink_NHASH; i++) {
 +		plink_hlist = &sbinfo->si_plink[i].head;
 +		rcu_read_lock();
-+		hlist_for_each_entry_rcu(plink, pos, plink_hlist, hlist)
++		hlist_for_each_entry_rcu(plink, plink_hlist, hlist)
 +			AuDbg("%lu\n", plink->inode->i_ino);
 +		rcu_read_unlock();
 +	}
@@ -21326,7 +21317,6 @@
 +	int found, i;
 +	struct au_sbinfo *sbinfo;
 +	struct hlist_head *plink_hlist;
-+	struct hlist_node *pos;
 +	struct pseudo_link *plink;
 +
 +	sbinfo = au_sbi(inode->i_sb);
@@ -21338,7 +21328,7 @@
 +	i = au_plink_hash(inode->i_ino);
 +	plink_hlist = &sbinfo->si_plink[i].head;
 +	rcu_read_lock();
-+	hlist_for_each_entry_rcu(plink, pos, plink_hlist, hlist)
++	hlist_for_each_entry_rcu(plink, plink_hlist, hlist)
 +		if (plink->inode == inode) {
 +			found = 1;
 +			break;
@@ -21541,7 +21531,6 @@
 +	struct super_block *sb;
 +	struct au_sbinfo *sbinfo;
 +	struct hlist_head *plink_hlist;
-+	struct hlist_node *pos;
 +	struct pseudo_link *plink, *tmp;
 +	struct au_sphlhead *sphl;
 +	int found, err, cnt, i;
@@ -21567,7 +21556,7 @@
 +	}
 +
 +	spin_lock(&sphl->spin);
-+	hlist_for_each_entry(plink, pos, plink_hlist, hlist) {
++	hlist_for_each_entry(plink, plink_hlist, hlist) {
 +		if (plink->inode == inode) {
 +			found = 1;
 +			break;
@@ -21604,7 +21593,7 @@
 +	int i, warned;
 +	struct au_sbinfo *sbinfo;
 +	struct hlist_head *plink_hlist;
-+	struct hlist_node *pos, *tmp;
++	struct hlist_node *tmp;
 +	struct pseudo_link *plink;
 +
 +	SiMustWriteLock(sb);
@@ -21621,7 +21610,7 @@
 +			pr_warn("pseudo-link is not flushed");
 +			warned = 1;
 +		}
-+		hlist_for_each_entry_safe(plink, pos, tmp, plink_hlist, hlist)
++		hlist_for_each_entry_safe(plink, tmp, plink_hlist, hlist)
 +			do_put_plink(plink, 0);
 +		INIT_HLIST_HEAD(plink_hlist);
 +	}
@@ -21672,7 +21661,7 @@
 +{
 +	struct au_sbinfo *sbinfo;
 +	struct hlist_head *plink_hlist;
-+	struct hlist_node *pos, *tmp;
++	struct hlist_node *tmp;
 +	struct pseudo_link *plink;
 +	struct inode *inode;
 +	int i, do_put;
@@ -21686,7 +21675,7 @@
 +	/* no spin_lock since sbinfo is write-locked */
 +	for (i = 0; i < AuPlink_NHASH; i++) {
 +		plink_hlist = &sbinfo->si_plink[i].head;
-+		hlist_for_each_entry_safe(plink, pos, tmp, plink_hlist, hlist) {
++		hlist_for_each_entry_safe(plink, tmp, plink_hlist, hlist) {
 +			inode = au_igrab(plink->inode);
 +			ii_write_lock_child(inode);
 +			do_put = au_plink_do_half_refresh(inode, br_id);
@@ -22972,8 +22961,8 @@
 +#endif /* __KERNEL__ */
 +#endif /* __AUFS_SPL_H__ */
 --- a/fs/aufs/super.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/super.c	2013-05-09 01:36:20.745181631 +0100
-@@ -0,0 +1,993 @@
++++ b/fs/aufs/super.c	2013-05-12 01:53:46.867187257 +0100
+@@ -0,0 +1,992 @@
 +/*
 + * Copyright (C) 2005-2013 Junjiro R. Okajima
 + *
@@ -23959,9 +23948,8 @@
 +
 +struct file_system_type aufs_fs_type = {
 +	.name		= AUFS_FSTYPE,
-+	.fs_flags	=
-+		FS_RENAME_DOES_D_MOVE	/* a race between rename and others */
-+		| FS_REVAL_DOT,		/* for NFS branch and udba */
++	/* a race between rename and others */
++	.fs_flags	= FS_RENAME_DOES_D_MOVE,
 +	.mount		= aufs_mount,
 +	.kill_sb	= aufs_kill_sb,
 +	/* no need to __module_get() and module_put(). */
@@ -25001,7 +24989,7 @@
 +	}
 +}
 --- a/fs/aufs/sysrq.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/sysrq.c	2013-05-04 18:39:17.031157464 +0100
++++ b/fs/aufs/sysrq.c	2013-05-12 01:53:46.867187257 +0100
 @@ -0,0 +1,151 @@
 +/*
 + * Copyright (C) 2005-2013 Junjiro R. Okajima
@@ -25094,7 +25082,7 @@
 +	lg_global_lock(&files_lglock);
 +	do_file_list_for_each_entry(sb, file) {
 +		umode_t mode;
-+		mode = file->f_dentry->d_inode->i_mode;
++		mode = file_inode(file)->i_mode;
 +		if (!special_file(mode) || au_special_file(mode))
 +			au_dpri_file(file);
 +	} while_file_list_for_each_entry;
@@ -25155,8 +25143,8 @@
 +		pr_err("err %d (ignored)\n", err);
 +}
 --- a/fs/aufs/vdir.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/vdir.c	2013-05-04 18:39:11.239157326 +0100
-@@ -0,0 +1,885 @@
++++ b/fs/aufs/vdir.c	2013-05-12 01:53:46.867187257 +0100
+@@ -0,0 +1,878 @@
 +/*
 + * Copyright (C) 2005-2013 Junjiro R. Okajima
 + *
@@ -25264,24 +25252,20 @@
 +
 +static void au_nhash_wh_do_free(struct hlist_head *head)
 +{
-+	struct au_vdir_wh *tpos;
-+	struct hlist_node *pos, *node;
++	struct au_vdir_wh *pos;
++	struct hlist_node *node;
 +
-+	hlist_for_each_entry_safe(tpos, pos, node, head, wh_hash) {
-+		/* hlist_del(pos); */
-+		kfree(tpos);
-+	}
++	hlist_for_each_entry_safe(pos, node, head, wh_hash)
++		kfree(pos);
 +}
 +
 +static void au_nhash_de_do_free(struct hlist_head *head)
 +{
-+	struct au_vdir_dehstr *tpos;
-+	struct hlist_node *pos, *node;
++	struct au_vdir_dehstr *pos;
++	struct hlist_node *node;
 +
-+	hlist_for_each_entry_safe(tpos, pos, node, head, hash) {
-+		/* hlist_del(pos); */
-+		au_cache_free_vdir_dehstr(tpos);
-+	}
++	hlist_for_each_entry_safe(pos, node, head, hash)
++		au_cache_free_vdir_dehstr(pos);
 +}
 +
 +static void au_nhash_do_free(struct au_nhash *nhash,
@@ -25320,15 +25304,14 @@
 +	int num;
 +	unsigned int u, n;
 +	struct hlist_head *head;
-+	struct au_vdir_wh *tpos;
-+	struct hlist_node *pos;
++	struct au_vdir_wh *pos;
 +
 +	num = 0;
 +	n = whlist->nh_num;
 +	head = whlist->nh_head;
 +	for (u = 0; u < n; u++, head++)
-+		hlist_for_each_entry(tpos, pos, head, wh_hash)
-+			if (tpos->wh_bindex == btgt && ++num > limit)
++		hlist_for_each_entry(pos, head, wh_hash)
++			if (pos->wh_bindex == btgt && ++num > limit)
 +				return 1;
 +	return 0;
 +}
@@ -25360,13 +25343,12 @@
 +int au_nhash_test_known_wh(struct au_nhash *whlist, char *name, int nlen)
 +{
 +	struct hlist_head *head;
-+	struct au_vdir_wh *tpos;
-+	struct hlist_node *pos;
++	struct au_vdir_wh *pos;
 +	struct au_vdir_destr *str;
 +
 +	head = au_name_hash(whlist, name, nlen);
-+	hlist_for_each_entry(tpos, pos, head, wh_hash) {
-+		str = &tpos->wh_str;
++	hlist_for_each_entry(pos, head, wh_hash) {
++		str = &pos->wh_str;
 +		AuDbg("%.*s\n", str->len, str->name);
 +		if (au_nhash_test_name(str, name, nlen))
 +			return 1;
@@ -25378,13 +25360,12 @@
 +static int test_known(struct au_nhash *delist, char *name, int nlen)
 +{
 +	struct hlist_head *head;
-+	struct au_vdir_dehstr *tpos;
-+	struct hlist_node *pos;
++	struct au_vdir_dehstr *pos;
 +	struct au_vdir_destr *str;
 +
 +	head = au_name_hash(delist, name, nlen);
-+	hlist_for_each_entry(tpos, pos, head, hash) {
-+		str = tpos->str;
++	hlist_for_each_entry(pos, head, hash) {
++		str = pos->str;
 +		AuDbg("%.*s\n", str->len, str->name);
 +		if (au_nhash_test_name(str, name, nlen))
 +			return 1;
@@ -25673,8 +25654,8 @@
 +	int err;
 +	unsigned int nh, u;
 +	struct hlist_head *head;
-+	struct au_vdir_wh *tpos;
-+	struct hlist_node *pos, *n;
++	struct au_vdir_wh *pos;
++	struct hlist_node *n;
 +	char *p, *o;
 +	struct au_vdir_destr *destr;
 +
@@ -25691,11 +25672,11 @@
 +	p += AUFS_WH_PFX_LEN;
 +	for (u = 0; u < nh; u++) {
 +		head = whlist->nh_head + u;
-+		hlist_for_each_entry_safe(tpos, pos, n, head, wh_hash) {
-+			destr = &tpos->wh_str;
++		hlist_for_each_entry_safe(pos, n, head, wh_hash) {
++			destr = &pos->wh_str;
 +			memcpy(p, destr->name, destr->len);
 +			err = append_de(vdir, o, destr->len + AUFS_WH_PFX_LEN,
-+					tpos->wh_ino, tpos->wh_type, delist);
++					pos->wh_ino, pos->wh_type, delist);
 +			if (unlikely(err))
 +				break;
 +		}
@@ -25791,7 +25772,7 @@
 +	struct au_vdir *vdir, *allocated;
 +
 +	err = 0;
-+	inode = file->f_dentry->d_inode;
++	inode = file_inode(file);
 +	IMustLock(inode);
 +	SiMustAnyLock(inode->i_sb);
 +
@@ -25915,7 +25896,7 @@
 +	} else
 +		return 0; /* success */
 +
-+	inode = file->f_dentry->d_inode;
++	inode = file_inode(file);
 +	err = copy_vdir(vdir_cache, au_ivdir(inode));
 +	if (!err) {
 +		file->f_version = inode->i_version;
@@ -26043,7 +26024,7 @@
 +	return 0;
 +}
 --- a/fs/aufs/vfsub.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/vfsub.c	2013-05-04 18:39:17.031157464 +0100
++++ b/fs/aufs/vfsub.c	2013-05-12 01:53:46.867187257 +0100
 @@ -0,0 +1,769 @@
 +/*
 + * Copyright (C) 2005-2013 Junjiro R. Okajima
@@ -26088,7 +26069,7 @@
 +	h_sb = h_path->dentry->d_sb;
 +	*did = (!au_test_fs_remote(h_sb) && au_test_fs_refresh_iattr(h_sb));
 +	if (*did)
-+		err = vfs_getattr(h_path->mnt, h_path->dentry, &st);
++		err = vfs_getattr(h_path, &st);
 +
 +	return err;
 +}
@@ -26815,8 +26796,8 @@
 +	return err;
 +}
 --- a/fs/aufs/vfsub.h	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/vfsub.h	2013-05-09 01:36:20.745181631 +0100
-@@ -0,0 +1,289 @@
++++ b/fs/aufs/vfsub.h	2013-05-12 01:53:46.867187257 +0100
+@@ -0,0 +1,294 @@
 +/*
 + * Copyright (C) 2005-2013 Junjiro R. Okajima
 + *
@@ -27001,6 +26982,11 @@
 +		      loff_t *ppos);
 +int vfsub_flush(struct file *file, fl_owner_t id);
 +int vfsub_readdir(struct file *file, filldir_t filldir, void *arg);
++
++static inline loff_t vfsub_f_size_read(struct file *file)
++{
++	return i_size_read(file_inode(file));
++}
 +
 +static inline unsigned int vfsub_file_flags(struct file *file)
 +{
@@ -27811,8 +27797,8 @@
 +	}
 +};
 --- a/fs/aufs/whout.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/whout.c	2013-05-09 01:36:20.749181631 +0100
-@@ -0,0 +1,1023 @@
++++ b/fs/aufs/whout.c	2013-05-12 01:53:46.871187257 +0100
+@@ -0,0 +1,1022 @@
 +/*
 + * Copyright (C) 2005-2013 Junjiro R. Okajima
 + *
@@ -28607,8 +28593,7 @@
 +	struct qstr wh_name;
 +	char *p;
 +	struct hlist_head *head;
-+	struct au_vdir_wh *tpos;
-+	struct hlist_node *pos;
++	struct au_vdir_wh *pos;
 +	struct au_vdir_destr *str;
 +
 +	err = -ENOMEM;
@@ -28623,11 +28608,11 @@
 +	n = whlist->nh_num;
 +	head = whlist->nh_head;
 +	for (ul = 0; !err && ul < n; ul++, head++) {
-+		hlist_for_each_entry(tpos, pos, head, wh_hash) {
-+			if (tpos->wh_bindex != bindex)
++		hlist_for_each_entry(pos, head, wh_hash) {
++			if (pos->wh_bindex != bindex)
 +				continue;
 +
-+			str = &tpos->wh_str;
++			str = &pos->wh_str;
 +			if (str->len + AUFS_WH_PFX_LEN <= PATH_MAX) {
 +				memcpy(p, str->name, str->len);
 +				wh_name.len = AUFS_WH_PFX_LEN + str->len;
@@ -29239,8 +29224,8 @@
 +#endif /* __KERNEL__ */
 +#endif /* __AUFS_WKQ_H__ */
 --- a/fs/aufs/xino.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/fs/aufs/xino.c	2013-05-09 01:36:20.749181631 +0100
-@@ -0,0 +1,1265 @@
++++ b/fs/aufs/xino.c	2013-05-12 01:53:46.871187257 +0100
+@@ -0,0 +1,1264 @@
 +/*
 + * Copyright (C) 2005-2013 Junjiro R. Okajima
 + *
@@ -29408,7 +29393,7 @@
 +		goto out_dput;
 +	}
 +
-+	path.mnt = base_file->f_vfsmnt;
++	path.mnt = base_file->f_path.mnt;
 +	file = vfsub_dentry_open(&path,
 +				 O_RDWR | O_CREAT | O_EXCL | O_LARGEFILE
 +				 /* | __FMODE_NONOTIFY */);
@@ -29425,8 +29410,7 @@
 +
 +	if (copy_src) {
 +		/* no one can touch copy_src xino */
-+		err = au_copy_file(file, copy_src,
-+				   i_size_read(copy_src->f_dentry->d_inode));
++		err = au_copy_file(file, copy_src, vfsub_f_size_read(copy_src));
 +		if (unlikely(err)) {
 +			pr_err("%.*s copy err %d\n", AuLNPair(name), err);
 +			goto out_fput;
@@ -29553,7 +29537,7 @@
 +	bindex = au_br_index(sb, br->br_id);
 +	err = au_xino_trunc(sb, bindex);
 +	if (!err
-+	    && br->br_xino.xi_file->f_dentry->d_inode->i_blocks
++	    && file_inode(br->br_xino.xi_file)->i_blocks
 +	    >= br->br_xino_upper)
 +		br->br_xino_upper += AUFS_XINO_TRUNC_STEP;
 +
@@ -29573,7 +29557,7 @@
 +	struct xino_do_trunc_args *args;
 +	int wkq_err;
 +
-+	if (br->br_xino.xi_file->f_dentry->d_inode->i_blocks
++	if (file_inode(br->br_xino.xi_file)->i_blocks
 +	    < br->br_xino_upper)
 +		return;
 +
@@ -29710,7 +29694,7 @@
 +
 +	pos = pindex;
 +	pos *= PAGE_SIZE;
-+	if (i_size_read(xib->f_dentry->d_inode) >= pos + PAGE_SIZE)
++	if (vfsub_f_size_read(xib) >= pos + PAGE_SIZE)
 +		sz = xino_fread(sbinfo->si_xread, xib, p, PAGE_SIZE, &pos);
 +	else {
 +		memset(p, 0, PAGE_SIZE);
@@ -29843,7 +29827,7 @@
 +	}
 +
 +	file = sbinfo->si_xib;
-+	pend = i_size_read(file->f_dentry->d_inode) / PAGE_SIZE;
++	pend = vfsub_f_size_read(file) / PAGE_SIZE;
 +	for (ul = pindex + 1; ul <= pend; ul++) {
 +		err = xib_pindex(sb, ul);
 +		if (unlikely(err))
@@ -29896,7 +29880,7 @@
 +	pos *= sizeof(*ino);
 +
 +	file = au_sbr(sb, bindex)->br_xino.xi_file;
-+	if (i_size_read(file->f_dentry->d_inode) < pos + sizeof(*ino))
++	if (vfsub_f_size_read(file) < pos + sizeof(*ino))
 +		return 0; /* no ino */
 +
 +	sz = xino_fread(sbinfo->si_xread, file, ino, sizeof(*ino), &pos);
@@ -30071,7 +30055,7 @@
 +	MtxMustLock(&sbinfo->si_xib_mtx);
 +	p = sbinfo->si_xib_buf;
 +	func = sbinfo->si_xread;
-+	pend = i_size_read(file->f_dentry->d_inode);
++	pend = vfsub_f_size_read(file);
 +	pos = 0;
 +	while (pos < pend) {
 +		sz = xino_fread(func, file, page, PAGE_SIZE, &pos);
@@ -30141,7 +30125,7 @@
 +		goto out;
 +
 +	file = sbinfo->si_xib;
-+	if (i_size_read(file->f_dentry->d_inode) <= PAGE_SIZE)
++	if (vfsub_f_size_read(file) <= PAGE_SIZE)
 +		goto out;
 +
 +	au_xino_lock_dir(sb, file, &ldir);
@@ -30251,7 +30235,7 @@
 +
 +	sbinfo->si_xib_last_pindex = 0;
 +	sbinfo->si_xib_next_bit = 0;
-+	if (i_size_read(file->f_dentry->d_inode) < PAGE_SIZE) {
++	if (vfsub_f_size_read(file) < PAGE_SIZE) {
 +		pos = 0;
 +		err = xino_fwrite(sbinfo->si_xwrite, file, sbinfo->si_xib_buf,
 +				  PAGE_SIZE, &pos);
@@ -30529,7 +30513,7 @@
 +
 +#include <uapi/linux/aufs_type.h>
 --- a/include/uapi/linux/aufs_type.h	1970-01-01 01:00:00.000000000 +0100
-+++ b/include/uapi/linux/aufs_type.h	2013-05-09 01:36:20.749181631 +0100
++++ b/include/uapi/linux/aufs_type.h	2013-05-12 01:53:46.871187257 +0100
 @@ -0,0 +1,235 @@
 +/*
 + * Copyright (C) 2005-2013 Junjiro R. Okajima
@@ -30573,7 +30557,7 @@
 +
 +#include <linux/limits.h>
 +
-+#define AUFS_VERSION	"3.8-20130506"
++#define AUFS_VERSION	"3.9-20130506"
 +
 +/* todo? move this to linux-2.6.19/include/magic.h */
 +#define AUFS_SUPER_MAGIC	('a' << 24 | 'u' << 16 | 'f' << 8 | 's')
