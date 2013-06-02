@@ -85,6 +85,9 @@ $
     def __unicode__(self):
         return self.complete
 
+    def __str__(self):
+        return unicode(self).encode('utf-8')
+
     @property
     def complete(self):
         if self.epoch is not None:
