@@ -133,7 +133,7 @@ class VersionLinux(Version):
 (\.\d+)?
 (?:
     (?P<revision_experimental>
-        ~experimental\.\d+
+        ~exp\d+
     )
     |
     (?P<revision_other>
