@@ -50,4 +50,4 @@ ifdef KERNEL_ARCH_PERF
 endif
 
 clean:
-	rm -rf doc out
+	rm -rf config doc out

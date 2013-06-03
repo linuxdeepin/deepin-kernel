@@ -21,4 +21,4 @@ modpost.h: $(top_srcdir)/scripts/mod/modpost.c
 modpost.o: modpost.c modpost.h
 
 clean:
-	rm -f modpost.h
+	rm -f modpost.h real-*/devicetable-offsets.*
