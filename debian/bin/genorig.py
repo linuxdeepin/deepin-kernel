@@ -24,7 +24,7 @@ class Main(object):
         version = changelog.version
 
         if override_version:
-            version = VersionLinux('%s-undef' % override_version)
+            version = VersionLinux('%s-0' % override_version)
 
         self.version_dfsg = version.linux_dfsg
         if self.version_dfsg is None:
