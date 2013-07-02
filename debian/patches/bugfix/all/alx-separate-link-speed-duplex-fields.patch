@@ -1,0 +1,488 @@
+From: Johannes Berg <johannes@sipsolutions.net>
+Date: Sat, 29 Jun 2013 19:23:17 +0200
+Subject: [4/6] alx: separate link speed/duplex fields
+Origin: https://git.kernel.org/cgit/linux/kernel/git/davem/net-next.git//commit?id=a5b87cc9e0538bf6680d431e0076d778e5bae38e
+
+As suggested by Ben Hutchings, use separate fields to track
+current link speed and duplex setting.
+
+Reported-by: Ben Hutchings <ben@decadent.org.uk>
+Signed-off-by: Johannes Berg <johannes@sipsolutions.net>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/ethernet/atheros/alx/ethtool.c |  31 ++-----
+ drivers/net/ethernet/atheros/alx/hw.c      | 139 +++++++++++++----------------
+ drivers/net/ethernet/atheros/alx/hw.h      |  24 ++++-
+ drivers/net/ethernet/atheros/alx/main.c    |  37 ++++----
+ 4 files changed, 106 insertions(+), 125 deletions(-)
+
+diff --git a/drivers/net/ethernet/atheros/alx/ethtool.c b/drivers/net/ethernet/atheros/alx/ethtool.c
+index 50a91d0..5e19e08 100644
+--- a/drivers/net/ethernet/atheros/alx/ethtool.c
++++ b/drivers/net/ethernet/atheros/alx/ethtool.c
+@@ -85,14 +85,8 @@ static int alx_get_settings(struct net_device *netdev, struct ethtool_cmd *ecmd)
+ 		}
+ 	}
+ 
+-	if (hw->link_speed != SPEED_UNKNOWN) {
+-		ethtool_cmd_speed_set(ecmd,
+-				      hw->link_speed - hw->link_speed % 10);
+-		ecmd->duplex = hw->link_speed % 10;
+-	} else {
+-		ethtool_cmd_speed_set(ecmd, SPEED_UNKNOWN);
+-		ecmd->duplex = DUPLEX_UNKNOWN;
+-	}
++	ethtool_cmd_speed_set(ecmd, hw->link_speed);
++	ecmd->duplex = hw->duplex;
+ 
+ 	return 0;
+ }
+@@ -110,24 +104,11 @@ static int alx_set_settings(struct net_device *netdev, struct ethtool_cmd *ecmd)
+ 			return -EINVAL;
+ 		adv_cfg = ecmd->advertising | ADVERTISED_Autoneg;
+ 	} else {
+-		int speed = ethtool_cmd_speed(ecmd);
+-
+-		switch (speed + ecmd->duplex) {
+-		case SPEED_10 + DUPLEX_HALF:
+-			adv_cfg = ADVERTISED_10baseT_Half;
+-			break;
+-		case SPEED_10 + DUPLEX_FULL:
+-			adv_cfg = ADVERTISED_10baseT_Full;
+-			break;
+-		case SPEED_100 + DUPLEX_HALF:
+-			adv_cfg = ADVERTISED_100baseT_Half;
+-			break;
+-		case SPEED_100 + DUPLEX_FULL:
+-			adv_cfg = ADVERTISED_100baseT_Full;
+-			break;
+-		default:
++		adv_cfg = alx_speed_to_ethadv(ethtool_cmd_speed(ecmd),
++					      ecmd->duplex);
++
++		if (!adv_cfg || adv_cfg == ADVERTISED_1000baseT_Full)
+ 			return -EINVAL;
+-		}
+ 	}
+ 
+ 	hw->adv_cfg = adv_cfg;
+diff --git a/drivers/net/ethernet/atheros/alx/hw.c b/drivers/net/ethernet/atheros/alx/hw.c
+index dc71cfb..aed48a7 100644
+--- a/drivers/net/ethernet/atheros/alx/hw.c
++++ b/drivers/net/ethernet/atheros/alx/hw.c
+@@ -624,12 +624,12 @@ void alx_start_mac(struct alx_hw *hw)
+ 	alx_write_mem32(hw, ALX_TXQ0, txq | ALX_TXQ0_EN);
+ 
+ 	mac = hw->rx_ctrl;
+-	if (hw->link_speed % 10 == DUPLEX_FULL)
++	if (hw->duplex == DUPLEX_FULL)
+ 		mac |= ALX_MAC_CTRL_FULLD;
+ 	else
+ 		mac &= ~ALX_MAC_CTRL_FULLD;
+ 	ALX_SET_FIELD(mac, ALX_MAC_CTRL_SPEED,
+-		      hw->link_speed >= SPEED_1000 ? ALX_MAC_CTRL_SPEED_1000 :
++		      hw->link_speed == SPEED_1000 ? ALX_MAC_CTRL_SPEED_1000 :
+ 						     ALX_MAC_CTRL_SPEED_10_100);
+ 	mac |= ALX_MAC_CTRL_TX_EN | ALX_MAC_CTRL_RX_EN;
+ 	hw->rx_ctrl = mac;
+@@ -790,28 +790,22 @@ void alx_post_phy_link(struct alx_hw *hw)
+ 	u16 phy_val, len, agc;
+ 	u8 revid = alx_hw_revision(hw);
+ 	bool adj_th = revid == ALX_REV_B0;
+-	int speed;
+-
+-	if (hw->link_speed == SPEED_UNKNOWN)
+-		speed = SPEED_UNKNOWN;
+-	else
+-		speed = hw->link_speed - hw->link_speed % 10;
+ 
+ 	if (revid != ALX_REV_B0 && !alx_is_rev_a(revid))
+ 		return;
+ 
+ 	/* 1000BT/AZ, wrong cable length */
+-	if (speed != SPEED_UNKNOWN) {
++	if (hw->link_speed != SPEED_UNKNOWN) {
+ 		alx_read_phy_ext(hw, ALX_MIIEXT_PCS, ALX_MIIEXT_CLDCTRL6,
+ 				 &phy_val);
+ 		len = ALX_GET_FIELD(phy_val, ALX_CLDCTRL6_CAB_LEN);
+ 		alx_read_phy_dbg(hw, ALX_MIIDBG_AGC, &phy_val);
+ 		agc = ALX_GET_FIELD(phy_val, ALX_AGC_2_VGA);
+ 
+-		if ((speed == SPEED_1000 &&
++		if ((hw->link_speed == SPEED_1000 &&
+ 		     (len > ALX_CLDCTRL6_CAB_LEN_SHORT1G ||
+ 		      (len == 0 && agc > ALX_AGC_LONG1G_LIMT))) ||
+-		    (speed == SPEED_100 &&
++		    (hw->link_speed == SPEED_100 &&
+ 		     (len > ALX_CLDCTRL6_CAB_LEN_SHORT100M ||
+ 		      (len == 0 && agc > ALX_AGC_LONG100M_LIMT)))) {
+ 			alx_write_phy_dbg(hw, ALX_MIIDBG_AZ_ANADECT,
+@@ -831,10 +825,10 @@ void alx_post_phy_link(struct alx_hw *hw)
+ 
+ 		/* threshold adjust */
+ 		if (adj_th && hw->lnk_patch) {
+-			if (speed == SPEED_100) {
++			if (hw->link_speed == SPEED_100) {
+ 				alx_write_phy_dbg(hw, ALX_MIIDBG_MSE16DB,
+ 						  ALX_MSE16DB_UP);
+-			} else if (speed == SPEED_1000) {
++			} else if (hw->link_speed == SPEED_1000) {
+ 				/*
+ 				 * Giga link threshold, raise the tolerance of
+ 				 * noise 50%
+@@ -869,7 +863,7 @@ void alx_post_phy_link(struct alx_hw *hw)
+  *    1. phy link must be established before calling this function
+  *    2. wol option (pattern,magic,link,etc.) is configed before call it.
+  */
+-int alx_pre_suspend(struct alx_hw *hw, int speed)
++int alx_pre_suspend(struct alx_hw *hw, int speed, u8 duplex)
+ {
+ 	u32 master, mac, phy, val;
+ 	int err = 0;
+@@ -897,9 +891,9 @@ int alx_pre_suspend(struct alx_hw *hw, int speed)
+ 			mac |= ALX_MAC_CTRL_RX_EN | ALX_MAC_CTRL_BRD_EN;
+ 		if (hw->sleep_ctrl & ALX_SLEEP_CIFS)
+ 			mac |= ALX_MAC_CTRL_TX_EN;
+-		if (speed % 10 == DUPLEX_FULL)
++		if (duplex == DUPLEX_FULL)
+ 			mac |= ALX_MAC_CTRL_FULLD;
+-		if (speed >= SPEED_1000)
++		if (speed == SPEED_1000)
+ 			ALX_SET_FIELD(mac, ALX_MAC_CTRL_SPEED,
+ 				      ALX_MAC_CTRL_SPEED_1000);
+ 		phy |= ALX_PHY_CTRL_DSPRST_OUT;
+@@ -938,7 +932,7 @@ bool alx_phy_configured(struct alx_hw *hw)
+ 	return cfg == hw_cfg;
+ }
+ 
+-int alx_get_phy_link(struct alx_hw *hw, int *speed)
++int alx_read_phy_link(struct alx_hw *hw)
+ {
+ 	struct pci_dev *pdev = hw->pdev;
+ 	u16 bmsr, giga;
+@@ -953,7 +947,8 @@ int alx_get_phy_link(struct alx_hw *hw, int *speed)
+ 		return err;
+ 
+ 	if (!(bmsr & BMSR_LSTATUS)) {
+-		*speed = SPEED_UNKNOWN;
++		hw->link_speed = SPEED_UNKNOWN;
++		hw->duplex = DUPLEX_UNKNOWN;
+ 		return 0;
+ 	}
+ 
+@@ -967,20 +962,20 @@ int alx_get_phy_link(struct alx_hw *hw, int *speed)
+ 
+ 	switch (giga & ALX_GIGA_PSSR_SPEED) {
+ 	case ALX_GIGA_PSSR_1000MBS:
+-		*speed = SPEED_1000;
++		hw->link_speed = SPEED_1000;
+ 		break;
+ 	case ALX_GIGA_PSSR_100MBS:
+-		*speed = SPEED_100;
++		hw->link_speed = SPEED_100;
+ 		break;
+ 	case ALX_GIGA_PSSR_10MBS:
+-		*speed = SPEED_10;
++		hw->link_speed = SPEED_10;
+ 		break;
+ 	default:
+ 		goto wrong_speed;
+ 	}
+ 
+-	*speed += (giga & ALX_GIGA_PSSR_DPLX) ? DUPLEX_FULL : DUPLEX_HALF;
+-	return 1;
++	hw->duplex = (giga & ALX_GIGA_PSSR_DPLX) ? DUPLEX_FULL : DUPLEX_HALF;
++	return 0;
+ 
+ wrong_speed:
+ 	dev_err(&pdev->dev, "invalid PHY speed/duplex: 0x%x\n", giga);
+@@ -1126,81 +1121,67 @@ void alx_configure_basic(struct alx_hw *hw)
+ 	alx_write_mem32(hw, ALX_WRR, val);
+ }
+ 
+-static inline u32 alx_speed_to_ethadv(int speed)
+-{
+-	switch (speed) {
+-	case SPEED_1000 + DUPLEX_FULL:
+-		return ADVERTISED_1000baseT_Full;
+-	case SPEED_100 + DUPLEX_FULL:
+-		return ADVERTISED_100baseT_Full;
+-	case SPEED_100 + DUPLEX_HALF:
+-		return ADVERTISED_100baseT_Half;
+-	case SPEED_10 + DUPLEX_FULL:
+-		return ADVERTISED_10baseT_Full;
+-	case SPEED_10 + DUPLEX_HALF:
+-		return ADVERTISED_10baseT_Half;
+-	default:
+-		return 0;
+-	}
+-}
+-
+-int alx_select_powersaving_speed(struct alx_hw *hw, int *speed)
++int alx_select_powersaving_speed(struct alx_hw *hw, int *speed, u8 *duplex)
+ {
+-	int i, err, spd;
++	int i, err;
+ 	u16 lpa;
+ 
+-	err = alx_get_phy_link(hw, &spd);
+-	if (err < 0)
++	err = alx_read_phy_link(hw);
++	if (err)
+ 		return err;
+ 
+-	if (spd == SPEED_UNKNOWN)
++	if (hw->link_speed == SPEED_UNKNOWN) {
++		*speed = SPEED_UNKNOWN;
++		*duplex = DUPLEX_UNKNOWN;
+ 		return 0;
++	}
+ 
+ 	err = alx_read_phy_reg(hw, MII_LPA, &lpa);
+ 	if (err)
+ 		return err;
+ 
+ 	if (!(lpa & LPA_LPACK)) {
+-		*speed = spd;
++		*speed = hw->link_speed;
+ 		return 0;
+ 	}
+ 
+-	if (lpa & LPA_10FULL)
+-		*speed = SPEED_10 + DUPLEX_FULL;
+-	else if (lpa & LPA_10HALF)
+-		*speed = SPEED_10 + DUPLEX_HALF;
+-	else if (lpa & LPA_100FULL)
+-		*speed = SPEED_100 + DUPLEX_FULL;
+-	else
+-		*speed = SPEED_100 + DUPLEX_HALF;
+-
+-	if (*speed != spd) {
+-		err = alx_write_phy_reg(hw, ALX_MII_IER, 0);
+-		if (err)
+-			return err;
+-		err = alx_setup_speed_duplex(hw,
+-					     alx_speed_to_ethadv(*speed) |
+-					     ADVERTISED_Autoneg,
+-					     ALX_FC_ANEG | ALX_FC_RX |
+-					     ALX_FC_TX);
+-		if (err)
+-			return err;
++	if (lpa & LPA_10FULL) {
++		*speed = SPEED_10;
++		*duplex = DUPLEX_FULL;
++	} else if (lpa & LPA_10HALF) {
++		*speed = SPEED_10;
++		*duplex = DUPLEX_HALF;
++	} else if (lpa & LPA_100FULL) {
++		*speed = SPEED_100;
++		*duplex = DUPLEX_FULL;
++	} else {
++		*speed = SPEED_100;
++		*duplex = DUPLEX_HALF;
++	}
+ 
+-		/* wait for linkup */
+-		for (i = 0; i < ALX_MAX_SETUP_LNK_CYCLE; i++) {
+-			int speed2;
++	if (*speed == hw->link_speed && *duplex == hw->duplex)
++		return 0;
++	err = alx_write_phy_reg(hw, ALX_MII_IER, 0);
++	if (err)
++		return err;
++	err = alx_setup_speed_duplex(hw, alx_speed_to_ethadv(*speed, *duplex) |
++					 ADVERTISED_Autoneg, ALX_FC_ANEG |
++					 ALX_FC_RX | ALX_FC_TX);
++	if (err)
++		return err;
+ 
+-			msleep(100);
++	/* wait for linkup */
++	for (i = 0; i < ALX_MAX_SETUP_LNK_CYCLE; i++) {
++		msleep(100);
+ 
+-			err = alx_get_phy_link(hw, &speed2);
+-			if (err < 0)
+-				return err;
+-			if (speed2 != SPEED_UNKNOWN)
+-				break;
+-		}
+-		if (i == ALX_MAX_SETUP_LNK_CYCLE)
+-			return -ETIMEDOUT;
++		err = alx_read_phy_link(hw);
++		if (err < 0)
++			return err;
++		if (hw->link_speed != SPEED_UNKNOWN)
++			break;
+ 	}
++	if (i == ALX_MAX_SETUP_LNK_CYCLE)
++		return -ETIMEDOUT;
+ 
+ 	return 0;
+ }
+diff --git a/drivers/net/ethernet/atheros/alx/hw.h b/drivers/net/ethernet/atheros/alx/hw.h
+index 65e723d..a60e35c 100644
+--- a/drivers/net/ethernet/atheros/alx/hw.h
++++ b/drivers/net/ethernet/atheros/alx/hw.h
+@@ -412,10 +412,11 @@ struct alx_hw {
+ 	u32 smb_timer;
+ 	/* SPEED_* + DUPLEX_*, SPEED_UNKNOWN if link is down */
+ 	int link_speed;
++	u8 duplex;
+ 
+ 	/* auto-neg advertisement or force mode config */
+-	u32 adv_cfg;
+ 	u8 flowctrl;
++	u32 adv_cfg;
+ 
+ 	u32 sleep_ctrl;
+ 
+@@ -478,12 +479,12 @@ void alx_reset_pcie(struct alx_hw *hw);
+ void alx_enable_aspm(struct alx_hw *hw, bool l0s_en, bool l1_en);
+ int alx_setup_speed_duplex(struct alx_hw *hw, u32 ethadv, u8 flowctrl);
+ void alx_post_phy_link(struct alx_hw *hw);
+-int alx_pre_suspend(struct alx_hw *hw, int speed);
++int alx_pre_suspend(struct alx_hw *hw, int speed, u8 duplex);
+ int alx_read_phy_reg(struct alx_hw *hw, u16 reg, u16 *phy_data);
+ int alx_write_phy_reg(struct alx_hw *hw, u16 reg, u16 phy_data);
+ int alx_read_phy_ext(struct alx_hw *hw, u8 dev, u16 reg, u16 *pdata);
+ int alx_write_phy_ext(struct alx_hw *hw, u8 dev, u16 reg, u16 data);
+-int alx_get_phy_link(struct alx_hw *hw, int *speed);
++int alx_read_phy_link(struct alx_hw *hw);
+ int alx_clear_phy_intr(struct alx_hw *hw);
+ int alx_config_wol(struct alx_hw *hw);
+ void alx_cfg_mac_flowcontrol(struct alx_hw *hw, u8 fc);
+@@ -493,7 +494,22 @@ void alx_set_macaddr(struct alx_hw *hw, const u8 *addr);
+ bool alx_phy_configured(struct alx_hw *hw);
+ void alx_configure_basic(struct alx_hw *hw);
+ void alx_disable_rss(struct alx_hw *hw);
+-int alx_select_powersaving_speed(struct alx_hw *hw, int *speed);
++int alx_select_powersaving_speed(struct alx_hw *hw, int *speed, u8 *duplex);
+ bool alx_get_phy_info(struct alx_hw *hw);
+ 
++static inline u32 alx_speed_to_ethadv(int speed, u8 duplex)
++{
++	if (speed == SPEED_1000 && duplex == DUPLEX_FULL)
++		return ADVERTISED_1000baseT_Full;
++	if (speed == SPEED_100 && duplex == DUPLEX_FULL)
++		return ADVERTISED_100baseT_Full;
++	if (speed == SPEED_100 && duplex== DUPLEX_HALF)
++		return ADVERTISED_100baseT_Half;
++	if (speed == SPEED_10 && duplex == DUPLEX_FULL)
++		return ADVERTISED_10baseT_Full;
++	if (speed == SPEED_10 && duplex == DUPLEX_HALF)
++		return ADVERTISED_10baseT_Half;
++	return 0;
++}
++
+ #endif
+diff --git a/drivers/net/ethernet/atheros/alx/main.c b/drivers/net/ethernet/atheros/alx/main.c
+index 418de8b..148b4b9 100644
+--- a/drivers/net/ethernet/atheros/alx/main.c
++++ b/drivers/net/ethernet/atheros/alx/main.c
+@@ -712,6 +712,7 @@ static int alx_init_sw(struct alx_priv *alx)
+ 	hw->dma_chnl = hw->max_dma_chnl;
+ 	hw->ith_tpd = alx->tx_ringsz / 3;
+ 	hw->link_speed = SPEED_UNKNOWN;
++	hw->duplex = DUPLEX_UNKNOWN;
+ 	hw->adv_cfg = ADVERTISED_Autoneg |
+ 		      ADVERTISED_10baseT_Half |
+ 		      ADVERTISED_10baseT_Full |
+@@ -758,6 +759,7 @@ static void alx_halt(struct alx_priv *alx)
+ 
+ 	alx_netif_stop(alx);
+ 	hw->link_speed = SPEED_UNKNOWN;
++	hw->duplex = DUPLEX_UNKNOWN;
+ 
+ 	alx_reset_mac(hw);
+ 
+@@ -869,18 +871,18 @@ static void __alx_stop(struct alx_priv *alx)
+ 	alx_free_rings(alx);
+ }
+ 
+-static const char *alx_speed_desc(u16 speed)
++static const char *alx_speed_desc(struct alx_hw *hw)
+ {
+-	switch (speed) {
+-	case SPEED_1000 + DUPLEX_FULL:
++	switch (alx_speed_to_ethadv(hw->link_speed, hw->duplex)) {
++	case ADVERTISED_1000baseT_Full:
+ 		return "1 Gbps Full";
+-	case SPEED_100 + DUPLEX_FULL:
++	case ADVERTISED_100baseT_Full:
+ 		return "100 Mbps Full";
+-	case SPEED_100 + DUPLEX_HALF:
++	case ADVERTISED_100baseT_Half:
+ 		return "100 Mbps Half";
+-	case SPEED_10 + DUPLEX_FULL:
++	case ADVERTISED_10baseT_Full:
+ 		return "10 Mbps Full";
+-	case SPEED_10 + DUPLEX_HALF:
++	case ADVERTISED_10baseT_Half:
+ 		return "10 Mbps Half";
+ 	default:
+ 		return "Unknown speed";
+@@ -891,7 +893,8 @@ static void alx_check_link(struct alx_priv *alx)
+ {
+ 	struct alx_hw *hw = &alx->hw;
+ 	unsigned long flags;
+-	int speed, old_speed;
++	int old_speed;
++	u8 old_duplex;
+ 	int err;
+ 
+ 	/* clear PHY internal interrupt status, otherwise the main
+@@ -899,7 +902,9 @@ static void alx_check_link(struct alx_priv *alx)
+ 	 */
+ 	alx_clear_phy_intr(hw);
+ 
+-	err = alx_get_phy_link(hw, &speed);
++	old_speed = hw->link_speed;
++	old_duplex = hw->duplex;
++	err = alx_read_phy_link(hw);
+ 	if (err < 0)
+ 		goto reset;
+ 
+@@ -908,15 +913,12 @@ static void alx_check_link(struct alx_priv *alx)
+ 	alx_write_mem32(hw, ALX_IMR, alx->int_mask);
+ 	spin_unlock_irqrestore(&alx->irq_lock, flags);
+ 
+-	old_speed = hw->link_speed;
+-
+-	if (old_speed == speed)
++	if (old_speed == hw->link_speed)
+ 		return;
+-	hw->link_speed = speed;
+ 
+-	if (speed != SPEED_UNKNOWN) {
++	if (hw->link_speed != SPEED_UNKNOWN) {
+ 		netif_info(alx, link, alx->dev,
+-			   "NIC Up: %s\n", alx_speed_desc(speed));
++			   "NIC Up: %s\n", alx_speed_desc(hw));
+ 		alx_post_phy_link(hw);
+ 		alx_enable_aspm(hw, true, true);
+ 		alx_start_mac(hw);
+@@ -965,6 +967,7 @@ static int __alx_shutdown(struct pci_dev *pdev, bool *wol_en)
+ 	struct net_device *netdev = alx->dev;
+ 	struct alx_hw *hw = &alx->hw;
+ 	int err, speed;
++	u8 duplex;
+ 
+ 	netif_device_detach(netdev);
+ 
+@@ -977,13 +980,13 @@ static int __alx_shutdown(struct pci_dev *pdev, bool *wol_en)
+ 		return err;
+ #endif
+ 
+-	err = alx_select_powersaving_speed(hw, &speed);
++	err = alx_select_powersaving_speed(hw, &speed, &duplex);
+ 	if (err)
+ 		return err;
+ 	err = alx_clear_phy_intr(hw);
+ 	if (err)
+ 		return err;
+-	err = alx_pre_suspend(hw, speed);
++	err = alx_pre_suspend(hw, speed, duplex);
+ 	if (err)
+ 		return err;
+ 	err = alx_config_wol(hw);
