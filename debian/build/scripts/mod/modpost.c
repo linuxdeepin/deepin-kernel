@@ -11,7 +11,7 @@ int main (int argc, char *argv[])
 {
   char const *data, *class;
   char *list_name = NULL;
-  char *name;
+  char *name = NULL;
   char prog[1024];
   unsigned char ei[EI_NIDENT];
   int opt;
