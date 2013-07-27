@@ -1,0 +1,53 @@
+From: Jason Wang <jasowang@redhat.com>
+Date: Wed, 10 Jul 2013 13:43:28 +0800
+Subject: macvtap: correctly linearize skb when zerocopy is used
+Origin: https://git.kernel.org/linus/61d46bf979d5cd7c164709a80ad5676a35494aae
+
+Userspace may produce vectors greater than MAX_SKB_FRAGS. When we try to
+linearize parts of the skb to let the rest of iov to be fit in
+the frags, we need count copylen into linear when calling macvtap_alloc_skb()
+instead of partly counting it into data_len. Since this breaks
+zerocopy_sg_from_iovec() since its inner counter assumes nr_frags should
+be zero at beginning. This cause nr_frags to be increased wrongly without
+setting the correct frags.
+
+This bug were introduced from b92946e2919134ebe2a4083e4302236295ea2a73
+(macvtap: zerocopy: validate vectors before building skb).
+
+Cc: Michael S. Tsirkin <mst@redhat.com>
+Signed-off-by: Jason Wang <jasowang@redhat.com>
+Acked-by: Michael S. Tsirkin <mst@redhat.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/macvtap.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/macvtap.c b/drivers/net/macvtap.c
+index f2c4a3b..876c722 100644
+--- a/drivers/net/macvtap.c
++++ b/drivers/net/macvtap.c
+@@ -712,6 +712,7 @@ static ssize_t macvtap_get_user(struct macvtap_queue *q, struct msghdr *m,
+ 	int vnet_hdr_len = 0;
+ 	int copylen = 0;
+ 	bool zerocopy = false;
++	size_t linear;
+ 
+ 	if (q->flags & IFF_VNET_HDR) {
+ 		vnet_hdr_len = q->vnet_hdr_sz;
+@@ -766,11 +767,14 @@ static ssize_t macvtap_get_user(struct macvtap_queue *q, struct msghdr *m,
+ 			copylen = vnet_hdr.hdr_len;
+ 		if (!copylen)
+ 			copylen = GOODCOPY_LEN;
+-	} else
++		linear = copylen;
++	} else {
+ 		copylen = len;
++		linear = vnet_hdr.hdr_len;
++	}
+ 
+ 	skb = macvtap_alloc_skb(&q->sk, NET_IP_ALIGN, copylen,
+-				vnet_hdr.hdr_len, noblock, &err);
++				linear, noblock, &err);
+ 	if (!skb)
+ 		goto err;
+ 
