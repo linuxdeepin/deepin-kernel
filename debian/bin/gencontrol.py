@@ -73,9 +73,21 @@ class Gencontrol(Base):
                          ['source_%s_real' % featureset])
             makefile.add('source', ['source_%s' % featureset])
 
+        triplet_enabled = []
+        for arch in iter(self.config['base', ]['arches']):
+            for featureset in self.config['base', arch].get('featuresets', ()):
+                if self.config.merge('base', None, featureset).get('enabled', True):
+                    for flavour in self.config['base', arch, featureset]['flavours']:
+                        triplet_enabled.append('%s_%s_%s' %
+                                               (arch, featureset, flavour))
+
         makeflags = makeflags.copy()
         makeflags['ALL_FEATURESETS'] = ' '.join(fs_enabled)
+        makeflags['ALL_TRIPLETS'] = ' '.join(triplet_enabled)
         super(Gencontrol, self).do_main_makefile(makefile, makeflags, extra)
+
+        # linux-source-$UPSTREAMVERSION will contain all kconfig files
+        makefile.add('binary-indep', deps=['setup'])
 
     def do_main_packages(self, packages, vars, makeflags, extra):
         packages.extend(self.process_packages(self.templates["control.main"], self.vars))
