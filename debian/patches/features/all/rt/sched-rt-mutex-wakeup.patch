@@ -1,0 +1,96 @@
+Subject: sched-rt-mutex-wakeup.patch
+From: Thomas Gleixner <tglx@linutronix.de>
+Date: Sat, 25 Jun 2011 09:21:04 +0200
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.10/patches-3.10.4-rt1.tar.xz
+
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+---
+ include/linux/sched.h |    2 ++
+ kernel/sched/core.c   |   31 ++++++++++++++++++++++++++++++-
+ kernel/sched/sched.h  |    3 ++-
+ 3 files changed, 34 insertions(+), 2 deletions(-)
+
+Index: linux-stable/include/linux/sched.h
+===================================================================
+--- linux-stable.orig/include/linux/sched.h
++++ linux-stable/include/linux/sched.h
+@@ -1034,6 +1034,7 @@ enum perf_event_task_context {
+ 
+ struct task_struct {
+ 	volatile long state;	/* -1 unrunnable, 0 runnable, >0 stopped */
++	volatile long saved_state;	/* saved state for "spinlock sleepers" */
+ 	void *stack;
+ 	atomic_t usage;
+ 	unsigned int flags;	/* per process flags, defined below */
+@@ -2015,6 +2016,7 @@ extern void xtime_update(unsigned long t
+ 
+ extern int wake_up_state(struct task_struct *tsk, unsigned int state);
+ extern int wake_up_process(struct task_struct *tsk);
++extern int wake_up_lock_sleeper(struct task_struct * tsk);
+ extern void wake_up_new_task(struct task_struct *tsk);
+ #ifdef CONFIG_SMP
+  extern void kick_process(struct task_struct *tsk);
+Index: linux-stable/kernel/sched/core.c
+===================================================================
+--- linux-stable.orig/kernel/sched/core.c
++++ linux-stable/kernel/sched/core.c
+@@ -1494,8 +1494,25 @@ try_to_wake_up(struct task_struct *p, un
+ 
+ 	smp_wmb();
+ 	raw_spin_lock_irqsave(&p->pi_lock, flags);
+-	if (!(p->state & state))
++	if (!(p->state & state)) {
++		/*
++		 * The task might be running due to a spinlock sleeper
++		 * wakeup. Check the saved state and set it to running
++		 * if the wakeup condition is true.
++		 */
++		if (!(wake_flags & WF_LOCK_SLEEPER)) {
++			if (p->saved_state & state)
++				p->saved_state = TASK_RUNNING;
++		}
+ 		goto out;
++	}
++
++	/*
++	 * If this is a regular wakeup, then we can unconditionally
++	 * clear the saved state of a "lock sleeper".
++	 */
++	if (!(wake_flags & WF_LOCK_SLEEPER))
++		p->saved_state = TASK_RUNNING;
+ 
+ 	success = 1; /* we're going to change ->state */
+ 	cpu = task_cpu(p);
+@@ -1591,6 +1608,18 @@ int wake_up_process(struct task_struct *
+ }
+ EXPORT_SYMBOL(wake_up_process);
+ 
++/**
++ * wake_up_lock_sleeper - Wake up a specific process blocked on a "sleeping lock"
++ * @p: The process to be woken up.
++ *
++ * Same as wake_up_process() above, but wake_flags=WF_LOCK_SLEEPER to indicate
++ * the nature of the wakeup.
++ */
++int wake_up_lock_sleeper(struct task_struct *p)
++{
++	return try_to_wake_up(p, TASK_ALL, WF_LOCK_SLEEPER);
++}
++
+ int wake_up_state(struct task_struct *p, unsigned int state)
+ {
+ 	return try_to_wake_up(p, state, 0);
+Index: linux-stable/kernel/sched/sched.h
+===================================================================
+--- linux-stable.orig/kernel/sched/sched.h
++++ linux-stable/kernel/sched/sched.h
+@@ -882,7 +882,8 @@ static inline void finish_lock_switch(st
+  */
+ #define WF_SYNC		0x01		/* waker goes to sleep after wakeup */
+ #define WF_FORK		0x02		/* child wakeup after fork */
+-#define WF_MIGRATED	0x4		/* internal use, task got migrated */
++#define WF_MIGRATED	0x04		/* internal use, task got migrated */
++#define WF_LOCK_SLEEPER	0x08		/* wakeup spinlock "sleeper" */
+ 
+ static inline void update_load_add(struct load_weight *lw, unsigned long inc)
+ {
