@@ -33,8 +33,10 @@ def main(source_dir, version):
             with open(path, 'w') as patch:
                 in_header = True
                 for line in source_patch:
-                    if in_header and line == '\n':
+                    if in_header and re.match(r'^(\n|[^\w\s]|Index:)', line):
                         patch.write('Origin: %s\n' % origin)
+                        if line != '\n':
+                            patch.write('\n')
                         in_header = False
                     patch.write(line)
             series_fh.write(name)
