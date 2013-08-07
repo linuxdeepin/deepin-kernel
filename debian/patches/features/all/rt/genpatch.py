@@ -9,11 +9,15 @@ def main(source_dir, version):
     old_series = set()
     new_series = set()
 
-    with open(os.path.join(patch_dir, series_name), 'r') as series_fh:
-        for line in series_fh:
-            name = line.strip()
-            if name != '' and name[0] != '#':
-                old_series.add(name)
+    try:
+        with open(os.path.join(patch_dir, series_name), 'r') as series_fh:
+            for line in series_fh:
+                name = line.strip()
+                if name != '' and name[0] != '#':
+                    old_series.add(name)
+    except IOError, e:
+        if e.errno != errno.ENOENT:
+            raise
 
     with open(os.path.join(patch_dir, series_name), 'w') as series_fh:
         # Add directory prefix to all filenames.
