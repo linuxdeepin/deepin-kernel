@@ -14,7 +14,7 @@ print '#define GETOPT_OPTIONS "%s"' % options
 
 print '#define GETOPT_CASE',
 for c in options:
-    if c == ':':
+    if c == ':' or c == 'T':
         continue
     print "case '%c':" % c,
 print

@@ -10,6 +10,8 @@
 int main (int argc, char *argv[])
 {
   char const *data, *class;
+  char *list_name = NULL;
+  char *name = NULL;
   char prog[1024];
   unsigned char ei[EI_NIDENT];
   int opt;
@@ -21,17 +23,69 @@ int main (int argc, char *argv[])
     {
       GETOPT_CASE
         break;
+      case 'T':
+        list_name = optarg;
+        break;
       default:
         return EXIT_FAILURE;
     }
   }
 
-  if (optind == argc)
-    return EXIT_SUCCESS;
-
-  if (!(file = fopen (argv[optind], "r")))
+  if (optind != argc)
   {
-    fprintf (stderr, "Can't open file\n");
+    name = argv[optind];
+  }
+  else if (list_name)
+  {
+    size_t name_len;
+    int is_stdin = strcmp (list_name, "-") == 0;
+
+    /* Read first line of list file */
+    if (is_stdin)
+    {
+      file = stdin;
+      setvbuf(stdin, NULL, _IONBF, 0); /* don't over-read */
+    }
+    else
+    {
+      file = fopen (list_name, "r");
+      if (!file)
+      {
+        fprintf (stderr, "Can't open \"%s\"\n", list_name);
+        return EXIT_FAILURE;
+      }
+    }
+    if (getline (&name, &name_len, file) < 0)
+    {
+      fprintf (stderr, "Can't read \"%s\"\n", list_name);
+      return EXIT_FAILURE;
+    }
+    if (!is_stdin)
+      fclose(file);
+
+    /* Remove new-line */
+    name [strcspn (name, "\n")] = 0;
+
+    /* If this came from stdin, we need to add the first name to the
+     * arguments, because the upstream modpost can't read it again.
+     */
+    if (is_stdin)
+    {
+      char **new_argv = malloc (sizeof(*argv) * (argc + 2));
+      memcpy(new_argv, argv, sizeof(*argv) * argc);
+      new_argv [argc] = name;
+      new_argv [argc + 1] = NULL;
+      argv = new_argv;
+    }
+  }
+  else
+  {
+    return EXIT_SUCCESS;
+  }
+
+  if (!(file = fopen (name, "r")))
+  {
+    fprintf (stderr, "Can't open \"%s\"\n", name);
     return EXIT_FAILURE;
   }
 
