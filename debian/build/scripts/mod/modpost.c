@@ -1,4 +1,5 @@
 #include <elf.h>
+#include <errno.h>
 #include <getopt.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -57,8 +58,16 @@ int main (int argc, char *argv[])
     }
     if (getline (&name, &name_len, file) < 0)
     {
-      fprintf (stderr, "Can't read \"%s\"\n", list_name);
-      return EXIT_FAILURE;
+      if (errno)
+      {
+        fprintf (stderr, "Can't read \"%s\"\n", list_name);
+        return EXIT_FAILURE;
+      }
+      else
+      {
+        /* Empty list */
+        return EXIT_SUCCESS;
+      }
     }
     if (!is_stdin)
       fclose(file);
@@ -80,6 +89,7 @@ int main (int argc, char *argv[])
   }
   else
   {
+    /* Empty list */
     return EXIT_SUCCESS;
   }
 
