@@ -136,7 +136,10 @@ class Gencontrol(Base):
                      ["$(MAKE) -f debian/rules.real install-libc-dev_%s %s" %
                       (arch, makeflags)])
 
-        if os.getenv('DEBIAN_KERNEL_DISABLE_INSTALLER'):
+        if self.version.linux_revision_backports:
+            # Installer is not (currently) built from backports
+            pass
+        elif os.getenv('DEBIAN_KERNEL_DISABLE_INSTALLER'):
             if self.changelog[0].distribution == 'UNRELEASED':
                 import warnings
                 warnings.warn(u'Disable installer modules on request (DEBIAN_KERNEL_DISABLE_INSTALLER set)')
@@ -421,11 +424,16 @@ class Gencontrol(Base):
         distribution = self.changelog[0].distribution
         if distribution in ('unstable', ):
             if (version.linux_revision_experimental or
-                    version.linux_revision_other):
+                version.linux_revision_backports or
+                version.linux_revision_other):
                 raise RuntimeError("Can't upload to %s with a version of %s" %
                         (distribution, version))
         if distribution in ('experimental', ):
             if not version.linux_revision_experimental:
+                raise RuntimeError("Can't upload to %s with a version of %s" %
+                        (distribution, version))
+        if distribution.endswith('-backports'):
+            if not version.linux_revision_backports:
                 raise RuntimeError("Can't upload to %s with a version of %s" %
                         (distribution, version))
 

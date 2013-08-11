@@ -136,6 +136,10 @@ class VersionLinux(Version):
         ~exp\d+
     )
     |
+    (?P<revision_backports>
+        ~bpo\d\d\+\d+
+    )
+    |
     (?P<revision_other>
         [^-]+
     )
@@ -160,6 +164,7 @@ $
         self.linux_upstream_full = self.linux_upstream + (d['update'] or u'')
         self.linux_dfsg = d['dfsg']
         self.linux_revision_experimental = match.group('revision_experimental') and True
+        self.linux_revision_backports = match.group('revision_backports') and True
         self.linux_revision_other = match.group('revision_other') and True
 
 
