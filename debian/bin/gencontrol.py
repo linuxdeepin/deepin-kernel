@@ -3,6 +3,9 @@
 import sys
 sys.path.append("debian/lib/python")
 
+import codecs
+import errno
+import glob
 import os
 import os.path
 import subprocess
@@ -59,6 +62,14 @@ class Gencontrol(Base):
             'SOURCEVERSION': self.version.complete,
         })
 
+        # Prepare to generate template-substituted translations
+        for path in glob.glob('debian/templates/po/*.po'):
+            target = 'debian/po/' + os.path.basename(path)
+            with open(target, 'w') as f:
+                f.write('# THIS IS A GENERATED FILE; DO NOT EDIT IT!\n'
+                        '# Translators should edit %s instead.\n'
+                        '#\n' % path)
+
     def do_main_makefile(self, makefile, makeflags, extra):
         fs_enabled = [featureset
                       for featureset in self.config['base', ]['featuresets']
@@ -98,6 +109,12 @@ class Gencontrol(Base):
 
     def do_arch_setup(self, vars, makeflags, arch, extra):
         config_base = self.config.merge('base', arch)
+
+        if config_base['kernel-arch'] in ['mips', 'parisc', 'powerpc']:
+            vars['image-stem'] = 'vmlinux'
+        else:
+            vars['image-stem'] = 'vmlinuz'
+
         self._setup_makeflags(self.arch_makeflags, makeflags, config_base)
 
     def do_arch_packages(self, packages, makefile, arch, vars, makeflags, extra):
@@ -199,7 +216,6 @@ class Gencontrol(Base):
 
     flavour_makeflags_image = (
         ('type', 'TYPE', False),
-        ('initramfs', 'INITRAMFS', True),
     )
 
     flavour_makeflags_other = (
@@ -219,6 +235,7 @@ class Gencontrol(Base):
         override_localversion = config_image.get('override-localversion', None)
         if override_localversion is not None:
             vars['localversion-image'] = vars['localversion_headers'] + '-' + override_localversion
+        vars['initramfs'] = 'YES' if config_image.get('initramfs', True) else ''
 
         self._setup_makeflags(self.flavour_makeflags_base, makeflags, config_base)
         self._setup_makeflags(self.flavour_makeflags_image, makeflags, config_image)
@@ -378,6 +395,29 @@ class Gencontrol(Base):
         makefile.add('binary-arch_%s_%s_%s_real' % (arch, featureset, flavour), cmds=cmds_binary_arch)
         makefile.add('build-arch_%s_%s_%s_real' % (arch, featureset, flavour), cmds=cmds_build)
         makefile.add('setup_%s_%s_%s_real' % (arch, featureset, flavour), cmds=cmds_setup)
+
+        # Substitute kernel version etc. into maintainer scripts,
+        # translations and lintian overrides
+        def substitute_file(template, target, append=False):
+            with codecs.open(target, 'a' if append else 'w',
+                             'utf-8') as f:
+                f.write(self.substitute(self.templates[template], vars))
+        if config_entry_image['type'] == 'plain':
+            substitute_file('headers.plain.postinst',
+                            'debian/linux-headers-%s%s.postinst' %
+                            (self.abiname, vars['localversion']))
+            for name in ['postinst', 'postrm', 'preinst', 'prerm', 'templates']:
+                substitute_file('image.plain.%s' % name,
+                                'debian/linux-image-%s%s.%s' %
+                                (self.abiname, vars['localversion'], name))
+            for path in glob.glob('debian/templates/po/*.po'):
+                substitute_file('po/' + os.path.basename(path),
+                                'debian/po/' + os.path.basename(path),
+                                append=True)
+        if build_debug:
+            substitute_file('image-dbg.lintian-override',
+                            'debian/linux-image-%s%s-dbg.lintian-overrides' %
+                            (self.abiname, vars['localversion']))
 
     def merge_packages(self, packages, new, arch):
         for new_package in new:
