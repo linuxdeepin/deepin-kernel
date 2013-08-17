@@ -19,13 +19,14 @@ class Templates(object):
     def _read(self, name):
         prefix, id = name.split('.', 1)
 
-        for dir in self.dirs:
-            filename = "%s/%s.in" % (dir, name)
-            if os.path.exists(filename):
-                f = codecs.open(filename, 'r', 'utf-8')
-                if prefix == 'control':
-                    return read_control(f)
-                return f.read()
+        for suffix in ['.in', '']:
+            for dir in self.dirs:
+                filename = "%s/%s%s" % (dir, name, suffix)
+                if os.path.exists(filename):
+                    f = codecs.open(filename, 'r', 'utf-8')
+                    if prefix == 'control':
+                        return read_control(f)
+                    return f.read()
 
     def get(self, key, default=None):
         if key in self._cache:
