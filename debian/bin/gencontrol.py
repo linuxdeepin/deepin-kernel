@@ -63,6 +63,10 @@ class Gencontrol(Base):
         })
 
         # Prepare to generate template-substituted translations
+        try:
+            os.mkdir('debian/po')
+        except OSError:
+            pass
         for path in glob.glob('debian/templates/po/*.po'):
             target = 'debian/po/' + os.path.basename(path)
             with open(target, 'w') as f:
