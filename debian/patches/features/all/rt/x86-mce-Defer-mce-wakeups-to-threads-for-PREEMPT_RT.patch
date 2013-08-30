@@ -2,7 +2,7 @@ From df12896518bc6db6a717de580116a07cdd19fbd9 Mon Sep 17 00:00:00 2001
 From: Steven Rostedt <rostedt@goodmis.org>
 Date: Thu, 11 Apr 2013 14:33:34 -0400
 Subject: [PATCH 4/5] x86/mce: Defer mce wakeups to threads for PREEMPT_RT
-Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.10/patches-3.10.6-rt3.tar.xz
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.10/patches-3.10.10-rt7.tar.xz
 
 We had a customer report a lockup on a 3.0-rt kernel that had the
 following backtrace:
@@ -55,8 +55,8 @@ Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
 		     kthread_run()]
 Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
 ---
- arch/x86/kernel/cpu/mcheck/mce.c |   75 ++++++++++++++++++++++++++++++++-------
- 1 file changed, 62 insertions(+), 13 deletions(-)
+ arch/x86/kernel/cpu/mcheck/mce.c |   73 ++++++++++++++++++++++++++++++++-------
+ 1 file changed, 61 insertions(+), 12 deletions(-)
 
 --- a/arch/x86/kernel/cpu/mcheck/mce.c
 +++ b/arch/x86/kernel/cpu/mcheck/mce.c
@@ -68,24 +68,15 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  #include <linux/kdebug.h>
  #include <linux/kernel.h>
  #include <linux/percpu.h>
-@@ -1343,26 +1344,72 @@ static void mce_do_trigger(struct work_s
+@@ -1343,6 +1344,63 @@ static void mce_do_trigger(struct work_s
  
  static DECLARE_WORK(mce_trigger_work, mce_do_trigger);
  
--/*
-- * Notify the user(s) about new machine check events.
-- * Can be called from interrupt context, but not from machine check/NMI
-- * context.
-- */
--int mce_notify_irq(void)
 +static void __mce_notify_work(void)
- {
- 	/* Not more than two messages every minute */
- 	static DEFINE_RATELIMIT_STATE(ratelimit, 60*HZ, 2);
- 
--	if (test_and_clear_bit(0, &mce_need_notify)) {
--		/* wake processes polling /dev/mcelog */
--		wake_up_interruptible(&mce_chrdev_wait);
++{
++	/* Not more than two messages every minute */
++	static DEFINE_RATELIMIT_STATE(ratelimit, 60*HZ, 2);
++
 +	/* wake processes polling /dev/mcelog */
 +	wake_up_interruptible(&mce_chrdev_wait);
 +
@@ -122,14 +113,10 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
 +					   "mce-notify");
 +	if (!mce_notify_helper)
 +		return -ENOMEM;
- 
--		if (mce_helper[0])
--			schedule_work(&mce_trigger_work);
++
 +	return 0;
 +}
- 
--		if (__ratelimit(&ratelimit))
--			pr_info(HW_ERR "Machine check events logged\n");
++
 +static void mce_notify_work(void)
 +{
 +	wake_up_process(mce_notify_helper);
@@ -141,15 +128,27 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
 +}
 +static inline int mce_notify_work_init(void) { return 0; }
 +#endif
- 
-+/*
-+ * Notify the user(s) about new machine check events.
-+ * Can be called from interrupt context, but not from machine check/NMI
-+ * context.
-+ */
-+int mce_notify_irq(void)
-+{
-+	if (test_and_clear_bit(0, &mce_need_notify)) {
++
+ /*
+  * Notify the user(s) about new machine check events.
+  * Can be called from interrupt context, but not from machine check/NMI
+@@ -1350,19 +1408,8 @@ static DECLARE_WORK(mce_trigger_work, mc
+  */
+ int mce_notify_irq(void)
+ {
+-	/* Not more than two messages every minute */
+-	static DEFINE_RATELIMIT_STATE(ratelimit, 60*HZ, 2);
+-
+ 	if (test_and_clear_bit(0, &mce_need_notify)) {
+-		/* wake processes polling /dev/mcelog */
+-		wake_up_interruptible(&mce_chrdev_wait);
+-
+-		if (mce_helper[0])
+-			schedule_work(&mce_trigger_work);
+-
+-		if (__ratelimit(&ratelimit))
+-			pr_info(HW_ERR "Machine check events logged\n");
+-
 +		mce_notify_work();
  		return 1;
  	}
