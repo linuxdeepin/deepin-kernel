@@ -43,7 +43,10 @@ class Gencontrol(Base):
     }
 
     def __init__(self, config_dirs=["debian/config"], template_dirs=["debian/templates"]):
-        super(Gencontrol, self).__init__(config.ConfigCoreHierarchy(self.config_schema, config_dirs), Templates(template_dirs), VersionLinux)
+        super(Gencontrol, self).__init__(
+            config.ConfigCoreHierarchy(self.config_schema, config_dirs),
+            Templates(template_dirs),
+            VersionLinux)
         self.process_changelog()
         self.config_dirs = config_dirs
 
@@ -393,7 +396,9 @@ class Gencontrol(Base):
 
         cmds_binary_arch = ["$(MAKE) -f debian/rules.real binary-arch-flavour %s" % makeflags]
         if packages_dummy:
-            cmds_binary_arch.append("$(MAKE) -f debian/rules.real install-dummy DH_OPTIONS='%s' %s" % (' '.join(["-p%s" % i['Package'] for i in packages_dummy]), makeflags))
+            cmds_binary_arch.append(
+                "$(MAKE) -f debian/rules.real install-dummy DH_OPTIONS='%s' %s"
+                % (' '.join("-p%s" % i['Package'] for i in packages_dummy), makeflags))
         cmds_build = ["$(MAKE) -f debian/rules.real build-arch %s" % makeflags]
         cmds_setup = ["$(MAKE) -f debian/rules.real setup-flavour %s" % makeflags]
         makefile.add('binary-arch_%s_%s_%s_real' % (arch, featureset, flavour), cmds=cmds_binary_arch)
@@ -470,16 +475,13 @@ class Gencontrol(Base):
             if (version.linux_revision_experimental or
                 version.linux_revision_backports or
                 version.linux_revision_other):
-                raise RuntimeError("Can't upload to %s with a version of %s" %
-                        (distribution, version))
+                raise RuntimeError("Can't upload to %s with a version of %s" % (distribution, version))
         if distribution in ('experimental', ):
             if not version.linux_revision_experimental:
-                raise RuntimeError("Can't upload to %s with a version of %s" %
-                        (distribution, version))
+                raise RuntimeError("Can't upload to %s with a version of %s" % (distribution, version))
         if distribution.endswith('-backports'):
             if not version.linux_revision_backports:
-                raise RuntimeError("Can't upload to %s with a version of %s" %
-                        (distribution, version))
+                raise RuntimeError("Can't upload to %s with a version of %s" % (distribution, version))
 
     def process_real_image(self, entry, fields, vars):
         entry = self.process_package(entry, vars)

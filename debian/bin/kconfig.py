@@ -28,13 +28,14 @@ def opt_callback_dict(option, opt, value, parser):
 
 if __name__ == '__main__':
     parser = optparse.OptionParser(usage="%prog [OPTION]... FILE...")
-    parser.add_option('-o', '--override',
-            action='callback',
-            callback=opt_callback_dict,
-            default={},
-            dest='overrides',
-            help="Override option",
-            type='string')
+    parser.add_option(
+        '-o', '--override',
+        action='callback',
+        callback=opt_callback_dict,
+        default={},
+        dest='overrides',
+        help="Override option",
+        type='string')
     options, args = parser.parse_args()
 
     merge(args[0], args[1:], options.overrides)
