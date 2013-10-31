@@ -128,10 +128,12 @@ class Gencontrol(Base):
 
         if self.version.linux_modifier is None:
             try:
-                vars['abiname'] = '-%s' % self.config['abi', arch]['abiname']
+                abiname_part = '-%s' % self.config['abi', arch]['abiname']
             except KeyError:
-                vars['abiname'] = self.abiname
-            makeflags['ABINAME'] = vars['abiname']
+                abiname_part = self.abiname_part
+            makeflags['ABINAME'] = vars['abiname'] = \
+                self.version.linux_upstream + abiname_part
+            makeflags['ABINAME_PART'] = abiname_part
 
         if foreign_kernel:
             packages_headers_arch = []
@@ -175,8 +177,7 @@ class Gencontrol(Base):
                 kw_env['KW_DEFCONFIG_DIR'] = installer_def_dir
                 kw_env['KW_CONFIG_DIR'] = installer_arch_dir
                 kw_proc = subprocess.Popen(
-                    ['kernel-wedge', 'gen-control',
-                     self.abiname],
+                    ['kernel-wedge', 'gen-control', vars['abiname']],
                     stdout=subprocess.PIPE,
                     env=kw_env)
                 udeb_packages = read_control(kw_proc.stdout)
@@ -409,11 +410,11 @@ class Gencontrol(Base):
         if config_entry_image['type'] == 'plain':
             substitute_file('headers.plain.postinst',
                             'debian/linux-headers-%s%s.postinst' %
-                            (self.abiname, vars['localversion']))
+                            (vars['abiname'], vars['localversion']))
             for name in ['postinst', 'postrm', 'preinst', 'prerm', 'templates']:
                 substitute_file('image.plain.%s' % name,
                                 'debian/linux-image-%s%s.%s' %
-                                (self.abiname, vars['localversion'], name))
+                                (vars['abiname'], vars['localversion'], name))
             for path in glob.glob('debian/templates/po/*.po'):
                 substitute_file('po/' + os.path.basename(path),
                                 'debian/po/' + os.path.basename(path),
@@ -421,7 +422,7 @@ class Gencontrol(Base):
         if build_debug:
             substitute_file('image-dbg.lintian-override',
                             'debian/linux-image-%s%s-dbg.lintian-overrides' %
-                            (self.abiname, vars['localversion']))
+                            (vars['abiname'], vars['localversion']))
 
     def merge_packages(self, packages, new, arch):
         for new_package in new:
