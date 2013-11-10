@@ -469,7 +469,9 @@ class Gencontrol(Base):
             'source_package': self.changelog[0].source,
             'abiname': self.abiname,
         }
-        self.config['version', ] = {'source': self.version.complete, 'abiname': self.abiname}
+        self.config['version', ] = {'source': self.version.complete,
+                                    'upstream': self.version.linux_upstream,
+                                    'abiname': self.abiname}
 
         distribution = self.changelog[0].distribution
         if distribution in ('unstable', ):

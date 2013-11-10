@@ -44,7 +44,13 @@ class CheckAbi(object):
 
         self.filename_new = "%s/Module.symvers" % dir
 
-        version_abi = self.config['version', ]['abiname']
+        upstream_version = self.config['version',]['upstream']
+        try:
+            version_abi = (upstream_version + '-' +
+                           self.config['abi', arch]['abiname'])
+        except KeyError:
+            version_abi = (upstream_version + '-' +
+                           self.config['abi', ]['abiname'])
         self.filename_ref = "debian/abi/%s/%s_%s_%s" % (version_abi, arch, featureset, flavour)
 
     def __call__(self, out):
