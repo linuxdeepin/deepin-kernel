@@ -259,7 +259,18 @@ class Gencontrol(Base):
         config_entry_relations = self.config.merge('relations', arch, featureset, flavour)
 
         compiler = config_entry_base.get('compiler', 'gcc')
-        relations_compiler = PackageRelation(config_entry_relations[compiler])
+
+        # linux-headers packages may depend on an intermediate
+        # meta-package, rather than directly on the compiler we use
+        # at build time.
+        if config_entry_relations.get('headers%' + compiler):
+            relations_compiler_headers = PackageRelation(
+                self.substitute(
+                    config_entry_relations['headers%' + compiler], vars))
+        else:
+            relations_compiler_headers = PackageRelation(
+                config_entry_relations[compiler])
+
         relations_compiler_build_dep = PackageRelation(config_entry_relations[compiler])
         for group in relations_compiler_build_dep:
             for item in group:
@@ -330,7 +341,7 @@ class Gencontrol(Base):
         if config_entry_build.get('modules', True):
             makeflags['MODULES'] = True
             package_headers = self.process_package(headers[0], vars)
-            package_headers['Depends'].extend(relations_compiler)
+            package_headers['Depends'].extend(relations_compiler_headers)
             packages_own.append(package_headers)
             extra['headers_arch_depends'].append('%s (= ${binary:Version})' % packages_own[-1]['Package'])
 

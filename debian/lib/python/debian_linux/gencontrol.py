@@ -129,9 +129,10 @@ class Gencontrol(object):
         if templates_extra is None:
             return
 
-        packages.extend(self.process_packages(templates_extra, {}))
+        packages_extra = self.process_packages(templates_extra, self.vars)
+        packages.extend(packages_extra)
         extra_arches = {}
-        for package in templates_extra:
+        for package in packages_extra:
             arches = package['Architecture']
             for arch in arches:
                 i = extra_arches.get(arch, [])
@@ -142,12 +143,9 @@ class Gencontrol(object):
         for arch in archs:
             cmds = []
             for i in extra_arches[arch]:
-                tmp = []
-                if 'X-Version-Overwrite-Epoch' in i:
-                        tmp.append("-v1:%s" % self.version['source'])
-                cmds.append("$(MAKE) -f debian/rules.real install-dummy DH_OPTIONS='-p%s' GENCONTROL_ARGS='%s'" % (i['Package'], ' '.join(tmp)))
-            makefile.add('binary-arch_%s' % arch['binary-arch_%s_extra' % arch])
-            makefile.add("binary-arch_%s_extra" % arch, cmds=cmds)
+                cmds.append("$(MAKE) -f debian/rules.real install-dummy ARCH='%s' DH_OPTIONS='-p%s'" % (arch, i['Package']))
+            makefile.add('binary-arch_%s' % arch, [u'binary-arch_%s_extra' % arch])
+            makefile.add("binary-arch_%s_extra" % arch, cmds = cmds)
 
     def do_arch(self, packages, makefile, arch, vars, makeflags, extra):
         vars['arch'] = arch
