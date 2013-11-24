@@ -260,16 +260,9 @@ class Gencontrol(Base):
 
         compiler = config_entry_base.get('compiler', 'gcc')
 
-        # linux-headers packages may depend on an intermediate
-        # meta-package, rather than directly on the compiler we use
-        # at build time.
-        if config_entry_relations.get('headers%' + compiler):
-            relations_compiler_headers = PackageRelation(
-                self.substitute(
-                    config_entry_relations['headers%' + compiler], vars))
-        else:
-            relations_compiler_headers = PackageRelation(
-                config_entry_relations[compiler])
+        relations_compiler_headers = PackageRelation(
+            config_entry_relations.get('headers%' + compiler) or
+            config_entry_relations.get(compiler))
 
         relations_compiler_build_dep = PackageRelation(config_entry_relations[compiler])
         for group in relations_compiler_build_dep:
