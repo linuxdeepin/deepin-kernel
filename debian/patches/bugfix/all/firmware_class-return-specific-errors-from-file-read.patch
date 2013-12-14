@@ -1,0 +1,148 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Sat, 14 Dec 2013 17:14:39 +0000
+Subject: firmware_class: Return specific errors from file read
+
+Currently the various failure cases are not distinguished and are all
+reported as -ENOENT.
+
+Change fw_file_size(), fw_read_file_contents() and
+fw_get_filesystem_firmware() to return an error code on failure.
+
+Change _request_firmware() to return the error code from
+fw_get_filesystem_firmware() if CONFIG_FW_LOADER_USER_HELPER is not
+enabled.  (If it is enabled and also fails, unfortunately we can't
+tell why.)
+
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+---
+--- a/drivers/base/firmware_class.c
++++ b/drivers/base/firmware_class.c
+@@ -273,40 +273,47 @@ MODULE_PARM_DESC(path, "customized firmw
+ static noinline_for_stack int fw_file_size(struct file *file)
+ {
+ 	struct kstat st;
+-	if (vfs_getattr(&file->f_path, &st))
+-		return -1;
++	int ret;
++
++	ret = vfs_getattr(&file->f_path, &st);
++	if (ret)
++		return ret;
+ 	if (!S_ISREG(st.mode))
+-		return -1;
++		return -ENOTTY;
+ 	if (st.size != (int)st.size)
+-		return -1;
++		return -EFBIG;
+ 	return st.size;
+ }
+ 
+-static bool fw_read_file_contents(struct file *file, struct firmware_buf *fw_buf)
++static int fw_read_file_contents(struct file *file, struct firmware_buf *fw_buf)
+ {
++	int read_size;
+ 	int size;
+ 	char *buf;
+ 
+ 	size = fw_file_size(file);
+-	if (size <= 0)
+-		return false;
++	if (size < 0)
++		return size;
++	if (size == 0)
++		return -EINVAL;
+ 	buf = vmalloc(size);
+ 	if (!buf)
+-		return false;
+-	if (kernel_read(file, 0, buf, size) != size) {
++		return -ENOMEM;
++	read_size = kernel_read(file, 0, buf, size);
++	if (read_size != size) {
+ 		vfree(buf);
+-		return false;
++		return read_size < 0 ? read_size : -EIO;
+ 	}
+ 	fw_buf->data = buf;
+ 	fw_buf->size = size;
+-	return true;
++	return 0;
+ }
+ 
+-static bool fw_get_filesystem_firmware(struct device *device,
++static int fw_get_filesystem_firmware(struct device *device,
+ 				       struct firmware_buf *buf)
+ {
+ 	int i;
+-	bool success = false;
++	int ret = -ENOENT;
+ 	char *path = __getname();
+ 
+ 	for (i = 0; i < ARRAY_SIZE(fw_path); i++) {
+@@ -319,16 +326,18 @@ static bool fw_get_filesystem_firmware(s
+ 		snprintf(path, PATH_MAX, "%s/%s", fw_path[i], buf->fw_id);
+ 
+ 		file = filp_open(path, O_RDONLY, 0);
+-		if (IS_ERR(file))
++		if (IS_ERR(file)) {
++			ret = PTR_ERR(file);
+ 			continue;
+-		success = fw_read_file_contents(file, buf);
++		}
++		ret = fw_read_file_contents(file, buf);
+ 		fput(file);
+-		if (success)
++		if (!ret)
+ 			break;
+ 	}
+ 	__putname(path);
+ 
+-	if (success) {
++	if (!ret) {
+ 		dev_dbg(device, "firmware: direct-loading firmware %s\n",
+ 			buf->fw_id);
+ 		mutex_lock(&fw_lock);
+@@ -337,7 +346,7 @@ static bool fw_get_filesystem_firmware(s
+ 		mutex_unlock(&fw_lock);
+ 	}
+ 
+-	return success;
++	return ret;
+ }
+ 
+ /* firmware holds the ownership of pages */
+@@ -933,13 +942,6 @@ static void kill_requests_without_uevent
+ #endif
+ 
+ #else /* CONFIG_FW_LOADER_USER_HELPER */
+-static inline int
+-fw_load_from_user_helper(struct firmware *firmware, const char *name,
+-			 struct device *device, bool uevent, bool nowait,
+-			 long timeout)
+-{
+-	return -ENOENT;
+-}
+ 
+ /* No abort during direct loading */
+ #define is_fw_load_aborted(buf) false
+@@ -1067,7 +1069,6 @@ _request_firmware(const struct firmware
+ 	if (ret <= 0) /* error or already assigned */
+ 		goto out;
+ 
+-	ret = 0;
+ 	timeout = firmware_loading_timeout();
+ 	if (nowait) {
+ 		timeout = usermodehelper_read_lock_wait(timeout);
+@@ -1086,9 +1087,12 @@ _request_firmware(const struct firmware
+ 		}
+ 	}
+ 
+-	if (!fw_get_filesystem_firmware(device, fw->priv))
++	ret = fw_get_filesystem_firmware(device, fw->priv);
++#ifdef CONFIG_FW_LOADER_USER_HELPER
++	if (ret)
+ 		ret = fw_load_from_user_helper(fw, name, device,
+ 					       uevent, nowait, timeout);
++#endif
+ 
+ 	/* don't cache firmware handled without uevent */
+ 	if (!ret)
