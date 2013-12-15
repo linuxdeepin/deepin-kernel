@@ -162,10 +162,7 @@ class Gencontrol(Base):
                      ["$(MAKE) -f debian/rules.real install-libc-dev_%s %s" %
                       (arch, makeflags)])
 
-        if self.version.linux_revision_backports:
-            # Installer is not (currently) built from backports
-            pass
-        elif os.getenv('DEBIAN_KERNEL_DISABLE_INSTALLER'):
+        if os.getenv('DEBIAN_KERNEL_DISABLE_INSTALLER'):
             if self.changelog[0].distribution == 'UNRELEASED':
                 import warnings
                 warnings.warn(u'Disable installer modules on request (DEBIAN_KERNEL_DISABLE_INSTALLER set)')
