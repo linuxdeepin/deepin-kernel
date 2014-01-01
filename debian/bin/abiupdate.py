@@ -7,7 +7,12 @@ import optparse
 import os
 import shutil
 import tempfile
-import urllib2
+
+try:
+    from urllib.request import urlopen
+    from urllib.error import HTTPError
+except ImportError:
+    from urllib2 import urlopen, HTTPError
 
 from debian_linux.abi import Symbols
 from debian_linux.config import *
@@ -63,7 +68,7 @@ class Main(object):
         self.version = changelog.version.linux_version
         self.version_source = changelog.version.complete
 
-        local_config = ConfigCoreDump(fp=file("debian/config.defines.dump"))
+        local_config = ConfigCoreDump(fp=open("debian/config.defines.dump", "rb"))
 
         self.version_abi = local_config['version', ]['abiname']
 
@@ -74,7 +79,7 @@ class Main(object):
 
             try:
                 config = self.get_config()
-            except urllib2.HTTPError as e:
+            except HTTPError as e:
                 self.log("Failed to retrieve %s: %s\n" % (e.filename, e))
                 sys.exit(1)
 
@@ -107,7 +112,7 @@ class Main(object):
         f = self.retrieve_package(self.url_config, filename, 'all')
         d = self.extract_package(f, "linux-support")
         c = d + "/usr/src/linux-support-" + self.version_abi + "/config.defines.dump"
-        config = ConfigCoreDump(fp=file(c))
+        config = ConfigCoreDump(fp=open(c, "rb"))
         shutil.rmtree(d)
         return config
 
@@ -115,8 +120,8 @@ class Main(object):
         u = url(self.source, filename, arch)
         filename_out = self.dir + "/" + filename
 
-        f_in = urllib2.urlopen(u)
-        f_out = file(filename_out, 'w')
+        f_in = urlopen(u)
+        f_out = open(filename_out, 'wb')
         while 1:
             r = f_in.read()
             if not r:
@@ -168,9 +173,9 @@ class Main(object):
             abi = self.get_abi(arch, localversion)
             self.save_abi(abi, arch, featureset, flavour)
             self.log("Ok.\n")
-        except urllib2.HTTPError, e:
+        except HTTPError as e:
             self.log("Failed to retrieve %s: %s\n" % (e.filename, e))
-        except StandardError, e:
+        except Exception:
             self.log("FAILED!\n")
             import traceback
             traceback.print_exc(None, sys.stdout)
