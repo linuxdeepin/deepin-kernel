@@ -37,8 +37,6 @@ class Symbols(dict):
             self[name] = Symbol(name, module, version, export)
 
     def write(self, file):
-        symbols = self.values()
-        symbols.sort(key=lambda i: i.name)
-        for s in symbols:
+        for s in sorted(self.values(), key=lambda i: i.name):
             file.write("%s %s %s %s\n" %
                     (s.version, s.name, s.module, s.export))

@@ -1,3 +1,5 @@
+from __future__ import print_function
+
 import glob
 import os
 import shutil
@@ -23,7 +25,7 @@ class Operation(object):
             s = "OK"
         else:
             s = "FAIL"
-        print """  (%s) %-4s %s""" % (self.operation, s, self.name)
+        print("""  (%s) %-4s %s""" % (self.operation, s, self.name))
 
     def do(self, dir):
         raise NotImplementedError
@@ -71,7 +73,7 @@ class SubOperation(Operation):
             s = "OK"
         else:
             s = "FAIL"
-        print """    %-10s %-4s %s""" % ('(%s)' % self.operation, s, self.name)
+        print("""    %-10s %-4s %s""" % ('(%s)' % self.operation, s, self.name))
 
 
 class SubOperationFilesRemove(SubOperation):
@@ -164,7 +166,7 @@ class PatchSeries(list):
 
             if operation in self.operations:
                 f = os.path.join(self.root, filename)
-                for suffix, cls in (('', file), ('.bz2', BZ2File), ('.gz', GzipFile)):
+                for suffix, cls in (('', open), ('.bz2', BZ2File), ('.gz', GzipFile)):
                     f1 = f + suffix
                     if os.path.exists(f1):
                         # Must copy current bindings into the lambda-function

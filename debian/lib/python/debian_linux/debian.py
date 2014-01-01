@@ -1,6 +1,7 @@
 import collections
 import itertools
 import os.path
+import six
 import re
 
 from . import utils
@@ -35,7 +36,10 @@ class Changelog(list):
     def __init__(self, dir='', version=None):
         if version is None:
             version = Version
-        f = file(os.path.join(dir, "debian/changelog"))
+        if six.PY3:
+            f = open(os.path.join(dir, "debian/changelog"), encoding="UTF-8")
+        else:
+            f = open(os.path.join(dir, "debian/changelog"))
         while True:
             line = f.readline()
             if not line:
@@ -53,7 +57,7 @@ class Changelog(list):
 
 
 class Version(object):
-    _version_rules = ur"""
+    _version_rules = r"""
 ^
 (?:
     (?P<epoch>
@@ -108,7 +112,7 @@ $
 
 
 class VersionLinux(Version):
-    _version_linux_rules = ur"""
+    _version_linux_rules = r"""
 ^
 (?P<version>
     \d+\.\d+
@@ -338,7 +342,7 @@ class PackageRelationEntry(object):
                 OP_GT: OP_LE,
         }
 
-        operators_text = dict([(b, a) for a, b in operators.iteritems()])
+        operators_text = dict((b, a) for a, b in operators.items())
 
         __slots__ = '_op',
 
@@ -387,14 +391,14 @@ class PackageRelationEntry(object):
 
 class Package(dict):
     _fields = collections.OrderedDict((
-        ('Package', unicode),
-        ('Source', unicode),
+        ('Package', six.text_type),
+        ('Source', six.text_type),
         ('Architecture', PackageArchitecture),
-        ('Section', unicode),
-        ('Priority', unicode),
-        ('Maintainer', unicode),
-        ('Uploaders', unicode),
-        ('Standards-Version', unicode),
+        ('Section', six.text_type),
+        ('Priority', six.text_type),
+        ('Maintainer', six.text_type),
+        ('Uploaders', six.text_type),
+        ('Standards-Version', six.text_type),
         ('Build-Depends', PackageRelation),
         ('Build-Depends-Indep', PackageRelation),
         ('Provides', PackageRelation),
