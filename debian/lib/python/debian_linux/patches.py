@@ -40,11 +40,12 @@ class OperationPatch(Operation):
         self.filename = filename
 
     def _call(self, dir, extraargs):
-        cmdline = "cd %s; patch -p1 -f -s -t --no-backup-if-mismatch %s" % (dir, extraargs)
-        f = os.popen(cmdline, 'wb')
-        shutil.copyfileobj(open(self.filename), f)
-        if f.close():
-            raise RuntimeError("Patch failed")
+        with open(self.filename) as f1:
+            cmdline = "cd %s; patch -p1 -f -s -t --no-backup-if-mismatch %s" % (dir, extraargs)
+            f = os.popen(cmdline, 'wb')
+            shutil.copyfileobj(f1, f)
+            if f.close():
+                raise RuntimeError("Patch failed")
 
     def patch_push(self, dir):
         self._call(dir, '--fuzz=1')
@@ -120,19 +121,20 @@ class OperationFiles(Operation):
 
         ops = []
 
-        for line in open(filename):
-            line = line.strip()
-            if not line or line[0] == '#':
-                continue
+        with open(filename) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line[0] == '#':
+                    continue
 
-            items = line.split()
-            operation, filename = items[:2]
-            data = items[2:]
+                items = line.split()
+                operation, filename = items[:2]
+                data = items[2:]
 
-            if operation not in self.suboperations:
-                raise RuntimeError('Undefined operation "%s" in series %s' % (operation, name))
+                if operation not in self.suboperations:
+                    raise RuntimeError('Undefined operation "%s" in series %s' % (operation, name))
 
-            ops.append(self.suboperations[operation](filename, data))
+                ops.append(self.suboperations[operation](filename, data))
 
         self.ops = ops
 
