@@ -35,14 +35,14 @@ class Operation(object):
 
 
 class OperationPatch(Operation):
-    def __init__(self, name, fopen, data):
+    def __init__(self, name, filename, data):
         super(OperationPatch, self).__init__(name, data)
-        self.fopen = fopen
+        self.filename = filename
 
     def _call(self, dir, extraargs):
         cmdline = "cd %s; patch -p1 -f -s -t --no-backup-if-mismatch %s" % (dir, extraargs)
         f = os.popen(cmdline, 'wb')
-        shutil.copyfileobj(self.fopen(), f)
+        shutil.copyfileobj(open(self.filename), f)
         if f.close():
             raise RuntimeError("Patch failed")
 
@@ -115,12 +115,12 @@ class OperationFiles(Operation):
         'unifdef': SubOperationFilesUnifdef,
     }
 
-    def __init__(self, name, fopen, data):
+    def __init__(self, name, filename, data):
         super(OperationFiles, self).__init__(name, data)
 
         ops = []
 
-        for line in fopen():
+        for line in open(filename):
             line = line.strip()
             if not line or line[0] == '#':
                 continue
@@ -166,18 +166,12 @@ class PatchSeries(list):
 
             if operation in self.operations:
                 f = os.path.join(self.root, filename)
-                for suffix, cls in (('', open), ('.bz2', BZ2File), ('.gz', GzipFile)):
-                    f1 = f + suffix
-                    if os.path.exists(f1):
-                        # Must copy current bindings into the lambda-function
-                        fopen = lambda cls=cls, f1=f1: cls(f1)
-                        break
+                if os.path.exists(f):
+                    self.append(self.operations[operation](filename, f, data))
                 else:
                     raise RuntimeError("Can't find patch %s for series %s" % (filename, self.name))
             else:
                 raise RuntimeError('Undefined operation "%s" in series %s' % (operation, name))
-
-            self.append(self.operations[operation](filename, fopen, data))
 
     def __call__(self, cond=bool, dir='.', reverse=False):
         if not reverse:
