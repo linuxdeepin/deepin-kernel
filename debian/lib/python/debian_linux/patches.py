@@ -148,9 +148,6 @@ class PatchSeries(list):
     def __init__(self, name, root, fp):
         self.name, self.root = name, root
 
-        from gzip import GzipFile
-        from bz2 import BZ2File
-
         for line in fp:
             line = line.strip()
 
