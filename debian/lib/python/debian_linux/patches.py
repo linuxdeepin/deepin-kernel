@@ -3,6 +3,7 @@ from __future__ import print_function
 import glob
 import os
 import shutil
+import subprocess
 
 
 class Operation(object):
@@ -39,13 +40,13 @@ class OperationPatch(Operation):
         super(OperationPatch, self).__init__(name, data)
         self.filename = filename
 
-    def _call(self, dir, extraargs):
-        with open(self.filename) as f1:
-            cmdline = "cd %s; patch -p1 -f -s -t --no-backup-if-mismatch %s" % (dir, extraargs)
-            f = os.popen(cmdline, 'wb')
-            shutil.copyfileobj(f1, f)
-            if f.close():
-                raise RuntimeError("Patch failed")
+    def _call(self, dir, *extraargs):
+        with open(self.filename) as f:
+            subprocess.check_call(
+                    ("patch", "-p1", "-f", "-s", "-t", "--no-backup-if-mismatch") + extraargs,
+                    cwd=dir,
+                    stdin=f,
+            )
 
     def patch_push(self, dir):
         self._call(dir, '--fuzz=1')
@@ -94,17 +95,11 @@ class SubOperationFilesUnifdef(SubOperation):
 
     def do(self, dir):
         filename = os.path.join(dir, self.name)
-        cmdline = "unifdef %s %s" % (filename, ' '.join(self.data))
-        f = os.popen(cmdline, 'rb')
-        data = f.read()
-        ret = f.close()
-        if ret is None:
+        ret = subprocess.call(("unifdef", "-o", filename, filename) + tuple(self.data))
+        if ret == 0:
             raise RuntimeError("unifdef of %s removed nothing" % self.name)
-        elif ret != 256:
+        elif ret != 1:
             raise RuntimeError("unifdef failed")
-        f1 = file(filename, 'wb')
-        f1.write(data)
-        f1.close()
 
 
 class OperationFiles(Operation):
