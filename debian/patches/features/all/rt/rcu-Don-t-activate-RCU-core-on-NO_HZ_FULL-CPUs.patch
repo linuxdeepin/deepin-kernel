@@ -1,0 +1,89 @@
+From 670879e479578081f73a32048eac5aec7724f2a1 Mon Sep 17 00:00:00 2001
+From: "Paul E. McKenney" <paulmck@linux.vnet.ibm.com>
+Date: Fri, 8 Nov 2013 09:03:10 -0800
+Subject: [PATCH] rcu: Don't activate RCU core on NO_HZ_FULL CPUs
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.12/patches-3.12.6-rt9.tar.xz
+
+Whenever a CPU receives a scheduling-clock interrupt, RCU checks to see
+if the RCU core needs anything from this CPU.  If so, RCU raises
+RCU_SOFTIRQ to carry out any needed processing.
+
+This approach has worked well historically, but it is undesirable on
+NO_HZ_FULL CPUs.  Such CPUs are expected to spend almost all of their time
+in userspace, so that scheduling-clock interrupts can be disabled while
+there is only one runnable task on the CPU in question.  Unfortunately,
+raising any softirq has the potential to wake up ksoftirqd, which would
+provide the second runnable task on that CPU, preventing disabling of
+scheduling-clock interrupts.
+
+What is needed instead is for RCU to leave NO_HZ_FULL CPUs alone,
+relying on the grace-period kthreads' quiescent-state forcing to
+do any needed RCU work on behalf of those CPUs.
+
+This commit therefore refrains from raising RCU_SOFTIRQ on any
+NO_HZ_FULL CPUs during any grace periods that have been in effect
+for less than one second.  The one-second limit handles the case
+where an inappropriate workload is running on a NO_HZ_FULL CPU
+that features lots of scheduling-clock interrupts, but no idle
+or userspace time.
+
+Reported-by: Mike Galbraith <bitbucket@online.de>
+Signed-off-by: Paul E. McKenney <paulmck@linux.vnet.ibm.com>
+Tested-by: Mike Galbraith <bitbucket@online.de>
+Toasted-by: Frederic Weisbecker <fweisbec@gmail.com>
+Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+---
+ kernel/rcutree.c        |    4 ++++
+ kernel/rcutree.h        |    1 +
+ kernel/rcutree_plugin.h |   20 ++++++++++++++++++++
+ 3 files changed, 25 insertions(+)
+
+--- a/kernel/rcutree.c
++++ b/kernel/rcutree.c
+@@ -2658,6 +2658,10 @@ static int __rcu_pending(struct rcu_stat
+ 	/* Check for CPU stalls, if enabled. */
+ 	check_cpu_stall(rsp, rdp);
+ 
++	/* Is this CPU a NO_HZ_FULL CPU that should ignore RCU? */
++	if (rcu_nohz_full_cpu(rsp))
++		return 0;
++
+ 	/* Is the RCU core waiting for a quiescent state from this CPU? */
+ 	if (rcu_scheduler_fully_active &&
+ 	    rdp->qs_pending && !rdp->passed_quiesce) {
+--- a/kernel/rcutree.h
++++ b/kernel/rcutree.h
+@@ -562,6 +562,7 @@ static void rcu_sysidle_report_gp(struct
+ 				  unsigned long maxj);
+ static void rcu_bind_gp_kthread(void);
+ static void rcu_sysidle_init_percpu_data(struct rcu_dynticks *rdtp);
++static bool rcu_nohz_full_cpu(struct rcu_state *rsp);
+ 
+ #endif /* #ifndef RCU_TREE_NONCORE */
+ 
+--- a/kernel/rcutree_plugin.h
++++ b/kernel/rcutree_plugin.h
+@@ -2795,3 +2795,23 @@ static void rcu_sysidle_init_percpu_data
+ }
+ 
+ #endif /* #else #ifdef CONFIG_NO_HZ_FULL_SYSIDLE */
++
++/*
++ * Is this CPU a NO_HZ_FULL CPU that should ignore RCU so that the
++ * grace-period kthread will do force_quiescent_state() processing?
++ * The idea is to avoid waking up RCU core processing on such a
++ * CPU unless the grace period has extended for too long.
++ *
++ * This code relies on the fact that all NO_HZ_FULL CPUs are also
++ * CONFIG_RCU_NOCB_CPUs.
++ */
++static bool rcu_nohz_full_cpu(struct rcu_state *rsp)
++{
++#ifdef CONFIG_NO_HZ_FULL
++	if (tick_nohz_full_cpu(smp_processor_id()) &&
++	    (!rcu_gp_in_progress(rsp) ||
++	     ULONG_CMP_LT(jiffies, ACCESS_ONCE(rsp->gp_start) + HZ)))
++		return 1;
++#endif /* #ifdef CONFIG_NO_HZ_FULL */
++	return 0;
++}
