@@ -42,13 +42,13 @@ MAKE_PERF := $(MAKE) prefix=/usr perfexecdir=share/perf_$(VERSION)-core NO_GTK2=
 all:
 ifdef KERNEL_ARCH_PERF
 	-mkdir out
-	+$(MAKE_PERF) -C $(top_srcdir)/tools/perf O=$(CURDIR)/out all VERSION=$(VERSION)
+	+$(MAKE_PERF) -C $(top_srcdir)/tools/perf -f Makefile.perf O=$(CURDIR)/out all VERSION=$(VERSION)
 	+$(MAKE_PERF) -C $(top_srcdir)/tools/perf/Documentation O=$(CURDIR)/out man VERSION=$(VERSION)
 endif
 
 install:
 ifdef KERNEL_ARCH_PERF
-	+$(MAKE_PERF) -C $(top_srcdir)/tools/perf O=$(CURDIR)/out install VERSION=$(VERSION)
+	+$(MAKE_PERF) -C $(top_srcdir)/tools/perf -f Makefile.perf O=$(CURDIR)/out install VERSION=$(VERSION)
 endif
 
 clean:
