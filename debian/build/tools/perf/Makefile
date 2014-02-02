@@ -12,7 +12,6 @@ else ifeq ($(DEB_HOST_ARCH_CPU),amd64)
   NO_LIBUNWIND=
 else ifeq ($(DEB_HOST_ARCH_CPU),arm)
   KERNEL_ARCH_PERF = arm
-  NO_LIBUNWIND=
 else ifeq ($(DEB_HOST_ARCH_CPU),hppa)
   KERNEL_ARCH_PERF = parisc
 else ifeq ($(DEB_HOST_ARCH_CPU),i386)
@@ -20,10 +19,8 @@ else ifeq ($(DEB_HOST_ARCH_CPU),i386)
   NO_LIBUNWIND=
 else ifeq ($(DEB_HOST_ARCH_CPU),powerpc)
   KERNEL_ARCH_PERF = powerpc
-  NO_LIBUNWIND=
 else ifeq ($(DEB_HOST_ARCH_CPU),powerpc64)
   KERNEL_ARCH_PERF = powerpc
-  NO_LIBUNWIND=
 else ifeq ($(DEB_HOST_ARCH_CPU),s390)
   KERNEL_ARCH_PERF = s390
 else ifeq ($(DEB_HOST_ARCH_CPU),s390x)
