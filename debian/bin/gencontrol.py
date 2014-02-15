@@ -6,6 +6,7 @@ sys.path.append("debian/lib/python")
 import codecs
 import errno
 import glob
+import io
 import os
 import os.path
 import subprocess
@@ -180,7 +181,10 @@ class Gencontrol(Base):
                     ['kernel-wedge', 'gen-control', vars['abiname']],
                     stdout=subprocess.PIPE,
                     env=kw_env)
-                udeb_packages = read_control(kw_proc.stdout)
+                if not isinstance(kw_proc.stdout, io.IOBase):
+                    udeb_packages = read_control(io.open(kw_proc.stdout.fileno(), encoding='utf-8', closefd=False))
+                else:
+                    udeb_packages = read_control(io.TextIOWrapper(kw_proc.stdout, 'utf-8'))
                 kw_proc.wait()
                 if kw_proc.returncode != 0:
                     raise RuntimeError('kernel-wedge exited with code %d' %
@@ -489,7 +493,7 @@ class Gencontrol(Base):
 
     def process_real_image(self, entry, fields, vars):
         entry = self.process_package(entry, vars)
-        for key, value in fields.iteritems():
+        for key, value in fields.items():
             if key in entry:
                 real = entry[key]
                 real.extend(value)
@@ -502,7 +506,7 @@ class Gencontrol(Base):
         super(Gencontrol, self).write(packages, makefile)
 
     def write_config(self):
-        f = file("debian/config.defines.dump", 'w')
+        f = open("debian/config.defines.dump", 'wb')
         self.config.dump(f)
         f.close()
 

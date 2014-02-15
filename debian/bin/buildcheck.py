@@ -214,7 +214,7 @@ class Main(object):
     def __init__(self, dir, arch, featureset, flavour):
         self.args = dir, arch, featureset, flavour
 
-        self.config = ConfigCoreDump(fp=file("debian/config.defines.dump"))
+        self.config = ConfigCoreDump(open("debian/config.defines.dump", "rb"))
 
     def __call__(self):
         fail = 0
