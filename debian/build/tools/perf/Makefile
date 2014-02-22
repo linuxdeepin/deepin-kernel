@@ -46,6 +46,13 @@ endif
 install:
 ifdef KERNEL_ARCH_PERF
 	+$(MAKE_PERF) -C $(top_srcdir)/tools/perf -f Makefile.perf O=$(CURDIR)/out install VERSION=$(VERSION)
+# Don't install a 'trace' alias yet:
+# - We need a wrapper for it anyway, so there's little point adding a
+#   versioned link
+# - It doesn't work out-of-the-box as non-root (it depends on debugfs),
+#   so it's less widely useful than strace
+# - 'perf trace' doesn't take much more typing
+	rm -f $(DESTDIR)/usr/bin/trace_$(VERSION)
 endif
 
 clean:
