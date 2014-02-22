@@ -19,6 +19,6 @@ install:
 	$(MAKE) -C userspace install
 
 clean:
-	rm -rf $(addprefix $(srcdir)/,autom4te.cache aclocal.m4 config.guess config.h.in config.sub configure depcomp install-sh ltmain.sh missing)
+	rm -rf $(addprefix $(srcdir)/,autom4te.cache aclocal.m4 compile config.guess config.h.in config.sub configure depcomp install-sh ltmain.sh missing)
 	find $(srcdir)/ -name Makefile.in -delete
 	rm -rf userspace
