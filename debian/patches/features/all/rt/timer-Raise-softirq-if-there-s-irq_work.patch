@@ -1,0 +1,47 @@
+From 9c537765294dfce1e51cd713b9020987bb0a3ed2 Mon Sep 17 00:00:00 2001
+From: Steven Rostedt <rostedt@goodmis.org>
+Date: Fri, 24 Jan 2014 15:09:33 -0500
+Subject: [PATCH] timer: Raise softirq if there's irq_work
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.14/patches-3.14.0-rt1.tar.xz
+
+[ Talking with Sebastian on IRC, it seems that doing the irq_work_run()
+  from the interrupt in -rt is a bad thing. Here we simply raise the
+  softirq if there's irq work to do. This too boots on my i7 ]
+
+After trying hard to figure out why my i7 box was locking up with the
+new active_timers code, that does not run the timer softirq if there
+are no active timers, I took an extra look at the softirq handler and
+noticed that it doesn't just run timer softirqs, it also runs irq work.
+
+This was the bug that was locking up the system. It wasn't missing a
+timer, it was missing irq work. By always doing the irq work callbacks,
+the system boots fine. The missing irq work callback was the RCU's
+sp_wakeup() function.
+
+No need to check for defined(CONFIG_IRQ_WORK). When that's not set the
+"irq_work_needs_cpu()" is a static inline that returns false.
+
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+---
+ kernel/timer.c |    9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+--- a/kernel/timer.c
++++ b/kernel/timer.c
+@@ -1462,8 +1462,13 @@ void run_local_timers(void)
+ 		return;
+ 	}
+ #endif
+-	if (!base->active_timers)
+-		goto out;
++	if (!base->active_timers) {
++#ifdef CONFIG_PREEMPT_RT_FULL
++		/* On RT, irq work runs from softirq */
++		if (!irq_work_needs_cpu())
++#endif
++			goto out;
++	}
+ 
+ 	/* Check whether the next pending timer has expired */
+ 	if (time_before_eq(base->next_timer, jiffies))

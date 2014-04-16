@@ -1,0 +1,102 @@
+From e047fce21592ed3959e21ed803a7577d3c20e394 Mon Sep 17 00:00:00 2001
+From: Nicholas Mc Guire <der.herr@hofr.at>
+Date: Sun, 29 Dec 2013 18:11:54 +0100
+Subject: [PATCH] net: ip_send_unicast_reply: add missing local serialization
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.14/patches-3.14.0-rt1.tar.xz
+
+in response to the oops in ip_output.c:ip_send_unicast_reply under high
+network load with CONFIG_PREEMPT_RT_FULL=y, reported by Sami Pietikainen
+<Sami.Pietikainen@wapice.com>, this patch adds local serialization in
+ip_send_unicast_reply.
+
+from ip_output.c:
+/*
+ *      Generic function to send a packet as reply to another packet.
+ *      Used to send some TCP resets/acks so far.
+ *
+ *      Use a fake percpu inet socket to avoid false sharing and contention.
+ */
+static DEFINE_PER_CPU(struct inet_sock, unicast_sock) = {
+...
+
+which was added in commit be9f4a44 in linux-stable. The git log, wich
+introduced the PER_CPU unicast_sock, states:
+<snip>
+commit be9f4a44e7d41cee50ddb5f038fc2391cbbb4046
+Author: Eric Dumazet <edumazet@google.com>
+Date:   Thu Jul 19 07:34:03 2012 +0000
+
+    ipv4: tcp: remove per net tcp_sock
+
+    tcp_v4_send_reset() and tcp_v4_send_ack() use a single socket
+    per network namespace.
+
+    This leads to bad behavior on multiqueue NICS, because many cpus
+    contend for the socket lock and once socket lock is acquired, extra
+    false sharing on various socket fields slow down the operations.
+
+    To better resist to attacks, we use a percpu socket. Each cpu can
+    run without contention, using appropriate memory (local node)
+<snip>
+
+The per-cpu here thus is assuming exclusivity serializing per cpu - so
+the use of get_cpu_ligh introduced in
+net-use-cpu-light-in-ip-send-unicast-reply.patch, which droped the
+preempt_disable in favor of a migrate_disable is probably wrong as this
+only handles the referencial consistency but not the serialization. To
+evade a preempt_disable here a local lock would be needed.
+
+Therapie:
+ * add local lock:
+ * and re-introduce local serialization:
+
+Tested on x86 with high network load using the testcase from Sami Pietikainen
+  while : ; do wget -O - ftp://LOCAL_SERVER/empty_file > /dev/null 2>&1; done
+
+Link: http://www.spinics.net/lists/linux-rt-users/msg11007.html
+Cc: stable-rt@vger.kernel.org
+Signed-off-by: Nicholas Mc Guire <der.herr@hofr.at>
+Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+---
+ net/ipv4/ip_output.c |    9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+--- a/net/ipv4/ip_output.c
++++ b/net/ipv4/ip_output.c
+@@ -79,6 +79,7 @@
+ #include <linux/mroute.h>
+ #include <linux/netlink.h>
+ #include <linux/tcp.h>
++#include <linux/locallock.h>
+ 
+ int sysctl_ip_default_ttl __read_mostly = IPDEFTTL;
+ EXPORT_SYMBOL(sysctl_ip_default_ttl);
+@@ -1477,6 +1478,9 @@ static DEFINE_PER_CPU(struct inet_sock,
+ 	.uc_ttl		= -1,
+ };
+ 
++/* serialize concurrent calls on the same CPU to ip_send_unicast_reply */
++static DEFINE_LOCAL_IRQ_LOCK(unicast_lock);
++
+ void ip_send_unicast_reply(struct net *net, struct sk_buff *skb, __be32 daddr,
+ 			   __be32 saddr, const struct ip_reply_arg *arg,
+ 			   unsigned int len)
+@@ -1516,8 +1520,7 @@ void ip_send_unicast_reply(struct net *n
+ 	if (IS_ERR(rt))
+ 		return;
+ 
+-	get_cpu_light();
+-	inet = &__get_cpu_var(unicast_sock);
++	inet = &get_locked_var(unicast_lock, unicast_sock);
+ 
+ 	inet->tos = arg->tos;
+ 	sk = &inet->sk;
+@@ -1541,7 +1544,7 @@ void ip_send_unicast_reply(struct net *n
+ 		ip_push_pending_frames(sk, &fl4);
+ 	}
+ 
+-	put_cpu_light();
++	put_locked_var(unicast_lock, unicast_sock);
+ 
+ 	ip_rt_put(rt);
+ }

@@ -1,0 +1,102 @@
+Subject: softirq-split-out-code.patch
+From: Thomas Gleixner <tglx@linutronix.de>
+Date: Tue, 28 Jun 2011 15:46:49 +0200
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.14/patches-3.14.0-rt1.tar.xz
+
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+---
+ kernel/softirq.c |   67 ++++++++++++++++++++++++++++---------------------------
+ 1 file changed, 35 insertions(+), 32 deletions(-)
+
+--- a/kernel/softirq.c
++++ b/kernel/softirq.c
+@@ -76,6 +76,40 @@ static void wakeup_softirqd(void)
+ 		wake_up_process(tsk);
+ }
+ 
++static void handle_pending_softirqs(u32 pending, int cpu)
++{
++	struct softirq_action *h = softirq_vec;
++	unsigned int prev_count = preempt_count();
++	int softirq_bit;
++
++	local_irq_enable();
++	h = softirq_vec;
++
++	while ((softirq_bit = ffs(pending))) {
++		unsigned int vec_nr;
++
++		h += softirq_bit - 1;
++		vec_nr = h - softirq_vec;
++
++		kstat_incr_softirqs_this_cpu(vec_nr);
++
++		trace_softirq_entry(vec_nr);
++		h->action(h);
++		trace_softirq_exit(vec_nr);
++		if (unlikely(prev_count != preempt_count())) {
++			pr_err("huh, entered softirq %u %s %p with preempt_count %08x, exited with %08x?\n",
++			       vec_nr, softirq_to_name[vec_nr], h->action,
++			       prev_count, preempt_count());
++			preempt_count_set(prev_count);
++		}
++		rcu_bh_qs(cpu);
++		h++;
++		pending >>= softirq_bit;
++	}
++
++	local_irq_disable();
++}
++
+ /*
+  * preempt_count and SOFTIRQ_OFFSET usage:
+  * - preempt_count is changed by SOFTIRQ_OFFSET on entering or leaving
+@@ -227,10 +261,8 @@ asmlinkage void __do_softirq(void)
+ 	unsigned long end = jiffies + MAX_SOFTIRQ_TIME;
+ 	unsigned long old_flags = current->flags;
+ 	int max_restart = MAX_SOFTIRQ_RESTART;
+-	struct softirq_action *h;
+ 	bool in_hardirq;
+ 	__u32 pending;
+-	int softirq_bit;
+ 	int cpu;
+ 
+ 	/*
+@@ -251,36 +283,7 @@ asmlinkage void __do_softirq(void)
+ 	/* Reset the pending bitmask before enabling irqs */
+ 	set_softirq_pending(0);
+ 
+-	local_irq_enable();
+-
+-	h = softirq_vec;
+-
+-	while ((softirq_bit = ffs(pending))) {
+-		unsigned int vec_nr;
+-		int prev_count;
+-
+-		h += softirq_bit - 1;
+-
+-		vec_nr = h - softirq_vec;
+-		prev_count = preempt_count();
+-
+-		kstat_incr_softirqs_this_cpu(vec_nr);
+-
+-		trace_softirq_entry(vec_nr);
+-		h->action(h);
+-		trace_softirq_exit(vec_nr);
+-		if (unlikely(prev_count != preempt_count())) {
+-			pr_err("huh, entered softirq %u %s %p with preempt_count %08x, exited with %08x?\n",
+-			       vec_nr, softirq_to_name[vec_nr], h->action,
+-			       prev_count, preempt_count());
+-			preempt_count_set(prev_count);
+-		}
+-		rcu_bh_qs(cpu);
+-		h++;
+-		pending >>= softirq_bit;
+-	}
+-
+-	local_irq_disable();
++	handle_pending_softirqs(pending, cpu);
+ 
+ 	pending = local_softirq_pending();
+ 	if (pending) {

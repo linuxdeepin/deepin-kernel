@@ -1,0 +1,159 @@
+From 8e48945ae26991b40973b233f34937477dcf97ab Mon Sep 17 00:00:00 2001
+From: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+Date: Fri, 31 Jan 2014 14:20:31 +0100
+Subject: [PATCH 1/7] irq_work: allow certain work in hard irq context
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.14/patches-3.14.0-rt1.tar.xz
+
+irq_work is processed in softirq context on -RT because we want to avoid
+long latencies which might arise from processing lots of perf events.
+The noHZ-full mode requires its callback to be called from real hardirq
+context (commit 76c24fb ("nohz: New APIs to re-evaluate the tick on full
+dynticks CPUs")). If it is called from a thread context we might get
+wrong results for checks like "is_idle_task(current)".
+This patch introduces a second list (hirq_work_list) which will be used
+if irq_work_run() has been invoked from hardirq context and process only
+work items marked with IRQ_WORK_HARD_IRQ.
+
+This patch also removes arch_irq_work_raise() from sparc & powerpc like
+it is already done for x86. Atleast for powerpc it is somehow
+superfluous because it is called from the timer interrupt which should
+invoke update_process_times().
+
+Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+---
+ arch/arm/kernel/smp.c      |    2 ++
+ arch/powerpc/kernel/time.c |    2 +-
+ arch/sparc/kernel/pcr.c    |    2 ++
+ include/linux/irq_work.h   |    1 +
+ kernel/irq_work.c          |   22 +++++++++++++++++++---
+ kernel/time/tick-sched.c   |    1 +
+ kernel/timer.c             |    2 +-
+ 7 files changed, 27 insertions(+), 5 deletions(-)
+
+--- a/arch/arm/kernel/smp.c
++++ b/arch/arm/kernel/smp.c
+@@ -454,12 +454,14 @@ void arch_send_call_function_single_ipi(
+ }
+ 
+ #ifdef CONFIG_IRQ_WORK
++#ifndef CONFIG_PREEMPT_RT_FULL
+ void arch_irq_work_raise(void)
+ {
+ 	if (is_smp())
+ 		smp_cross_call(cpumask_of(smp_processor_id()), IPI_IRQ_WORK);
+ }
+ #endif
++#endif
+ 
+ static const char *ipi_types[NR_IPI] = {
+ #define S(x,s)	[x] = s
+--- a/arch/powerpc/kernel/time.c
++++ b/arch/powerpc/kernel/time.c
+@@ -423,7 +423,7 @@ unsigned long profile_pc(struct pt_regs
+ EXPORT_SYMBOL(profile_pc);
+ #endif
+ 
+-#ifdef CONFIG_IRQ_WORK
++#if defined(CONFIG_IRQ_WORK) && !defined(CONFIG_PREEMPT_RT_FULL)
+ 
+ /*
+  * 64-bit uses a byte in the PACA, 32-bit uses a per-cpu variable...
+--- a/arch/sparc/kernel/pcr.c
++++ b/arch/sparc/kernel/pcr.c
+@@ -43,10 +43,12 @@ void __irq_entry deferred_pcr_work_irq(i
+ 	set_irq_regs(old_regs);
+ }
+ 
++#ifndef CONFIG_PREEMPT_RT_FULL
+ void arch_irq_work_raise(void)
+ {
+ 	set_softint(1 << PIL_DEFERRED_PCR_WORK);
+ }
++#endif
+ 
+ const struct pcr_ops *pcr_ops;
+ EXPORT_SYMBOL_GPL(pcr_ops);
+--- a/include/linux/irq_work.h
++++ b/include/linux/irq_work.h
+@@ -16,6 +16,7 @@
+ #define IRQ_WORK_BUSY		2UL
+ #define IRQ_WORK_FLAGS		3UL
+ #define IRQ_WORK_LAZY		4UL /* Doesn't want IPI, wait for tick */
++#define IRQ_WORK_HARD_IRQ	8UL /* Run hard IRQ context, even on RT */
+ 
+ struct irq_work {
+ 	unsigned long flags;
+--- a/kernel/irq_work.c
++++ b/kernel/irq_work.c
+@@ -20,6 +20,9 @@
+ 
+ 
+ static DEFINE_PER_CPU(struct llist_head, irq_work_list);
++#ifdef CONFIG_PREEMPT_RT_FULL
++static DEFINE_PER_CPU(struct llist_head, hirq_work_list);
++#endif
+ static DEFINE_PER_CPU(int, irq_work_raised);
+ 
+ /*
+@@ -48,7 +51,11 @@ static bool irq_work_claim(struct irq_wo
+ 	return true;
+ }
+ 
++#ifdef CONFIG_PREEMPT_RT_FULL
++void arch_irq_work_raise(void)
++#else
+ void __weak arch_irq_work_raise(void)
++#endif
+ {
+ 	/*
+ 	 * Lame architectures will get the timer tick callback
+@@ -70,8 +77,12 @@ void irq_work_queue(struct irq_work *wor
+ 	/* Queue the entry and raise the IPI if needed. */
+ 	preempt_disable();
+ 
+-	llist_add(&work->llnode, &__get_cpu_var(irq_work_list));
+-
++#ifdef CONFIG_PREEMPT_RT_FULL
++	if (work->flags & IRQ_WORK_HARD_IRQ)
++		llist_add(&work->llnode, &__get_cpu_var(hirq_work_list));
++	else
++#endif
++		llist_add(&work->llnode, &__get_cpu_var(irq_work_list));
+ 	/*
+ 	 * If the work is not "lazy" or the tick is stopped, raise the irq
+ 	 * work interrupt (if supported by the arch), otherwise, just wait
+@@ -115,7 +126,12 @@ static void __irq_work_run(void)
+ 	__this_cpu_write(irq_work_raised, 0);
+ 	barrier();
+ 
+-	this_list = &__get_cpu_var(irq_work_list);
++#ifdef CONFIG_PREEMPT_RT_FULL
++	if (in_irq())
++		this_list = &__get_cpu_var(hirq_work_list);
++	else
++#endif
++		this_list = &__get_cpu_var(irq_work_list);
+ 	if (llist_empty(this_list))
+ 		return;
+ 
+--- a/kernel/time/tick-sched.c
++++ b/kernel/time/tick-sched.c
+@@ -222,6 +222,7 @@ static void nohz_full_kick_work_func(str
+ 
+ static DEFINE_PER_CPU(struct irq_work, nohz_full_kick_work) = {
+ 	.func = nohz_full_kick_work_func,
++	.flags = IRQ_WORK_HARD_IRQ,
+ };
+ 
+ /*
+--- a/kernel/timer.c
++++ b/kernel/timer.c
+@@ -1425,7 +1425,7 @@ void update_process_times(int user_tick)
+ 	scheduler_tick();
+ 	run_local_timers();
+ 	rcu_check_callbacks(cpu, user_tick);
+-#if defined(CONFIG_IRQ_WORK) && !defined(CONFIG_PREEMPT_RT_FULL)
++#if defined(CONFIG_IRQ_WORK)
+ 	if (in_irq())
+ 		irq_work_run();
+ #endif

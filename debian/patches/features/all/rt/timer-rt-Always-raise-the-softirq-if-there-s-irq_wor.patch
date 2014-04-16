@@ -1,0 +1,67 @@
+From a0944325c8d32f24e9c1e0e998a10342fc9b6667 Mon Sep 17 00:00:00 2001
+From: Steven Rostedt <rostedt@goodmis.org>
+Date: Fri, 31 Jan 2014 12:07:57 -0500
+Subject: [PATCH 2/7] timer/rt: Always raise the softirq if there's irq_work to
+ be done
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.14/patches-3.14.0-rt1.tar.xz
+
+It was previously discovered that some systems would hang on boot up
+with a previous version of 3.12-rt. This was due to RCU using irq_work,
+and RT defers the irq_work to a softirq. But if there's no active
+timers, the softirq will not be raised, and RCU work will not get done,
+causing the system to hang.  The fix was to check that if there was no
+active timers but irq_work to be done, then we should raise the softirq.
+
+But this fix was not 100% correct. It left out the case that there were
+active timers that were not expired yet. This would have the softirq
+not get raised even if there was irq work to be done.
+
+If there is irq_work to be done, then we must raise the timer softirq
+regardless of if there is active timers or whether they are expired or
+not. The softirq can handle those cases. But we can never ignore
+irq_work.
+
+As it is only PREEMPT_RT_FULL that requires irq_work to be done in the
+softirq, we can pull out the check in the active_timers condition, and
+make the code a bit cleaner by having the irq_work check separate, and
+put the code in with the other #ifdef PREEMPT_RT. If there is irq_work
+to be done, there's no need to check the active timers or if they are
+expired. Just raise the time softirq and be done with it. Otherwise, we
+can do the timer checks just like we do with non -rt.
+
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+---
+ kernel/timer.c |   16 +++++++++-------
+ 1 file changed, 9 insertions(+), 7 deletions(-)
+
+--- a/kernel/timer.c
++++ b/kernel/timer.c
+@@ -1457,18 +1457,20 @@ void run_local_timers(void)
+ 	 * the timer softirq.
+ 	 */
+ #ifdef CONFIG_PREEMPT_RT_FULL
++	/* On RT, irq work runs from softirq */
++	if (irq_work_needs_cpu()) {
++		raise_softirq(TIMER_SOFTIRQ);
++		return;
++	}
++
+ 	if (!spin_do_trylock(&base->lock)) {
+ 		raise_softirq(TIMER_SOFTIRQ);
+ 		return;
+ 	}
+ #endif
+-	if (!base->active_timers) {
+-#ifdef CONFIG_PREEMPT_RT_FULL
+-		/* On RT, irq work runs from softirq */
+-		if (!irq_work_needs_cpu())
+-#endif
+-			goto out;
+-	}
++
++	if (!base->active_timers)
++		goto out;
+ 
+ 	/* Check whether the next pending timer has expired */
+ 	if (time_before_eq(base->next_timer, jiffies))
