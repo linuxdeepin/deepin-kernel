@@ -118,11 +118,6 @@ class Gencontrol(Base):
     def do_arch_setup(self, vars, makeflags, arch, extra):
         config_base = self.config.merge('base', arch)
 
-        if config_base['kernel-arch'] in ['mips', 'parisc', 'powerpc']:
-            vars['image-stem'] = 'vmlinux'
-        else:
-            vars['image-stem'] = 'vmlinuz'
-
         self._setup_makeflags(self.arch_makeflags, makeflags, config_base)
 
     def do_arch_packages(self, packages, makefile, arch, vars, makeflags, extra):
@@ -223,8 +218,13 @@ class Gencontrol(Base):
         ('override-host-type', 'OVERRIDE_HOST_TYPE', True),
     )
 
+    flavour_makeflags_build = (
+        ('image-file', 'IMAGE_FILE', True),
+    )
+
     flavour_makeflags_image = (
         ('type', 'TYPE', False),
+        ('install-stem', 'IMAGE_INSTALL_STEM', True),
     )
 
     flavour_makeflags_other = (
@@ -234,6 +234,7 @@ class Gencontrol(Base):
 
     def do_flavour_setup(self, vars, makeflags, arch, featureset, flavour, extra):
         config_base = self.config.merge('base', arch, featureset, flavour)
+        config_build = self.config.merge('build', arch, featureset, flavour)
         config_description = self.config.merge('description', arch, featureset, flavour)
         config_image = self.config.merge('image', arch, featureset, flavour)
 
@@ -245,8 +246,10 @@ class Gencontrol(Base):
         if override_localversion is not None:
             vars['localversion-image'] = vars['localversion_headers'] + '-' + override_localversion
         vars['initramfs'] = 'YES' if config_image.get('initramfs', True) else ''
+        vars['image-stem'] = config_image.get('install-stem')
 
         self._setup_makeflags(self.flavour_makeflags_base, makeflags, config_base)
+        self._setup_makeflags(self.flavour_makeflags_build, makeflags, config_build)
         self._setup_makeflags(self.flavour_makeflags_image, makeflags, config_image)
         self._setup_makeflags(self.flavour_makeflags_other, makeflags, vars)
 
