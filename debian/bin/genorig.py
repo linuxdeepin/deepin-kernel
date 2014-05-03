@@ -81,7 +81,7 @@ class Main(object):
 
     def upstream_patch(self, input_patch):
         self.log("Patching source with %s\n" % input_patch)
-        match = re.match(r'(^|.*/)patch-\d+\.\d+\.\d+(-\S+?)?(\.(?P<extension>(bz2|gz|xz)))?$', input_patch)
+        match = re.match(r'(^|.*/)patch-\d+\.\d+(\.\d+)?(-\S+?)?(\.(?P<extension>(bz2|gz|xz)))?$', input_patch)
         if not match:
             raise RuntimeError("Can't identify name of patch")
         cmdline = []
