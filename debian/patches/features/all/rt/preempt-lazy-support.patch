@@ -1,7 +1,7 @@
 Subject: sched: Add support for lazy preemption
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Fri, 26 Oct 2012 18:50:54 +0100
-Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.14/patches-3.14.0-rt1.tar.xz
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.14/patches-3.14.3-rt5.tar.xz
 
 It has become an obsession to mitigate the determinism vs. throughput
 loss of RT. Looking at the mainline semantics of preemption points
@@ -53,9 +53,9 @@ performance.
 
 Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 ---
- arch/x86/include/asm/preempt.h |   12 ++++++++--
+ arch/x86/include/asm/preempt.h |   18 ++++++++++++++-
  include/linux/ftrace_event.h   |    1 
- include/linux/preempt.h        |   33 +++++++++++++++++++++++++--
+ include/linux/preempt.h        |   29 +++++++++++++++++++++++-
  include/linux/sched.h          |   37 ++++++++++++++++++++++++++++++
  include/linux/thread_info.h    |   13 ++++++++++
  kernel/Kconfig.preempt         |    6 +++++
@@ -66,11 +66,11 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  kernel/trace/trace.c           |   41 ++++++++++++++++++++--------------
  kernel/trace/trace.h           |    2 +
  kernel/trace/trace_output.c    |   13 +++++++++-
- 13 files changed, 201 insertions(+), 34 deletions(-)
+ 13 files changed, 206 insertions(+), 31 deletions(-)
 
 --- a/arch/x86/include/asm/preempt.h
 +++ b/arch/x86/include/asm/preempt.h
-@@ -85,17 +85,25 @@ static __always_inline void __preempt_co
+@@ -85,17 +85,33 @@ static __always_inline void __preempt_co
   * a decrement which hits zero means we have no preempt_count and should
   * reschedule.
   */
@@ -84,7 +84,11 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +{
 +	if (____preempt_count_dec_and_test())
 +		return true;
++#ifdef CONFIG_PREEMPT_LAZY
 +	return test_thread_flag(TIF_NEED_RESCHED_LAZY);
++#else
++	return false;
++#endif
 +}
 +
  /*
@@ -92,9 +96,12 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
   */
  static __always_inline bool should_resched(void)
  {
--	return unlikely(!__this_cpu_read_4(__preempt_count));
++#ifdef CONFIG_PREEMPT_LAZY
 +	return unlikely(!__this_cpu_read_4(__preempt_count) || \
 +			test_thread_flag(TIF_NEED_RESCHED_LAZY));
++#else
+ 	return unlikely(!__this_cpu_read_4(__preempt_count));
++#endif
  }
  
  #ifdef CONFIG_PREEMPT
@@ -158,24 +165,6 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  #else
  #define preempt_enable() \
  do { \
-@@ -99,7 +126,8 @@ do { \
- #define preempt_enable_notrace() \
- do { \
- 	barrier(); \
--	if (unlikely(__preempt_count_dec_and_test())) \
-+	if (unlikely(__preempt_count_dec_and_test() || \
-+				test_thread_flag(TIF_NEED_RESCHED_LAZY))) \
- 		__preempt_schedule_context(); \
- } while (0)
- #else
-@@ -122,7 +150,6 @@ do { \
- #define sched_preempt_enable_no_resched()	barrier()
- #define preempt_enable_no_resched()		barrier()
- #define preempt_enable()			barrier()
--#define preempt_check_resched()			do { } while (0)
- 
- #define preempt_disable_notrace()		barrier()
- #define preempt_enable_no_resched_notrace()	barrier()
 @@ -147,7 +174,7 @@ do { \
  } while (0)
  #define preempt_fold_need_resched() \

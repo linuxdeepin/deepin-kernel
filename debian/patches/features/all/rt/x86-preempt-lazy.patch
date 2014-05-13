@@ -1,16 +1,16 @@
 Subject: x86-preempt-lazy.patch
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Thu, 01 Nov 2012 11:03:47 +0100
-Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.14/patches-3.14.0-rt1.tar.xz
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.14/patches-3.14.3-rt5.tar.xz
 
 Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 ---
  arch/x86/Kconfig                   |    1 +
  arch/x86/include/asm/thread_info.h |    6 ++++++
- arch/x86/kernel/asm-offsets.c      |    1 +
- arch/x86/kernel/entry_32.S         |   17 +++++++++++++++--
- arch/x86/kernel/entry_64.S         |   28 ++++++++++++++++++++--------
- 5 files changed, 43 insertions(+), 10 deletions(-)
+ arch/x86/kernel/asm-offsets.c      |    2 ++
+ arch/x86/kernel/entry_32.S         |   20 ++++++++++++++++++--
+ arch/x86/kernel/entry_64.S         |   29 ++++++++++++++++++++++-------
+ 5 files changed, 49 insertions(+), 9 deletions(-)
 
 --- a/arch/x86/Kconfig
 +++ b/arch/x86/Kconfig
@@ -68,31 +68,40 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	BLANK();
  	OFFSET(crypto_tfm_ctx_offset, crypto_tfm, __crt_ctx);
+@@ -71,4 +72,5 @@ void common(void) {
+ 
+ 	BLANK();
+ 	DEFINE(PTREGS_SIZE, sizeof(struct pt_regs));
++	DEFINE(_PREEMPT_ENABLED, PREEMPT_ENABLED);
+ }
 --- a/arch/x86/kernel/entry_32.S
 +++ b/arch/x86/kernel/entry_32.S
-@@ -363,8 +363,21 @@ END(ret_from_exception)
+@@ -363,8 +363,24 @@ END(ret_from_exception)
  ENTRY(resume_kernel)
  	DISABLE_INTERRUPTS(CLBR_ANY)
  need_resched:
 +	# preempt count == 0 + NEED_RS set?
  	cmpl $0,PER_CPU_VAR(__preempt_count)
++#ifndef CONFIG_PREEMPT_LAZY
+ 	jnz restore_all
++#else
 +	jz test_int_off
 +
 +	# atleast preempt count == 0 ?
-+	cmpl $_TIF_NEED_RESCHED,PER_CPU_VAR(__preempt_count)
++	cmpl $_PREEMPT_ENABLED,PER_CPU_VAR(__preempt_count)
 +	jne restore_all
 +
 +	cmpl $0,TI_preempt_lazy_count(%ebp)	# non-zero preempt_lazy_count ?
- 	jnz restore_all
++	jnz restore_all
 +
-+	testl $_TIF_NEED_RESCHED_LAZY, %ecx
++	testl $_TIF_NEED_RESCHED_LAZY, TI_flags(%ebp)
 +	jz restore_all
-+
 +test_int_off:
++#endif
  	testl $X86_EFLAGS_IF,PT_EFLAGS(%esp)	# interrupts off (exception path) ?
  	jz restore_all
  	call preempt_schedule_irq
-@@ -604,7 +617,7 @@ ENDPROC(system_call)
+@@ -604,7 +620,7 @@ ENDPROC(system_call)
  	ALIGN
  	RING0_PTREGS_FRAME		# can't unwind into user space anyway
  work_pending:
@@ -101,7 +110,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	jz work_notifysig
  work_resched:
  	call schedule
-@@ -617,7 +630,7 @@ ENDPROC(system_call)
+@@ -617,7 +633,7 @@ ENDPROC(system_call)
  	andl $_TIF_WORK_MASK, %ecx	# is there any work to be done other
  					# than syscall tracing?
  	jz restore_all
@@ -145,15 +154,17 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	TRACE_IRQS_ON
  	ENABLE_INTERRUPTS(CLBR_NONE)
  	pushq_cfi %rdi
-@@ -1104,7 +1104,19 @@ ENTRY(native_iret)
+@@ -1104,7 +1104,22 @@ ENTRY(native_iret)
  	/* rcx:	 threadinfo. interrupts off. */
  ENTRY(retint_kernel)
  	cmpl $0,PER_CPU_VAR(__preempt_count)
--	jnz  retint_restore_args
++#ifndef CONFIG_PREEMPT_LAZY
+ 	jnz  retint_restore_args
++#else
 +	jz  check_int_off
 +
 +	# atleast preempt count == 0 ?
-+	cmpl $_TIF_NEED_RESCHED,PER_CPU_VAR(__preempt_count)
++	cmpl $_PREEMPT_ENABLED,PER_CPU_VAR(__preempt_count)
 +	jnz retint_restore_args
 +
 +	cmpl $0, TI_preempt_lazy_count(%rcx)
@@ -161,12 +172,12 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +
 +	bt $TIF_NEED_RESCHED_LAZY,TI_flags(%rcx)
 +	jnc  retint_restore_args
-+
 +check_int_off:
++#endif
  	bt   $9,EFLAGS-ARGOFFSET(%rsp)	/* interrupts off? */
  	jnc  retint_restore_args
  	call preempt_schedule_irq
-@@ -1540,7 +1552,7 @@ ENTRY(paranoid_exit)
+@@ -1540,7 +1555,7 @@ ENTRY(paranoid_exit)
  	movq %rsp,%rdi			/* &pt_regs */
  	call sync_regs
  	movq %rax,%rsp			/* switch stack for scheduling */

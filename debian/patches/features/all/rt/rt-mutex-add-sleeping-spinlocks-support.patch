@@ -1,15 +1,15 @@
 Subject: rt-mutex-add-sleeping-spinlocks-support.patch
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Fri, 10 Jun 2011 11:21:25 +0200
-Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.14/patches-3.14.0-rt1.tar.xz
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.14/patches-3.14.3-rt5.tar.xz
 
 Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 ---
- include/linux/rtmutex.h         |   32 ++-
+ include/linux/rtmutex.h         |   27 ++
  kernel/futex.c                  |    5 
- kernel/locking/rtmutex.c        |  375 +++++++++++++++++++++++++++++++++++++---
+ kernel/locking/rtmutex.c        |  377 +++++++++++++++++++++++++++++++++++++---
  kernel/locking/rtmutex_common.h |   11 +
- 4 files changed, 394 insertions(+), 29 deletions(-)
+ 4 files changed, 390 insertions(+), 30 deletions(-)
 
 --- a/include/linux/rtmutex.h
 +++ b/include/linux/rtmutex.h
@@ -34,26 +34,24 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	const char 		*name, *file;
  	int			line;
  	void			*magic;
-@@ -58,19 +62,35 @@ struct hrtimer_sleeper;
- #ifdef CONFIG_DEBUG_RT_MUTEXES
- # define __DEBUG_RT_MUTEX_INITIALIZER(mutexname) \
- 	, .name = #mutexname, .file = __FILE__, .line = __LINE__
--# define rt_mutex_init(mutex)			__rt_mutex_init(mutex, __func__)
+@@ -55,22 +59,33 @@ struct hrtimer_sleeper;
+ # define rt_mutex_debug_check_no_locks_held(task)	do { } while (0)
+ #endif
+ 
 +# define rt_mutex_init(mutex)					\
 +	do {							\
 +		raw_spin_lock_init(&(mutex)->wait_lock);	\
 +		__rt_mutex_init(mutex, #mutex);			\
 +	} while (0)
 +
+ #ifdef CONFIG_DEBUG_RT_MUTEXES
+ # define __DEBUG_RT_MUTEX_INITIALIZER(mutexname) \
+ 	, .name = #mutexname, .file = __FILE__, .line = __LINE__
+-# define rt_mutex_init(mutex)			__rt_mutex_init(mutex, __func__)
   extern void rt_mutex_debug_task_free(struct task_struct *tsk);
  #else
  # define __DEBUG_RT_MUTEX_INITIALIZER(mutexname)
 -# define rt_mutex_init(mutex)			__rt_mutex_init(mutex, NULL)
-+# define rt_mutex_init(mutex)					\
-+	 do {							\
-+		 raw_spin_lock_init(&(mutex)->wait_lock);	\
-+		 __rt_mutex_init(mutex, #mutex);		\
-+	 } while (0)
  # define rt_mutex_debug_task_free(t)			do { } while (0)
  #endif
  
@@ -77,7 +75,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	struct rt_mutex mutexname = __RT_MUTEX_INITIALIZER(mutexname)
 --- a/kernel/futex.c
 +++ b/kernel/futex.c
-@@ -2469,10 +2469,7 @@ static int futex_wait_requeue_pi(u32 __u
+@@ -2476,10 +2476,7 @@ static int futex_wait_requeue_pi(u32 __u
  	 * The waiter is allocated on our stack, manipulated by the requeue
  	 * code while we sleep on uaddr.
  	 */
@@ -555,7 +553,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	raw_spin_lock(&lock->wait_lock);
  
-@@ -1062,7 +1400,6 @@ EXPORT_SYMBOL_GPL(rt_mutex_destroy);
+@@ -1062,13 +1400,12 @@ EXPORT_SYMBOL_GPL(rt_mutex_destroy);
  void __rt_mutex_init(struct rt_mutex *lock, const char *name)
  {
  	lock->owner = NULL;
@@ -563,6 +561,13 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	lock->waiters = RB_ROOT;
  	lock->waiters_leftmost = NULL;
  
+ 	debug_rt_mutex_init(lock, name);
+ }
+-EXPORT_SYMBOL_GPL(__rt_mutex_init);
++EXPORT_SYMBOL(__rt_mutex_init);
+ 
+ /**
+  * rt_mutex_init_proxy_locked - initialize and lock a rt_mutex on behalf of a
 @@ -1083,7 +1420,7 @@ EXPORT_SYMBOL_GPL(__rt_mutex_init);
  void rt_mutex_init_proxy_locked(struct rt_mutex *lock,
  				struct task_struct *proxy_owner)

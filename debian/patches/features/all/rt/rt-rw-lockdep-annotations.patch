@@ -1,7 +1,7 @@
 Subject: rt: rwsem/rwlock: lockdep annotations
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Fri, 28 Sep 2012 10:49:42 +0100
-Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.14/patches-3.14.0-rt1.tar.xz
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.14/patches-3.14.3-rt5.tar.xz
 
 rwlocks and rwsems on RT do not allow multiple readers. Annotate the
 lockdep acquire functions accordingly.
@@ -9,21 +9,21 @@ lockdep acquire functions accordingly.
 Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 Cc: stable-rt@vger.kernel.org
 ---
- kernel/locking/rt.c |   44 +++++++++++++++++++++++++-------------------
- 1 file changed, 25 insertions(+), 19 deletions(-)
+ kernel/locking/rt.c |   25 +++++++++++++++----------
+ 1 file changed, 15 insertions(+), 10 deletions(-)
 
 --- a/kernel/locking/rt.c
 +++ b/kernel/locking/rt.c
-@@ -213,17 +213,16 @@ int __lockfunc rt_read_trylock(rwlock_t
- 	 */
+@@ -216,17 +216,17 @@ int __lockfunc rt_read_trylock(rwlock_t
  	if (rt_mutex_owner(lock) != current) {
+ 		migrate_disable();
  		ret = rt_mutex_trylock(lock);
--		if (ret)
-+		if (ret) {
+-		if (!ret)
++		if (ret)
 +			rwlock_acquire(&rwlock->dep_map, 0, 1, _RET_IP_);
- 			migrate_disable();
--
-+		}
++		else
+ 			migrate_enable();
+ 
  	} else if (!rwlock->read_depth) {
  		ret = 0;
  	}
@@ -31,26 +31,27 @@ Cc: stable-rt@vger.kernel.org
 -	if (ret) {
 +	if (ret)
  		rwlock->read_depth++;
--		rwlock_acquire_read(&rwlock->dep_map, 0, 1, _RET_IP_);
+-		rwlock_acquire(&rwlock->dep_map, 0, 1, _RET_IP_);
 -	}
  
  	return ret;
  }
-@@ -241,12 +240,11 @@ void __lockfunc rt_read_lock(rwlock_t *r
+@@ -244,13 +244,13 @@ void __lockfunc rt_read_lock(rwlock_t *r
  {
  	struct rt_mutex *lock = &rwlock->lock;
  
--	rwlock_acquire_read(&rwlock->dep_map, 0, 0, _RET_IP_);
--
+-	rwlock_acquire(&rwlock->dep_map, 0, 0, _RET_IP_);
+ 
  	/*
  	 * recursive read locks succeed when current owns the lock
  	 */
  	if (rt_mutex_owner(lock) != current) {
+ 		migrate_disable();
 +		rwlock_acquire(&rwlock->dep_map, 0, 0, _RET_IP_);
  		__rt_spin_lock(lock);
- 		migrate_disable();
  	}
-@@ -266,10 +264,9 @@ EXPORT_SYMBOL(rt_write_unlock);
+ 	rwlock->read_depth++;
+@@ -269,10 +269,9 @@ EXPORT_SYMBOL(rt_write_unlock);
  
  void __lockfunc rt_read_unlock(rwlock_t *rwlock)
  {
@@ -62,20 +63,7 @@ Cc: stable-rt@vger.kernel.org
  		__rt_spin_unlock(&rwlock->lock);
  		migrate_enable();
  	}
-@@ -319,9 +316,10 @@ EXPORT_SYMBOL(rt_up_write);
- 
- void  rt_up_read(struct rw_semaphore *rwsem)
- {
--	rwsem_release(&rwsem->dep_map, 1, _RET_IP_);
--	if (--rwsem->read_depth == 0)
-+	if (--rwsem->read_depth == 0) {
-+		rwsem_release(&rwsem->dep_map, 1, _RET_IP_);
- 		rt_mutex_unlock(&rwsem->lock);
-+	}
- }
- EXPORT_SYMBOL(rt_up_read);
- 
-@@ -360,6 +358,13 @@ void  rt_down_write_nested(struct rw_sem
+@@ -361,6 +360,14 @@ void  rt_down_write_nested(struct rw_sem
  }
  EXPORT_SYMBOL(rt_down_write_nested);
  
@@ -85,43 +73,19 @@ Cc: stable-rt@vger.kernel.org
 +	rwsem_acquire_nest(&rwsem->dep_map, 0, 0, nest, _RET_IP_);
 +	rt_mutex_lock(&rwsem->lock);
 +}
++EXPORT_SYMBOL(rt_down_write_nested_lock);
 +
  int  rt_down_read_trylock(struct rw_semaphore *rwsem)
  {
- 	struct rt_mutex *lock = &rwsem->lock;
-@@ -370,15 +375,16 @@ int  rt_down_read_trylock(struct rw_sema
- 	 * but not when read_depth == 0 which means that the rwsem is
- 	 * write locked.
- 	 */
--	if (rt_mutex_owner(lock) != current)
-+	if (rt_mutex_owner(lock) != current) {
- 		ret = rt_mutex_trylock(&rwsem->lock);
--	else if (!rwsem->read_depth)
-+		if (ret)
-+			rwsem_acquire(&rwsem->dep_map, 0, 1, _RET_IP_);
-+	} else if (!rwsem->read_depth) {
- 		ret = 0;
-+	}
+ 	int ret;
+@@ -375,9 +382,7 @@ EXPORT_SYMBOL(rt_down_read_trylock);
  
--	if (ret) {
-+	if (ret)
- 		rwsem->read_depth++;
--		rwsem_acquire(&rwsem->dep_map, 0, 1, _RET_IP_);
--	}
- 	return ret;
- }
- EXPORT_SYMBOL(rt_down_read_trylock);
-@@ -387,10 +393,10 @@ static void __rt_down_read(struct rw_sem
+ static void __rt_down_read(struct rw_semaphore *rwsem, int subclass)
  {
- 	struct rt_mutex *lock = &rwsem->lock;
- 
--	rwsem_acquire_read(&rwsem->dep_map, subclass, 0, _RET_IP_);
+-	struct rt_mutex *lock = &rwsem->lock;
 -
--	if (rt_mutex_owner(lock) != current)
-+	if (rt_mutex_owner(lock) != current) {
-+		rwsem_acquire(&rwsem->dep_map, subclass, 0, _RET_IP_);
- 		rt_mutex_lock(&rwsem->lock);
-+	}
- 	rwsem->read_depth++;
+-	rwsem_acquire_read(&rwsem->dep_map, subclass, 0, _RET_IP_);
++	rwsem_acquire(&rwsem->dep_map, subclass, 0, _RET_IP_);
+ 	rt_mutex_lock(&rwsem->lock);
  }
  
