@@ -1,0 +1,101 @@
+Subject: powerpc/powernv: Add calls to support little endian host
+From: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+Date: Tue, 20 May 2014 11:01:28 +1000
+Origin: http://patchwork.ozlabs.org/patch/350461/
+
+When running as a powernv "host" system on P8, we need to switch
+the endianness of interrupt handlers. This does it via the appropriate
+call to the OPAL firmware which may result in just switching HID0:HILE
+but depending on the processor version might need to do a few more
+things. This call must be done early before any other processor has
+been brought out of firmware.
+
+Signed-off-by: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+Signed-off-by: Andy Whitcroft <apw@canonical.com>
+
+---
+
+diff --git a/arch/powerpc/include/asm/opal.h b/arch/powerpc/include/asm/opal.h
+index 0394e91..a2a3d0d 100644
+--- a/arch/powerpc/include/asm/opal.h
++++ b/arch/powerpc/include/asm/opal.h
+@@ -129,6 +129,7 @@ extern int opal_enter_rtas(struct rtas_args *args,
+ #define OPAL_LPC_READ				67
+ #define OPAL_LPC_WRITE				68
+ #define OPAL_RETURN_CPU				69
++#define OPAL_REINIT_CPUS			70
+ #define OPAL_FLASH_VALIDATE			76
+ #define OPAL_FLASH_MANAGE			77
+ #define OPAL_FLASH_UPDATE			78
+@@ -599,6 +600,11 @@ struct OpalIoPhb3ErrorData {
+ 	uint64_t pestB[OPAL_PHB3_NUM_PEST_REGS];
+ };
+ 
++enum {
++	OPAL_REINIT_CPUS_HILE_BE	= (1 << 0),
++	OPAL_REINIT_CPUS_HILE_LE	= (1 << 1),
++};
++
+ typedef struct oppanel_line {
+ 	const char * 	line;
+ 	uint64_t 	line_len;
+@@ -719,6 +725,7 @@ int64_t opal_pci_next_error(uint64_t phb_id, uint64_t *first_frozen_pe,
+ 			    uint16_t *pci_error_type, uint16_t *severity);
+ int64_t opal_pci_poll(uint64_t phb_id);
+ int64_t opal_return_cpu(void);
++int64_t opal_reinit_cpus(uint64_t flags);
+ 
+ int64_t opal_xscom_read(uint32_t gcid, uint64_t pcb_addr, __be64 *val);
+ int64_t opal_xscom_write(uint32_t gcid, uint64_t pcb_addr, uint64_t val);
+diff --git a/arch/powerpc/platforms/powernv/opal-wrappers.S b/arch/powerpc/platforms/powernv/opal-wrappers.S
+index e780650..3abb518 100644
+--- a/arch/powerpc/platforms/powernv/opal-wrappers.S
++++ b/arch/powerpc/platforms/powernv/opal-wrappers.S
+@@ -123,6 +123,7 @@ OPAL_CALL(opal_xscom_write,			OPAL_XSCOM_WRITE);
+ OPAL_CALL(opal_lpc_read,			OPAL_LPC_READ);
+ OPAL_CALL(opal_lpc_write,			OPAL_LPC_WRITE);
+ OPAL_CALL(opal_return_cpu,			OPAL_RETURN_CPU);
++OPAL_CALL(opal_reinit_cpus,			OPAL_REINIT_CPUS);
+ OPAL_CALL(opal_validate_flash,			OPAL_FLASH_VALIDATE);
+ OPAL_CALL(opal_manage_flash,			OPAL_FLASH_MANAGE);
+ OPAL_CALL(opal_update_flash,			OPAL_FLASH_UPDATE);
+diff --git a/arch/powerpc/platforms/powernv/opal.c b/arch/powerpc/platforms/powernv/opal.c
+index 1c798cd..359f18a 100644
+--- a/arch/powerpc/platforms/powernv/opal.c
++++ b/arch/powerpc/platforms/powernv/opal.c
+@@ -42,6 +42,21 @@ static DEFINE_SPINLOCK(opal_notifier_lock);
+ static uint64_t last_notified_mask = 0x0ul;
+ static atomic_t opal_notifier_hold = ATOMIC_INIT(0);
+ 
++static void opal_reinit_cores(void)
++{
++	/* Do the actual re-init, This will clobber all FPRs, VRs, etc...
++	 *
++	 * It will preserve non volatile GPRs and HSPRG0/1. It will
++	 * also restore HIDs and other SPRs to their original value
++	 * but it might clobber a bunch.
++	 */
++#ifdef __BIG_ENDIAN__
++	opal_reinit_cpus(OPAL_REINIT_CPUS_HILE_BE);
++#else
++	opal_reinit_cpus(OPAL_REINIT_CPUS_HILE_LE);
++#endif
++}	
++
+ int __init early_init_dt_scan_opal(unsigned long node,
+ 				   const char *uname, int depth, void *data)
+ {
+@@ -77,6 +92,13 @@ int __init early_init_dt_scan_opal(unsigned long node,
+ 		printk("OPAL V1 detected !\n");
+ 	}
+ 
++	/* Reinit all cores with the right endian */
++	opal_reinit_cores();
++
++	/* Restore some bits */
++	if (cur_cpu_spec->cpu_restore)
++		cur_cpu_spec->cpu_restore();
++
+ 	return 1;
+ }
+ 
