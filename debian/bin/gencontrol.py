@@ -32,7 +32,6 @@ class Gencontrol(Base):
         'image': {
             'bootloaders': config.SchemaItemList(),
             'configs': config.SchemaItemList(),
-            'initramfs': config.SchemaItemBoolean(),
             'initramfs-generators': config.SchemaItemList(),
         },
         'relations': {
@@ -245,7 +244,6 @@ class Gencontrol(Base):
         override_localversion = config_image.get('override-localversion', None)
         if override_localversion is not None:
             vars['localversion-image'] = vars['localversion_headers'] + '-' + override_localversion
-        vars['initramfs'] = 'YES' if config_image.get('initramfs', True) else ''
         vars['image-stem'] = config_image.get('install-stem')
 
         self._setup_makeflags(self.flavour_makeflags_base, makeflags, config_base)
@@ -278,19 +276,18 @@ class Gencontrol(Base):
         for field in 'Depends', 'Provides', 'Suggests', 'Recommends', 'Conflicts', 'Breaks':
             image_fields[field] = PackageRelation(config_entry_image.get(field.lower(), None), override_arches=(arch,))
 
-        if config_entry_image.get('initramfs', True):
-            generators = config_entry_image['initramfs-generators']
-            l = PackageRelationGroup()
-            for i in generators:
-                i = config_entry_relations.get(i, i)
-                l.append(i)
-                a = PackageRelationEntry(i)
-                if a.operator is not None:
-                    a.operator = -a.operator
-                    image_fields['Breaks'].append(PackageRelationGroup([a]))
-            for item in l:
-                item.arches = [arch]
-            image_fields['Depends'].append(l)
+        generators = config_entry_image['initramfs-generators']
+        l = PackageRelationGroup()
+        for i in generators:
+            i = config_entry_relations.get(i, i)
+            l.append(i)
+            a = PackageRelationEntry(i)
+            if a.operator is not None:
+                a.operator = -a.operator
+                image_fields['Breaks'].append(PackageRelationGroup([a]))
+        for item in l:
+            item.arches = [arch]
+        image_fields['Depends'].append(l)
 
         bootloaders = config_entry_image.get('bootloaders')
         if bootloaders:
