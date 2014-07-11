@@ -1,7 +1,7 @@
 Subject: rt-mutex-add-sleeping-spinlocks-support.patch
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Fri, 10 Jun 2011 11:21:25 +0200
-Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.14/patches-3.14.3-rt5.tar.xz
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.14/patches-3.14.10-rt7.tar.xz
 
 Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 ---
@@ -11,8 +11,10 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  kernel/locking/rtmutex_common.h |   11 +
  4 files changed, 390 insertions(+), 30 deletions(-)
 
---- a/include/linux/rtmutex.h
-+++ b/include/linux/rtmutex.h
+Index: linux-stable/include/linux/rtmutex.h
+===================================================================
+--- linux-stable.orig/include/linux/rtmutex.h
++++ linux-stable/include/linux/rtmutex.h
 @@ -18,6 +18,10 @@
  
  extern int max_lock_depth; /* for sysctl */
@@ -73,9 +75,11 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  #define DEFINE_RT_MUTEX(mutexname) \
  	struct rt_mutex mutexname = __RT_MUTEX_INITIALIZER(mutexname)
---- a/kernel/futex.c
-+++ b/kernel/futex.c
-@@ -2476,10 +2476,7 @@ static int futex_wait_requeue_pi(u32 __u
+Index: linux-stable/kernel/futex.c
+===================================================================
+--- linux-stable.orig/kernel/futex.c
++++ linux-stable/kernel/futex.c
+@@ -2600,10 +2600,7 @@ static int futex_wait_requeue_pi(u32 __u
  	 * The waiter is allocated on our stack, manipulated by the requeue
  	 * code while we sleep on uaddr.
  	 */
@@ -87,8 +91,10 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	ret = get_futex_key(uaddr2, flags & FLAGS_SHARED, &key2, VERIFY_WRITE);
  	if (unlikely(ret != 0))
---- a/kernel/locking/rtmutex.c
-+++ b/kernel/locking/rtmutex.c
+Index: linux-stable/kernel/locking/rtmutex.c
+===================================================================
+--- linux-stable.orig/kernel/locking/rtmutex.c
++++ linux-stable/kernel/locking/rtmutex.c
 @@ -8,6 +8,12 @@
   *  Copyright (C) 2005 Kihon Technologies Inc., Steven Rostedt
   *  Copyright (C) 2006 Esben Nielsen
@@ -102,7 +108,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
   *  See Documentation/rt-mutex-design.txt for details.
   */
  #include <linux/spinlock.h>
-@@ -261,6 +267,14 @@ static void rt_mutex_adjust_prio(struct
+@@ -313,6 +319,14 @@ static void rt_mutex_adjust_prio(struct
  	raw_spin_unlock_irqrestore(&task->pi_lock, flags);
  }
  
@@ -117,7 +123,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  /*
   * Max number of times we'll walk the boosting chain:
   */
-@@ -385,13 +399,15 @@ static int rt_mutex_adjust_prio_chain(st
+@@ -470,13 +484,15 @@ static int rt_mutex_adjust_prio_chain(st
  	/* Release the task */
  	raw_spin_unlock_irqrestore(&task->pi_lock, flags);
  	if (!rt_mutex_owner(lock)) {
@@ -136,7 +142,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  		raw_spin_unlock(&lock->wait_lock);
  		goto out_put_task;
  	}
-@@ -434,6 +450,25 @@ static int rt_mutex_adjust_prio_chain(st
+@@ -534,6 +550,25 @@ static int rt_mutex_adjust_prio_chain(st
  	return ret;
  }
  
@@ -162,7 +168,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  /*
   * Try to take an rt-mutex
   *
-@@ -443,8 +478,9 @@ static int rt_mutex_adjust_prio_chain(st
+@@ -543,8 +578,9 @@ static int rt_mutex_adjust_prio_chain(st
   * @task:   the task which wants to acquire the lock
   * @waiter: the waiter that is queued to the lock's wait list. (could be NULL)
   */
@@ -174,7 +180,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  {
  	/*
  	 * We have to be careful here if the atomic speedups are
-@@ -477,12 +513,14 @@ static int try_to_take_rt_mutex(struct r
+@@ -577,12 +613,14 @@ static int try_to_take_rt_mutex(struct r
  	 * 3) it is top waiter
  	 */
  	if (rt_mutex_has_waiters(lock)) {
@@ -193,7 +199,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	if (waiter || rt_mutex_has_waiters(lock)) {
  		unsigned long flags;
  		struct rt_mutex_waiter *top;
-@@ -506,7 +544,6 @@ static int try_to_take_rt_mutex(struct r
+@@ -606,7 +644,6 @@ static int try_to_take_rt_mutex(struct r
  		raw_spin_unlock_irqrestore(&task->pi_lock, flags);
  	}
  
@@ -201,7 +207,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	debug_rt_mutex_lock(lock);
  
  	rt_mutex_set_owner(lock, task);
-@@ -516,6 +553,13 @@ static int try_to_take_rt_mutex(struct r
+@@ -616,6 +653,13 @@ static int try_to_take_rt_mutex(struct r
  	return 1;
  }
  
@@ -215,25 +221,26 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  /*
   * Task blocks on lock.
   *
-@@ -629,7 +673,7 @@ static void wakeup_next_waiter(struct rt
- 
- 	raw_spin_unlock_irqrestore(&current->pi_lock, flags);
- 
+@@ -764,7 +808,7 @@ static void wakeup_next_waiter(struct rt
+ 	 * long as we hold lock->wait_lock. The waiter task needs to
+ 	 * acquire it in order to dequeue the waiter.
+ 	 */
 -	wake_up_process(waiter->task);
 +	rt_mutex_wake_waiter(waiter);
  }
  
  /*
-@@ -706,18 +750,314 @@ void rt_mutex_adjust_pi(struct task_stru
+@@ -843,19 +887,315 @@ void rt_mutex_adjust_pi(struct task_stru
  		return;
  	}
- 
+ 	next_lock = waiter->lock;
 -	raw_spin_unlock_irqrestore(&task->pi_lock, flags);
--
+ 
  	/* gets dropped in rt_mutex_adjust_prio_chain()! */
  	get_task_struct(task);
+-
 +	raw_spin_unlock_irqrestore(&task->pi_lock, flags);
- 	rt_mutex_adjust_prio_chain(task, 0, NULL, NULL, task);
+ 	rt_mutex_adjust_prio_chain(task, 0, NULL, next_lock, NULL, task);
  }
  
 +#ifdef CONFIG_PREEMPT_RT_FULL
@@ -542,7 +549,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
   * @timeout:		 the pre-initialized and started timer, or NULL for none
   * @waiter:		 the pre-initialized rt_mutex_waiter
   *
-@@ -773,9 +1113,7 @@ rt_mutex_slowlock(struct rt_mutex *lock,
+@@ -931,9 +1271,7 @@ rt_mutex_slowlock(struct rt_mutex *lock,
  	struct rt_mutex_waiter waiter;
  	int ret = 0;
  
@@ -553,7 +560,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	raw_spin_lock(&lock->wait_lock);
  
-@@ -1062,13 +1400,12 @@ EXPORT_SYMBOL_GPL(rt_mutex_destroy);
+@@ -1259,13 +1597,12 @@ EXPORT_SYMBOL_GPL(rt_mutex_destroy);
  void __rt_mutex_init(struct rt_mutex *lock, const char *name)
  {
  	lock->owner = NULL;
@@ -568,7 +575,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  /**
   * rt_mutex_init_proxy_locked - initialize and lock a rt_mutex on behalf of a
-@@ -1083,7 +1420,7 @@ EXPORT_SYMBOL_GPL(__rt_mutex_init);
+@@ -1280,7 +1617,7 @@ EXPORT_SYMBOL_GPL(__rt_mutex_init);
  void rt_mutex_init_proxy_locked(struct rt_mutex *lock,
  				struct task_struct *proxy_owner)
  {
@@ -577,8 +584,10 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	debug_rt_mutex_proxy_lock(lock, proxy_owner);
  	rt_mutex_set_owner(lock, proxy_owner);
  	rt_mutex_deadlock_account_lock(lock, proxy_owner);
---- a/kernel/locking/rtmutex_common.h
-+++ b/kernel/locking/rtmutex_common.h
+Index: linux-stable/kernel/locking/rtmutex_common.h
+===================================================================
+--- linux-stable.orig/kernel/locking/rtmutex_common.h
++++ linux-stable/kernel/locking/rtmutex_common.h
 @@ -49,6 +49,7 @@ struct rt_mutex_waiter {
  	struct rb_node          pi_tree_entry;
  	struct task_struct	*task;

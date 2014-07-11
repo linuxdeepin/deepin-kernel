@@ -1,17 +1,19 @@
 Subject: rtmutex-futex-prepare-rt.patch
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Fri, 10 Jun 2011 11:04:15 +0200
-Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.14/patches-3.14.3-rt5.tar.xz
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.14/patches-3.14.10-rt7.tar.xz
 
 Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 ---
  kernel/futex.c                  |   77 ++++++++++++++++++++++++++++++++--------
- kernel/locking/rtmutex.c        |   30 +++++++++++++--
+ kernel/locking/rtmutex.c        |   31 ++++++++++++++--
  kernel/locking/rtmutex_common.h |    2 +
- 3 files changed, 90 insertions(+), 19 deletions(-)
+ 3 files changed, 91 insertions(+), 19 deletions(-)
 
---- a/kernel/futex.c
-+++ b/kernel/futex.c
+Index: linux-stable/kernel/futex.c
+===================================================================
+--- linux-stable.orig/kernel/futex.c
++++ linux-stable/kernel/futex.c
 @@ -1710,6 +1710,16 @@ retry_private:
  				requeue_pi_wake_futex(this, &key2, hb2);
  				drop_count++;
@@ -128,8 +130,10 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  		/*
  		 * Fixup the pi_state owner and possibly acquire the lock if we
  		 * haven't already.
---- a/kernel/locking/rtmutex.c
-+++ b/kernel/locking/rtmutex.c
+Index: linux-stable/kernel/locking/rtmutex.c
+===================================================================
+--- linux-stable.orig/kernel/locking/rtmutex.c
++++ linux-stable/kernel/locking/rtmutex.c
 @@ -69,6 +69,11 @@ static void fixup_rt_mutex_waiters(struc
  		clear_rt_mutex_waiters(lock);
  }
@@ -142,7 +146,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  /*
   * We can speed up the acquire/release, if the architecture
   * supports cmpxchg and if there's no debugging state to be set up
-@@ -328,7 +333,7 @@ static int rt_mutex_adjust_prio_chain(st
+@@ -389,7 +394,7 @@ static int rt_mutex_adjust_prio_chain(st
  	 * reached or the state of the chain has changed while we
  	 * dropped the locks.
  	 */
@@ -151,7 +155,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  		goto out_unlock_pi;
  
  	/*
-@@ -552,6 +557,23 @@ static int task_blocks_on_rt_mutex(struc
+@@ -641,6 +646,23 @@ static int task_blocks_on_rt_mutex(struc
  		return -EDEADLK;
  
  	raw_spin_lock_irqsave(&task->pi_lock, flags);
@@ -175,25 +179,26 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	__rt_mutex_adjust_prio(task);
  	waiter->task = task;
  	waiter->lock = lock;
-@@ -575,7 +597,7 @@ static int task_blocks_on_rt_mutex(struc
+@@ -664,7 +686,7 @@ static int task_blocks_on_rt_mutex(struc
  		rt_mutex_enqueue_pi(owner, waiter);
  
  		__rt_mutex_adjust_prio(owner);
 -		if (owner->pi_blocked_on)
 +		if (rt_mutex_real_waiter(owner->pi_blocked_on))
  			chain_walk = 1;
- 		raw_spin_unlock_irqrestore(&owner->pi_lock, flags);
- 	}
-@@ -669,7 +691,7 @@ static void remove_waiter(struct rt_mute
- 		}
+ 	} else if (debug_rt_mutex_detect_deadlock(waiter, detect_deadlock)) {
+ 		chain_walk = 1;
+@@ -781,7 +803,8 @@ static void remove_waiter(struct rt_mute
  		__rt_mutex_adjust_prio(owner);
  
--		if (owner->pi_blocked_on)
+ 		/* Store the lock on which owner is blocked or NULL */
+-		next_lock = task_blocked_on_lock(owner);
 +		if (rt_mutex_real_waiter(owner->pi_blocked_on))
- 			chain_walk = 1;
++			next_lock = task_blocked_on_lock(owner);
  
  		raw_spin_unlock_irqrestore(&owner->pi_lock, flags);
-@@ -701,7 +723,7 @@ void rt_mutex_adjust_pi(struct task_stru
+ 	}
+@@ -813,7 +836,7 @@ void rt_mutex_adjust_pi(struct task_stru
  	raw_spin_lock_irqsave(&task->pi_lock, flags);
  
  	waiter = task->pi_blocked_on;
@@ -202,8 +207,10 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  			!dl_prio(task->prio))) {
  		raw_spin_unlock_irqrestore(&task->pi_lock, flags);
  		return;
---- a/kernel/locking/rtmutex_common.h
-+++ b/kernel/locking/rtmutex_common.h
+Index: linux-stable/kernel/locking/rtmutex_common.h
+===================================================================
+--- linux-stable.orig/kernel/locking/rtmutex_common.h
++++ linux-stable/kernel/locking/rtmutex_common.h
 @@ -104,6 +104,8 @@ static inline struct task_struct *rt_mut
  /*
   * PI-futex support (proxy locking functions, etc.):
