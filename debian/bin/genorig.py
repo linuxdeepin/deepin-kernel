@@ -144,6 +144,7 @@ class Main(object):
                 'arch/*/Makefile',
                 'arch/x86/lib/memcpy_64.S',
                 'arch/x86/lib/memset_64.S',
+                'drivers/staging/usbip/uapi/',
                 'drivers/staging/usbip/userspace/',
                 'include/',
                 'lib/rbtree.c',
