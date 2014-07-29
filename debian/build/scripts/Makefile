@@ -8,6 +8,7 @@ DATA = \
 	Kbuild.include \
 	Makefile.build \
 	Makefile.clean \
+	Makefile.extrawarn \
 	Makefile.host \
 	Makefile.lib \
 	Makefile.modinst \
