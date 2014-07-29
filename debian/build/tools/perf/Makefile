@@ -33,8 +33,9 @@ else ifeq ($(DEB_HOST_ARCH_CPU),sparc64)
   KERNEL_ARCH_PERF = sparc
 endif
 
-# disable Gtk UI until it's more usable
-MAKE_PERF := $(MAKE) prefix=/usr perfexecdir=share/perf_$(VERSION)-core NO_GTK2=1 NO_PERL=1 V=1 HAVE_CPLUS_DEMANGLE=1 ARCH=$(KERNEL_ARCH_PERF) EXTRA_WARNINGS=-Wno-error NO_LIBUNWIND=$(NO_LIBUNWIND)
+# - disable Gtk UI until it's more usable
+# - Include version in all directory names
+MAKE_PERF := $(MAKE) prefix=/usr perfexecdir=share/perf_$(VERSION)-core plugindir=/usr/lib/traceevent_$(VERSION)/plugins NO_GTK2=1 NO_PERL=1 V=1 HAVE_CPLUS_DEMANGLE=1 ARCH=$(KERNEL_ARCH_PERF) EXTRA_WARNINGS=-Wno-error NO_LIBUNWIND=$(NO_LIBUNWIND)
 
 all:
 ifdef KERNEL_ARCH_PERF
