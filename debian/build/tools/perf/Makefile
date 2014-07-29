@@ -39,7 +39,10 @@ MAKE_PERF := $(MAKE) prefix=/usr perfexecdir=share/perf_$(VERSION)-core NO_GTK2=
 all:
 ifdef KERNEL_ARCH_PERF
 	-mkdir out
-	+$(MAKE_PERF) -C $(top_srcdir)/tools/perf -f Makefile.perf O=$(CURDIR)/out all VERSION=$(VERSION)
+# perf changes some default directories depending on whether DESTDIR is
+# set.  We must define it even when building to avoid a rebuild when we
+# run 'make install'.
+	+$(MAKE_PERF) -C $(top_srcdir)/tools/perf -f Makefile.perf O=$(CURDIR)/out all VERSION=$(VERSION) DESTDIR=dummy
 	+$(MAKE_PERF) -C $(top_srcdir)/tools/perf/Documentation O=$(CURDIR)/out man VERSION=$(VERSION)
 endif
 
