@@ -1,0 +1,86 @@
+From: Alex Smith <alex.smith@imgtec.com>
+Date: Thu, 1 May 2014 12:51:19 +0100
+Subject: MIPS: ptrace: Avoid smp_processor_id() in preemptible code
+Origin: https://git.kernel.org/linus/57c7ea513f0e4b033ba602550992e2ca0e6b8d2c
+
+ptrace_{get,set}_watch_regs access current_cpu_data to get the watch
+register count/masks, which calls smp_processor_id(). However they are
+run in preemptible context and therefore trigger warnings like so:
+
+[ 6340.092000] BUG: using smp_processor_id() in preemptible [00000000] code: gdb/367
+[ 6340.092000] caller is ptrace_get_watch_regs+0x44/0x220
+
+Since the watch register count/masks should be the same across all
+CPUs, use boot_cpu_data instead. Note that this may need to change in
+future should a heterogenous system be supported where the count/masks
+are not the same across all CPUs (the current code is also incorrect
+for this scenario - current_cpu_data here would not necessarily be
+correct for the CPU that the target task will execute on).
+
+Signed-off-by: Alex Smith <alex.smith@imgtec.com>
+Reviewed-by: Paul Burton <paul.burton@imgtec.com>
+Cc: linux-mips@linux-mips.org
+Patchwork: https://patchwork.linux-mips.org/patch/6879/
+Signed-off-by: Ralf Baechle <ralf@linux-mips.org>
+---
+ arch/mips/kernel/ptrace.c | 14 +++++++-------
+ 1 file changed, 7 insertions(+), 7 deletions(-)
+
+diff --git a/arch/mips/kernel/ptrace.c b/arch/mips/kernel/ptrace.c
+index 71f85f4..f639ccd 100644
+--- a/arch/mips/kernel/ptrace.c
++++ b/arch/mips/kernel/ptrace.c
+@@ -163,7 +163,7 @@ int ptrace_get_watch_regs(struct task_struct *child,
+ 	enum pt_watch_style style;
+ 	int i;
+ 
+-	if (!cpu_has_watch || current_cpu_data.watch_reg_use_cnt == 0)
++	if (!cpu_has_watch || boot_cpu_data.watch_reg_use_cnt == 0)
+ 		return -EIO;
+ 	if (!access_ok(VERIFY_WRITE, addr, sizeof(struct pt_watch_regs)))
+ 		return -EIO;
+@@ -177,14 +177,14 @@ int ptrace_get_watch_regs(struct task_struct *child,
+ #endif
+ 
+ 	__put_user(style, &addr->style);
+-	__put_user(current_cpu_data.watch_reg_use_cnt,
++	__put_user(boot_cpu_data.watch_reg_use_cnt,
+ 		   &addr->WATCH_STYLE.num_valid);
+-	for (i = 0; i < current_cpu_data.watch_reg_use_cnt; i++) {
++	for (i = 0; i < boot_cpu_data.watch_reg_use_cnt; i++) {
+ 		__put_user(child->thread.watch.mips3264.watchlo[i],
+ 			   &addr->WATCH_STYLE.watchlo[i]);
+ 		__put_user(child->thread.watch.mips3264.watchhi[i] & 0xfff,
+ 			   &addr->WATCH_STYLE.watchhi[i]);
+-		__put_user(current_cpu_data.watch_reg_masks[i],
++		__put_user(boot_cpu_data.watch_reg_masks[i],
+ 			   &addr->WATCH_STYLE.watch_masks[i]);
+ 	}
+ 	for (; i < 8; i++) {
+@@ -204,12 +204,12 @@ int ptrace_set_watch_regs(struct task_struct *child,
+ 	unsigned long lt[NUM_WATCH_REGS];
+ 	u16 ht[NUM_WATCH_REGS];
+ 
+-	if (!cpu_has_watch || current_cpu_data.watch_reg_use_cnt == 0)
++	if (!cpu_has_watch || boot_cpu_data.watch_reg_use_cnt == 0)
+ 		return -EIO;
+ 	if (!access_ok(VERIFY_READ, addr, sizeof(struct pt_watch_regs)))
+ 		return -EIO;
+ 	/* Check the values. */
+-	for (i = 0; i < current_cpu_data.watch_reg_use_cnt; i++) {
++	for (i = 0; i < boot_cpu_data.watch_reg_use_cnt; i++) {
+ 		__get_user(lt[i], &addr->WATCH_STYLE.watchlo[i]);
+ #ifdef CONFIG_32BIT
+ 		if (lt[i] & __UA_LIMIT)
+@@ -228,7 +228,7 @@ int ptrace_set_watch_regs(struct task_struct *child,
+ 			return -EINVAL;
+ 	}
+ 	/* Install them. */
+-	for (i = 0; i < current_cpu_data.watch_reg_use_cnt; i++) {
++	for (i = 0; i < boot_cpu_data.watch_reg_use_cnt; i++) {
+ 		if (lt[i] & 7)
+ 			watch_active = 1;
+ 		child->thread.watch.mips3264.watchlo[i] = lt[i];
+-- 
+2.0.0
+
