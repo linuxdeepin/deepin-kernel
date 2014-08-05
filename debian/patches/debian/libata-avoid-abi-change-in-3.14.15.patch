@@ -1,0 +1,78 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Tue, 05 Aug 2014 09:51:04 +0100
+Subject: libata: Avoid ABI change in 3.14.15
+
+Commit 1a112d10f03e ('libata: introduce ata_host->n_tags to avoid oops
+on SAS controllers') added a field in a structure which may be
+driver-allocated.  So we can't simply move it to the end.  However
+there is a flags field with many free bits, and we only need 5 bits
+(ATA_MAX_QUEUE == 32 and n_tags must be less than this).  Add a
+pair of accessors to make this slightly less ugly.
+
+--- a/drivers/ata/libata-core.c
++++ b/drivers/ata/libata-core.c
+@@ -175,6 +175,18 @@ static bool ata_sstatus_online(u32 sstat
+ 	return (sstatus & 0xf) == 0x3;
+ }
+ 
++static unsigned int ata_host_get_n_tags(const struct ata_host *host)
++{
++	return (host->flags & ATA_HOST_N_TAGS_MASK) >> ATA_HOST_N_TAGS_SHIFT;
++}
++
++static void ata_host_set_n_tags(const struct ata_host *host,
++				unsigned int n_tags)
++{
++	host->flags = ((host->flags & ~ATA_HOST_N_TAGS_MASK) |
++		       (n_tags << ATA_HOST_N_TAGS_SHIFT));
++}
++
+ /**
+  *	ata_link_next - link iteration helper
+  *	@link: the previous link, NULL to start
+@@ -4798,7 +4810,7 @@ void swap_buf_le16(u16 *buf, unsigned in
+ static struct ata_queued_cmd *ata_qc_new(struct ata_port *ap)
+ {
+ 	struct ata_queued_cmd *qc = NULL;
+-	unsigned int max_queue = ap->host->n_tags;
++	unsigned int max_queue = ata_host_get_n_tags(ap->host);
+ 	unsigned int i, tag;
+ 
+ 	/* no command while frozen */
+@@ -6108,7 +6120,7 @@ void ata_host_init(struct ata_host *host
+ {
+ 	spin_lock_init(&host->lock);
+ 	mutex_init(&host->eh_mutex);
+-	host->n_tags = ATA_MAX_QUEUE - 1;
++	ata_host_set_n_tags(host, ATA_MAX_QUEUE - 1);
+ 	host->dev = dev;
+ 	host->ops = ops;
+ }
+@@ -6190,7 +6202,7 @@ int ata_host_register(struct ata_host *h
+ {
+ 	int i, rc;
+ 
+-	host->n_tags = clamp(sht->can_queue, 1, ATA_MAX_QUEUE - 1);
++	ata_host_set_n_tags(host, clamp(sht->can_queue, 1, ATA_MAX_QUEUE - 1));
+ 
+ 	/* host must have been started */
+ 	if (!(host->flags & ATA_HOST_STARTED)) {
+--- a/include/linux/libata.h
++++ b/include/linux/libata.h
+@@ -271,6 +271,8 @@ enum {
+ 	ATA_HOST_STARTED	= (1 << 1),	/* Host started */
+ 	ATA_HOST_PARALLEL_SCAN	= (1 << 2),	/* Ports on this host can be scanned in parallel */
+ 	ATA_HOST_IGNORE_ATA	= (1 << 3),	/* Ignore ATA devices on this host. */
++	ATA_HOST_N_TAGS_SHIFT	= 4,
++	ATA_HOST_N_TAGS_MASK	= (ATA_MAX_QUEUE - 1) << ATA_HOST_N_TAGS_SHIFT,
+ 
+ 	/* bits 24:31 of host->flags are reserved for LLD specific flags */
+ 
+@@ -593,7 +595,6 @@ struct ata_host {
+ 	struct device 		*dev;
+ 	void __iomem * const	*iomap;
+ 	unsigned int		n_ports;
+-	unsigned int		n_tags;			/* nr of NCQ tags */
+ 	void			*private_data;
+ 	struct ata_port_operations *ops;
+ 	unsigned long		flags;
