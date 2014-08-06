@@ -9,15 +9,12 @@ No-one seems interested in regularly checking for vulnerabilities
 specific to x32 (at least no-one with a white hat).
 
 Still, adding another flavour just to turn on x32 seems wasteful.  And
-the only difference on syscall entry is whether we mask the x32 flag
-out of the syscall number before range-checking it.
+the only differences on syscall entry are two instructions (mask out
+the x32 flag and compare the syscall number).
 
-So replace the mask (andl) instruction with a nop and add a kernel
-parameter "syscall.x32" which allows it to be enabled/disabled at
-boot time.  Add a Kconfig parameter to set the default.
-
-Change the comparison instruction to cmpq, because now the upper 32
-bits may or may not be cleared by the previous instruction.
+So pad the standard comparison with a nop and add a kernel parameter
+"syscall.x32" which controls whether this is replaced with the x32
+version at boot time.  Add a Kconfig parameter to set the default.
 
 Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
 ---
@@ -43,7 +40,7 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  			on older distributions. When this option is enabled
 --- a/arch/x86/Kconfig
 +++ b/arch/x86/Kconfig
-@@ -2383,6 +2383,14 @@ config X86_X32
+@@ -2384,6 +2384,14 @@ config X86_X32
  	  elf32_x86_64 support enabled to compile a kernel with this
  	  option set.
  
@@ -84,60 +81,48 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  # error "The following code assumes __USER32_DS == __USER_DS"
 --- a/arch/x86/kernel/entry_64.S
 +++ b/arch/x86/kernel/entry_64.S
-@@ -618,12 +618,14 @@ GLOBAL(system_call_after_swapgs)
- 	testl $_TIF_WORK_SYSCALL_ENTRY,TI_flags+THREAD_INFO(%rsp,RIP-ARGOFFSET)
- 	jnz tracesys
- system_call_fastpath:
--#if __SYSCALL_MASK == ~0
--	cmpq $__NR_syscall_max,%rax
--#else
+@@ -621,8 +621,12 @@ system_call_fastpath:
+ #if __SYSCALL_MASK == ~0
+ 	cmpq $__NR_syscall_max,%rax
+ #else
 -	andl $__SYSCALL_MASK,%eax
 -	cmpl $__NR_syscall_max,%eax
-+#if __SYSCALL_MASK != ~0
-+	.globl system_call_fast_maybe_mask
-+	.globl system_call_fast_masked
-+system_call_fast_maybe_mask:
-+	.byte P6_NOP5_ATOMIC
-+system_call_fast_masked:
++	.globl system_call_fast_compare
++	.globl system_call_fast_compare_end
++system_call_fast_compare:
++	cmpq $511,%rax			/* x32 syscalls start at 512 */
++	.byte P6_NOP4
++system_call_fast_compare_end:
  #endif
-+	cmpq $__NR_syscall_max,%rax
  	ja badsys
  	movq %r10,%rcx
- 	call *sys_call_table(,%rax,8)  # XXX:	 rip relative
-@@ -737,12 +739,14 @@ tracesys:
- 	 */
- 	LOAD_ARGS ARGOFFSET, 1
- 	RESTORE_REST
--#if __SYSCALL_MASK == ~0
--	cmpq $__NR_syscall_max,%rax
--#else
+@@ -740,8 +744,12 @@ tracesys:
+ #if __SYSCALL_MASK == ~0
+ 	cmpq $__NR_syscall_max,%rax
+ #else
 -	andl $__SYSCALL_MASK,%eax
 -	cmpl $__NR_syscall_max,%eax
-+#if __SYSCALL_MASK != ~0
-+	.globl system_call_trace_maybe_mask
-+	.globl system_call_trace_masked
-+system_call_trace_maybe_mask:
-+	.byte P6_NOP5_ATOMIC
-+system_call_trace_masked:
++	.globl system_call_trace_compare
++	.globl system_call_trace_compare_end
++system_call_trace_compare:
++	cmpq $511,%rax			/* x32 syscalls start at 512 */
++	.byte P6_NOP4
++system_call_trace_compare_end:
  #endif
-+	cmpq $__NR_syscall_max,%rax
  	ja   int_ret_from_sys_call	/* RAX(%rsp) set to -ENOSYS above */
  	movq %r10,%rcx	/* fixup for C */
- 	call *sys_call_table(,%rax,8)
-@@ -813,6 +817,18 @@ int_restore_rest:
+@@ -813,6 +821,16 @@ int_restore_rest:
  	CFI_ENDPROC
  END(system_call)
  
 +#if __SYSCALL_MASK != ~0
-+	/*
-+	 * This replaces the nops before the syscall range check
-+	 * if syscall.x32 is set
-+	 */
-+	.globl system_call_mask
-+	.globl system_call_mask_end
-+system_call_mask:
++	/* This replaces the usual comparisons if syscall.x32 is set */
++	.globl system_call_mask_compare
++	.globl system_call_mask_compare_end
++system_call_mask_compare:
 +	andl $__SYSCALL_MASK,%eax
-+system_call_mask_end:
++	cmpl $__NR_syscall_max,%eax
++system_call_mask_compare_end:
 +#endif
 +
  	.macro FORK_LIKE func
@@ -172,21 +157,21 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
 +bool x32_enabled = !IS_ENABLED(CONFIG_X86_X32_DISABLED);
 +module_param_named(x32, x32_enabled, bool, 0444);
 +
-+extern char system_call_fast_masked[], system_call_fast_maybe_mask[],
-+	system_call_trace_masked[], system_call_trace_maybe_mask[],
-+	system_call_mask_end[], system_call_mask[];
++extern char system_call_fast_compare_end[], system_call_fast_compare[],
++	system_call_trace_compare_end[], system_call_trace_compare[],
++	system_call_mask_compare_end[], system_call_mask_compare[];
 +
 +static int __init x32_enable(void)
 +{
-+	BUG_ON(system_call_fast_masked - system_call_fast_maybe_mask != 5);
-+	BUG_ON(system_call_trace_masked - system_call_trace_maybe_mask != 5);
-+	BUG_ON(system_call_mask_end - system_call_mask != 5);
++	BUG_ON(system_call_fast_compare_end - system_call_fast_compare != 10);
++	BUG_ON(system_call_trace_compare_end - system_call_trace_compare != 10);
++	BUG_ON(system_call_mask_compare_end - system_call_mask_compare != 10);
 +
 +	if (x32_enabled) {
-+		text_poke_early(system_call_fast_maybe_mask,
-+				system_call_mask, 5);
-+		text_poke_early(system_call_trace_maybe_mask,
-+				system_call_mask, 5);
++		text_poke_early(system_call_fast_compare,
++				system_call_mask_compare, 10);
++		text_poke_early(system_call_trace_compare,
++				system_call_mask_compare, 10);
 +#ifdef CONFIG_X86_X32_DISABLED
 +		pr_info("Enabled x32 syscalls\n");
 +#endif
