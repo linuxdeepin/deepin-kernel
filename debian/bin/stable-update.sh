@@ -51,8 +51,8 @@ if [ "$(base_version "$new_ver")" != "$(base_version "$cur_ver")" ]; then
 fi
 
 case "$cur_pkg_ver" in
-    *~experimental*)
-	new_pkg_ver="$new_ver-1~experimental.1"
+    *~exp*)
+	new_pkg_ver="$new_ver-1~exp1"
 	;;
     *)
 	new_pkg_ver="$new_ver-1"
