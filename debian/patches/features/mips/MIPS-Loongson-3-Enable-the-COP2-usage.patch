@@ -1,0 +1,132 @@
+From: Huacai Chen <chenhc@lemote.com>
+Date: Thu, 26 Jun 2014 11:41:31 +0800
+Subject: [7/8] MIPS: Loongson-3: Enable the COP2 usage
+Origin: https://git.kernel.org/linus/ef2f826c8f2ff1e4215968042139604633581a13
+
+Loongson-3 has some specific instructions (MMI/SIMD) in coprocessor 2.
+COP2 isn't independent because it share COP1 (FPU)'s registers. This
+patch enable the COP2 usage so user-space programs can use the MMI/SIMD
+instructions. When COP2 exception happens, we enable both COP1 (FPU)
+and COP2, only in this way the fp context can be saved and restored
+correctly.
+
+Signed-off-by: Huacai Chen <chenhc@lemote.com>
+Cc: John Crispin <john@phrozen.org>
+Cc: Steven J. Hill <Steven.Hill@imgtec.com>
+Cc: Aurelien Jarno <aurelien@aurel32.net>
+Cc: linux-mips@linux-mips.org
+Cc: Fuxin Zhang <zhangfx@lemote.com>
+Cc: Zhangjin Wu <wuzhangjin@gmail.com>
+Patchwork: https://patchwork.linux-mips.org/patch/7189/
+Signed-off-by: Ralf Baechle <ralf@linux-mips.org>
+---
+ arch/mips/include/asm/cop2.h            |    8 ++++
+ arch/mips/loongson/loongson-3/Makefile  |    2 +-
+ arch/mips/loongson/loongson-3/cop2-ex.c |   63 +++++++++++++++++++++++++++++++
+ 3 files changed, 72 insertions(+), 1 deletion(-)
+ create mode 100644 arch/mips/loongson/loongson-3/cop2-ex.c
+
+diff --git a/arch/mips/include/asm/cop2.h b/arch/mips/include/asm/cop2.h
+index c1516cc..d035298 100644
+--- a/arch/mips/include/asm/cop2.h
++++ b/arch/mips/include/asm/cop2.h
+@@ -32,6 +32,14 @@ extern void nlm_cop2_restore(struct nlm_cop2_state *);
+ #define cop2_present		1
+ #define cop2_lazy_restore	0
+ 
++#elif defined(CONFIG_CPU_LOONGSON3)
++
++#define cop2_save(r)
++#define cop2_restore(r)
++
++#define cop2_present		1
++#define cop2_lazy_restore	1
++
+ #else
+ 
+ #define cop2_present		0
+diff --git a/arch/mips/loongson/loongson-3/Makefile b/arch/mips/loongson/loongson-3/Makefile
+index 471b0f2a..b4df775 100644
+--- a/arch/mips/loongson/loongson-3/Makefile
++++ b/arch/mips/loongson/loongson-3/Makefile
+@@ -1,7 +1,7 @@
+ #
+ # Makefile for Loongson-3 family machines
+ #
+-obj-y			+= irq.o
++obj-y			+= irq.o cop2-ex.o
+ 
+ obj-$(CONFIG_SMP)	+= smp.o
+ 
+diff --git a/arch/mips/loongson/loongson-3/cop2-ex.c b/arch/mips/loongson/loongson-3/cop2-ex.c
+new file mode 100644
+index 0000000..9182e8d
+--- /dev/null
++++ b/arch/mips/loongson/loongson-3/cop2-ex.c
+@@ -0,0 +1,63 @@
++/*
++ * This file is subject to the terms and conditions of the GNU General Public
++ * License.  See the file "COPYING" in the main directory of this archive
++ * for more details.
++ *
++ * Copyright (C) 2014 Lemote Corporation.
++ *   written by Huacai Chen <chenhc@lemote.com>
++ *
++ * based on arch/mips/cavium-octeon/cpu.c
++ * Copyright (C) 2009 Wind River Systems,
++ *   written by Ralf Baechle <ralf@linux-mips.org>
++ */
++#include <linux/init.h>
++#include <linux/sched.h>
++#include <linux/notifier.h>
++
++#include <asm/fpu.h>
++#include <asm/cop2.h>
++#include <asm/current.h>
++#include <asm/mipsregs.h>
++
++static int loongson_cu2_call(struct notifier_block *nfb, unsigned long action,
++	void *data)
++{
++	int fpu_enabled;
++	int fr = !test_thread_flag(TIF_32BIT_FPREGS);
++
++	switch (action) {
++	case CU2_EXCEPTION:
++		preempt_disable();
++		fpu_enabled = read_c0_status() & ST0_CU1;
++		if (!fr)
++			set_c0_status(ST0_CU1 | ST0_CU2);
++		else
++			set_c0_status(ST0_CU1 | ST0_CU2 | ST0_FR);
++		enable_fpu_hazard();
++		KSTK_STATUS(current) |= (ST0_CU1 | ST0_CU2);
++		if (fr)
++			KSTK_STATUS(current) |= ST0_FR;
++		else
++			KSTK_STATUS(current) &= ~ST0_FR;
++		/* If FPU is enabled, we needn't init or restore fp */
++		if(!fpu_enabled) {
++			set_thread_flag(TIF_USEDFPU);
++			if (!used_math()) {
++				_init_fpu();
++				set_used_math();
++			} else
++				_restore_fp(current);
++		}
++		preempt_enable();
++
++		return NOTIFY_STOP;	/* Don't call default notifier */
++	}
++
++	return NOTIFY_OK;		/* Let default notifier send signals */
++}
++
++static int __init loongson_cu2_setup(void)
++{
++	return cu2_notifier(loongson_cu2_call, 0);
++}
++early_initcall(loongson_cu2_setup);
+-- 
+1.7.10.4
+
