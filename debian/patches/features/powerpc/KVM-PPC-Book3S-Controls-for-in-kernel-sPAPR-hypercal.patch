@@ -1,0 +1,422 @@
+From: Paul Mackerras <paulus@samba.org>
+Date: Mon, 2 Jun 2014 11:02:59 +1000
+Subject: KVM: PPC: Book3S: Controls for in-kernel sPAPR
+ hypercall handling
+Origin: https://git.kernel.org/linus/699a0ea0823d32030b0666b28ff8633960f7ffa7
+
+This provides a way for userspace controls which sPAPR hcalls get
+handled in the kernel.  Each hcall can be individually enabled or
+disabled for in-kernel handling, except for H_RTAS.  The exception
+for H_RTAS is because userspace can already control whether
+individual RTAS functions are handled in-kernel or not via the
+KVM_PPC_RTAS_DEFINE_TOKEN ioctl, and because the numeric value for
+H_RTAS is out of the normal sequence of hcall numbers.
+
+Hcalls are enabled or disabled using the KVM_ENABLE_CAP ioctl for the
+KVM_CAP_PPC_ENABLE_HCALL capability on the file descriptor for the VM.
+The args field of the struct kvm_enable_cap specifies the hcall number
+in args[0] and the enable/disable flag in args[1]; 0 means disable
+in-kernel handling (so that the hcall will always cause an exit to
+userspace) and 1 means enable.  Enabling or disabling in-kernel
+handling of an hcall is effective across the whole VM.
+
+The ability for KVM_ENABLE_CAP to be used on a VM file descriptor
+on PowerPC is new, added by this commit.  The KVM_CAP_ENABLE_CAP_VM
+capability advertises that this ability exists.
+
+When a VM is created, an initial set of hcalls are enabled for
+in-kernel handling.  The set that is enabled is the set that have
+an in-kernel implementation at this point.  Any new hcall
+implementations from this point onwards should not be added to the
+default set without a good reason.
+
+No distinction is made between real-mode and virtual-mode hcall
+implementations; the one setting controls them both.
+
+Signed-off-by: Paul Mackerras <paulus@samba.org>
+Signed-off-by: Alexander Graf <agraf@suse.de>
+---
+ Documentation/virtual/kvm/api.txt       |   41 +++++++++++++++++++++++--
+ arch/powerpc/include/asm/kvm_book3s.h   |    1 +
+ arch/powerpc/include/asm/kvm_host.h     |    2 ++
+ arch/powerpc/kernel/asm-offsets.c       |    1 +
+ arch/powerpc/kvm/book3s_hv.c            |   51 +++++++++++++++++++++++++++++++
+ arch/powerpc/kvm/book3s_hv_rmhandlers.S |   11 +++++++
+ arch/powerpc/kvm/book3s_pr.c            |    5 +++
+ arch/powerpc/kvm/book3s_pr_papr.c       |   37 ++++++++++++++++++++++
+ arch/powerpc/kvm/powerpc.c              |   45 +++++++++++++++++++++++++++
+ include/uapi/linux/kvm.h                |    1 +
+ 10 files changed, 193 insertions(+), 2 deletions(-)
+
+diff --git a/Documentation/virtual/kvm/api.txt b/Documentation/virtual/kvm/api.txt
+index 0fe3649..5c54d19 100644
+--- a/Documentation/virtual/kvm/api.txt
++++ b/Documentation/virtual/kvm/api.txt
+@@ -2863,8 +2863,8 @@ The fields in each entry are defined as follows:
+          this function/index combination
+ 
+ 
+-6. Capabilities that can be enabled
+------------------------------------
++6. Capabilities that can be enabled on vCPUs
++--------------------------------------------
+ 
+ There are certain capabilities that change the behavior of the virtual CPU when
+ enabled. To enable them, please see section 4.37. Below you can find a list of
+@@ -3002,3 +3002,40 @@ Parameters: args[0] is the XICS device fd
+             args[1] is the XICS CPU number (server ID) for this vcpu
+ 
+ This capability connects the vcpu to an in-kernel XICS device.
++
++
++7. Capabilities that can be enabled on VMs
++------------------------------------------
++
++There are certain capabilities that change the behavior of the virtual
++machine when enabled. To enable them, please see section 4.37. Below
++you can find a list of capabilities and what their effect on the VM
++is when enabling them.
++
++The following information is provided along with the description:
++
++  Architectures: which instruction set architectures provide this ioctl.
++      x86 includes both i386 and x86_64.
++
++  Parameters: what parameters are accepted by the capability.
++
++  Returns: the return value.  General error numbers (EBADF, ENOMEM, EINVAL)
++      are not detailed, but errors with specific meanings are.
++
++
++7.1 KVM_CAP_PPC_ENABLE_HCALL
++
++Architectures: ppc
++Parameters: args[0] is the sPAPR hcall number
++	    args[1] is 0 to disable, 1 to enable in-kernel handling
++
++This capability controls whether individual sPAPR hypercalls (hcalls)
++get handled by the kernel or not.  Enabling or disabling in-kernel
++handling of an hcall is effective across the VM.  On creation, an
++initial set of hcalls are enabled for in-kernel handling, which
++consists of those hcalls for which in-kernel handlers were implemented
++before this capability was implemented.  If disabled, the kernel will
++not to attempt to handle the hcall, but will always exit to userspace
++to handle it.  Note that it may not make sense to enable some and
++disable others of a group of related hcalls, but KVM does not prevent
++userspace from doing that.
+diff --git a/arch/powerpc/include/asm/kvm_book3s.h b/arch/powerpc/include/asm/kvm_book3s.h
+index a20cc0b..052ab2a 100644
+--- a/arch/powerpc/include/asm/kvm_book3s.h
++++ b/arch/powerpc/include/asm/kvm_book3s.h
+@@ -187,6 +187,7 @@ extern void kvmppc_hv_entry_trampoline(void);
+ extern u32 kvmppc_alignment_dsisr(struct kvm_vcpu *vcpu, unsigned int inst);
+ extern ulong kvmppc_alignment_dar(struct kvm_vcpu *vcpu, unsigned int inst);
+ extern int kvmppc_h_pr(struct kvm_vcpu *vcpu, unsigned long cmd);
++extern void kvmppc_pr_init_default_hcalls(struct kvm *kvm);
+ extern void kvmppc_copy_to_svcpu(struct kvmppc_book3s_shadow_vcpu *svcpu,
+ 				 struct kvm_vcpu *vcpu);
+ extern void kvmppc_copy_from_svcpu(struct kvm_vcpu *vcpu,
+diff --git a/arch/powerpc/include/asm/kvm_host.h b/arch/powerpc/include/asm/kvm_host.h
+index f9ae696..62b2cee 100644
+--- a/arch/powerpc/include/asm/kvm_host.h
++++ b/arch/powerpc/include/asm/kvm_host.h
+@@ -34,6 +34,7 @@
+ #include <asm/processor.h>
+ #include <asm/page.h>
+ #include <asm/cacheflush.h>
++#include <asm/hvcall.h>
+ 
+ #define KVM_MAX_VCPUS		NR_CPUS
+ #define KVM_MAX_VCORES		NR_CPUS
+@@ -263,6 +264,7 @@ struct kvm_arch {
+ #ifdef CONFIG_PPC_BOOK3S_64
+ 	struct list_head spapr_tce_tables;
+ 	struct list_head rtas_tokens;
++	DECLARE_BITMAP(enabled_hcalls, MAX_HCALL_OPCODE/4 + 1);
+ #endif
+ #ifdef CONFIG_KVM_MPIC
+ 	struct openpic *mpic;
+diff --git a/arch/powerpc/kernel/asm-offsets.c b/arch/powerpc/kernel/asm-offsets.c
+index f5995a9..17ffcb4 100644
+--- a/arch/powerpc/kernel/asm-offsets.c
++++ b/arch/powerpc/kernel/asm-offsets.c
+@@ -493,6 +493,7 @@ int main(void)
+ 	DEFINE(KVM_HOST_SDR1, offsetof(struct kvm, arch.host_sdr1));
+ 	DEFINE(KVM_TLBIE_LOCK, offsetof(struct kvm, arch.tlbie_lock));
+ 	DEFINE(KVM_NEED_FLUSH, offsetof(struct kvm, arch.need_tlb_flush.bits));
++	DEFINE(KVM_ENABLED_HCALLS, offsetof(struct kvm, arch.enabled_hcalls));
+ 	DEFINE(KVM_LPCR, offsetof(struct kvm, arch.lpcr));
+ 	DEFINE(KVM_RMOR, offsetof(struct kvm, arch.rmor));
+ 	DEFINE(KVM_VRMA_SLB_V, offsetof(struct kvm, arch.vrma_slb_v));
+diff --git a/arch/powerpc/kvm/book3s_hv.c b/arch/powerpc/kvm/book3s_hv.c
+index 1562acf..cf445d2 100644
+--- a/arch/powerpc/kvm/book3s_hv.c
++++ b/arch/powerpc/kvm/book3s_hv.c
+@@ -67,6 +67,8 @@
+ /* Used as a "null" value for timebase values */
+ #define TB_NIL	(~(u64)0)
+ 
++static DECLARE_BITMAP(default_enabled_hcalls, MAX_HCALL_OPCODE/4 + 1);
++
+ static void kvmppc_end_cede(struct kvm_vcpu *vcpu);
+ static int kvmppc_hv_setup_htab_rma(struct kvm_vcpu *vcpu);
+ 
+@@ -562,6 +564,10 @@ int kvmppc_pseries_do_hcall(struct kvm_vcpu *vcpu)
+ 	struct kvm_vcpu *tvcpu;
+ 	int idx, rc;
+ 
++	if (req <= MAX_HCALL_OPCODE &&
++	    !test_bit(req/4, vcpu->kvm->arch.enabled_hcalls))
++		return RESUME_HOST;
++
+ 	switch (req) {
+ 	case H_ENTER:
+ 		idx = srcu_read_lock(&vcpu->kvm->srcu);
+@@ -2269,6 +2275,10 @@ static int kvmppc_core_init_vm_hv(struct kvm *kvm)
+ 	 */
+ 	cpumask_setall(&kvm->arch.need_tlb_flush);
+ 
++	/* Start out with the default set of hcalls enabled */
++	memcpy(kvm->arch.enabled_hcalls, default_enabled_hcalls,
++	       sizeof(kvm->arch.enabled_hcalls));
++
+ 	kvm->arch.rma = NULL;
+ 
+ 	kvm->arch.host_sdr1 = mfspr(SPRN_SDR1);
+@@ -2407,6 +2417,45 @@ static long kvm_arch_vm_ioctl_hv(struct file *filp,
+ 	return r;
+ }
+ 
++/*
++ * List of hcall numbers to enable by default.
++ * For compatibility with old userspace, we enable by default
++ * all hcalls that were implemented before the hcall-enabling
++ * facility was added.  Note this list should not include H_RTAS.
++ */
++static unsigned int default_hcall_list[] = {
++	H_REMOVE,
++	H_ENTER,
++	H_READ,
++	H_PROTECT,
++	H_BULK_REMOVE,
++	H_GET_TCE,
++	H_PUT_TCE,
++	H_SET_DABR,
++	H_SET_XDABR,
++	H_CEDE,
++	H_PROD,
++	H_CONFER,
++	H_REGISTER_VPA,
++#ifdef CONFIG_KVM_XICS
++	H_EOI,
++	H_CPPR,
++	H_IPI,
++	H_IPOLL,
++	H_XIRR,
++	H_XIRR_X,
++#endif
++	0
++};
++
++static void init_default_hcalls(void)
++{
++	int i;
++
++	for (i = 0; default_hcall_list[i]; ++i)
++		__set_bit(default_hcall_list[i] / 4, default_enabled_hcalls);
++}
++
+ static struct kvmppc_ops kvm_ops_hv = {
+ 	.get_sregs = kvm_arch_vcpu_ioctl_get_sregs_hv,
+ 	.set_sregs = kvm_arch_vcpu_ioctl_set_sregs_hv,
+@@ -2454,6 +2503,8 @@ static int kvmppc_book3s_init_hv(void)
+ 	kvm_ops_hv.owner = THIS_MODULE;
+ 	kvmppc_hv_ops = &kvm_ops_hv;
+ 
++	init_default_hcalls();
++
+ 	r = kvmppc_mmu_hv_init();
+ 	return r;
+ }
+diff --git a/arch/powerpc/kvm/book3s_hv_rmhandlers.S b/arch/powerpc/kvm/book3s_hv_rmhandlers.S
+index 64ac56f..33aaade 100644
+--- a/arch/powerpc/kvm/book3s_hv_rmhandlers.S
++++ b/arch/powerpc/kvm/book3s_hv_rmhandlers.S
+@@ -1909,6 +1909,17 @@ hcall_try_real_mode:
+ 	clrrdi	r3,r3,2
+ 	cmpldi	r3,hcall_real_table_end - hcall_real_table
+ 	bge	guest_exit_cont
++	/* See if this hcall is enabled for in-kernel handling */
++	ld	r4, VCPU_KVM(r9)
++	srdi	r0, r3, 8	/* r0 = (r3 / 4) >> 6 */
++	sldi	r0, r0, 3	/* index into kvm->arch.enabled_hcalls[] */
++	add	r4, r4, r0
++	ld	r0, KVM_ENABLED_HCALLS(r4)
++	rlwinm	r4, r3, 32-2, 0x3f	/* r4 = (r3 / 4) & 0x3f */
++	srd	r0, r0, r4
++	andi.	r0, r0, 1
++	beq	guest_exit_cont
++	/* Get pointer to handler, if any, and call it */
+ 	LOAD_REG_ADDR(r4, hcall_real_table)
+ 	lwax	r3,r3,r4
+ 	cmpwi	r3,0
+diff --git a/arch/powerpc/kvm/book3s_pr.c b/arch/powerpc/kvm/book3s_pr.c
+index 3b82e86..123ac7d 100644
+--- a/arch/powerpc/kvm/book3s_pr.c
++++ b/arch/powerpc/kvm/book3s_pr.c
+@@ -1597,6 +1597,11 @@ static int kvmppc_core_init_vm_pr(struct kvm *kvm)
+ {
+ 	mutex_init(&kvm->arch.hpt_mutex);
+ 
++#ifdef CONFIG_PPC_BOOK3S_64
++	/* Start out with the default set of hcalls enabled */
++	kvmppc_pr_init_default_hcalls(kvm);
++#endif
++
+ 	if (firmware_has_feature(FW_FEATURE_SET_MODE)) {
+ 		spin_lock(&kvm_global_user_count_lock);
+ 		if (++kvm_global_user_count == 1)
+diff --git a/arch/powerpc/kvm/book3s_pr_papr.c b/arch/powerpc/kvm/book3s_pr_papr.c
+index f7c25c6..eacaa6e 100644
+--- a/arch/powerpc/kvm/book3s_pr_papr.c
++++ b/arch/powerpc/kvm/book3s_pr_papr.c
+@@ -267,6 +267,10 @@ static int kvmppc_h_pr_xics_hcall(struct kvm_vcpu *vcpu, u32 cmd)
+ 
+ int kvmppc_h_pr(struct kvm_vcpu *vcpu, unsigned long cmd)
+ {
++	if (cmd <= MAX_HCALL_OPCODE &&
++	    !test_bit(cmd/4, vcpu->kvm->arch.enabled_hcalls))
++		return EMULATE_FAIL;
++
+ 	switch (cmd) {
+ 	case H_ENTER:
+ 		return kvmppc_h_pr_enter(vcpu);
+@@ -304,3 +308,36 @@ int kvmppc_h_pr(struct kvm_vcpu *vcpu, unsigned long cmd)
+ 
+ 	return EMULATE_FAIL;
+ }
++
++
++/*
++ * List of hcall numbers to enable by default.
++ * For compatibility with old userspace, we enable by default
++ * all hcalls that were implemented before the hcall-enabling
++ * facility was added.  Note this list should not include H_RTAS.
++ */
++static unsigned int default_hcall_list[] = {
++	H_ENTER,
++	H_REMOVE,
++	H_PROTECT,
++	H_BULK_REMOVE,
++	H_PUT_TCE,
++	H_CEDE,
++#ifdef CONFIG_KVM_XICS
++	H_XIRR,
++	H_CPPR,
++	H_EOI,
++	H_IPI,
++	H_IPOLL,
++	H_XIRR_X,
++#endif
++	0
++};
++
++void kvmppc_pr_init_default_hcalls(struct kvm *kvm)
++{
++	int i;
++
++	for (i = 0; default_hcall_list[i]; ++i)
++		__set_bit(default_hcall_list[i] / 4, kvm->arch.enabled_hcalls);
++}
+diff --git a/arch/powerpc/kvm/powerpc.c b/arch/powerpc/kvm/powerpc.c
+index 61c738a..3222a4d 100644
+--- a/arch/powerpc/kvm/powerpc.c
++++ b/arch/powerpc/kvm/powerpc.c
+@@ -387,6 +387,7 @@ int kvm_dev_ioctl_check_extension(long ext)
+ 	case KVM_CAP_PPC_UNSET_IRQ:
+ 	case KVM_CAP_PPC_IRQ_LEVEL:
+ 	case KVM_CAP_ENABLE_CAP:
++	case KVM_CAP_ENABLE_CAP_VM:
+ 	case KVM_CAP_ONE_REG:
+ 	case KVM_CAP_IOEVENTFD:
+ 	case KVM_CAP_DEVICE_CTRL:
+@@ -417,6 +418,7 @@ int kvm_dev_ioctl_check_extension(long ext)
+ 	case KVM_CAP_PPC_ALLOC_HTAB:
+ 	case KVM_CAP_PPC_RTAS:
+ 	case KVM_CAP_PPC_FIXUP_HCALL:
++	case KVM_CAP_PPC_ENABLE_HCALL:
+ #ifdef CONFIG_KVM_XICS
+ 	case KVM_CAP_IRQ_XICS:
+ #endif
+@@ -1099,6 +1101,40 @@ int kvm_vm_ioctl_irq_line(struct kvm *kvm, struct kvm_irq_level *irq_event,
+ 	return 0;
+ }
+ 
++
++static int kvm_vm_ioctl_enable_cap(struct kvm *kvm,
++				   struct kvm_enable_cap *cap)
++{
++	int r;
++
++	if (cap->flags)
++		return -EINVAL;
++
++	switch (cap->cap) {
++#ifdef CONFIG_KVM_BOOK3S_64_HANDLER
++	case KVM_CAP_PPC_ENABLE_HCALL: {
++		unsigned long hcall = cap->args[0];
++
++		r = -EINVAL;
++		if (hcall > MAX_HCALL_OPCODE || (hcall & 3) ||
++		    cap->args[1] > 1)
++			break;
++		if (cap->args[1])
++			set_bit(hcall / 4, kvm->arch.enabled_hcalls);
++		else
++			clear_bit(hcall / 4, kvm->arch.enabled_hcalls);
++		r = 0;
++		break;
++	}
++#endif
++	default:
++		r = -EINVAL;
++		break;
++	}
++
++	return r;
++}
++
+ long kvm_arch_vm_ioctl(struct file *filp,
+                        unsigned int ioctl, unsigned long arg)
+ {
+@@ -1118,6 +1154,15 @@ long kvm_arch_vm_ioctl(struct file *filp,
+ 
+ 		break;
+ 	}
++	case KVM_ENABLE_CAP:
++	{
++		struct kvm_enable_cap cap;
++		r = -EFAULT;
++		if (copy_from_user(&cap, argp, sizeof(cap)))
++			goto out;
++		r = kvm_vm_ioctl_enable_cap(kvm, &cap);
++		break;
++	}
+ #ifdef CONFIG_PPC_BOOK3S_64
+ 	case KVM_CREATE_SPAPR_TCE: {
+ 		struct kvm_create_spapr_tce create_tce;
+diff --git a/include/uapi/linux/kvm.h b/include/uapi/linux/kvm.h
+index e11d8f1..0418b74 100644
+--- a/include/uapi/linux/kvm.h
++++ b/include/uapi/linux/kvm.h
+@@ -758,6 +758,7 @@ struct kvm_ppc_smmu_info {
+ #define KVM_CAP_VM_ATTRIBUTES 101
+ #define KVM_CAP_ARM_PSCI_0_2 102
+ #define KVM_CAP_PPC_FIXUP_HCALL 103
++#define KVM_CAP_PPC_ENABLE_HCALL 104
+ 
+ #ifdef KVM_CAP_IRQ_ROUTING
+ 
+-- 
+1.7.10.4
+

@@ -1,0 +1,144 @@
+From: Alexander Graf <agraf@suse.de>
+Date: Mon, 14 Jul 2014 18:33:08 +0200
+Subject: KVM: Allow KVM_CHECK_EXTENSION on the vm fd
+Origin: https://git.kernel.org/linus/92b591a4c46b103ebd3fc0d03a084e1efd331253
+
+The KVM_CHECK_EXTENSION is only available on the kvm fd today. Unfortunately
+on PPC some of the capabilities change depending on the way a VM was created.
+
+So instead we need a way to expose capabilities as VM ioctl, so that we can
+see which VM type we're using (HV or PR). To enable this, add the
+KVM_CHECK_EXTENSION ioctl to our vm ioctl portfolio.
+
+Signed-off-by: Alexander Graf <agraf@suse.de>
+Acked-by: Paolo Bonzini <pbonzini@redhat.com>
+---
+ Documentation/virtual/kvm/api.txt |    7 +++--
+ include/uapi/linux/kvm.h          |    1 +
+ virt/kvm/kvm_main.c               |   58 ++++++++++++++++++++-----------------
+ 3 files changed, 37 insertions(+), 29 deletions(-)
+
+diff --git a/Documentation/virtual/kvm/api.txt b/Documentation/virtual/kvm/api.txt
+index 884f819..8898caf 100644
+--- a/Documentation/virtual/kvm/api.txt
++++ b/Documentation/virtual/kvm/api.txt
+@@ -148,9 +148,9 @@ of banks, as set via the KVM_X86_SETUP_MCE ioctl.
+ 
+ 4.4 KVM_CHECK_EXTENSION
+ 
+-Capability: basic
++Capability: basic, KVM_CAP_CHECK_EXTENSION_VM for vm ioctl
+ Architectures: all
+-Type: system ioctl
++Type: system ioctl, vm ioctl
+ Parameters: extension identifier (KVM_CAP_*)
+ Returns: 0 if unsupported; 1 (or some other positive integer) if supported
+ 
+@@ -160,6 +160,9 @@ receives an integer that describes the extension availability.
+ Generally 0 means no and 1 means yes, but some extensions may report
+ additional information in the integer return value.
+ 
++Based on their initialization different VMs may have different capabilities.
++It is thus encouraged to use the vm ioctl to query for capabilities (available
++with KVM_CAP_CHECK_EXTENSION_VM on the vm fd)
+ 
+ 4.5 KVM_GET_VCPU_MMAP_SIZE
+ 
+diff --git a/include/uapi/linux/kvm.h b/include/uapi/linux/kvm.h
+index 0418b74..51776ca 100644
+--- a/include/uapi/linux/kvm.h
++++ b/include/uapi/linux/kvm.h
+@@ -759,6 +759,7 @@ struct kvm_ppc_smmu_info {
+ #define KVM_CAP_ARM_PSCI_0_2 102
+ #define KVM_CAP_PPC_FIXUP_HCALL 103
+ #define KVM_CAP_PPC_ENABLE_HCALL 104
++#define KVM_CAP_CHECK_EXTENSION_VM 105
+ 
+ #ifdef KVM_CAP_IRQ_ROUTING
+ 
+diff --git a/virt/kvm/kvm_main.c b/virt/kvm/kvm_main.c
+index e28f3ca..1b95cc9 100644
+--- a/virt/kvm/kvm_main.c
++++ b/virt/kvm/kvm_main.c
+@@ -2324,6 +2324,34 @@ static int kvm_ioctl_create_device(struct kvm *kvm,
+ 	return 0;
+ }
+ 
++static long kvm_vm_ioctl_check_extension_generic(struct kvm *kvm, long arg)
++{
++	switch (arg) {
++	case KVM_CAP_USER_MEMORY:
++	case KVM_CAP_DESTROY_MEMORY_REGION_WORKS:
++	case KVM_CAP_JOIN_MEMORY_REGIONS_WORKS:
++#ifdef CONFIG_KVM_APIC_ARCHITECTURE
++	case KVM_CAP_SET_BOOT_CPU_ID:
++#endif
++	case KVM_CAP_INTERNAL_ERROR_DATA:
++#ifdef CONFIG_HAVE_KVM_MSI
++	case KVM_CAP_SIGNAL_MSI:
++#endif
++#ifdef CONFIG_HAVE_KVM_IRQ_ROUTING
++	case KVM_CAP_IRQFD_RESAMPLE:
++#endif
++	case KVM_CAP_CHECK_EXTENSION_VM:
++		return 1;
++#ifdef CONFIG_HAVE_KVM_IRQ_ROUTING
++	case KVM_CAP_IRQ_ROUTING:
++		return KVM_MAX_IRQ_ROUTES;
++#endif
++	default:
++		break;
++	}
++	return kvm_vm_ioctl_check_extension(kvm, arg);
++}
++
+ static long kvm_vm_ioctl(struct file *filp,
+ 			   unsigned int ioctl, unsigned long arg)
+ {
+@@ -2487,6 +2515,9 @@ static long kvm_vm_ioctl(struct file *filp,
+ 		r = 0;
+ 		break;
+ 	}
++	case KVM_CHECK_EXTENSION:
++		r = kvm_vm_ioctl_check_extension_generic(kvm, arg);
++		break;
+ 	default:
+ 		r = kvm_arch_vm_ioctl(filp, ioctl, arg);
+ 		if (r == -ENOTTY)
+@@ -2571,33 +2602,6 @@ static int kvm_dev_ioctl_create_vm(unsigned long type)
+ 	return r;
+ }
+ 
+-static long kvm_vm_ioctl_check_extension_generic(struct kvm *kvm, long arg)
+-{
+-	switch (arg) {
+-	case KVM_CAP_USER_MEMORY:
+-	case KVM_CAP_DESTROY_MEMORY_REGION_WORKS:
+-	case KVM_CAP_JOIN_MEMORY_REGIONS_WORKS:
+-#ifdef CONFIG_KVM_APIC_ARCHITECTURE
+-	case KVM_CAP_SET_BOOT_CPU_ID:
+-#endif
+-	case KVM_CAP_INTERNAL_ERROR_DATA:
+-#ifdef CONFIG_HAVE_KVM_MSI
+-	case KVM_CAP_SIGNAL_MSI:
+-#endif
+-#ifdef CONFIG_HAVE_KVM_IRQ_ROUTING
+-	case KVM_CAP_IRQFD_RESAMPLE:
+-#endif
+-		return 1;
+-#ifdef CONFIG_HAVE_KVM_IRQ_ROUTING
+-	case KVM_CAP_IRQ_ROUTING:
+-		return KVM_MAX_IRQ_ROUTES;
+-#endif
+-	default:
+-		break;
+-	}
+-	return kvm_vm_ioctl_check_extension(kvm, arg);
+-}
+-
+ static long kvm_dev_ioctl(struct file *filp,
+ 			  unsigned int ioctl, unsigned long arg)
+ {
+-- 
+1.7.10.4
+

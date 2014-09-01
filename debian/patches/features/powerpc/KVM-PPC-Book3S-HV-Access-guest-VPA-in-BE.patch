@@ -1,0 +1,103 @@
+From: Alexander Graf <agraf@suse.de>
+Date: Wed, 11 Jun 2014 10:34:19 +0200
+Subject: KVM: PPC: Book3S HV: Access guest VPA in BE
+Origin: https://git.kernel.org/linus/02407552256111479fbfd23a3e01218b399aaa35
+
+There are a few shared data structures between the host and the guest. Most
+of them get registered through the VPA interface.
+
+These data structures are defined to always be in big endian byte order, so
+let's make sure we always access them in big endian.
+
+Signed-off-by: Alexander Graf <agraf@suse.de>
+---
+ arch/powerpc/kvm/book3s_hv.c     |   22 +++++++++++-----------
+ arch/powerpc/kvm/book3s_hv_ras.c |    6 +++---
+ 2 files changed, 14 insertions(+), 14 deletions(-)
+
+diff --git a/arch/powerpc/kvm/book3s_hv.c b/arch/powerpc/kvm/book3s_hv.c
+index 7db9df2..f1281c4 100644
+--- a/arch/powerpc/kvm/book3s_hv.c
++++ b/arch/powerpc/kvm/book3s_hv.c
+@@ -272,7 +272,7 @@ struct kvm_vcpu *kvmppc_find_vcpu(struct kvm *kvm, int id)
+ static void init_vpa(struct kvm_vcpu *vcpu, struct lppaca *vpa)
+ {
+ 	vpa->__old_status |= LPPACA_OLD_SHARED_PROC;
+-	vpa->yield_count = 1;
++	vpa->yield_count = cpu_to_be32(1);
+ }
+ 
+ static int set_vpa(struct kvm_vcpu *vcpu, struct kvmppc_vpa *v,
+@@ -295,8 +295,8 @@ static int set_vpa(struct kvm_vcpu *vcpu, struct kvmppc_vpa *v,
+ struct reg_vpa {
+ 	u32 dummy;
+ 	union {
+-		u16 hword;
+-		u32 word;
++		__be16 hword;
++		__be32 word;
+ 	} length;
+ };
+ 
+@@ -335,9 +335,9 @@ static unsigned long do_h_register_vpa(struct kvm_vcpu *vcpu,
+ 		if (va == NULL)
+ 			return H_PARAMETER;
+ 		if (subfunc == H_VPA_REG_VPA)
+-			len = ((struct reg_vpa *)va)->length.hword;
++			len = be16_to_cpu(((struct reg_vpa *)va)->length.hword);
+ 		else
+-			len = ((struct reg_vpa *)va)->length.word;
++			len = be32_to_cpu(((struct reg_vpa *)va)->length.word);
+ 		kvmppc_unpin_guest_page(kvm, va, vpa, false);
+ 
+ 		/* Check length */
+@@ -542,18 +542,18 @@ static void kvmppc_create_dtl_entry(struct kvm_vcpu *vcpu,
+ 		return;
+ 	memset(dt, 0, sizeof(struct dtl_entry));
+ 	dt->dispatch_reason = 7;
+-	dt->processor_id = vc->pcpu + vcpu->arch.ptid;
+-	dt->timebase = now + vc->tb_offset;
+-	dt->enqueue_to_dispatch_time = stolen;
+-	dt->srr0 = kvmppc_get_pc(vcpu);
+-	dt->srr1 = vcpu->arch.shregs.msr;
++	dt->processor_id = cpu_to_be16(vc->pcpu + vcpu->arch.ptid);
++	dt->timebase = cpu_to_be64(now + vc->tb_offset);
++	dt->enqueue_to_dispatch_time = cpu_to_be32(stolen);
++	dt->srr0 = cpu_to_be64(kvmppc_get_pc(vcpu));
++	dt->srr1 = cpu_to_be64(vcpu->arch.shregs.msr);
+ 	++dt;
+ 	if (dt == vcpu->arch.dtl.pinned_end)
+ 		dt = vcpu->arch.dtl.pinned_addr;
+ 	vcpu->arch.dtl_ptr = dt;
+ 	/* order writing *dt vs. writing vpa->dtl_idx */
+ 	smp_wmb();
+-	vpa->dtl_idx = ++vcpu->arch.dtl_index;
++	vpa->dtl_idx = cpu_to_be64(++vcpu->arch.dtl_index);
+ 	vcpu->arch.dtl.dirty = true;
+ }
+ 
+diff --git a/arch/powerpc/kvm/book3s_hv_ras.c b/arch/powerpc/kvm/book3s_hv_ras.c
+index 3a5c568..d562c8e 100644
+--- a/arch/powerpc/kvm/book3s_hv_ras.c
++++ b/arch/powerpc/kvm/book3s_hv_ras.c
+@@ -45,14 +45,14 @@ static void reload_slb(struct kvm_vcpu *vcpu)
+ 		return;
+ 
+ 	/* Sanity check */
+-	n = min_t(u32, slb->persistent, SLB_MIN_SIZE);
++	n = min_t(u32, be32_to_cpu(slb->persistent), SLB_MIN_SIZE);
+ 	if ((void *) &slb->save_area[n] > vcpu->arch.slb_shadow.pinned_end)
+ 		return;
+ 
+ 	/* Load up the SLB from that */
+ 	for (i = 0; i < n; ++i) {
+-		unsigned long rb = slb->save_area[i].esid;
+-		unsigned long rs = slb->save_area[i].vsid;
++		unsigned long rb = be64_to_cpu(slb->save_area[i].esid);
++		unsigned long rs = be64_to_cpu(slb->save_area[i].vsid);
+ 
+ 		rb = (rb & ~0xFFFul) | i;	/* insert entry number */
+ 		asm volatile("slbmte %0,%1" : : "r" (rs), "r" (rb));
+-- 
+1.7.10.4
+
