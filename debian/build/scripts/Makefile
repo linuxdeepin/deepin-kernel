@@ -2,7 +2,8 @@ PROGS = \
 	bin2c \
 	conmakehash \
 	kallsyms \
-	pnmtologo
+	pnmtologo \
+	recordmcount
 
 DATA = \
 	Kbuild.include \
@@ -33,6 +34,7 @@ SCRIPTS =  \
 	mkuboot.sh \
 	namespace.pl \
 	patch-kernel \
+	recordmcount.pl \
 	setlocalversion \
 	ver_linux
 
