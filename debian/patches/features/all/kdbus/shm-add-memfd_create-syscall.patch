@@ -1,0 +1,181 @@
+From: David Herrmann <dh.herrmann@gmail.com>
+Date: Fri, 8 Aug 2014 14:25:29 -0700
+Subject: shm: add memfd_create() syscall
+Origin: https://git.kernel.org/linus/9183df25fe7b194563db3fec6dc3202a5855839c
+Bug-Debian: https://bugs.debian.org/760702
+
+memfd_create() is similar to mmap(MAP_ANON), but returns a file-descriptor
+that you can pass to mmap().  It can support sealing and avoids any
+connection to user-visible mount-points.  Thus, it's not subject to quotas
+on mounted file-systems, but can be used like malloc()'ed memory, but with
+a file-descriptor to it.
+
+memfd_create() returns the raw shmem file, so calls like ftruncate() can
+be used to modify the underlying inode.  Also calls like fstat() will
+return proper information and mark the file as regular file.  If you want
+sealing, you can specify MFD_ALLOW_SEALING.  Otherwise, sealing is not
+supported (like on all other regular files).
+
+Compared to O_TMPFILE, it does not require a tmpfs mount-point and is not
+subject to a filesystem size limit.  It is still properly accounted to
+memcg limits, though, and to the same overcommit or no-overcommit
+accounting as all user memory.
+
+Signed-off-by: David Herrmann <dh.herrmann@gmail.com>
+Acked-by: Hugh Dickins <hughd@google.com>
+Cc: Michael Kerrisk <mtk.manpages@gmail.com>
+Cc: Ryan Lortie <desrt@desrt.ca>
+Cc: Lennart Poettering <lennart@poettering.net>
+Cc: Daniel Mack <zonque@gmail.com>
+Cc: Andy Lutomirski <luto@amacapital.net>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+[bwh: Backported to 3.16: adjust context]
+---
+ arch/x86/syscalls/syscall_32.tbl |  1 +
+ arch/x86/syscalls/syscall_64.tbl |  1 +
+ include/linux/syscalls.h         |  1 +
+ include/uapi/linux/memfd.h       |  8 +++++
+ kernel/sys_ni.c                  |  1 +
+ mm/shmem.c                       | 73 ++++++++++++++++++++++++++++++++++++++++
+ 6 files changed, 85 insertions(+)
+ create mode 100644 include/uapi/linux/memfd.h
+
+--- a/arch/x86/syscalls/syscall_32.tbl
++++ b/arch/x86/syscalls/syscall_32.tbl
+@@ -360,3 +360,4 @@
+ 351	i386	sched_setattr		sys_sched_setattr
+ 352	i386	sched_getattr		sys_sched_getattr
+ 353	i386	renameat2		sys_renameat2
++356	i386	memfd_create		sys_memfd_create
+--- a/arch/x86/syscalls/syscall_64.tbl
++++ b/arch/x86/syscalls/syscall_64.tbl
+@@ -323,6 +323,7 @@
+ 314	common	sched_setattr		sys_sched_setattr
+ 315	common	sched_getattr		sys_sched_getattr
+ 316	common	renameat2		sys_renameat2
++319	common	memfd_create		sys_memfd_create
+ 
+ #
+ # x32-specific system call numbers start at 512 to avoid cache impact
+--- a/include/linux/syscalls.h
++++ b/include/linux/syscalls.h
+@@ -802,6 +802,7 @@ asmlinkage long sys_timerfd_settime(int
+ asmlinkage long sys_timerfd_gettime(int ufd, struct itimerspec __user *otmr);
+ asmlinkage long sys_eventfd(unsigned int count);
+ asmlinkage long sys_eventfd2(unsigned int count, int flags);
++asmlinkage long sys_memfd_create(const char __user *uname_ptr, unsigned int flags);
+ asmlinkage long sys_fallocate(int fd, int mode, loff_t offset, loff_t len);
+ asmlinkage long sys_old_readdir(unsigned int, struct old_linux_dirent __user *, unsigned int);
+ asmlinkage long sys_pselect6(int, fd_set __user *, fd_set __user *,
+--- /dev/null
++++ b/include/uapi/linux/memfd.h
+@@ -0,0 +1,8 @@
++#ifndef _UAPI_LINUX_MEMFD_H
++#define _UAPI_LINUX_MEMFD_H
++
++/* flags for memfd_create(2) (unsigned int) */
++#define MFD_CLOEXEC		0x0001U
++#define MFD_ALLOW_SEALING	0x0002U
++
++#endif /* _UAPI_LINUX_MEMFD_H */
+--- a/kernel/sys_ni.c
++++ b/kernel/sys_ni.c
+@@ -197,6 +197,7 @@ cond_syscall(compat_sys_timerfd_settime)
+ cond_syscall(compat_sys_timerfd_gettime);
+ cond_syscall(sys_eventfd);
+ cond_syscall(sys_eventfd2);
++cond_syscall(sys_memfd_create);
+ 
+ /* performance counters: */
+ cond_syscall(sys_perf_event_open);
+--- a/mm/shmem.c
++++ b/mm/shmem.c
+@@ -66,7 +66,9 @@ static struct vfsmount *shm_mnt;
+ #include <linux/highmem.h>
+ #include <linux/seq_file.h>
+ #include <linux/magic.h>
++#include <linux/syscalls.h>
+ #include <linux/fcntl.h>
++#include <uapi/linux/memfd.h>
+ 
+ #include <asm/uaccess.h>
+ #include <asm/pgtable.h>
+@@ -2710,6 +2712,77 @@ static int shmem_show_options(struct seq
+ 	shmem_show_mpol(seq, sbinfo->mpol);
+ 	return 0;
+ }
++
++#define MFD_NAME_PREFIX "memfd:"
++#define MFD_NAME_PREFIX_LEN (sizeof(MFD_NAME_PREFIX) - 1)
++#define MFD_NAME_MAX_LEN (NAME_MAX - MFD_NAME_PREFIX_LEN)
++
++#define MFD_ALL_FLAGS (MFD_CLOEXEC | MFD_ALLOW_SEALING)
++
++SYSCALL_DEFINE2(memfd_create,
++		const char __user *, uname,
++		unsigned int, flags)
++{
++	struct shmem_inode_info *info;
++	struct file *file;
++	int fd, error;
++	char *name;
++	long len;
++
++	if (flags & ~(unsigned int)MFD_ALL_FLAGS)
++		return -EINVAL;
++
++	/* length includes terminating zero */
++	len = strnlen_user(uname, MFD_NAME_MAX_LEN + 1);
++	if (len <= 0)
++		return -EFAULT;
++	if (len > MFD_NAME_MAX_LEN + 1)
++		return -EINVAL;
++
++	name = kmalloc(len + MFD_NAME_PREFIX_LEN, GFP_TEMPORARY);
++	if (!name)
++		return -ENOMEM;
++
++	strcpy(name, MFD_NAME_PREFIX);
++	if (copy_from_user(&name[MFD_NAME_PREFIX_LEN], uname, len)) {
++		error = -EFAULT;
++		goto err_name;
++	}
++
++	/* terminating-zero may have changed after strnlen_user() returned */
++	if (name[len + MFD_NAME_PREFIX_LEN - 1]) {
++		error = -EFAULT;
++		goto err_name;
++	}
++
++	fd = get_unused_fd_flags((flags & MFD_CLOEXEC) ? O_CLOEXEC : 0);
++	if (fd < 0) {
++		error = fd;
++		goto err_name;
++	}
++
++	file = shmem_file_setup(name, 0, VM_NORESERVE);
++	if (IS_ERR(file)) {
++		error = PTR_ERR(file);
++		goto err_fd;
++	}
++	info = SHMEM_I(file_inode(file));
++	file->f_mode |= FMODE_LSEEK | FMODE_PREAD | FMODE_PWRITE;
++	file->f_flags |= O_RDWR | O_LARGEFILE;
++	if (flags & MFD_ALLOW_SEALING)
++		info->seals &= ~F_SEAL_SEAL;
++
++	fd_install(fd, file);
++	kfree(name);
++	return fd;
++
++err_fd:
++	put_unused_fd(fd);
++err_name:
++	kfree(name);
++	return error;
++}
++
+ #endif /* CONFIG_TMPFS */
+ 
+ static void shmem_put_super(struct super_block *sb)
