@@ -1,0 +1,231 @@
+From: Paolo Bonzini <pbonzini@redhat.com>
+Date: Wed, 6 Aug 2014 14:24:45 +0200
+Subject: KVM: Move more code under CONFIG_HAVE_KVM_IRQFD
+Origin: https://git.kernel.org/linus/c77dcacb397519b6ade8f08201a4a90a7f4f751e
+
+Commits e4d57e1ee1ab (KVM: Move irq notifier implementation into
+eventfd.c, 2014-06-30) included the irq notifier code unconditionally
+in eventfd.c, while it was under CONFIG_HAVE_KVM_IRQCHIP before.
+
+Similarly, commit 297e21053a52 (KVM: Give IRQFD its own separate enabling
+Kconfig option, 2014-06-30) moved code from CONFIG_HAVE_IRQ_ROUTING
+to CONFIG_HAVE_KVM_IRQFD but forgot to move the pieces that used to be
+under CONFIG_HAVE_KVM_IRQCHIP.
+
+Together, this broke compilation without CONFIG_KVM_XICS.  Fix by adding
+or changing the #ifdefs so that they point at CONFIG_HAVE_KVM_IRQFD.
+
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+---
+ include/linux/kvm_host.h   |   2 +
+ include/trace/events/kvm.h |   8 +--
+ virt/kvm/eventfd.c         | 122 ++++++++++++++++++++++-----------------------
+ virt/kvm/kvm_main.c        |   2 +
+ 4 files changed, 69 insertions(+), 65 deletions(-)
+
+diff --git a/include/linux/kvm_host.h b/include/linux/kvm_host.h
+index 8593d2e..a4c33b3 100644
+--- a/include/linux/kvm_host.h
++++ b/include/linux/kvm_host.h
+@@ -388,6 +388,8 @@ struct kvm {
+ 	 */
+ 	struct kvm_irq_routing_table __rcu *irq_routing;
+ 	struct hlist_head mask_notifier_list;
++#endif
++#ifdef CONFIG_HAVE_KVM_IRQFD
+ 	struct hlist_head irq_ack_notifier_list;
+ #endif
+ 
+diff --git a/include/trace/events/kvm.h b/include/trace/events/kvm.h
+index 131a0bd..908925a 100644
+--- a/include/trace/events/kvm.h
++++ b/include/trace/events/kvm.h
+@@ -37,7 +37,7 @@ TRACE_EVENT(kvm_userspace_exit,
+ 		  __entry->errno < 0 ? -__entry->errno : __entry->reason)
+ );
+ 
+-#if defined(CONFIG_HAVE_KVM_IRQCHIP)
++#if defined(CONFIG_HAVE_KVM_IRQFD)
+ TRACE_EVENT(kvm_set_irq,
+ 	TP_PROTO(unsigned int gsi, int level, int irq_source_id),
+ 	TP_ARGS(gsi, level, irq_source_id),
+@@ -57,7 +57,7 @@ TRACE_EVENT(kvm_set_irq,
+ 	TP_printk("gsi %u level %d source %d",
+ 		  __entry->gsi, __entry->level, __entry->irq_source_id)
+ );
+-#endif
++#endif /* defined(CONFIG_HAVE_KVM_IRQFD) */
+ 
+ #if defined(__KVM_HAVE_IOAPIC)
+ #define kvm_deliver_mode		\
+@@ -124,7 +124,7 @@ TRACE_EVENT(kvm_msi_set_irq,
+ 
+ #endif /* defined(__KVM_HAVE_IOAPIC) */
+ 
+-#if defined(CONFIG_HAVE_KVM_IRQCHIP)
++#if defined(CONFIG_HAVE_KVM_IRQFD)
+ 
+ TRACE_EVENT(kvm_ack_irq,
+ 	TP_PROTO(unsigned int irqchip, unsigned int pin),
+@@ -149,7 +149,7 @@ TRACE_EVENT(kvm_ack_irq,
+ #endif
+ );
+ 
+-#endif /* defined(CONFIG_HAVE_KVM_IRQCHIP) */
++#endif /* defined(CONFIG_HAVE_KVM_IRQFD) */
+ 
+ 
+ 
+diff --git a/virt/kvm/eventfd.c b/virt/kvm/eventfd.c
+index f5f6154..3c5981c 100644
+--- a/virt/kvm/eventfd.c
++++ b/virt/kvm/eventfd.c
+@@ -445,6 +445,67 @@ out:
+ 	kfree(irqfd);
+ 	return ret;
+ }
++
++bool kvm_irq_has_notifier(struct kvm *kvm, unsigned irqchip, unsigned pin)
++{
++	struct kvm_irq_ack_notifier *kian;
++	int gsi, idx;
++
++	idx = srcu_read_lock(&kvm->irq_srcu);
++	gsi = kvm_irq_map_chip_pin(kvm, irqchip, pin);
++	if (gsi != -1)
++		hlist_for_each_entry_rcu(kian, &kvm->irq_ack_notifier_list,
++					 link)
++			if (kian->gsi == gsi) {
++				srcu_read_unlock(&kvm->irq_srcu, idx);
++				return true;
++			}
++
++	srcu_read_unlock(&kvm->irq_srcu, idx);
++
++	return false;
++}
++EXPORT_SYMBOL_GPL(kvm_irq_has_notifier);
++
++void kvm_notify_acked_irq(struct kvm *kvm, unsigned irqchip, unsigned pin)
++{
++	struct kvm_irq_ack_notifier *kian;
++	int gsi, idx;
++
++	trace_kvm_ack_irq(irqchip, pin);
++
++	idx = srcu_read_lock(&kvm->irq_srcu);
++	gsi = kvm_irq_map_chip_pin(kvm, irqchip, pin);
++	if (gsi != -1)
++		hlist_for_each_entry_rcu(kian, &kvm->irq_ack_notifier_list,
++					 link)
++			if (kian->gsi == gsi)
++				kian->irq_acked(kian);
++	srcu_read_unlock(&kvm->irq_srcu, idx);
++}
++
++void kvm_register_irq_ack_notifier(struct kvm *kvm,
++				   struct kvm_irq_ack_notifier *kian)
++{
++	mutex_lock(&kvm->irq_lock);
++	hlist_add_head_rcu(&kian->link, &kvm->irq_ack_notifier_list);
++	mutex_unlock(&kvm->irq_lock);
++#ifdef __KVM_HAVE_IOAPIC
++	kvm_vcpu_request_scan_ioapic(kvm);
++#endif
++}
++
++void kvm_unregister_irq_ack_notifier(struct kvm *kvm,
++				    struct kvm_irq_ack_notifier *kian)
++{
++	mutex_lock(&kvm->irq_lock);
++	hlist_del_init_rcu(&kian->link);
++	mutex_unlock(&kvm->irq_lock);
++	synchronize_srcu(&kvm->irq_srcu);
++#ifdef __KVM_HAVE_IOAPIC
++	kvm_vcpu_request_scan_ioapic(kvm);
++#endif
++}
+ #endif
+ 
+ void
+@@ -867,64 +928,3 @@ kvm_ioeventfd(struct kvm *kvm, struct kvm_ioeventfd *args)
+ 
+ 	return kvm_assign_ioeventfd(kvm, args);
+ }
+-
+-bool kvm_irq_has_notifier(struct kvm *kvm, unsigned irqchip, unsigned pin)
+-{
+-	struct kvm_irq_ack_notifier *kian;
+-	int gsi, idx;
+-
+-	idx = srcu_read_lock(&kvm->irq_srcu);
+-	gsi = kvm_irq_map_chip_pin(kvm, irqchip, pin);
+-	if (gsi != -1)
+-		hlist_for_each_entry_rcu(kian, &kvm->irq_ack_notifier_list,
+-					 link)
+-			if (kian->gsi == gsi) {
+-				srcu_read_unlock(&kvm->irq_srcu, idx);
+-				return true;
+-			}
+-
+-	srcu_read_unlock(&kvm->irq_srcu, idx);
+-
+-	return false;
+-}
+-EXPORT_SYMBOL_GPL(kvm_irq_has_notifier);
+-
+-void kvm_notify_acked_irq(struct kvm *kvm, unsigned irqchip, unsigned pin)
+-{
+-	struct kvm_irq_ack_notifier *kian;
+-	int gsi, idx;
+-
+-	trace_kvm_ack_irq(irqchip, pin);
+-
+-	idx = srcu_read_lock(&kvm->irq_srcu);
+-	gsi = kvm_irq_map_chip_pin(kvm, irqchip, pin);
+-	if (gsi != -1)
+-		hlist_for_each_entry_rcu(kian, &kvm->irq_ack_notifier_list,
+-					 link)
+-			if (kian->gsi == gsi)
+-				kian->irq_acked(kian);
+-	srcu_read_unlock(&kvm->irq_srcu, idx);
+-}
+-
+-void kvm_register_irq_ack_notifier(struct kvm *kvm,
+-				   struct kvm_irq_ack_notifier *kian)
+-{
+-	mutex_lock(&kvm->irq_lock);
+-	hlist_add_head_rcu(&kian->link, &kvm->irq_ack_notifier_list);
+-	mutex_unlock(&kvm->irq_lock);
+-#ifdef __KVM_HAVE_IOAPIC
+-	kvm_vcpu_request_scan_ioapic(kvm);
+-#endif
+-}
+-
+-void kvm_unregister_irq_ack_notifier(struct kvm *kvm,
+-				    struct kvm_irq_ack_notifier *kian)
+-{
+-	mutex_lock(&kvm->irq_lock);
+-	hlist_del_init_rcu(&kian->link);
+-	mutex_unlock(&kvm->irq_lock);
+-	synchronize_srcu(&kvm->irq_srcu);
+-#ifdef __KVM_HAVE_IOAPIC
+-	kvm_vcpu_request_scan_ioapic(kvm);
+-#endif
+-}
+diff --git a/virt/kvm/kvm_main.c b/virt/kvm/kvm_main.c
+index a69a623..33712fb 100644
+--- a/virt/kvm/kvm_main.c
++++ b/virt/kvm/kvm_main.c
+@@ -465,6 +465,8 @@ static struct kvm *kvm_create_vm(unsigned long type)
+ 
+ #ifdef CONFIG_HAVE_KVM_IRQCHIP
+ 	INIT_HLIST_HEAD(&kvm->mask_notifier_list);
++#endif
++#ifdef CONFIG_HAVE_KVM_IRQFD
+ 	INIT_HLIST_HEAD(&kvm->irq_ack_notifier_list);
+ #endif
+ 
+-- 
+2.0.0
+
