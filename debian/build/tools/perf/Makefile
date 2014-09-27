@@ -35,9 +35,13 @@ else ifeq ($(DEB_HOST_ARCH_CPU),sparc64)
   KERNEL_ARCH_PERF = sparc
 endif
 
-# - disable Gtk UI until it's more usable
-# - Include version in all directory names
-MAKE_PERF := $(MAKE) prefix=/usr perfexecdir=share/perf_$(VERSION)-core plugindir=/usr/lib/traceevent_$(VERSION)/plugins NO_GTK2=1 NO_PERL=1 V=1 ARCH=$(KERNEL_ARCH_PERF) EXTRA_WARNINGS=-Wno-error NO_LIBUNWIND=$(NO_LIBUNWIND)
+MAKE_PERF := $(MAKE) prefix=/usr V=1 ARCH=$(KERNEL_ARCH_PERF) EXTRA_WARNINGS=-Wno-error NO_LIBUNWIND=$(NO_LIBUNWIND)
+
+# Disable Gtk UI until it's more usable
+MAKE_PERF += NO_GTK2=1
+
+# Include version in all directory names
+MAKE_PERF += perfexecdir=share/perf_$(VERSION)-core plugindir=/usr/lib/traceevent_$(VERSION)/plugins
 
 # perf can link against libbfd if available, but the result is
 # undistributable as they are licenced under GPL v2 and v3+
