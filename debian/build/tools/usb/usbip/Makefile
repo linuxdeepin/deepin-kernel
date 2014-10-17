@@ -7,16 +7,18 @@ unexport MAKEFLAGS
 
 all:
 	cd $(srcdir) && ./autogen.sh
-	$(srcdir)/configure \
+	mkdir -p out
+	cd out && $(srcdir)/configure \
 		--prefix=/usr \
 		--with-tcp-wrappers \
 		--with-usbids-dir=/usr/share/misc \
 		--disable-shared
-	$(MAKE)
+	$(MAKE) -C out
 
 install:
-	$(MAKE) install
+	$(MAKE) -C out install
 
 clean:
 	rm -rf $(addprefix $(srcdir)/,autom4te.cache aclocal.m4 compile config.guess config.h.in config.sub configure depcomp install-sh ltmain.sh missing)
 	find $(srcdir)/ -name Makefile.in -delete
+	rm -rf out
