@@ -3,7 +3,6 @@ DATA = \
 	Makefile \
 
 SUBDIRS = \
-	drivers/staging/usbip \
 	scripts \
 	tools
 

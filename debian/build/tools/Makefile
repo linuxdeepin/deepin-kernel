@@ -1,4 +1,5 @@
 SUBDIRS = \
-	perf
+	perf \
+	usb/usbip
 
 include ../Makefile.inc
