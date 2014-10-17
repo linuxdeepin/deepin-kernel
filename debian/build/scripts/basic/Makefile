@@ -1,4 +1,5 @@
 PROGS = \
+	bin2c \
 	fixdep
 
 OUTDIR = scripts/basic
