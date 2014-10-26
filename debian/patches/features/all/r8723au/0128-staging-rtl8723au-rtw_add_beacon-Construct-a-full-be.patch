@@ -1,0 +1,121 @@
+From: Jes Sorensen <Jes.Sorensen@redhat.com>
+Date: Tue, 24 Jun 2014 15:03:20 +0200
+Subject: [128/249] staging: rtl8723au: rtw_add_beacon(): Construct a full
+ beacon frame for validation
+Origin: https://git.kernel.org/linus/fb5fd46dbdd32faecd5f826f2d47e798732b7b4d
+
+Clean up and correct the beacon frame validation using a full beacon
+frame, and pass that to rtw_check_beacon_data23a(). Previous we went
+through hoops to construct the frame, minus the ieee80211_3addr header
+which just made it more complicated, and resulted in inconsistencies
+and bugs.
+
+Signed-off-by: Jes Sorensen <Jes.Sorensen@redhat.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/staging/rtl8723au/core/rtw_ap.c           |  8 +++++---
+ drivers/staging/rtl8723au/include/rtw_ap.h        |  3 ++-
+ drivers/staging/rtl8723au/os_dep/ioctl_cfg80211.c | 24 +++++++++++------------
+ 3 files changed, 19 insertions(+), 16 deletions(-)
+
+diff --git a/drivers/staging/rtl8723au/core/rtw_ap.c b/drivers/staging/rtl8723au/core/rtw_ap.c
+index 18c9b30..08e933a 100644
+--- a/drivers/staging/rtl8723au/core/rtw_ap.c
++++ b/drivers/staging/rtl8723au/core/rtw_ap.c
+@@ -789,8 +789,8 @@ static void start_bss_network(struct rtw_adapter *padapter, u8 *pbuf)
+ 	update_bmc_sta(padapter);
+ }
+ 
+-int rtw_check_beacon_data23a(struct rtw_adapter *padapter, u8 *pbuf,
+-			     unsigned int len)
++int rtw_check_beacon_data23a(struct rtw_adapter *padapter,
++			     struct ieee80211_mgmt *mgmt, unsigned int len)
+ {
+ 	int ret = _SUCCESS;
+ 	u8 *p;
+@@ -808,7 +808,9 @@ int rtw_check_beacon_data23a(struct rtw_adapter *padapter, u8 *pbuf,
+ 	struct mlme_priv *pmlmepriv = &padapter->mlmepriv;
+ 	struct wlan_bssid_ex *pbss_network = &pmlmepriv->cur_network.network;
+ 	u8 *ie = pbss_network->IEs;
+-
++	u8 *pbuf = mgmt->u.beacon.variable - _FIXED_IE_LENGTH_;
++	len -= (offsetof(struct ieee80211_mgmt, u.beacon.variable) -
++		_FIXED_IE_LENGTH_);
+ 	/* SSID */
+ 	/* Supported rates */
+ 	/* DS Params */
+diff --git a/drivers/staging/rtl8723au/include/rtw_ap.h b/drivers/staging/rtl8723au/include/rtw_ap.h
+index 8d9be5a..9f8d235 100644
+--- a/drivers/staging/rtl8723au/include/rtw_ap.h
++++ b/drivers/staging/rtl8723au/include/rtw_ap.h
+@@ -32,7 +32,8 @@ void update_beacon23a(struct rtw_adapter *padapter, u8 ie_id, u8 *oui, u8 tx);
+ void add_RATid23a(struct rtw_adapter *padapter, struct sta_info *psta, u8 rssi_level);
+ void expire_timeout_chk23a(struct rtw_adapter *padapter);
+ void update_sta_info23a_apmode23a(struct rtw_adapter *padapter, struct sta_info *psta);
+-int rtw_check_beacon_data23a(struct rtw_adapter *padapter, u8 *pbuf, unsigned int len);
++int rtw_check_beacon_data23a(struct rtw_adapter *padapter,
++			     struct ieee80211_mgmt *mgmt, unsigned int len);
+ void rtw_ap_restore_network(struct rtw_adapter *padapter);
+ void rtw_set_macaddr_acl23a(struct rtw_adapter *padapter, int mode);
+ int rtw_acl_add_sta23a(struct rtw_adapter *padapter, u8 *addr);
+diff --git a/drivers/staging/rtl8723au/os_dep/ioctl_cfg80211.c b/drivers/staging/rtl8723au/os_dep/ioctl_cfg80211.c
+index 9584688..2a4a696 100644
+--- a/drivers/staging/rtl8723au/os_dep/ioctl_cfg80211.c
++++ b/drivers/staging/rtl8723au/os_dep/ioctl_cfg80211.c
+@@ -2916,10 +2916,11 @@ static int rtw_add_beacon(struct rtw_adapter *adapter, const u8 *head,
+ {
+ 	int ret = 0;
+ 	u8 *pbuf;
+-	uint len, wps_ielen = 0;
++	uint len, ielen, wps_ielen = 0;
+ 	struct mlme_priv *pmlmepriv = &adapter->mlmepriv;
+ 	struct wlan_bssid_ex *bss = &pmlmepriv->cur_network.network;
+ 	const struct ieee80211_mgmt *mgmt = (struct ieee80211_mgmt *)head;
++	struct ieee80211_mgmt *tmpmgmt;
+ 	/* struct sta_priv *pstapriv = &padapter->stapriv; */
+ 
+ 	DBG_8723A("%s beacon_head_len =%zu, beacon_tail_len =%zu\n",
+@@ -2934,33 +2935,32 @@ static int rtw_add_beacon(struct rtw_adapter *adapter, const u8 *head,
+ 	pbuf = kzalloc(head_len + tail_len, GFP_KERNEL);
+ 	if (!pbuf)
+ 		return -ENOMEM;
++	tmpmgmt = (struct ieee80211_mgmt *)pbuf;
+ 
+ 	bss->beacon_interval = get_unaligned_le16(&mgmt->u.beacon.beacon_int);
+ 	bss->capability = get_unaligned_le16(&mgmt->u.beacon.capab_info);
+ 	bss->tsf = get_unaligned_le64(&mgmt->u.beacon.timestamp);
+ 
+ 	/*  24 = beacon header len. */
+-	memcpy(pbuf, (void *)head + sizeof(struct ieee80211_hdr_3addr),
+-	       head_len - sizeof(struct ieee80211_hdr_3addr));
+-	memcpy(pbuf + head_len - sizeof(struct ieee80211_hdr_3addr),
+-	       (void *)tail, tail_len);
+-
+-	len = head_len + tail_len - sizeof(struct ieee80211_hdr_3addr);
++	memcpy(pbuf, (void *)head, head_len);
++	memcpy(pbuf + head_len, (void *)tail, tail_len);
+ 
++	len = head_len + tail_len;
++	ielen = len - offsetof(struct ieee80211_mgmt, u.beacon.variable);
+ 	/* check wps ie if inclued */
+ 	if (cfg80211_find_vendor_ie(WLAN_OUI_MICROSOFT,
+ 				    WLAN_OUI_TYPE_MICROSOFT_WPS,
+-				    pbuf + _FIXED_IE_LENGTH_,
+-				    len - _FIXED_IE_LENGTH_))
++				    tmpmgmt->u.beacon.variable, ielen))
+ 		DBG_8723A("add bcn, wps_ielen =%d\n", wps_ielen);
+ 
+ 	/* pbss_network->IEs will not include p2p_ie, wfd ie */
+-	rtw_ies_remove_ie23a(pbuf, &len, _BEACON_IE_OFFSET_,
++	rtw_ies_remove_ie23a(tmpmgmt->u.beacon.variable, &ielen, 0,
+ 			     WLAN_EID_VENDOR_SPECIFIC, P2P_OUI23A, 4);
+-	rtw_ies_remove_ie23a(pbuf, &len, _BEACON_IE_OFFSET_,
++	rtw_ies_remove_ie23a(tmpmgmt->u.beacon.variable, &ielen, 0,
+ 			     WLAN_EID_VENDOR_SPECIFIC, WFD_OUI23A, 4);
+ 
+-	if (rtw_check_beacon_data23a(adapter, pbuf, len) == _SUCCESS) {
++	len = ielen + offsetof(struct ieee80211_mgmt, u.beacon.variable);
++	if (rtw_check_beacon_data23a(adapter, tmpmgmt, len) == _SUCCESS) {
+ 		ret = 0;
+ 	} else {
+ 		ret = -EINVAL;

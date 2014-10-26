@@ -1,0 +1,221 @@
+From: Jes Sorensen <Jes.Sorensen@redhat.com>
+Date: Mon, 9 Jun 2014 15:16:53 +0200
+Subject: [074/249] staging: rtl8723au: Consolidate duplicate adhoc joining
+ code into rtw_do_join_adhoc()
+Origin: https://git.kernel.org/linus/fcc6020ae8915eedf8f9bd584f32a6f731ff1d14
+
+Signed-off-by: Jes Sorensen <Jes.Sorensen@redhat.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/staging/rtl8723au/core/rtw_ioctl_set.c | 40 +----------
+ drivers/staging/rtl8723au/core/rtw_mlme.c      | 93 ++++++++++----------------
+ drivers/staging/rtl8723au/include/rtw_mlme.h   |  1 +
+ 3 files changed, 41 insertions(+), 93 deletions(-)
+
+diff --git a/drivers/staging/rtl8723au/core/rtw_ioctl_set.c b/drivers/staging/rtl8723au/core/rtw_ioctl_set.c
+index f3dd995..a994893e 100644
+--- a/drivers/staging/rtl8723au/core/rtw_ioctl_set.c
++++ b/drivers/staging/rtl8723au/core/rtw_ioctl_set.c
+@@ -25,7 +25,6 @@
+ int rtw_do_join23a(struct rtw_adapter *padapter)
+ {
+ 	struct list_head *plist, *phead;
+-	u8* pibss = NULL;
+ 	struct mlme_priv *pmlmepriv = &padapter->mlmepriv;
+ 	struct rtw_queue *queue = &pmlmepriv->scanned_queue;
+ 	int ret = _SUCCESS;
+@@ -80,43 +79,10 @@ int rtw_do_join23a(struct rtw_adapter *padapter)
+ 			pmlmepriv->to_join = false;
+ 		} else {
+ 			if (check_fwstate(pmlmepriv, WIFI_ADHOC_STATE)) {
+-				struct wlan_bssid_ex *pdev_network;
+-				/*  submit createbss_cmd to change to a
+-				    ADHOC_MASTER */
+-
+-				/* pmlmepriv->lock has been acquired by
+-				   caller... */
+-				pdev_network =
+-					&padapter->registrypriv.dev_network;
+-
+-				pmlmepriv->fw_state = WIFI_ADHOC_MASTER_STATE;
+-
+-				pibss = padapter->registrypriv.dev_network.MacAddress;
+-
+-				memcpy(&pdev_network->Ssid,
+-				       &pmlmepriv->assoc_ssid,
+-				       sizeof(struct cfg80211_ssid));
+-
+-				rtw_update_registrypriv_dev_network23a(padapter);
+-
+-				rtw_generate_random_ibss23a(pibss);
+-
+-				if (rtw_createbss_cmd23a(padapter) != _SUCCESS) {
+-					RT_TRACE(_module_rtl871x_ioctl_set_c_,
+-						 _drv_err_,
+-						 ("***Error =>do_goin: rtw_creat"
+-						  "ebss_cmd status FAIL***\n"));
+-					ret = _FAIL;
++				/* switch to ADHOC_MASTER */
++				ret = rtw_do_join_adhoc(padapter);
++				if (ret != _SUCCESS)
+ 					goto exit;
+-				}
+-
+-				pmlmepriv->to_join = false;
+-
+-				RT_TRACE(_module_rtl871x_ioctl_set_c_,
+-					 _drv_info_,
+-					 ("***Error => rtw_select_and_join_from"
+-					  "_scanned_queue FAIL under STA_Mode"
+-					  "***\n "));
+ 			} else {
+ 				/*  can't associate ; reset under-linking */
+ 				_clr_fwstate_(pmlmepriv, _FW_UNDER_LINKING);
+diff --git a/drivers/staging/rtl8723au/core/rtw_mlme.c b/drivers/staging/rtl8723au/core/rtw_mlme.c
+index 77a0a4a..81693c1 100644
+--- a/drivers/staging/rtl8723au/core/rtw_mlme.c
++++ b/drivers/staging/rtl8723au/core/rtw_mlme.c
+@@ -705,8 +705,6 @@ rtw_surveydone_event_callback23a(struct rtw_adapter *adapter, const u8 *pbuf)
+ {
+ 	struct mlme_priv *pmlmepriv = &adapter->mlmepriv;
+ 	struct mlme_ext_priv *pmlmeext = &adapter->mlmeextpriv;
+-	struct wlan_bssid_ex *pdev_network;
+-	u8 *pibss;
+ 
+ 	spin_lock_bh(&pmlmepriv->lock);
+ 
+@@ -738,39 +736,8 @@ rtw_surveydone_event_callback23a(struct rtw_adapter *adapter, const u8 *pbuf)
+ 				set_fwstate(pmlmepriv, _FW_UNDER_LINKING);
+ 
+ 				if (rtw_select_and_join_from_scanned_queue23a(
+-					    pmlmepriv) == _SUCCESS) {
+-				} else {
+-					pdev_network = &adapter->registrypriv.dev_network;
+-					pibss = adapter->registrypriv.dev_network.MacAddress;
+-
+-					_clr_fwstate_(pmlmepriv,
+-						      _FW_UNDER_SURVEY);
+-
+-					RT_TRACE(_module_rtl871x_mlme_c_,
+-						 _drv_err_,
+-						 ("switching to adhoc "
+-						  "master\n"));
+-
+-					memcpy(&pdev_network->Ssid,
+-					       &pmlmepriv->assoc_ssid,
+-					       sizeof(struct cfg80211_ssid));
+-
+-					rtw_update_registrypriv_dev_network23a(
+-						adapter);
+-					rtw_generate_random_ibss23a(pibss);
+-
+-					pmlmepriv->fw_state =
+-						WIFI_ADHOC_MASTER_STATE;
+-
+-					if (rtw_createbss_cmd23a(adapter) !=
+-					    _SUCCESS)
+-					RT_TRACE(_module_rtl871x_mlme_c_,
+-						 _drv_err_,
+-						 ("Error =>rtw_createbss_cmd23a"
+-						  " status FAIL\n"));
+-
+-					pmlmepriv->to_join = false;
+-				}
++					    pmlmepriv) != _SUCCESS)
++					rtw_do_join_adhoc(adapter);
+ 			}
+ 		} else {
+ 			int ret;
+@@ -1425,7 +1392,6 @@ void rtw_stadel_event_callback23a(struct rtw_adapter *adapter, const u8 *pbuf)
+ 	struct sta_info *psta;
+ 	struct wlan_network* pwlan;
+ 	struct wlan_bssid_ex *pdev_network;
+-	u8 *pibss;
+ 	struct mlme_priv *pmlmepriv = &adapter->mlmepriv;
+ 	struct stadel_event *pstadel = (struct stadel_event *)pbuf;
+ 	struct sta_priv *pstapriv = &adapter->stapriv;
+@@ -1496,30 +1462,11 @@ void rtw_stadel_event_callback23a(struct rtw_adapter *adapter, const u8 *pbuf)
+ 			spin_unlock_bh(&pmlmepriv->scanned_queue.lock);
+ 			/* re-create ibss */
+ 			pdev_network = &adapter->registrypriv.dev_network;
+-			pibss = adapter->registrypriv.dev_network.MacAddress;
+ 
+ 			memcpy(pdev_network, &tgt_network->network,
+ 			       get_wlan_bssid_ex_sz(&tgt_network->network));
+ 
+-			memcpy(&pdev_network->Ssid, &pmlmepriv->assoc_ssid,
+-			       sizeof(struct cfg80211_ssid));
+-
+-			rtw_update_registrypriv_dev_network23a(adapter);
+-
+-			rtw_generate_random_ibss23a(pibss);
+-
+-			if (check_fwstate(pmlmepriv, WIFI_ADHOC_STATE)) {
+-				set_fwstate(pmlmepriv, WIFI_ADHOC_MASTER_STATE);
+-				_clr_fwstate_(pmlmepriv, WIFI_ADHOC_STATE);
+-			}
+-
+-			if (rtw_createbss_cmd23a(adapter) != _SUCCESS) {
+-				RT_TRACE(_module_rtl871x_ioctl_set_c_,
+-					 _drv_err_,
+-					 ("***Error =>stadel_event_callback: "
+-					  "rtw_createbss_cmd23a status "
+-					  "FAIL***\n"));
+-			}
++			rtw_do_join_adhoc(adapter);
+ 		}
+ 	}
+ 
+@@ -1777,6 +1724,40 @@ exit:
+ }
+ 
+ 
++int rtw_do_join_adhoc(struct rtw_adapter *adapter)
++{
++	struct mlme_priv *pmlmepriv = &adapter->mlmepriv;
++	struct wlan_bssid_ex *pdev_network;
++	u8 *ibss;
++	int ret;
++
++	pdev_network = &adapter->registrypriv.dev_network;
++	ibss = adapter->registrypriv.dev_network.MacAddress;
++
++	_clr_fwstate_(pmlmepriv, _FW_UNDER_SURVEY);
++
++	RT_TRACE(_module_rtl871x_mlme_c_, _drv_err_,
++		 ("switching to adhoc master\n"));
++
++	memcpy(&pdev_network->Ssid, &pmlmepriv->assoc_ssid,
++	       sizeof(struct cfg80211_ssid));
++
++	rtw_update_registrypriv_dev_network23a(adapter);
++	rtw_generate_random_ibss23a(ibss);
++
++	pmlmepriv->fw_state = WIFI_ADHOC_MASTER_STATE;
++
++	ret = rtw_createbss_cmd23a(adapter);
++	if (ret != _SUCCESS) {
++		RT_TRACE(_module_rtl871x_mlme_c_, _drv_err_,
++			 ("Error =>rtw_createbss_cmd23a status FAIL\n"));
++	} else  {
++		pmlmepriv->to_join = false;
++	}
++
++	return ret;
++}
++
+ int rtw_do_join_network(struct rtw_adapter *adapter,
+ 			struct wlan_network *candidate)
+ {
+diff --git a/drivers/staging/rtl8723au/include/rtw_mlme.h b/drivers/staging/rtl8723au/include/rtw_mlme.h
+index e48518f..79c3b3d 100644
+--- a/drivers/staging/rtl8723au/include/rtw_mlme.h
++++ b/drivers/staging/rtl8723au/include/rtw_mlme.h
+@@ -240,6 +240,7 @@ int rtw_init_mlme_priv23a(struct rtw_adapter *adapter);
+ 
+ void rtw_free_mlme_priv23a(struct mlme_priv *pmlmepriv);
+ 
++int rtw_do_join_adhoc(struct rtw_adapter *adapter);
+ int rtw_do_join_network(struct rtw_adapter *adapter,
+ 			struct wlan_network *candidate);
+ int rtw_select_and_join_from_scanned_queue23a(struct mlme_priv *pmlmepriv);

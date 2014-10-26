@@ -1,0 +1,567 @@
+From: Jes Sorensen <Jes.Sorensen@redhat.com>
+Date: Tue, 24 Jun 2014 15:03:29 +0200
+Subject: [137/249] staging: rtl8723au: Stop carrying half the beacon frame
+ header in the stored IE array
+Origin: https://git.kernel.org/linus/68e6c79609fc2d2d1132fd293f4d9dd7bdd514b5
+
+This gets rid of the odd carrying of half the beacon frame in the IE
+array stored for the network. Instead we rely on the relevant fields
+(timestamp, beacon_interval, and capability) stored in struct
+wlan_bssid_ex.
+
+Carrying only half the ieee80211_mgmt header led to a number of bugs
+and simply obfuscated the code.
+
+I have tried catching all instances relying on these three elements in
+the IEs array, but missed cases may still need to be tracked down.
+
+Signed-off-by: Jes Sorensen <Jes.Sorensen@redhat.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/staging/rtl8723au/core/rtw_ap.c        |  8 +--
+ drivers/staging/rtl8723au/core/rtw_ieee80211.c | 41 +++----------
+ drivers/staging/rtl8723au/core/rtw_mlme.c      | 27 +--------
+ drivers/staging/rtl8723au/core/rtw_mlme_ext.c  | 83 +++++++++++---------------
+ drivers/staging/rtl8723au/core/rtw_wlan_util.c | 29 ++-------
+ drivers/staging/rtl8723au/hal/rtl8723a_cmd.c   |  9 +--
+ drivers/staging/rtl8723au/include/wifi.h       |  2 +-
+ 7 files changed, 58 insertions(+), 141 deletions(-)
+
+diff --git a/drivers/staging/rtl8723au/core/rtw_ap.c b/drivers/staging/rtl8723au/core/rtw_ap.c
+index c19ed95..5c30f7b 100644
+--- a/drivers/staging/rtl8723au/core/rtw_ap.c
++++ b/drivers/staging/rtl8723au/core/rtw_ap.c
+@@ -652,7 +652,6 @@ static void start_bss_network(struct rtw_adapter *padapter, u8 *pbuf)
+ 	struct mlme_ext_info *pmlmeinfo = &pmlmeext->mlmext_info;
+ 	struct wlan_bssid_ex *pnetwork_mlmeext = &pmlmeinfo->network;
+ 	struct ieee80211_ht_operation *pht_info = NULL;
+-	int bcn_fixed_size;
+ 
+ 	bcn_interval = (u16)pnetwork->beacon_interval;
+ 	cur_channel = pnetwork->DSConfig;
+@@ -728,12 +727,9 @@ static void start_bss_network(struct rtw_adapter *padapter, u8 *pbuf)
+ 						 DYNAMIC_ALL_FUNC_ENABLE);
+ 	}
+ 	/* set channel, bwmode */
+-	bcn_fixed_size = offsetof(struct ieee80211_mgmt, u.beacon.variable) -
+-		offsetof(struct ieee80211_mgmt, u.beacon);
+ 
+-	p = cfg80211_find_ie(WLAN_EID_HT_OPERATION,
+-			     pnetwork->IEs + bcn_fixed_size,
+-			     pnetwork->IELength - bcn_fixed_size);
++	p = cfg80211_find_ie(WLAN_EID_HT_OPERATION, pnetwork->IEs,
++			     pnetwork->IELength);
+ 	if (p && p[1]) {
+ 		pht_info = (struct ieee80211_ht_operation *)(p + 2);
+ 
+diff --git a/drivers/staging/rtl8723au/core/rtw_ieee80211.c b/drivers/staging/rtl8723au/core/rtw_ieee80211.c
+index f235ae0..2cb8eed 100644
+--- a/drivers/staging/rtl8723au/core/rtw_ieee80211.c
++++ b/drivers/staging/rtl8723au/core/rtw_ieee80211.c
+@@ -355,36 +355,15 @@ int rtw_generate_ie23a(struct registry_priv *pregistrypriv)
+ 
+ 	pdev_network->tsf = 0;
+ 
+-	/* timestamp will be inserted by hardware */
+-	sz += 8;
+-	ie += sz;
+-
+-	/* beacon interval : 2bytes */
+-	/* BCN_INTERVAL; */
+-	*(u16*)ie = cpu_to_le16(pdev_network->beacon_interval);
+-	sz += 2;
+-	ie += 2;
+-
+-	/* capability info */
+-	*(u16*)ie = 0;
+-
+-	*(u16*)ie |= cpu_to_le16(WLAN_CAPABILITY_IBSS);
+ 	cap = WLAN_CAPABILITY_IBSS;
+ 
+-	if (pregistrypriv->preamble == PREAMBLE_SHORT) {
+-		*(u16*)ie |= cpu_to_le16(WLAN_CAPABILITY_SHORT_PREAMBLE);
++	if (pregistrypriv->preamble == PREAMBLE_SHORT)
+ 		cap |= WLAN_CAPABILITY_SHORT_PREAMBLE;
+-	}
+ 
+-	if (pdev_network->Privacy) {
+-		*(u16*)ie |= cpu_to_le16(WLAN_CAPABILITY_PRIVACY);
++	if (pdev_network->Privacy)
+ 		cap |= WLAN_CAPABILITY_PRIVACY;
+ 
+-	}
+-
+ 	pdev_network->capability = cap;
+-	sz += 2;
+-	ie += 2;
+ 
+ 	/* SSID */
+ 	ie = rtw_set_ie23a(ie, WLAN_EID_SSID, pdev_network->Ssid.ssid_len,
+@@ -718,13 +697,11 @@ static int rtw_get_cipher_info(struct wlan_network *pnetwork)
+ 	const u8 *pbuf;
+ 	int group_cipher = 0, pairwise_cipher = 0, is8021x = 0;
+ 	int ret = _FAIL;
+-	int r, offset, plen;
++	int r, plen;
+ 	char *pie;
+ 
+-	offset = offsetof(struct ieee80211_mgmt, u.beacon.variable) -
+-		offsetof(struct ieee80211_mgmt, u);
+-	pie = &pnetwork->network.IEs[offset];
+-	plen = pnetwork->network.IELength - offset;
++	pie = pnetwork->network.IEs;
++	plen = pnetwork->network.IELength;
+ 
+ 	pbuf = cfg80211_find_vendor_ie(WLAN_OUI_MICROSOFT,
+ 				       WLAN_OUI_TYPE_MICROSOFT_WPA, pie, plen);
+@@ -779,7 +756,7 @@ static int rtw_get_cipher_info(struct wlan_network *pnetwork)
+ void rtw_get_bcn_info23a(struct wlan_network *pnetwork)
+ {
+ 	u8 bencrypt = 0;
+-	int pie_len, ie_offset;
++	int pie_len;
+ 	u8 *pie;
+ 	const u8 *p;
+ 
+@@ -792,10 +769,8 @@ void rtw_get_bcn_info23a(struct wlan_network *pnetwork)
+ 	RT_TRACE(_module_rtl871x_mlme_c_, _drv_info_,
+ 		 ("%s: ssid =%s\n", __func__, pnetwork->network.Ssid.ssid));
+ 
+-	ie_offset = offsetof(struct ieee80211_mgmt, u.beacon.variable) -
+-		offsetof(struct ieee80211_mgmt, u);
+-	pie = pnetwork->network.IEs + ie_offset;
+-	pie_len = pnetwork->network.IELength - ie_offset;
++	pie = pnetwork->network.IEs;
++	pie_len = pnetwork->network.IELength;
+ 
+ 	p = cfg80211_find_ie(WLAN_EID_RSN, pie, pie_len);
+ 	if (p && p[1]) {
+diff --git a/drivers/staging/rtl8723au/core/rtw_mlme.c b/drivers/staging/rtl8723au/core/rtw_mlme.c
+index 66f24dc..1ccaa6f2 100644
+--- a/drivers/staging/rtl8723au/core/rtw_mlme.c
++++ b/drivers/staging/rtl8723au/core/rtw_mlme.c
+@@ -424,16 +424,11 @@ static void update_current_network(struct rtw_adapter *adapter,
+ 
+ 	if (check_fwstate(pmlmepriv, _FW_LINKED) &&
+ 	    is_same_network23a(&pmlmepriv->cur_network.network, pnetwork)) {
+-		int bcn_size;
+ 		update_network23a(&pmlmepriv->cur_network.network,
+ 				  pnetwork,adapter, true);
+ 
+-		bcn_size = offsetof(struct ieee80211_mgmt, u.beacon.variable) -
+-			offsetof(struct ieee80211_mgmt, u.beacon);
+-
+ 		rtw_update_protection23a(adapter,
+-					 pmlmepriv->cur_network.network.IEs +
+-					 bcn_size,
++					 pmlmepriv->cur_network.network.IEs,
+ 					 pmlmepriv->cur_network.network.IELength);
+ 	}
+ }
+@@ -619,8 +614,6 @@ void rtw_survey_event_cb23a(struct rtw_adapter *adapter, const u8 *pbuf)
+ 				     pnetwork->MacAddress)) {
+ 			struct wlan_network* ibss_wlan;
+ 
+-			memcpy(pmlmepriv->cur_network.network.IEs,
+-			       pnetwork->IEs, 8);
+ 			pmlmepriv->cur_network.network.beacon_interval =
+ 				pnetwork->beacon_interval;
+ 			pmlmepriv->cur_network.network.capability =
+@@ -631,8 +624,6 @@ void rtw_survey_event_cb23a(struct rtw_adapter *adapter, const u8 *pbuf)
+ 				&pmlmepriv->scanned_queue,
+ 				pnetwork->MacAddress);
+ 			if (ibss_wlan) {
+-				memcpy(ibss_wlan->network.IEs,
+-				       pnetwork->IEs, 8);
+ 				pmlmepriv->cur_network.network.beacon_interval =
+ 					ibss_wlan->network.beacon_interval;
+ 				pmlmepriv->cur_network.network.capability =
+@@ -1019,7 +1010,6 @@ rtw_joinbss_update_network23a(struct rtw_adapter *padapter,
+ {
+ 	struct mlme_priv *pmlmepriv = &padapter->mlmepriv;
+ 	struct wlan_network *cur_network = &pmlmepriv->cur_network;
+-	int bcn_size;
+ 
+ 	DBG_8723A("%s\n", __func__);
+ 
+@@ -1076,11 +1066,8 @@ rtw_joinbss_update_network23a(struct rtw_adapter *padapter,
+ 		break;
+ 	}
+ 
+-	bcn_size = offsetof(struct ieee80211_mgmt, u.beacon.variable) -
+-		offsetof(struct ieee80211_mgmt, u.beacon);
+-
+-	rtw_update_protection23a(padapter, cur_network->network.IEs +
+-				 bcn_size, cur_network->network.IELength);
++	rtw_update_protection23a(padapter, cur_network->network.IEs,
++				 cur_network->network.IELength);
+ 
+ 	rtw_update_ht_cap23a(padapter, cur_network->network.IEs,
+ 			     cur_network->network.IELength);
+@@ -2243,7 +2230,6 @@ void rtw_update_ht_cap23a(struct rtw_adapter *padapter, u8 *pie, uint ie_len)
+ 	struct registry_priv *pregistrypriv = &padapter->registrypriv;
+ 	struct mlme_ext_priv *pmlmeext = &padapter->mlmeextpriv;
+ 	struct mlme_ext_info *pmlmeinfo = &pmlmeext->mlmext_info;
+-	int bcn_fixed_size;
+ 
+ 	if (!phtpriv->ht_option)
+ 		return;
+@@ -2253,13 +2239,6 @@ void rtw_update_ht_cap23a(struct rtw_adapter *padapter, u8 *pie, uint ie_len)
+ 
+ 	DBG_8723A("+rtw_update_ht_cap23a()\n");
+ 
+-	bcn_fixed_size = offsetof(struct ieee80211_mgmt, u.beacon.variable) -
+-		offsetof(struct ieee80211_mgmt, u.beacon);
+-
+-	/* Adjust pie + ie_len for our searches */
+-	pie += bcn_fixed_size;
+-	ie_len -= bcn_fixed_size;
+-
+ 	/* maybe needs check if ap supports rx ampdu. */
+ 	if (!phtpriv->ampdu_enable && pregistrypriv->ampdu_enable == 1) {
+ 		if (pregistrypriv->wifi_spec == 1)
+diff --git a/drivers/staging/rtl8723au/core/rtw_mlme_ext.c b/drivers/staging/rtl8723au/core/rtw_mlme_ext.c
+index ebd3743..c473e33 100644
+--- a/drivers/staging/rtl8723au/core/rtw_mlme_ext.c
++++ b/drivers/staging/rtl8723au/core/rtw_mlme_ext.c
+@@ -3119,7 +3119,7 @@ static void issue_assocreq(struct rtw_adapter *padapter)
+ 	struct mlme_priv *pmlmepriv = &padapter->mlmepriv;
+ 	struct mlme_ext_priv *pmlmeext = &padapter->mlmeextpriv;
+ 	struct mlme_ext_info *pmlmeinfo = &pmlmeext->mlmext_info;
+-	int bssrate_len = 0, sta_bssrate_len = 0, pie_len, bcn_fixed_size;
++	int bssrate_len = 0, sta_bssrate_len = 0, pie_len;
+ 	u8 *pie;
+ 
+ 	pmgntframe = alloc_mgtxmitframe23a(pxmitpriv);
+@@ -3227,11 +3227,9 @@ static void issue_assocreq(struct rtw_adapter *padapter)
+ 				       bssrate_len, bssrate, &pattrib->pktlen);
+ 
+ 	/* RSN */
+-	bcn_fixed_size = offsetof(struct ieee80211_mgmt, u.beacon.variable) -
+-		offsetof(struct ieee80211_mgmt, u.beacon);
+ 
+-	pie = pmlmeinfo->network.IEs + bcn_fixed_size;
+-	pie_len = pmlmeinfo->network.IELength - bcn_fixed_size;
++	pie = pmlmeinfo->network.IEs;
++	pie_len = pmlmeinfo->network.IELength;
+ 
+ 	p = cfg80211_find_ie(WLAN_EID_RSN, pie, pie_len);
+ 	if (p)
+@@ -3309,7 +3307,7 @@ static void issue_assocreq(struct rtw_adapter *padapter)
+ 	}
+ 
+ 	/* vendor specific IE, such as WPA, WMM, WPS */
+-	for (i = bcn_fixed_size;  i < pmlmeinfo->network.IELength;) {
++	for (i = 0;  i < pmlmeinfo->network.IELength;) {
+ 		p = pmlmeinfo->network.IEs + i;
+ 
+ 		switch (p[0]) {
+@@ -4139,47 +4137,44 @@ static void rtw_site_survey(struct rtw_adapter *padapter)
+ static struct wlan_bssid_ex *collect_bss_info(struct rtw_adapter *padapter,
+ 					      struct recv_frame *precv_frame)
+ {
+-	int i;
+-	const u8 *p;
+ 	struct sk_buff *skb = precv_frame->pkt;
+ 	struct ieee80211_mgmt *mgmt = (struct ieee80211_mgmt *) skb->data;
+-	unsigned int length;
+-	u8 ie_offset;
+ 	struct registry_priv *pregistrypriv = &padapter->registrypriv;
+ 	struct mlme_ext_priv *pmlmeext = &padapter->mlmeextpriv;
+ 	struct mlme_ext_info *pmlmeinfo = &pmlmeext->mlmext_info;
+ 	struct wlan_bssid_ex *bssid;
++	const u8 *p;
++	u8 *pie;
++	unsigned int length;
++	int i;
+ 
+-	length = skb->len - sizeof(struct ieee80211_hdr_3addr);
+-
+-	if (length > MAX_IE_SZ) {
+-		/* DBG_8723A("IE too long for survey event\n"); */
+-		return NULL;
+-	}
++	length = skb->len;
+ 
+ 	bssid = kzalloc(sizeof(struct wlan_bssid_ex), GFP_ATOMIC);
+ 	if (!bssid)
+ 		return NULL;
+ 
+ 	if (ieee80211_is_beacon(mgmt->frame_control)) {
++		length -= offsetof(struct ieee80211_mgmt, u.beacon.variable);
++		pie = mgmt->u.beacon.variable;
+ 		bssid->reserved = 1;
+-		ie_offset = offsetof(struct ieee80211_mgmt, u.beacon.variable);
+ 		bssid->capability =
+ 			get_unaligned_le16(&mgmt->u.beacon.capab_info);
+ 		bssid->beacon_interval =
+ 			get_unaligned_le16(&mgmt->u.beacon.beacon_int);
+ 		bssid->tsf = get_unaligned_le64(&mgmt->u.beacon.timestamp);
+-	} else  if (ieee80211_is_probe_req(mgmt->frame_control)) {
+-		ie_offset = offsetof(struct ieee80211_mgmt,
+-				     u.probe_req.variable);
++	} else if (ieee80211_is_probe_req(mgmt->frame_control)) {
++		length -= offsetof(struct ieee80211_mgmt, u.probe_req.variable);
++		pie = mgmt->u.probe_req.variable;
+ 		bssid->reserved = 2;
+ 		bssid->capability = 0;
+ 		bssid->beacon_interval =
+ 			padapter->registrypriv.dev_network.beacon_interval;
+ 		bssid->tsf = 0;
+ 	} else if (ieee80211_is_probe_resp(mgmt->frame_control)) {
+-		ie_offset = offsetof(struct ieee80211_mgmt,
+-				     u.probe_resp.variable);
++		length -=
++			offsetof(struct ieee80211_mgmt, u.probe_resp.variable);
++		pie = mgmt->u.probe_resp.variable;
+ 		bssid->reserved = 3;
+ 		bssid->capability =
+ 			get_unaligned_le16(&mgmt->u.probe_resp.capab_info);
+@@ -4187,21 +4182,27 @@ static struct wlan_bssid_ex *collect_bss_info(struct rtw_adapter *padapter,
+ 			get_unaligned_le16(&mgmt->u.probe_resp.beacon_int);
+ 		bssid->tsf = get_unaligned_le64(&mgmt->u.probe_resp.timestamp);
+ 	} else {
++		length -= offsetof(struct ieee80211_mgmt, u.beacon.variable);
++		pie = mgmt->u.beacon.variable;
+ 		bssid->reserved = 0;
+-		ie_offset = offsetof(struct ieee80211_mgmt, u.beacon.variable);
+ 		bssid->capability =
+ 			get_unaligned_le16(&mgmt->u.beacon.capab_info);
+ 		bssid->beacon_interval =
+ 			padapter->registrypriv.dev_network.beacon_interval;
+ 		bssid->tsf = 0;
+ 	}
+-	ie_offset -= offsetof(struct ieee80211_mgmt, u);
++
++	if (length > MAX_IE_SZ) {
++		/* DBG_8723A("IE too long for survey event\n"); */
++		kfree(bssid);
++		return NULL;
++	}
+ 
+ 	bssid->Length = offsetof(struct wlan_bssid_ex, IEs) + length;
+ 
+ 	/* below is to copy the information element */
+ 	bssid->IELength = length;
+-	memcpy(bssid->IEs, &mgmt->u, bssid->IELength);
++	memcpy(bssid->IEs, pie, bssid->IELength);
+ 
+ 	/* get the signal strength */
+ 	/*  in dBM.raw data */
+@@ -4212,8 +4213,7 @@ static struct wlan_bssid_ex *collect_bss_info(struct rtw_adapter *padapter,
+ 		precv_frame->attrib.phy_info.SignalStrength;/* in percentage */
+ 
+ 	/*  checking SSID */
+-	p = cfg80211_find_ie(WLAN_EID_SSID, bssid->IEs + ie_offset,
+-			     bssid->IELength - ie_offset);
++	p = cfg80211_find_ie(WLAN_EID_SSID, bssid->IEs, bssid->IELength);
+ 
+ 	if (!p) {
+ 		DBG_8723A("marc: cannot find SSID for survey event\n");
+@@ -4230,8 +4230,7 @@ static struct wlan_bssid_ex *collect_bss_info(struct rtw_adapter *padapter,
+ 
+ 	/* checking rate info... */
+ 	i = 0;
+-	p = cfg80211_find_ie(WLAN_EID_SUPP_RATES, bssid->IEs + ie_offset,
+-			     bssid->IELength - ie_offset);
++	p = cfg80211_find_ie(WLAN_EID_SUPP_RATES, bssid->IEs, bssid->IELength);
+ 	if (p) {
+ 		if (p[1] > NDIS_802_11_LENGTH_RATES_EX) {
+ 			DBG_8723A("%s()-%d: IE too long (%d) for survey "
+@@ -4242,8 +4241,8 @@ static struct wlan_bssid_ex *collect_bss_info(struct rtw_adapter *padapter,
+ 		i = p[1];
+ 	}
+ 
+-	p = cfg80211_find_ie(WLAN_EID_EXT_SUPP_RATES, bssid->IEs + ie_offset,
+-			     bssid->IELength - ie_offset);
++	p = cfg80211_find_ie(WLAN_EID_EXT_SUPP_RATES, bssid->IEs,
++			     bssid->IELength);
+ 	if (p) {
+ 		if (p[1] > (NDIS_802_11_LENGTH_RATES_EX-i)) {
+ 			DBG_8723A("%s()-%d: IE too long (%d) for survey "
+@@ -4253,12 +4252,8 @@ static struct wlan_bssid_ex *collect_bss_info(struct rtw_adapter *padapter,
+ 		memcpy(bssid->SupportedRates + i, p + 2, p[1]);
+ 	}
+ 
+-	if (bssid->IELength < _FIXED_IE_LENGTH_)
+-		goto fail;
+-
+ 	/*  Checking for DSConfig */
+-	p = cfg80211_find_ie(WLAN_EID_DS_PARAMS, bssid->IEs + ie_offset,
+-			     bssid->IELength - ie_offset);
++	p = cfg80211_find_ie(WLAN_EID_DS_PARAMS, bssid->IEs, bssid->IELength);
+ 
+ 	bssid->DSConfig = 0;
+ 
+@@ -4266,9 +4261,8 @@ static struct wlan_bssid_ex *collect_bss_info(struct rtw_adapter *padapter,
+ 		bssid->DSConfig = p[2];
+ 	} else {/*  In 5G, some ap do not have DSSET IE */
+ 		/*  checking HT info for channel */
+-		p = cfg80211_find_ie(WLAN_EID_HT_OPERATION,
+-				     bssid->IEs + ie_offset,
+-				     bssid->IELength - ie_offset);
++		p = cfg80211_find_ie(WLAN_EID_HT_OPERATION, bssid->IEs,
++				     bssid->IELength);
+ 		if (p) {
+ 			struct ieee80211_ht_operation *HT_info =
+ 				(struct ieee80211_ht_operation *)(p + 2);
+@@ -4305,9 +4299,8 @@ static struct wlan_bssid_ex *collect_bss_info(struct rtw_adapter *padapter,
+ 	    pmlmeinfo->bwmode_updated == false) {
+ 		struct mlme_priv *pmlmepriv = &padapter->mlmepriv;
+ 
+-		p = cfg80211_find_ie(WLAN_EID_HT_CAPABILITY,
+-				     bssid->IEs + ie_offset,
+-				     bssid->IELength - ie_offset);
++		p = cfg80211_find_ie(WLAN_EID_HT_CAPABILITY, bssid->IEs,
++				     bssid->IELength);
+ 		if (p && p[1] > 0) {
+ 			struct ieee80211_ht_cap *pHT_caps;
+ 			pHT_caps = (struct ieee80211_ht_cap *)(p + 2);
+@@ -5586,7 +5579,6 @@ int join_cmd_hdl23a(struct rtw_adapter *padapter, const u8 *pbuf)
+ 	const struct wlan_bssid_ex *pparm = (struct wlan_bssid_ex *)pbuf;
+ 	struct ieee80211_ht_operation *pht_info;
+ 	u32 i;
+-	int bcn_fixed_size;
+ 	u8 *p;
+         /* u32	initialgain; */
+ 	/* u32	acparm; */
+@@ -5632,10 +5624,7 @@ int join_cmd_hdl23a(struct rtw_adapter *padapter, const u8 *pbuf)
+ 	/* pmlmeinfo->assoc_AP_vendor = check_assoc_AP23a(pnetwork->IEs,
+ 	   pnetwork->IELength); */
+ 
+-	bcn_fixed_size = offsetof(struct ieee80211_mgmt, u.beacon.variable) -
+-		offsetof(struct ieee80211_mgmt, u.beacon);
+-
+-	for (i = bcn_fixed_size; i < pnetwork->IELength;) {
++	for (i = 0; i < pnetwork->IELength;) {
+ 		p = pnetwork->IEs + i;
+ 
+ 		switch (p[0]) {
+diff --git a/drivers/staging/rtl8723au/core/rtw_wlan_util.c b/drivers/staging/rtl8723au/core/rtw_wlan_util.c
+index dbca440..66e72e2 100644
+--- a/drivers/staging/rtl8723au/core/rtw_wlan_util.c
++++ b/drivers/staging/rtl8723au/core/rtw_wlan_util.c
+@@ -880,7 +880,7 @@ int rtw_check_bcn_info23a(struct rtw_adapter *Adapter,
+ 	unsigned short val16;
+ 	u8 crypto, bcn_channel;
+ 	int group_cipher = 0, pairwise_cipher = 0, is_8021x = 0, r;
+-	int pie_len, ie_offset, ssid_len, privacy;
++	int pie_len, ssid_len, privacy;
+ 	const u8 *p, *ssid;
+ 
+ 	if (is_client_associated_to_ap23a(Adapter) == false)
+@@ -901,8 +901,6 @@ int rtw_check_bcn_info23a(struct rtw_adapter *Adapter,
+ 
+ 	/* check bw and channel offset */
+ 	/* parsing HT_CAP_IE */
+-	ie_offset = offsetof(struct ieee80211_mgmt, u.beacon.variable) -
+-		offsetof(struct ieee80211_mgmt, u);
+ 	pie_len = pkt_len - offsetof(struct ieee80211_mgmt, u.beacon.variable);
+ 
+ 	/* Checking for channel */
+@@ -1070,13 +1068,9 @@ bool is_ap_in_tkip23a(struct rtw_adapter *padapter)
+ 	struct mlme_ext_info *pmlmeinfo = &pmlmeext->mlmext_info;
+ 	struct wlan_bssid_ex *cur_network = &pmlmeinfo->network;
+ 	const u8 *p;
+-	int bcn_fixed_size;
+-
+-	bcn_fixed_size = offsetof(struct ieee80211_mgmt, u.beacon.variable) -
+-		offsetof(struct ieee80211_mgmt, u.beacon);
+ 
+ 	if (cur_network->capability & WLAN_CAPABILITY_PRIVACY) {
+-		for (i = bcn_fixed_size; i < pmlmeinfo->network.IELength;) {
++		for (i = 0; i < pmlmeinfo->network.IELength;) {
+ 			p = pmlmeinfo->network.IEs + i;
+ 
+ 			switch (p[0]) {
+@@ -1105,13 +1099,9 @@ bool should_forbid_n_rate23a(struct rtw_adapter * padapter)
+ 	struct mlme_priv *pmlmepriv = &padapter->mlmepriv;
+ 	struct wlan_bssid_ex  *cur_network = &pmlmepriv->cur_network.network;
+ 	const u8 *p;
+-	int bcn_fixed_size;
+-
+-	bcn_fixed_size = offsetof(struct ieee80211_mgmt, u.beacon.variable) -
+-		offsetof(struct ieee80211_mgmt, u.beacon);
+ 
+ 	if (cur_network->capability & WLAN_CAPABILITY_PRIVACY) {
+-		for (i = bcn_fixed_size; i < cur_network->IELength;) {
++		for (i = 0; i < cur_network->IELength;) {
+ 			p = cur_network->IEs + i;
+ 
+ 			switch (p[0]) {
+@@ -1148,13 +1138,9 @@ bool is_ap_in_wep23a(struct rtw_adapter *padapter)
+ 	struct mlme_ext_info *pmlmeinfo = &pmlmeext->mlmext_info;
+ 	struct wlan_bssid_ex *cur_network = &pmlmeinfo->network;
+ 	const u8 *p;
+-	int bcn_fixed_size;
+-
+-	bcn_fixed_size = offsetof(struct ieee80211_mgmt, u.beacon.variable) -
+-		offsetof(struct ieee80211_mgmt, u.beacon);
+ 
+ 	if (cur_network->capability & WLAN_CAPABILITY_PRIVACY) {
+-		for (i = bcn_fixed_size; i < pmlmeinfo->network.IELength;) {
++		for (i = 0; i < pmlmeinfo->network.IELength;) {
+ 			p = pmlmeinfo->network.IEs + i;
+ 
+ 			switch (p[0]) {
+@@ -1334,17 +1320,14 @@ void update_tx_basic_rate23a(struct rtw_adapter *padapter, u8 wirelessmode)
+ 
+ unsigned char check_assoc_AP23a(u8 *pframe, uint len)
+ {
+-	int i, bcn_fixed_size;
++	int i;
+ 	u8 epigram_vendor_flag;
+ 	u8 ralink_vendor_flag;
+ 	const u8 *p;
+ 	epigram_vendor_flag = 0;
+ 	ralink_vendor_flag = 0;
+ 
+-	bcn_fixed_size = offsetof(struct ieee80211_mgmt, u.beacon.variable) -
+-		offsetof(struct ieee80211_mgmt, u.beacon);
+-
+-	for (i = bcn_fixed_size; i < len;) {
++	for (i = 0; i < len;) {
+ 		p = pframe + i;
+ 
+ 		switch (p[0]) {
+diff --git a/drivers/staging/rtl8723au/hal/rtl8723a_cmd.c b/drivers/staging/rtl8723au/hal/rtl8723a_cmd.c
+index 2d67762..7a70e22 100644
+--- a/drivers/staging/rtl8723au/hal/rtl8723a_cmd.c
++++ b/drivers/staging/rtl8723au/hal/rtl8723a_cmd.c
+@@ -209,7 +209,6 @@ ConstructBeacon(struct rtw_adapter *padapter, u8 *pframe, u32 *pLength)
+ 	struct mlme_ext_info *pmlmeinfo = &pmlmeext->mlmext_info;
+ 	struct wlan_bssid_ex *cur_network = &pmlmeinfo->network;
+ 	u8 bc_addr[] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+-	int bcn_fixed_size;
+ 
+ 	/* DBG_8723A("%s\n", __func__); */
+ 
+@@ -237,13 +236,9 @@ ConstructBeacon(struct rtw_adapter *padapter, u8 *pframe, u32 *pLength)
+ 	pktlen = offsetof(struct ieee80211_mgmt, u.beacon.variable);
+ 
+ 	if ((pmlmeinfo->state&0x03) == WIFI_FW_AP_STATE) {
+-		bcn_fixed_size =
+-			offsetof(struct ieee80211_mgmt, u.beacon.variable) -
+-			offsetof(struct ieee80211_mgmt, u.beacon);
+-
+ 		/* DBG_8723A("ie len =%d\n", cur_network->IELength); */
+-		pktlen += cur_network->IELength - bcn_fixed_size;
+-		memcpy(pframe, cur_network->IEs + bcn_fixed_size, pktlen);
++		pktlen += cur_network->IELength;
++		memcpy(pframe, cur_network->IEs, pktlen);
+ 
+ 		goto _ConstructBeacon;
+ 	}
+diff --git a/drivers/staging/rtl8723au/include/wifi.h b/drivers/staging/rtl8723au/include/wifi.h
+index d07fd12..2508120 100644
+--- a/drivers/staging/rtl8723au/include/wifi.h
++++ b/drivers/staging/rtl8723au/include/wifi.h
+@@ -23,7 +23,7 @@
+  */
+ #define	WiFiNavUpperUs		30000	/*  30 ms */
+ 
+-#define _BEACON_IE_OFFSET_		12
++#define _BEACON_IE_OFFSET_		0
+ 
+ #define _FIXED_IE_LENGTH_		_BEACON_IE_OFFSET_
+ 

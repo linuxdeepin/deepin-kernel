@@ -1,0 +1,357 @@
+From: Jes Sorensen <Jes.Sorensen@redhat.com>
+Date: Mon, 9 Jun 2014 15:16:17 +0200
+Subject: [038/249] staging: rtl8723au: Let cfg80211 handle public action
+ management frames
+Origin: https://git.kernel.org/linus/2e74d336edb945b4a1f851e821001093e4094729
+
+The driver shouldn't be dealing with public action management frames.
+Let these go directly to the cfg80211 layer which can defer them to
+userland if needed.
+
+Signed-off-by: Jes Sorensen <Jes.Sorensen@redhat.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/staging/rtl8723au/core/rtw_ieee80211.c     |  26 ----
+ drivers/staging/rtl8723au/core/rtw_mlme_ext.c      | 132 +++------------------
+ drivers/staging/rtl8723au/include/ieee80211.h      |  23 +---
+ drivers/staging/rtl8723au/include/ioctl_cfg80211.h |   3 -
+ drivers/staging/rtl8723au/include/wifi.h           |   1 -
+ drivers/staging/rtl8723au/os_dep/ioctl_cfg80211.c  |  43 +------
+ 6 files changed, 18 insertions(+), 210 deletions(-)
+
+diff --git a/drivers/staging/rtl8723au/core/rtw_ieee80211.c b/drivers/staging/rtl8723au/core/rtw_ieee80211.c
+index fa3ca9e..9f6dd77 100644
+--- a/drivers/staging/rtl8723au/core/rtw_ieee80211.c
++++ b/drivers/staging/rtl8723au/core/rtw_ieee80211.c
+@@ -894,29 +894,3 @@ u16 rtw_mcs_rate23a(u8 rf_type, u8 bw_40MHz, u8 short_GI_20, u8 short_GI_40,
+ 	}
+ 	return max_rate;
+ }
+-
+-static const char *_action_public_str23a[] = {
+-	"ACT_PUB_BSSCOEXIST",
+-	"ACT_PUB_DSE_ENABLE",
+-	"ACT_PUB_DSE_DEENABLE",
+-	"ACT_PUB_DSE_REG_LOCATION",
+-	"ACT_PUB_EXT_CHL_SWITCH",
+-	"ACT_PUB_DSE_MSR_REQ",
+-	"ACT_PUB_DSE_MSR_RPRT",
+-	"ACT_PUB_MP",
+-	"ACT_PUB_DSE_PWR_CONSTRAINT",
+-	"ACT_PUB_VENDOR",
+-	"ACT_PUB_GAS_INITIAL_REQ",
+-	"ACT_PUB_GAS_INITIAL_RSP",
+-	"ACT_PUB_GAS_COMEBACK_REQ",
+-	"ACT_PUB_GAS_COMEBACK_RSP",
+-	"ACT_PUB_TDLS_DISCOVERY_RSP",
+-	"ACT_PUB_LOCATION_TRACK",
+-	"ACT_PUB_RSVD",
+-};
+-
+-const char *action_public_str23a(u8 action)
+-{
+-	action = (action >= ACT_PUBLIC_MAX) ? ACT_PUBLIC_MAX : action;
+-	return _action_public_str23a[action];
+-}
+diff --git a/drivers/staging/rtl8723au/core/rtw_mlme_ext.c b/drivers/staging/rtl8723au/core/rtw_mlme_ext.c
+index 051ea49..80a822c 100644
+--- a/drivers/staging/rtl8723au/core/rtw_mlme_ext.c
++++ b/drivers/staging/rtl8723au/core/rtw_mlme_ext.c
+@@ -2135,136 +2135,32 @@ static int OnAction23a_back23a(struct rtw_adapter *padapter,
+ 	return _SUCCESS;
+ }
+ 
+-static int rtw_action_public_decache(struct recv_frame *recv_frame, s32 token)
+-{
+-	struct rtw_adapter *adapter = recv_frame->adapter;
+-	struct mlme_ext_priv *mlmeext = &adapter->mlmeextpriv;
+-	struct sk_buff *skb = recv_frame->pkt;
+-	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *) skb->data;
+-	u16 seq_ctrl;
+-
+-	seq_ctrl = ((recv_frame->attrib.seq_num&0xffff) << 4) |
+-		(recv_frame->attrib.frag_num & 0xf);
+-
+-	if (ieee80211_has_retry(hdr->frame_control)) {
+-		if (token >= 0) {
+-			if ((seq_ctrl == mlmeext->action_public_rxseq) &&
+-			    (token == mlmeext->action_public_dialog_token)) {
+-				DBG_8723A("%s(%s): seq_ctrl = 0x%x, "
+-					  "rxseq = 0x%x, token:%d\n", __func__,
+-					  adapter->pnetdev->name, seq_ctrl,
+-					  mlmeext->action_public_rxseq, token);
+-				return _FAIL;
+-			}
+-		} else {
+-			if (seq_ctrl == mlmeext->action_public_rxseq) {
+-				DBG_8723A("%s(%s): seq_ctrl = 0x%x, "
+-					  "rxseq = 0x%x\n", __func__,
+-					  adapter->pnetdev->name, seq_ctrl,
+-					  mlmeext->action_public_rxseq);
+-				return _FAIL;
+-			}
+-		}
+-	}
+-
+-	mlmeext->action_public_rxseq = seq_ctrl;
+-
+-	if (token >= 0)
+-		mlmeext->action_public_dialog_token = token;
+-
+-	return _SUCCESS;
+-}
+-
+-static int on_action_public23a_p2p(struct recv_frame *precv_frame)
+-{
+-	struct sk_buff *skb = precv_frame->pkt;
+-	u8 *pframe = skb->data;
+-	u8 *frame_body;
+-	u8 dialogToken = 0;
+-
+-	frame_body = (unsigned char *)
+-		(pframe + sizeof(struct ieee80211_hdr_3addr));
+-
+-	dialogToken = frame_body[7];
+-
+-	if (rtw_action_public_decache(precv_frame, dialogToken) == _FAIL)
+-		return _FAIL;
+-
+-	return _SUCCESS;
+-}
+-
+-static int on_action_public23a_vendor(struct recv_frame *precv_frame)
+-{
+-	unsigned int ret = _FAIL;
+-	struct sk_buff *skb = precv_frame->pkt;
+-	u8 *pframe = skb->data;
+-	u8 *frame_body = pframe + sizeof(struct ieee80211_hdr_3addr);
+-
+-	if (!memcmp(frame_body + 2, P2P_OUI23A, 4)) {
+-		ret = on_action_public23a_p2p(precv_frame);
+-	}
+-
+-	return ret;
+-}
+-
+-static unsigned int
+-on_action_public23a_default(struct recv_frame *precv_frame, u8 action)
+-{
+-	unsigned int ret = _FAIL;
+-	struct sk_buff *skb = precv_frame->pkt;
+-	u8 *pframe = skb->data;
+-	uint frame_len = skb->len;
+-	u8 *frame_body = pframe + sizeof(struct ieee80211_hdr_3addr);
+-	u8 token;
+-	struct rtw_adapter *adapter = precv_frame->adapter;
+-	int cnt = 0;
+-	char msg[64];
+-
+-	token = frame_body[2];
+-
+-	if (rtw_action_public_decache(precv_frame, token) == _FAIL)
+-		goto exit;
+-
+-	cnt += sprintf((msg+cnt), "%s(token:%u)",
+-		       action_public_str23a(action), token);
+-	rtw_cfg80211_rx_action(adapter, pframe, frame_len, msg);
+-
+-	ret = _SUCCESS;
+-
+-exit:
+-	return ret;
+-}
+-
+ static int on_action_public23a(struct rtw_adapter *padapter,
+ 			       struct recv_frame *precv_frame)
+ {
+-	int ret = _FAIL;
+ 	struct sk_buff *skb = precv_frame->pkt;
+ 	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *) skb->data;
+ 	u8 *pframe = skb->data;
+-	u8 *frame_body = pframe + sizeof(struct ieee80211_hdr_3addr);
+-	u8 category, action;
++	int freq, channel;
+ 
+ 	/* check RA matches or not */
+ 	if (!ether_addr_equal(myid(&padapter->eeprompriv), hdr->addr1))
+-		goto exit;
++		return _FAIL;
+ 
+-	category = frame_body[0];
+-	if (category != WLAN_CATEGORY_PUBLIC)
+-		goto exit;
++	channel = rtw_get_oper_ch23a(padapter);
+ 
+-	action = frame_body[1];
+-	switch (action) {
+-	case ACT_PUBLIC_VENDOR:
+-		ret = on_action_public23a_vendor(precv_frame);
+-		break;
+-	default:
+-		ret = on_action_public23a_default(precv_frame, action);
+-		break;
+-	}
++	if (channel <= RTW_CH_MAX_2G_CHANNEL)
++		freq = ieee80211_channel_to_frequency(channel,
++						      IEEE80211_BAND_2GHZ);
++	else
++		freq = ieee80211_channel_to_frequency(channel,
++						      IEEE80211_BAND_5GHZ);
+ 
+-exit:
+-	return ret;
++	if (cfg80211_rx_mgmt(padapter->rtw_wdev, freq, 0, pframe,
++			     skb->len, 0, GFP_ATOMIC))
++		return _SUCCESS;
++
++	return _FAIL;
+ }
+ 
+ static int
+diff --git a/drivers/staging/rtl8723au/include/ieee80211.h b/drivers/staging/rtl8723au/include/ieee80211.h
+index 0ef6e79..f6e982e 100644
+--- a/drivers/staging/rtl8723au/include/ieee80211.h
++++ b/drivers/staging/rtl8723au/include/ieee80211.h
+@@ -315,6 +315,7 @@ struct ieee80211_snap_hdr {
+ #define MAX_RATES_LENGTH	12
+ #define MAX_RATES_EX_LENGTH	16
+ #define MAX_CHANNEL_NUMBER	161
++#define RTW_CH_MAX_2G_CHANNEL	14	/* Max channel in 2G band */
+ 
+ #define MAX_WPA_IE_LEN		256
+ #define MAX_WPS_IE_LEN		256
+@@ -335,26 +336,6 @@ join_res:
+ 
+ #define MAXTID	16
+ 
+-enum _PUBLIC_ACTION{
+-	ACT_PUBLIC_BSSCOEXIST = 0, /*  20/40 BSS Coexistence */
+-	ACT_PUBLIC_DSE_ENABLE = 1,
+-	ACT_PUBLIC_DSE_DEENABLE = 2,
+-	ACT_PUBLIC_DSE_REG_LOCATION = 3,
+-	ACT_PUBLIC_EXT_CHL_SWITCH = 4,
+-	ACT_PUBLIC_DSE_MSR_REQ = 5,
+-	ACT_PUBLIC_DSE_MSR_RPRT = 6,
+-	ACT_PUBLIC_MP = 7, /*  Measurement Pilot */
+-	ACT_PUBLIC_DSE_PWR_CONSTRAINT = 8,
+-	ACT_PUBLIC_VENDOR = 9, /*  for WIFI_DIRECT */
+-	ACT_PUBLIC_GAS_INITIAL_REQ = 10,
+-	ACT_PUBLIC_GAS_INITIAL_RSP = 11,
+-	ACT_PUBLIC_GAS_COMEBACK_REQ = 12,
+-	ACT_PUBLIC_GAS_COMEBACK_RSP = 13,
+-	ACT_PUBLIC_TDLS_DISCOVERY_RSP = 14,
+-	ACT_PUBLIC_LOCATION_TRACK = 15,
+-	ACT_PUBLIC_MAX
+-};
+-
+ #define WME_OUI_TYPE 2
+ #define WME_OUI_SUBTYPE_INFORMATION_ELEMENT 0
+ #define WME_OUI_SUBTYPE_PARAMETER_ELEMENT 1
+@@ -446,6 +427,4 @@ void rtw_get_bcn_info23a(struct wlan_network *pnetwork);
+ u16 rtw_mcs_rate23a(u8 rf_type, u8 bw_40MHz, u8 short_GI_20, u8 short_GI_40,
+ 		    struct ieee80211_mcs_info *mcs);
+ 
+-const char *action_public_str23a(u8 action);
+-
+ #endif /* IEEE80211_H */
+diff --git a/drivers/staging/rtl8723au/include/ioctl_cfg80211.h b/drivers/staging/rtl8723au/include/ioctl_cfg80211.h
+index 63e921f..3a4ead5 100644
+--- a/drivers/staging/rtl8723au/include/ioctl_cfg80211.h
++++ b/drivers/staging/rtl8723au/include/ioctl_cfg80211.h
+@@ -61,9 +61,6 @@ void rtw_cfg80211_indicate_sta_disassoc(struct rtw_adapter *padapter,
+ 					unsigned char *da, unsigned short reason);
+ #endif /* CONFIG_8723AU_AP_MODE */
+ 
+-void rtw_cfg80211_rx_action(struct rtw_adapter *adapter, u8 *frame,
+-			    uint frame_len, const char*msg);
+-
+ bool rtw_cfg80211_pwr_mgmt(struct rtw_adapter *adapter);
+ 
+ #endif /* __IOCTL_CFG80211_H__ */
+diff --git a/drivers/staging/rtl8723au/include/wifi.h b/drivers/staging/rtl8723au/include/wifi.h
+index 07ea4c6..3f64546 100644
+--- a/drivers/staging/rtl8723au/include/wifi.h
++++ b/drivers/staging/rtl8723au/include/wifi.h
+@@ -32,7 +32,6 @@
+ #define _AUTH_IE_OFFSET_		6
+ #define _DEAUTH_IE_OFFSET_		0
+ #define _BEACON_IE_OFFSET_		12
+-#define _PUBLIC_ACTION_IE_OFFSET_	8
+ 
+ #define _FIXED_IE_LENGTH_		_BEACON_IE_OFFSET_
+ 
+diff --git a/drivers/staging/rtl8723au/os_dep/ioctl_cfg80211.c b/drivers/staging/rtl8723au/os_dep/ioctl_cfg80211.c
+index d2fa9b20..0d581c8 100644
+--- a/drivers/staging/rtl8723au/os_dep/ioctl_cfg80211.c
++++ b/drivers/staging/rtl8723au/os_dep/ioctl_cfg80211.c
+@@ -26,8 +26,6 @@
+ #define RTW_MAX_REMAIN_ON_CHANNEL_DURATION 65535	/* ms */
+ #define RTW_MAX_NUM_PMKIDS 4
+ 
+-#define RTW_CH_MAX_2G_CHANNEL               14	/* Max channel in 2G band */
+-
+ static const u32 rtw_cipher_suites[] = {
+ 	WLAN_CIPHER_SUITE_WEP40,
+ 	WLAN_CIPHER_SUITE_WEP104,
+@@ -2593,11 +2591,8 @@ static int rtw_cfg80211_monitor_if_xmit_entry(struct sk_buff *skb,
+ 			  MAC_ARG(mgmt->da), __func__, ndev->name);
+ 		category = mgmt->u.action.category;
+ 		action = mgmt->u.action.u.wme_action.action_code;
+-		if (mgmt->u.action.category == WLAN_CATEGORY_PUBLIC)
+-			DBG_8723A("RTW_Tx:%s\n", action_public_str23a(action));
+-		else
+-			DBG_8723A("RTW_Tx:category(%u), action(%u)\n", category,
+-				  action);
++		DBG_8723A("RTW_Tx:category(%u), action(%u)\n",
++			  category, action);
+ 
+ 		/* starting alloc mgmt frame to dump it */
+ 		pmgntframe = alloc_mgtxmitframe23a(pxmitpriv);
+@@ -3011,34 +3006,6 @@ static int cfg80211_rtw_change_bss(struct wiphy *wiphy, struct net_device *ndev,
+ }
+ #endif /* CONFIG_8723AU_AP_MODE */
+ 
+-void rtw_cfg80211_rx_action(struct rtw_adapter *adapter, u8 *frame,
+-			    uint frame_len, const char *msg)
+-{
+-	struct ieee80211_mgmt *hdr = (struct ieee80211_mgmt *)frame;
+-	s32 freq;
+-	int channel;
+-
+-	channel = rtw_get_oper_ch23a(adapter);
+-
+-	DBG_8723A("RTW_Rx:cur_ch =%d\n", channel);
+-	if (msg)
+-		DBG_8723A("RTW_Rx:%s\n", msg);
+-	else
+-		DBG_8723A("RTW_Rx:category(%u), action(%u)\n",
+-			  hdr->u.action.category,
+-			  hdr->u.action.u.wme_action.action_code);
+-
+-	if (channel <= RTW_CH_MAX_2G_CHANNEL)
+-		freq = ieee80211_channel_to_frequency(channel,
+-						      IEEE80211_BAND_2GHZ);
+-	else
+-		freq = ieee80211_channel_to_frequency(channel,
+-						      IEEE80211_BAND_5GHZ);
+-
+-	cfg80211_rx_mgmt(adapter->rtw_wdev, freq, 0, frame, frame_len,
+-			 0, GFP_ATOMIC);
+-}
+-
+ static int _cfg80211_rtw_mgmt_tx(struct rtw_adapter *padapter, u8 tx_ch,
+ 				 const u8 *buf, size_t len)
+ {
+@@ -3145,11 +3112,7 @@ static int cfg80211_rtw_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
+ 		  MAC_ARG(hdr->da));
+ 	category = hdr->u.action.category;
+ 	action = hdr->u.action.u.wme_action.action_code;
+-	if (category == WLAN_CATEGORY_PUBLIC)
+-		DBG_8723A("RTW_Tx:%s\n", action_public_str23a(action));
+-	else
+-		DBG_8723A("RTW_Tx:category(%u), action(%u)\n",
+-			  category, action);
++	DBG_8723A("RTW_Tx:category(%u), action(%u)\n", category, action);
+ 
+ 	do {
+ 		dump_cnt++;

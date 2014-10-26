@@ -1,0 +1,426 @@
+From: Jes Sorensen <Jes.Sorensen@redhat.com>
+Date: Sat, 31 May 2014 18:05:11 +0200
+Subject: [012/249] staging: rtl8723au: Use struct ieee80211_ht_cap and
+ associated #defines
+Origin: https://git.kernel.org/linus/65be27da4953163c638a006542d279f5b1f346ea
+
+Signed-off-by: Jes Sorensen <Jes.Sorensen@redhat.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/staging/rtl8723au/core/rtw_ap.c            |  9 ++--
+ drivers/staging/rtl8723au/core/rtw_ioctl_set.c     | 11 ++--
+ drivers/staging/rtl8723au/core/rtw_mlme.c          | 14 +++--
+ drivers/staging/rtl8723au/core/rtw_mlme_ext.c      | 42 ++++++++-------
+ drivers/staging/rtl8723au/core/rtw_wlan_util.c     | 60 ++++++++++++----------
+ .../staging/rtl8723au/hal/rtl8723a_bt-coexist.c    |  4 +-
+ drivers/staging/rtl8723au/hal/usb_halinit.c        |  4 +-
+ drivers/staging/rtl8723au/include/rtw_mlme_ext.h   |  6 +--
+ drivers/staging/rtl8723au/include/wifi.h           | 14 -----
+ 9 files changed, 84 insertions(+), 80 deletions(-)
+
+diff --git a/drivers/staging/rtl8723au/core/rtw_ap.c b/drivers/staging/rtl8723au/core/rtw_ap.c
+index d03bb3e..83be27f 100644
+--- a/drivers/staging/rtl8723au/core/rtw_ap.c
++++ b/drivers/staging/rtl8723au/core/rtw_ap.c
+@@ -623,15 +623,18 @@ static void update_hw_ht_param(struct rtw_adapter *padapter)
+ 		AMPDU_para [1:0]:Max AMPDU Len => 0:8k , 1:16k, 2:32k, 3:64k
+ 		AMPDU_para [4:2]:Min MPDU Start Spacing
+ 	*/
+-	max_AMPDU_len = pmlmeinfo->HT_caps.u.HT_cap_element.AMPDU_para & 0x03;
++	max_AMPDU_len = pmlmeinfo->ht_cap.ampdu_params_info &
++		IEEE80211_HT_AMPDU_PARM_FACTOR;
+ 
+-	min_MPDU_spacing = (pmlmeinfo->HT_caps.u.HT_cap_element.AMPDU_para & 0x1c) >> 2;
++	min_MPDU_spacing = (pmlmeinfo->ht_cap.ampdu_params_info &
++			    IEEE80211_HT_AMPDU_PARM_DENSITY) >> 2;
+ 
+ 	rtl8723a_set_ampdu_min_space(padapter, min_MPDU_spacing);
+ 	rtl8723a_set_ampdu_factor(padapter, max_AMPDU_len);
+ 
+ 	/*  Config SM Power Save setting */
+-	pmlmeinfo->SM_PS = (pmlmeinfo->HT_caps.u.HT_cap_element.HT_caps_info & 0x0C) >> 2;
++	pmlmeinfo->SM_PS = (le16_to_cpu(pmlmeinfo->ht_cap.cap_info) &
++			    IEEE80211_HT_CAP_SM_PS) >> 2;
+ 	if (pmlmeinfo->SM_PS == WLAN_HT_CAP_SM_PS_STATIC)
+ 		DBG_8723A("%s(): WLAN_HT_CAP_SM_PS_STATIC\n", __func__);
+ }
+diff --git a/drivers/staging/rtl8723au/core/rtw_ioctl_set.c b/drivers/staging/rtl8723au/core/rtw_ioctl_set.c
+index 30474f5..e9f46a6 100644
+--- a/drivers/staging/rtl8723au/core/rtw_ioctl_set.c
++++ b/drivers/staging/rtl8723au/core/rtw_ioctl_set.c
+@@ -399,15 +399,18 @@ u16 rtw_get_cur_max_rate23a(struct rtw_adapter *adapter)
+ 
+ 			/* short_GI = (pht_capie->cap_info & (IEEE80211_HT_CAP
+ 			   _SGI_20|IEEE80211_HT_CAP_SGI_40)) ? 1 : 0; */
+-			short_GI_20 = (pmlmeinfo->HT_caps.u.HT_cap_element.HT_caps_info&IEEE80211_HT_CAP_SGI_20) ? 1:0;
+-			short_GI_40 = (pmlmeinfo->HT_caps.u.HT_cap_element.HT_caps_info&IEEE80211_HT_CAP_SGI_40) ? 1:0;
++			short_GI_20 =
++				(pmlmeinfo->ht_cap.cap_info &
++				 cpu_to_le16(IEEE80211_HT_CAP_SGI_20)) ? 1:0;
++			short_GI_40 =
++				(pmlmeinfo->ht_cap.cap_info &
++				 cpu_to_le16(IEEE80211_HT_CAP_SGI_40)) ? 1:0;
+ 
+ 			rf_type = rtl8723a_get_rf_type(adapter);
+ 			max_rate = rtw_mcs_rate23a(rf_type, bw_40MHz &
+ 						pregistrypriv->cbw40_enable,
+ 						short_GI_20, short_GI_40,
+-						&pmlmeinfo->HT_caps.u.HT_cap_element.mcs_info
+-			);
++						&pmlmeinfo->ht_cap.mcs);
+ 		}
+ 	} else {
+ 		while ((pcur_bss->SupportedRates[i] != 0) &&
+diff --git a/drivers/staging/rtl8723au/core/rtw_mlme.c b/drivers/staging/rtl8723au/core/rtw_mlme.c
+index ab59ab7..19b891f 100644
+--- a/drivers/staging/rtl8723au/core/rtw_mlme.c
++++ b/drivers/staging/rtl8723au/core/rtw_mlme.c
+@@ -2320,7 +2320,8 @@ void rtw_update_ht_cap23a(struct rtw_adapter *padapter, u8 *pie, uint ie_len)
+ 
+ 	/* update cur_bwmode & cur_ch_offset */
+ 	if (pregistrypriv->cbw40_enable &&
+-	    pmlmeinfo->HT_caps.u.HT_cap_element.HT_caps_info & BIT(1) &&
++	    pmlmeinfo->ht_cap.cap_info &
++	    cpu_to_le16(IEEE80211_HT_CAP_SUP_WIDTH_20_40) &&
+ 	    pmlmeinfo->HT_info.infos[0] & BIT(2)) {
+ 		int i;
+ 		u8 rf_type;
+@@ -2330,9 +2331,11 @@ void rtw_update_ht_cap23a(struct rtw_adapter *padapter, u8 *pie, uint ie_len)
+ 		/* update the MCS rates */
+ 		for (i = 0; i < IEEE80211_HT_MCS_MASK_LEN; i++) {
+ 			if (rf_type == RF_1T1R || rf_type == RF_1T2R)
+-				pmlmeinfo->HT_caps.u.HT_cap_element.mcs_info.rx_mask[i] &= MCS_rate_1R23A[i];
++				pmlmeinfo->ht_cap.mcs.rx_mask[i] &=
++					MCS_rate_1R23A[i];
+ 			else
+-				pmlmeinfo->HT_caps.u.HT_cap_element.mcs_info.rx_mask[i] &= MCS_rate_2R23A[i];
++				pmlmeinfo->ht_cap.mcs.rx_mask[i] &=
++					MCS_rate_2R23A[i];
+ 		}
+ 		/* switch to the 40M Hz mode accoring to the AP */
+ 		pmlmeext->cur_bwmode = HT_CHANNEL_WIDTH_40;
+@@ -2356,8 +2359,9 @@ void rtw_update_ht_cap23a(struct rtw_adapter *padapter, u8 *pie, uint ie_len)
+ 	/*  */
+ 	/*  Config SM Power Save setting */
+ 	/*  */
+-	pmlmeinfo->SM_PS = (pmlmeinfo->HT_caps.u.HT_cap_element.HT_caps_info &
+-			    0x0C) >> 2;
++	pmlmeinfo->SM_PS =
++		(le16_to_cpu(pmlmeinfo->ht_cap.cap_info) &
++		 IEEE80211_HT_CAP_SM_PS) >> IEEE80211_HT_CAP_SM_PS_SHIFT;
+ 	if (pmlmeinfo->SM_PS == WLAN_HT_CAP_SM_PS_STATIC)
+ 		DBG_8723A("%s(): WLAN_HT_CAP_SM_PS_STATIC\n", __func__);
+ 
+diff --git a/drivers/staging/rtl8723au/core/rtw_mlme_ext.c b/drivers/staging/rtl8723au/core/rtw_mlme_ext.c
+index 6249ab2..b5f1d40 100644
+--- a/drivers/staging/rtl8723au/core/rtw_mlme_ext.c
++++ b/drivers/staging/rtl8723au/core/rtw_mlme_ext.c
+@@ -3476,19 +3476,22 @@ static void issue_assocreq(struct rtw_adapter *padapter)
+ 		p = cfg80211_find_ie(WLAN_EID_HT_CAPABILITY, pie, pie_len);
+ 
+ 		if (p && !is_ap_in_tkip23a(padapter)) {
+-			memcpy(&pmlmeinfo->HT_caps, p + 2,
+-			       sizeof(struct HT_caps_element));
++			struct ieee80211_ht_cap *cap = &pmlmeinfo->ht_cap;
++
++			memcpy(cap, p + 2, sizeof(struct ieee80211_ht_cap));
+ 
+ 			/* to disable 40M Hz support while gd_bw_40MHz_en = 0 */
+ 			if (pregpriv->cbw40_enable == 0) {
+-				pmlmeinfo->HT_caps.u.HT_cap_element.HT_caps_info &= (~(BIT(6) | BIT(1)));
++				cap->cap_info &= ~cpu_to_le16(
++					IEEE80211_HT_CAP_SGI_40 |
++					IEEE80211_HT_CAP_SUP_WIDTH_20_40);
+ 			} else {
+-				pmlmeinfo->HT_caps.u.HT_cap_element.HT_caps_info |= BIT(1);
++				cap->cap_info |= cpu_to_le16(
++					IEEE80211_HT_CAP_SUP_WIDTH_20_40);
+ 			}
+ 
+ 			/* todo: disable SM power save mode */
+-			pmlmeinfo->HT_caps.u.HT_cap_element.HT_caps_info |=
+-				0x000c;
++			cap->cap_info |= cpu_to_le16(IEEE80211_HT_CAP_SM_PS);
+ 
+ 			rf_type = rtl8723a_get_rf_type(padapter);
+ 			/* switch (pregpriv->rf_config) */
+@@ -3496,9 +3499,9 @@ static void issue_assocreq(struct rtw_adapter *padapter)
+ 			case RF_1T1R:
+ 				/* RX STBC One spatial stream */
+ 				if (pregpriv->rx_stbc)
+-					pmlmeinfo->HT_caps.u.HT_cap_element.HT_caps_info |= cpu_to_le16(0x0100);
++					cap->cap_info |= cpu_to_le16(1 << IEEE80211_HT_CAP_RX_STBC_SHIFT);
+ 
+-				memcpy(&pmlmeinfo->HT_caps.u.HT_cap_element.mcs_info, MCS_rate_1R23A, 16);
++				memcpy(&cap->mcs, MCS_rate_1R23A, 16);
+ 				break;
+ 
+ 			case RF_2T2R:
+@@ -3517,23 +3520,23 @@ static void issue_assocreq(struct rtw_adapter *padapter)
+ 				    pregpriv->wifi_spec == 1) {
+ 					DBG_8723A("declare supporting RX "
+ 						  "STBC\n");
+-					pmlmeinfo->HT_caps.u.HT_cap_element.HT_caps_info |= cpu_to_le16(0x0200);/* RX STBC two spatial stream */
++					/* RX STBC two spatial stream */
++					cap->cap_info |= cpu_to_le16(2 << IEEE80211_HT_CAP_RX_STBC_SHIFT);
+ 				}
+-				memcpy(&pmlmeinfo->HT_caps.u.HT_cap_element.mcs_info, MCS_rate_2R23A, 16);
++				memcpy(&cap->mcs, MCS_rate_2R23A, 16);
+ 				break;
+ 			}
+-			pmlmeinfo->HT_caps.u.HT_cap_element.HT_caps_info =
+-				cpu_to_le16(pmlmeinfo->HT_caps.u.HT_cap_element.HT_caps_info);
+ 
+ 			if (rtl8723a_BT_coexist(padapter) &&
+ 			    rtl8723a_BT_using_antenna_1(padapter)) {
+ 				/*  set to 8K */
+-				pmlmeinfo->HT_caps.u.HT_cap_element.AMPDU_para &= (u8)~IEEE80211_HT_AMPDU_PARM_FACTOR;
+-/*				pmlmeinfo->HT_caps.u.HT_cap_element.AMPDU_para |= MAX_AMPDU_FACTOR_8K */
++				cap->ampdu_params_info &=
++					~IEEE80211_HT_AMPDU_PARM_FACTOR;
++/*				cap->ampdu_params_info |= MAX_AMPDU_FACTOR_8K */
+ 			}
+ 
+ 			pframe = rtw_set_ie23a(pframe, WLAN_EID_HT_CAPABILITY,
+-					       p[1], (u8 *)&pmlmeinfo->HT_caps,
++					       p[1], (u8 *)&pmlmeinfo->ht_cap,
+ 					       &pattrib->pktlen);
+ 		}
+ 	}
+@@ -4679,10 +4682,11 @@ int collect_bss_info23a(struct rtw_adapter *padapter,
+ 				     bssid->IEs + ie_offset,
+ 				     bssid->IELength - ie_offset);
+ 		if (p && p[1] > 0) {
+-			struct HT_caps_element *pHT_caps;
+-			pHT_caps = (struct HT_caps_element *)(p + 2);
++			struct ieee80211_ht_cap *pHT_caps;
++			pHT_caps = (struct ieee80211_ht_cap *)(p + 2);
+ 
+-			if (pHT_caps->u.HT_cap_element.HT_caps_info & BIT(14))
++			if (pHT_caps->cap_info &
++			    cpu_to_le16(IEEE80211_HT_CAP_40MHZ_INTOLERANT))
+ 				pmlmepriv->num_FortyMHzIntolerant++;
+ 		} else
+ 			pmlmepriv->num_sta_no_ht++;
+@@ -5392,7 +5396,7 @@ void update_sta_info23a(struct rtw_adapter *padapter, struct sta_info *psta)
+ 
+ 		psta->htpriv.ampdu_enable = pmlmepriv->htpriv.ampdu_enable;
+ 
+-		if (support_short_GI23a(padapter, &pmlmeinfo->HT_caps))
++		if (support_short_GI23a(padapter, &pmlmeinfo->ht_cap))
+ 			psta->htpriv.sgi = true;
+ 
+ 		psta->qos_option = true;
+diff --git a/drivers/staging/rtl8723au/core/rtw_wlan_util.c b/drivers/staging/rtl8723au/core/rtw_wlan_util.c
+index b63248b..1194a6e 100644
+--- a/drivers/staging/rtl8723au/core/rtw_wlan_util.c
++++ b/drivers/staging/rtl8723au/core/rtw_wlan_util.c
+@@ -720,6 +720,8 @@ void HT_caps_handler23a(struct rtw_adapter *padapter, u8 *p)
+ 	struct mlme_ext_info *pmlmeinfo = &pmlmeext->mlmext_info;
+ 	struct mlme_priv *pmlmepriv = &padapter->mlmepriv;
+ 	struct ht_priv *phtpriv = &pmlmepriv->htpriv;
++	struct ieee80211_ht_cap *cap;
++	u8 *dstcap;
+ 
+ 	if (!p)
+ 		return;
+@@ -729,44 +731,44 @@ void HT_caps_handler23a(struct rtw_adapter *padapter, u8 *p)
+ 
+ 	pmlmeinfo->HT_caps_enable = 1;
+ 
++	cap = &pmlmeinfo->ht_cap;
++	dstcap = (u8 *)cap;
+ 	for (i = 0; i < p[1]; i++) {
+ 		if (i != 2) {
+-			/*	Commented by Albert 2010/07/12 */
+-			/*	Got the endian issue here. */
+-			pmlmeinfo->HT_caps.u.HT_cap[i] &= p[i + 2];
++			dstcap[i] &= p[i + 2];
+ 		} else {
+ 			/* modify from  fw by Thomas 2010/11/17 */
+-			if ((pmlmeinfo->HT_caps.u.HT_cap_element.AMPDU_para & 0x3) > (p[i + 2] & 0x3))
+-				max_AMPDU_len = p[i + 2] & 0x3;
++			if ((cap->ampdu_params_info &
++			     IEEE80211_HT_AMPDU_PARM_FACTOR) >
++			    (p[i + 2] & IEEE80211_HT_AMPDU_PARM_FACTOR))
++				max_AMPDU_len = p[i + 2] &
++					IEEE80211_HT_AMPDU_PARM_FACTOR;
+ 			else
+-				max_AMPDU_len = pmlmeinfo->HT_caps.u.HT_cap_element.AMPDU_para & 0x3;
+-
+-			if ((pmlmeinfo->HT_caps.u.HT_cap_element.AMPDU_para & 0x1c) > (p[i + 2] & 0x1c))
+-				min_MPDU_spacing = pmlmeinfo->HT_caps.u.HT_cap_element.AMPDU_para & 0x1c;
++				max_AMPDU_len = cap->ampdu_params_info &
++					IEEE80211_HT_AMPDU_PARM_FACTOR;
++
++			if ((cap->ampdu_params_info &
++			     IEEE80211_HT_AMPDU_PARM_DENSITY) >
++			    (p[i + 2] & IEEE80211_HT_AMPDU_PARM_DENSITY))
++				min_MPDU_spacing = cap->ampdu_params_info &
++					IEEE80211_HT_AMPDU_PARM_DENSITY;
+ 			else
+-				min_MPDU_spacing = p[i + 2] & 0x1c;
++				min_MPDU_spacing = p[i + 2] &
++					IEEE80211_HT_AMPDU_PARM_DENSITY;
+ 
+-			pmlmeinfo->HT_caps.u.HT_cap_element.AMPDU_para =
++			cap->ampdu_params_info =
+ 				max_AMPDU_len | min_MPDU_spacing;
+ 		}
+ 	}
+ 
+-	/*	Commented by Albert 2010/07/12 */
+-	/*	Have to handle the endian issue after copying. */
+-	/*	HT_ext_caps didn't be used yet. */
+-	pmlmeinfo->HT_caps.u.HT_cap_element.HT_caps_info =
+-		le16_to_cpu(pmlmeinfo->HT_caps.u.HT_cap_element.HT_caps_info);
+-	pmlmeinfo->HT_caps.u.HT_cap_element.HT_ext_caps =
+-		le16_to_cpu(pmlmeinfo->HT_caps.u.HT_cap_element.HT_ext_caps);
+-
+ 	rf_type = rtl8723a_get_rf_type(padapter);
+ 
+ 	/* update the MCS rates */
+ 	for (i = 0; i < IEEE80211_HT_MCS_MASK_LEN; i++) {
+ 		if (rf_type == RF_1T1R || rf_type == RF_1T2R)
+-			pmlmeinfo->HT_caps.u.HT_cap_element.mcs_info.rx_mask[i] &= MCS_rate_1R23A[i];
++			cap->mcs.rx_mask[i] &= MCS_rate_1R23A[i];
+ 		else
+-			pmlmeinfo->HT_caps.u.HT_cap_element.mcs_info.rx_mask[i] &= MCS_rate_2R23A[i];
++			cap->mcs.rx_mask[i] &= MCS_rate_2R23A[i];
+ 	}
+ 	return;
+ }
+@@ -816,10 +818,12 @@ void HTOnAssocRsp23a(struct rtw_adapter *padapter)
+ 		AMPDU_para [1:0]:Max AMPDU Len => 0:8k , 1:16k, 2:32k, 3:64k
+ 		AMPDU_para [4:2]:Min MPDU Start Spacing
+ 	*/
+-	max_AMPDU_len = pmlmeinfo->HT_caps.u.HT_cap_element.AMPDU_para & 0x03;
++	max_AMPDU_len = pmlmeinfo->ht_cap.ampdu_params_info &
++		IEEE80211_HT_AMPDU_PARM_FACTOR;
+ 
+ 	min_MPDU_spacing =
+-		(pmlmeinfo->HT_caps.u.HT_cap_element.AMPDU_para & 0x1c) >> 2;
++		(pmlmeinfo->ht_cap.ampdu_params_info &
++		 IEEE80211_HT_AMPDU_PARM_DENSITY) >> 2;
+ 
+ 	rtl8723a_set_ampdu_min_space(padapter, min_MPDU_spacing);
+ 	rtl8723a_set_ampdu_factor(padapter, max_AMPDU_len);
+@@ -1338,18 +1342,18 @@ unsigned int update_supported_rate23a(unsigned char *ptn, unsigned int ptn_sz)
+ 	return mask;
+ }
+ 
+-unsigned int update_MSC_rate23a(struct HT_caps_element *pHT_caps)
++unsigned int update_MSC_rate23a(struct ieee80211_ht_cap *pHT_caps)
+ {
+ 	unsigned int mask = 0;
+ 
+-	mask = pHT_caps->u.HT_cap_element.mcs_info.rx_mask[0] << 12 |
+-		pHT_caps->u.HT_cap_element.mcs_info.rx_mask[1] << 20;
++	mask = pHT_caps->mcs.rx_mask[0] << 12 |
++		pHT_caps->mcs.rx_mask[1] << 20;
+ 
+ 	return mask;
+ }
+ 
+ int support_short_GI23a(struct rtw_adapter *padapter,
+-			struct HT_caps_element *pHT_caps)
++			struct ieee80211_ht_cap *pHT_caps)
+ {
+ 	struct mlme_ext_priv *pmlmeext = &padapter->mlmeextpriv;
+ 	struct mlme_ext_info *pmlmeinfo = &pmlmeext->mlmext_info;
+@@ -1361,7 +1365,7 @@ int support_short_GI23a(struct rtw_adapter *padapter,
+ 		return _FAIL;
+ 	bit_offset = (pmlmeext->cur_bwmode & HT_CHANNEL_WIDTH_40)? 6: 5;
+ 
+-	if (pHT_caps->u.HT_cap_element.HT_caps_info & (0x1 << bit_offset))
++	if (pHT_caps->cap_info & cpu_to_le16(0x1 << bit_offset))
+ 		return _SUCCESS;
+ 	else
+ 		return _FAIL;
+diff --git a/drivers/staging/rtl8723au/hal/rtl8723a_bt-coexist.c b/drivers/staging/rtl8723au/hal/rtl8723a_bt-coexist.c
+index c001053..bb86986 100644
+--- a/drivers/staging/rtl8723au/hal/rtl8723a_bt-coexist.c
++++ b/drivers/staging/rtl8723au/hal/rtl8723a_bt-coexist.c
+@@ -5871,8 +5871,8 @@ btdm_1AntUpdateHalRAMask(struct rtw_adapter *padapter, u32 mac_id, u32 filter)
+ 		mask = update_supported_rate23a(cur_network->SupportedRates,
+ 						supportRateNum);
+ 		mask |= (pmlmeinfo->HT_enable) ?
+-			update_MSC_rate23a(&pmlmeinfo->HT_caps):0;
+-		if (support_short_GI23a(padapter, &pmlmeinfo->HT_caps))
++			update_MSC_rate23a(&pmlmeinfo->ht_cap):0;
++		if (support_short_GI23a(padapter, &pmlmeinfo->ht_cap))
+ 			shortGIrate = true;
+ 		break;
+ 	case 1:/* for broadcast/multicast */
+diff --git a/drivers/staging/rtl8723au/hal/usb_halinit.c b/drivers/staging/rtl8723au/hal/usb_halinit.c
+index 6a7fb28..d3d7289 100644
+--- a/drivers/staging/rtl8723au/hal/usb_halinit.c
++++ b/drivers/staging/rtl8723au/hal/usb_halinit.c
+@@ -1532,9 +1532,9 @@ void rtl8723a_update_ramask(struct rtw_adapter *padapter,
+ 		mask = update_supported_rate23a(cur_network->SupportedRates,
+ 					     supportRateNum);
+ 		mask |= (pmlmeinfo->HT_enable) ?
+-			update_MSC_rate23a(&pmlmeinfo->HT_caps) : 0;
++			update_MSC_rate23a(&pmlmeinfo->ht_cap) : 0;
+ 
+-		if (support_short_GI23a(padapter, &pmlmeinfo->HT_caps))
++		if (support_short_GI23a(padapter, &pmlmeinfo->ht_cap))
+ 			shortGIrate = true;
+ 		break;
+ 
+diff --git a/drivers/staging/rtl8723au/include/rtw_mlme_ext.h b/drivers/staging/rtl8723au/include/rtw_mlme_ext.h
+index badbce0..57622fb 100644
+--- a/drivers/staging/rtl8723au/include/rtw_mlme_ext.h
++++ b/drivers/staging/rtl8723au/include/rtw_mlme_ext.h
+@@ -366,7 +366,7 @@ struct mlme_ext_info
+ 
+ 	struct ADDBA_request		ADDBA_req;
+ 	struct WMM_para_element	WMM_param;
+-	struct HT_caps_element	HT_caps;
++	struct ieee80211_ht_cap ht_cap;
+ 	struct HT_info_element		HT_info;
+ 	struct wlan_bssid_ex			network;/* join network or bss_network, if in ap mode, it is the same to cur_network.network */
+ 	struct FW_Sta_Info		FW_sta_info[NUM_STA];
+@@ -536,7 +536,7 @@ int update_sta_support_rate23a(struct rtw_adapter *padapter, u8* pvar_ie,
+ void update_sta_info23a(struct rtw_adapter *padapter, struct sta_info *psta);
+ unsigned int update_basic_rate23a(unsigned char *ptn, unsigned int ptn_sz);
+ unsigned int update_supported_rate23a(unsigned char *ptn, unsigned int ptn_sz);
+-unsigned int update_MSC_rate23a(struct HT_caps_element *pHT_caps);
++unsigned int update_MSC_rate23a(struct ieee80211_ht_cap *ht_cap);
+ void Update_RA_Entry23a(struct rtw_adapter *padapter, struct sta_info *psta);
+ void set_sta_rate23a(struct rtw_adapter *padapter, struct sta_info *psta);
+ 
+@@ -545,7 +545,7 @@ int receive_disconnect23a(struct rtw_adapter *padapter,
+ 
+ unsigned char get_highest_rate_idx23a(u32 mask);
+ int support_short_GI23a(struct rtw_adapter *padapter,
+-		     struct HT_caps_element *pHT_caps);
++			struct ieee80211_ht_cap *ht_cap);
+ bool is_ap_in_tkip23a(struct rtw_adapter *padapter);
+ bool is_ap_in_wep23a(struct rtw_adapter *padapter);
+ bool should_forbid_n_rate23a(struct rtw_adapter *padapter);
+diff --git a/drivers/staging/rtl8723au/include/wifi.h b/drivers/staging/rtl8723au/include/wifi.h
+index f731833..d0a8c86 100644
+--- a/drivers/staging/rtl8723au/include/wifi.h
++++ b/drivers/staging/rtl8723au/include/wifi.h
+@@ -76,20 +76,6 @@ struct ieee80211_ht_addt_info {
+ 	unsigned char	basic_set[16];
+ } __packed;
+ 
+-struct HT_caps_element {
+-	union {
+-		struct {
+-			unsigned short	HT_caps_info;
+-			unsigned char	AMPDU_para;
+-			struct ieee80211_mcs_info mcs_info;
+-			unsigned short	HT_ext_caps;
+-			unsigned int	Beamforming_caps;
+-			unsigned char	ASEL_caps;
+-		} HT_cap_element;
+-		unsigned char HT_cap[26];
+-	} u;
+-} __packed;
+-
+ struct HT_info_element {
+ 	unsigned char	primary_channel;
+ 	unsigned char	infos[5];
