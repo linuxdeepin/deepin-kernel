@@ -61,7 +61,6 @@ class Gencontrol(Base):
             'VERSION': self.version.linux_version,
             'UPSTREAMVERSION': self.version.linux_upstream,
             'ABINAME': self.abiname_version + self.abiname_part,
-            'ABINAME_PART': self.abiname_part,
             'SOURCEVERSION': self.version.complete,
         })
 
@@ -131,7 +130,6 @@ class Gencontrol(Base):
                 abiname_part = self.abiname_part
             makeflags['ABINAME'] = vars['abiname'] = \
                 self.abiname_version + abiname_part
-            makeflags['ABINAME_PART'] = abiname_part
 
         if foreign_kernel:
             packages_headers_arch = []
