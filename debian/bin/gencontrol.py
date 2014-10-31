@@ -60,7 +60,7 @@ class Gencontrol(Base):
         makeflags.update({
             'VERSION': self.version.linux_version,
             'UPSTREAMVERSION': self.version.linux_upstream,
-            'ABINAME': self.abiname,
+            'ABINAME': self.abiname_version + self.abiname_part,
             'ABINAME_PART': self.abiname_part,
             'SOURCEVERSION': self.version.complete,
         })
@@ -130,7 +130,7 @@ class Gencontrol(Base):
             except KeyError:
                 abiname_part = self.abiname_part
             makeflags['ABINAME'] = vars['abiname'] = \
-                self.version.linux_upstream + abiname_part
+                self.abiname_version + abiname_part
             makeflags['ABINAME_PART'] = abiname_part
 
         if foreign_kernel:
@@ -466,17 +466,21 @@ class Gencontrol(Base):
             self.abiname_part = ''
         else:
             self.abiname_part = '-%s' % self.config['abi', ]['abiname']
-        self.abiname = self.version.linux_upstream + self.abiname_part
+        # We need to keep at least three version components to avoid
+        # userland breakage (e.g. #742226, #745984).
+        self.abiname_version = re.sub('^(\d+\.\d+)(?=-|$)', r'\1.0',
+                                      self.version.linux_upstream)
         self.vars = {
             'upstreamversion': self.version.linux_upstream,
             'version': self.version.linux_version,
             'source_upstream': self.version.upstream,
             'source_package': self.changelog[0].source,
-            'abiname': self.abiname,
+            'abiname': self.abiname_version + self.abiname_part,
         }
         self.config['version', ] = {'source': self.version.complete,
                                     'upstream': self.version.linux_upstream,
-                                    'abiname': self.abiname}
+                                    'abiname': (self.abiname_version +
+                                                self.abiname_part)}
 
         distribution = self.changelog[0].distribution
         if distribution in ('unstable', ):
