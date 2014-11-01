@@ -60,7 +60,8 @@ class Gencontrol(Base):
         makeflags.update({
             'VERSION': self.version.linux_version,
             'UPSTREAMVERSION': self.version.linux_upstream,
-            'ABINAME': self.abiname_version + self.abiname_part,
+            'ABINAME': self.abiname,
+            'ABINAME_INTERNAL': self.abiname_internal,
             'SOURCEVERSION': self.version.complete,
         })
 
@@ -129,7 +130,9 @@ class Gencontrol(Base):
             except KeyError:
                 abiname_part = self.abiname_part
             makeflags['ABINAME'] = vars['abiname'] = \
-                self.abiname_version + abiname_part
+                self.version.linux_upstream + abiname_part
+            makeflags['ABINAME_INTERNAL'] = vars['abiname_internal'] = \
+                self.version.linux_upstream_3part + abiname_part
 
         if foreign_kernel:
             packages_headers_arch = []
@@ -170,7 +173,7 @@ class Gencontrol(Base):
                 kw_env['KW_DEFCONFIG_DIR'] = installer_def_dir
                 kw_env['KW_CONFIG_DIR'] = installer_arch_dir
                 kw_proc = subprocess.Popen(
-                    ['kernel-wedge', 'gen-control', vars['abiname']],
+                    ['kernel-wedge', 'gen-control', vars['abiname_internal']],
                     stdout=subprocess.PIPE,
                     env=kw_env)
                 if not isinstance(kw_proc.stdout, io.IOBase):
@@ -464,21 +467,19 @@ class Gencontrol(Base):
             self.abiname_part = ''
         else:
             self.abiname_part = '-%s' % self.config['abi', ]['abiname']
-        # We need to keep at least three version components to avoid
-        # userland breakage (e.g. #742226, #745984).
-        self.abiname_version = re.sub('^(\d+\.\d+)(?=-|$)', r'\1.0',
-                                      self.version.linux_upstream)
+        self.abiname = self.version.linux_upstream + self.abiname_part
+        self.abiname_internal = self.version.linux_upstream_3part + self.abiname_part
         self.vars = {
             'upstreamversion': self.version.linux_upstream,
             'version': self.version.linux_version,
             'source_upstream': self.version.upstream,
             'source_package': self.changelog[0].source,
-            'abiname': self.abiname_version + self.abiname_part,
+            'abiname': self.abiname,
+            'abiname_internal': self.abiname_internal,
         }
         self.config['version', ] = {'source': self.version.complete,
                                     'upstream': self.version.linux_upstream,
-                                    'abiname': (self.abiname_version +
-                                                self.abiname_part)}
+                                    'abiname': self.abiname}
 
         distribution = self.changelog[0].distribution
         if distribution in ('unstable', ):

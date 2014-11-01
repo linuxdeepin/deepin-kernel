@@ -161,8 +161,10 @@ $
         if d['modifier'] is not None:
             assert not d['update']
             self.linux_upstream = u'-'.join((d['version'], d['modifier']))
+            self.linux_upstream_3part = u'-'.join((d['version'] + '.0', d['modifier']))
         else:
             self.linux_upstream = d['version']
+            self.linux_upstream_3part = d['version'] + '.0'
         self.linux_upstream_full = self.linux_upstream + (d['update'] or u'')
         self.linux_dfsg = d['dfsg']
         self.linux_revision_experimental = match.group('revision_experimental') and True
