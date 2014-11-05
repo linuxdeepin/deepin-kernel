@@ -15,7 +15,7 @@ echo
 echo "Patches without required headers"
 echo "================================"
 xargs egrep -l '^(Subject|Description):' < $TMPDIR/used | xargs egrep -l '^(From|Author|Origin):' > $TMPDIR/goodheaders || test $? = 1
-fgrep -v -f $TMPDIR/goodheaders $TMPDIR/used
+fgrep -v -f $TMPDIR/goodheaders $TMPDIR/used || test $? = 1
 echo
 echo "Patches without Origin or Forwarded header"
 echo "=========================================="
