@@ -19,8 +19,8 @@ fgrep -v -f $TMPDIR/goodheaders $TMPDIR/used || test $? = 1
 echo
 echo "Patches without Origin or Forwarded header"
 echo "=========================================="
-xargs egrep -L '^(Origin|Forwarded):' < $TMPDIR/used || test $? = 1
+xargs egrep -L '^(Origin:|Forwarded: (no\b|not-needed|http))' < $TMPDIR/used || test $? = 1
 echo
 echo "Patches to be forwarded"
 echo "======================="
-xargs egrep -l '^Forwarded: no' < $TMPDIR/used | grep -v ^debian/patches/debian/ || test $? = 1
+xargs egrep -l '^Forwarded: no\b' < $TMPDIR/used || test $? = 1
