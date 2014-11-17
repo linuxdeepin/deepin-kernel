@@ -68,10 +68,22 @@ sed -i '1,/^ --/ { /New upstream stable update:/ { a\
 '"$(
 while [ "v$cur_ver" != "v$new_ver" ]; do
     next_ver="$(next_update "$cur_ver")"
-    # TODO: Need URLs for full changelogs
-    echo "    [$next_ver]\\"
+    echo "    http://kernel.alioth.debian.org/linux-changelog/ChangeLog-$next_ver\\"
     git log --reverse --pretty='    - %s\' "v$cur_ver..v$next_ver^"
     cur_ver="$next_ver"
 done)"'
 
 } }' debian/changelog
+
+declare -a changelogs
+changelogs=()
+while [ "v$cur_ver" != "v$new_ver" ]; do
+    next_ver="$(next_update "$cur_ver")"
+    git log "v$cur_ver..v$next_ver" > "../ChangeLog-$next_ver"
+    chmod 644 "../ChangeLog-$next_ver"
+    changelogs[${#changelogs[*]} + 1]="../ChangeLog-$next_ver"
+    cur_ver="$next_ver"
+done
+
+echo 'To upload the full changelogs:'
+echo "scp ${changelogs[*]} alioth.debian.org:/home/groups/kernel/htdocs/linux-changelog/"
