@@ -1,0 +1,129 @@
+Subject: Revert "drivers/net: Disable UFO through virtio" in macvtap and tun
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Tue, 11 Nov 2014 17:12:58 +0000
+
+This reverts commit 88e0e0e5aa722b193c8758c8b45d041de5316924 for
+the tap drivers, but leaves UFO disabled in virtio_net.
+
+libvirt at least assumes that tap features will never be dropped
+in new kernel versions, and doing so prevents migration of VMs to
+the never kernel version while they are running with virtio net
+devices.
+
+Fixes: 88e0e0e5aa7a ("drivers/net: Disable UFO through virtio")
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+---
+ drivers/net/macvtap.c | 13 ++++++++-----
+ drivers/net/tun.c     | 19 ++++++++-----------
+ 2 files changed, 16 insertions(+), 16 deletions(-)
+
+--- a/drivers/net/macvtap.c
++++ b/drivers/net/macvtap.c
+@@ -66,7 +66,7 @@ static struct cdev macvtap_cdev;
+ static const struct proto_ops macvtap_socket_ops;
+ 
+ #define TUN_OFFLOADS (NETIF_F_HW_CSUM | NETIF_F_TSO_ECN | NETIF_F_TSO | \
+-		      NETIF_F_TSO6)
++		      NETIF_F_TSO6 | NETIF_F_UFO)
+ #define RX_OFFLOADS (NETIF_F_GRO | NETIF_F_LRO)
+ #define TAP_FEATURES (NETIF_F_GSO | NETIF_F_SG)
+ 
+@@ -570,8 +570,6 @@ static int macvtap_skb_from_vnet_hdr(str
+ 			gso_type = SKB_GSO_TCPV6;
+ 			break;
+ 		case VIRTIO_NET_HDR_GSO_UDP:
+-			pr_warn_once("macvtap: %s: using disabled UFO feature; please fix this program\n",
+-				     current->comm);
+ 			gso_type = SKB_GSO_UDP;
+ 			if (skb->protocol == htons(ETH_P_IPV6))
+ 				ipv6_proxy_select_ident(skb);
+@@ -619,6 +617,8 @@ static void macvtap_skb_to_vnet_hdr(cons
+ 			vnet_hdr->gso_type = VIRTIO_NET_HDR_GSO_TCPV4;
+ 		else if (sinfo->gso_type & SKB_GSO_TCPV6)
+ 			vnet_hdr->gso_type = VIRTIO_NET_HDR_GSO_TCPV6;
++		else if (sinfo->gso_type & SKB_GSO_UDP)
++			vnet_hdr->gso_type = VIRTIO_NET_HDR_GSO_UDP;
+ 		else
+ 			BUG();
+ 		if (sinfo->gso_type & SKB_GSO_TCP_ECN)
+@@ -955,6 +955,9 @@ static int set_offload(struct macvtap_qu
+ 			if (arg & TUN_F_TSO6)
+ 				feature_mask |= NETIF_F_TSO6;
+ 		}
++
++		if (arg & TUN_F_UFO)
++			feature_mask |= NETIF_F_UFO;
+ 	}
+ 
+ 	/* tun/tap driver inverts the usage for TSO offloads, where
+@@ -965,7 +968,7 @@ static int set_offload(struct macvtap_qu
+ 	 * When user space turns off TSO, we turn off GSO/LRO so that
+ 	 * user-space will not receive TSO frames.
+ 	 */
+-	if (feature_mask & (NETIF_F_TSO | NETIF_F_TSO6))
++	if (feature_mask & (NETIF_F_TSO | NETIF_F_TSO6 | NETIF_F_UFO))
+ 		features |= RX_OFFLOADS;
+ 	else
+ 		features &= ~RX_OFFLOADS;
+@@ -1066,7 +1069,7 @@ static long macvtap_ioctl(struct file *f
+ 	case TUNSETOFFLOAD:
+ 		/* let the user check for future flags */
+ 		if (arg & ~(TUN_F_CSUM | TUN_F_TSO4 | TUN_F_TSO6 |
+-			    TUN_F_TSO_ECN))
++			    TUN_F_TSO_ECN | TUN_F_UFO))
+ 			return -EINVAL;
+ 
+ 		rtnl_lock();
+--- a/drivers/net/tun.c
++++ b/drivers/net/tun.c
+@@ -175,7 +175,7 @@ struct tun_struct {
+ 	struct net_device	*dev;
+ 	netdev_features_t	set_features;
+ #define TUN_USER_FEATURES (NETIF_F_HW_CSUM|NETIF_F_TSO_ECN|NETIF_F_TSO| \
+-			  NETIF_F_TSO6)
++			  NETIF_F_TSO6|NETIF_F_UFO)
+ 
+ 	int			vnet_hdr_sz;
+ 	int			sndbuf;
+@@ -1152,20 +1152,10 @@ static ssize_t tun_get_user(struct tun_s
+ 			skb_shinfo(skb)->gso_type = SKB_GSO_TCPV6;
+ 			break;
+ 		case VIRTIO_NET_HDR_GSO_UDP:
+-		{
+-			static bool warned;
+-
+-			if (!warned) {
+-				warned = true;
+-				netdev_warn(tun->dev,
+-					    "%s: using disabled UFO feature; please fix this program\n",
+-					    current->comm);
+-			}
+ 			skb_shinfo(skb)->gso_type = SKB_GSO_UDP;
+ 			if (skb->protocol == htons(ETH_P_IPV6))
+ 				ipv6_proxy_select_ident(skb);
+ 			break;
+-		}
+ 		default:
+ 			tun->dev->stats.rx_frame_errors++;
+ 			kfree_skb(skb);
+@@ -1269,6 +1259,8 @@ static ssize_t tun_put_user(struct tun_s
+ 				gso.gso_type = VIRTIO_NET_HDR_GSO_TCPV4;
+ 			else if (sinfo->gso_type & SKB_GSO_TCPV6)
+ 				gso.gso_type = VIRTIO_NET_HDR_GSO_TCPV6;
++			else if (sinfo->gso_type & SKB_GSO_UDP)
++				gso.gso_type = VIRTIO_NET_HDR_GSO_UDP;
+ 			else {
+ 				pr_err("unexpected GSO type: "
+ 				       "0x%x, gso_size %d, hdr_len %d\n",
+@@ -1775,6 +1767,11 @@ static int set_offload(struct tun_struct
+ 				features |= NETIF_F_TSO6;
+ 			arg &= ~(TUN_F_TSO4|TUN_F_TSO6);
+ 		}
++
++		if (arg & TUN_F_UFO) {
++			features |= NETIF_F_UFO;
++			arg &= ~TUN_F_UFO;
++		}
+ 	}
+ 
+ 	/* This gives the user a way to test for new features in future by
