@@ -4,6 +4,7 @@ import sys
 sys.path.append('debian/lib/python')
 
 import fnmatch
+import glob
 import stat
 
 from debian_linux.abi import Symbols
@@ -174,6 +175,7 @@ class CheckImage(object):
         self.dir = dir
         self.arch, self.featureset, self.flavour = arch, featureset, flavour
 
+        self.config_entry_base = config.merge('base', arch, featureset, flavour)
         self.config_entry_build = config.merge('build', arch, featureset, flavour)
         self.config_entry_image = config.merge('image', arch, featureset, flavour)
 
@@ -198,7 +200,15 @@ class CheckImage(object):
         if not value:
             return 0
 
-        size = os.stat(image)[stat.ST_SIZE]
+        dtb_size = 0
+        if self.config_entry_image.get('check-size-with-dtb'):
+            for dtb in glob.glob(
+                    os.path.join(self.dir, 'arch',
+                                 self.config_entry_base['kernel-arch'],
+                                 'boot/dts/*.dtb')):
+                dtb_size = max(dtb_size, os.stat(dtb).st_size)
+
+        size = os.stat(image).st_size + dtb_size
 
         if size > value:
             out.write('Image too large (%d > %d)!  Refusing to continue.\n' % (size, value))

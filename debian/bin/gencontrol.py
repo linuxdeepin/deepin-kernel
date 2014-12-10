@@ -34,6 +34,7 @@ class Gencontrol(Base):
             'configs': config.SchemaItemList(),
             'initramfs-generators': config.SchemaItemList(),
             'check-size': config.SchemaItemInteger(),
+            'check-size-with-dtb': config.SchemaItemBoolean(),
         },
         'relations': {
         },
