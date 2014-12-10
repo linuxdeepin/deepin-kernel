@@ -198,8 +198,6 @@ class CheckImage(object):
         if not value:
             return 0
 
-        value = int(value)
-
         size = os.stat(image)[stat.ST_SIZE]
 
         if size > value:

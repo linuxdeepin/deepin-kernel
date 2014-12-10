@@ -33,6 +33,7 @@ class Gencontrol(Base):
             'bootloaders': config.SchemaItemList(),
             'configs': config.SchemaItemList(),
             'initramfs-generators': config.SchemaItemList(),
+            'check-size': config.SchemaItemInteger(),
         },
         'relations': {
         },
