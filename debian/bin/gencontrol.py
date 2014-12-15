@@ -477,6 +477,7 @@ class Gencontrol(Base):
         }
         self.config['version', ] = {'source': self.version.complete,
                                     'upstream': self.version.linux_upstream,
+                                    'abiname_base': self.abiname_version,
                                     'abiname': (self.abiname_version +
                                                 self.abiname_part)}
 
