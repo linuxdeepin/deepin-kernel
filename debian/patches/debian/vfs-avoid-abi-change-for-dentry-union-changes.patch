@@ -1,0 +1,76 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Mon, 12 Jan 2015 04:54:59 +0000
+Subject: vfs: Avoid ABI change for dentry union changes
+Forwarded: not-needed
+
+Commit 946e51f2bf37f1656916eb75bd0742ba33983c28 ("move d_rcu from
+overlapping d_child to overlapping d_alias") looks disruptive and
+it is an API change since the union is named.  However, it doesn't
+actually move anything that modules need, so it is not an ABI
+change and we can safely hide it from genksysms.
+
+Verify this by adding an unused function with some BUILD_BUG_ONs
+to assert the size and alignment of fields remain the same.
+
+---
+--- a/include/linux/dcache.h
++++ b/include/linux/dcache.h
+@@ -124,15 +124,31 @@ struct dentry {
+ 	void *d_fsdata;			/* fs-specific data */
+ 
+ 	struct list_head d_lru;		/* LRU list */
++#ifdef __GENKSYMS__
++	/*
++	 * bwh: The union changes here don't move anything other than
++	 * d_rcu (which modules definitely should not touch).  This is
++	 * checked by dcache_abi_check().
++	 */
++	union {
++#endif
+ 	struct list_head d_child;	/* child of parent list */
++#ifdef __GENKSYMS__
++		struct rcu_head d_rcu;
++	} d_u;
++#endif
+ 	struct list_head d_subdirs;	/* our children */
+ 	/*
+ 	 * d_alias and d_rcu can share memory
+ 	 */
++#ifndef __GENKSYMS__
+ 	union {
++#endif
+ 		struct hlist_node d_alias;	/* inode alias list */
++#ifndef __GENKSYMS__
+ 	 	struct rcu_head d_rcu;
+ 	} d_u;
++#endif
+ };
+ 
+ /*
+--- a/fs/dcache.c
++++ b/fs/dcache.c
+@@ -255,6 +255,24 @@ static void dentry_free(struct dentry *d
+ 		call_rcu(&dentry->d_u.d_rcu, __d_free);
+ }
+ 
++/*
++ * bwh: Assert that dentry union changes didn't change the structure
++ * layout other than to move d_rcu.
++ */
++static void __always_unused dcache_abi_check(void)
++{
++	struct dentry dentry;
++	union {
++		struct list_head d_child;
++		struct rcu_head d_rcu;
++	} old_d_u;
++	BUILD_BUG_ON(sizeof(dentry.d_child) != sizeof(old_d_u) ||
++		     __alignof__(dentry.d_child) != __alignof__(old_d_u));
++	BUILD_BUG_ON(sizeof(dentry.d_u.d_alias) != sizeof(dentry.d_u) ||
++		     __alignof__(dentry.d_u.d_alias) !=
++		     __alignof__(dentry.d_u));
++}
++
+ /**
+  * dentry_rcuwalk_barrier - invalidate in-progress rcu-walk lookups
+  * @dentry: the target dentry
