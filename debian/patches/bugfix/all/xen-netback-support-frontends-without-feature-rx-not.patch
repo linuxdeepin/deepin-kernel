@@ -1,0 +1,188 @@
+From 0baa6f7d5b0ed21b28768d151b1d74cb9b88dacf Mon Sep 17 00:00:00 2001
+From: David Vrabel <david.vrabel@citrix.com>
+Date: Thu, 18 Dec 2014 11:13:06 +0000
+Subject: [PATCH 4/4] xen-netback: support frontends without feature-rx-notify
+ again
+Origin: https://git.kernel.org/linus/26c0e102585d5a4d311f5d6eb7f524d288e7f6b7
+
+Commit bc96f648df1bbc2729abbb84513cf4f64273a1f1 (xen-netback: make
+feature-rx-notify mandatory) incorrectly assumed that there were no
+frontends in use that did not support this feature.  But the frontend
+driver in MiniOS does not and since this is used by (qemu) stubdoms,
+these stopped working.
+
+Netback sort of works as-is in this mode except:
+
+- If there are no Rx requests and the internal Rx queue fills, only
+  the drain timeout will wake the thread.  The default drain timeout
+  of 10 s would give unacceptable pauses.
+
+- If an Rx stall was detected and the internal Rx queue is drained,
+  then the Rx thread would never wake.
+
+Handle these two cases (when feature-rx-notify is disabled) by:
+
+- Reducing the drain timeout to 30 ms.
+
+- Disabling Rx stall detection.
+
+Reported-by: John <jw@nuclearfallout.net>
+Tested-by: John <jw@nuclearfallout.net>
+Signed-off-by: David Vrabel <david.vrabel@citrix.com>
+Reviewed-by: Wei Liu <wei.liu2@citrix.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/xen-netback/common.h    |    4 +++-
+ drivers/net/xen-netback/interface.c |    4 +++-
+ drivers/net/xen-netback/netback.c   |   27 ++++++++++++++-------------
+ drivers/net/xen-netback/xenbus.c    |   12 +++++++++---
+ 4 files changed, 29 insertions(+), 18 deletions(-)
+
+diff --git a/drivers/net/xen-netback/common.h b/drivers/net/xen-netback/common.h
+index 083ecc9..5f1fda4 100644
+--- a/drivers/net/xen-netback/common.h
++++ b/drivers/net/xen-netback/common.h
+@@ -230,6 +230,8 @@ struct xenvif {
+ 	 */
+ 	bool disabled;
+ 	unsigned long status;
++	unsigned long drain_timeout;
++	unsigned long stall_timeout;
+ 
+ 	/* Queues */
+ 	struct xenvif_queue *queues;
+@@ -328,7 +330,7 @@ irqreturn_t xenvif_interrupt(int irq, void *dev_id);
+ extern bool separate_tx_rx_irq;
+ 
+ extern unsigned int rx_drain_timeout_msecs;
+-extern unsigned int rx_drain_timeout_jiffies;
++extern unsigned int rx_stall_timeout_msecs;
+ extern unsigned int xenvif_max_queues;
+ 
+ #ifdef CONFIG_DEBUG_FS
+diff --git a/drivers/net/xen-netback/interface.c b/drivers/net/xen-netback/interface.c
+index ddcb757..af047c2 100644
+--- a/drivers/net/xen-netback/interface.c
++++ b/drivers/net/xen-netback/interface.c
+@@ -166,7 +166,7 @@ static int xenvif_start_xmit(struct sk_buff *skb, struct net_device *dev)
+ 		goto drop;
+ 
+ 	cb = XENVIF_RX_CB(skb);
+-	cb->expires = jiffies + rx_drain_timeout_jiffies;
++	cb->expires = jiffies + vif->drain_timeout;
+ 
+ 	xenvif_rx_queue_tail(queue, skb);
+ 	xenvif_kick_thread(queue);
+@@ -414,6 +414,8 @@ struct xenvif *xenvif_alloc(struct device *parent, domid_t domid,
+ 	vif->ip_csum = 1;
+ 	vif->dev = dev;
+ 	vif->disabled = false;
++	vif->drain_timeout = msecs_to_jiffies(rx_drain_timeout_msecs);
++	vif->stall_timeout = msecs_to_jiffies(rx_stall_timeout_msecs);
+ 
+ 	/* Start out with no queues. */
+ 	vif->queues = NULL;
+diff --git a/drivers/net/xen-netback/netback.c b/drivers/net/xen-netback/netback.c
+index 6563f07..c39aace 100644
+--- a/drivers/net/xen-netback/netback.c
++++ b/drivers/net/xen-netback/netback.c
+@@ -60,14 +60,12 @@ module_param(separate_tx_rx_irq, bool, 0644);
+  */
+ unsigned int rx_drain_timeout_msecs = 10000;
+ module_param(rx_drain_timeout_msecs, uint, 0444);
+-unsigned int rx_drain_timeout_jiffies;
+ 
+ /* The length of time before the frontend is considered unresponsive
+  * because it isn't providing Rx slots.
+  */
+-static unsigned int rx_stall_timeout_msecs = 60000;
++unsigned int rx_stall_timeout_msecs = 60000;
+ module_param(rx_stall_timeout_msecs, uint, 0444);
+-static unsigned int rx_stall_timeout_jiffies;
+ 
+ unsigned int xenvif_max_queues;
+ module_param_named(max_queues, xenvif_max_queues, uint, 0644);
+@@ -2022,7 +2020,7 @@ static bool xenvif_rx_queue_stalled(struct xenvif_queue *queue)
+ 	return !queue->stalled
+ 		&& prod - cons < XEN_NETBK_RX_SLOTS_MAX
+ 		&& time_after(jiffies,
+-			      queue->last_rx_time + rx_stall_timeout_jiffies);
++			      queue->last_rx_time + queue->vif->stall_timeout);
+ }
+ 
+ static bool xenvif_rx_queue_ready(struct xenvif_queue *queue)
+@@ -2040,8 +2038,9 @@ static bool xenvif_have_rx_work(struct xenvif_queue *queue)
+ {
+ 	return (!skb_queue_empty(&queue->rx_queue)
+ 		&& xenvif_rx_ring_slots_available(queue, XEN_NETBK_RX_SLOTS_MAX))
+-		|| xenvif_rx_queue_stalled(queue)
+-		|| xenvif_rx_queue_ready(queue)
++		|| (queue->vif->stall_timeout &&
++		    (xenvif_rx_queue_stalled(queue)
++		     || xenvif_rx_queue_ready(queue)))
+ 		|| kthread_should_stop()
+ 		|| queue->vif->disabled;
+ }
+@@ -2094,6 +2093,9 @@ int xenvif_kthread_guest_rx(void *data)
+ 	struct xenvif_queue *queue = data;
+ 	struct xenvif *vif = queue->vif;
+ 
++	if (!vif->stall_timeout)
++		xenvif_queue_carrier_on(queue);
++
+ 	for (;;) {
+ 		xenvif_wait_for_rx_work(queue);
+ 
+@@ -2120,10 +2122,12 @@ int xenvif_kthread_guest_rx(void *data)
+ 		 * while it's probably not responsive, drop the
+ 		 * carrier so packets are dropped earlier.
+ 		 */
+-		if (xenvif_rx_queue_stalled(queue))
+-			xenvif_queue_carrier_off(queue);
+-		else if (xenvif_rx_queue_ready(queue))
+-			xenvif_queue_carrier_on(queue);
++		if (vif->stall_timeout) {
++			if (xenvif_rx_queue_stalled(queue))
++				xenvif_queue_carrier_off(queue);
++			else if (xenvif_rx_queue_ready(queue))
++				xenvif_queue_carrier_on(queue);
++		}
+ 
+ 		/* Queued packets may have foreign pages from other
+ 		 * domains.  These cannot be queued indefinitely as
+@@ -2194,9 +2198,6 @@ static int __init netback_init(void)
+ 	if (rc)
+ 		goto failed_init;
+ 
+-	rx_drain_timeout_jiffies = msecs_to_jiffies(rx_drain_timeout_msecs);
+-	rx_stall_timeout_jiffies = msecs_to_jiffies(rx_stall_timeout_msecs);
+-
+ #ifdef CONFIG_DEBUG_FS
+ 	xen_netback_dbg_root = debugfs_create_dir("xen-netback", NULL);
+ 	if (IS_ERR_OR_NULL(xen_netback_dbg_root))
+diff --git a/drivers/net/xen-netback/xenbus.c b/drivers/net/xen-netback/xenbus.c
+index cc8f8ba..60f7c7d 100644
+--- a/drivers/net/xen-netback/xenbus.c
++++ b/drivers/net/xen-netback/xenbus.c
+@@ -887,9 +887,15 @@ static int read_xenbus_vif_flags(struct backend_info *be)
+ 		return -EOPNOTSUPP;
+ 
+ 	if (xenbus_scanf(XBT_NIL, dev->otherend,
+-			 "feature-rx-notify", "%d", &val) < 0 || val == 0) {
+-		xenbus_dev_fatal(dev, -EINVAL, "feature-rx-notify is mandatory");
+-		return -EINVAL;
++			 "feature-rx-notify", "%d", &val) < 0)
++		val = 0;
++	if (!val) {
++		/* - Reduce drain timeout to poll more frequently for
++		 *   Rx requests.
++		 * - Disable Rx stall detection.
++		 */
++		be->vif->drain_timeout = msecs_to_jiffies(30);
++		be->vif->stall_timeout = 0;
+ 	}
+ 
+ 	if (xenbus_scanf(XBT_NIL, dev->otherend, "feature-sg",
+-- 
+1.7.10.4
+

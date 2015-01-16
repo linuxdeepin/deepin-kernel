@@ -68,9 +68,9 @@ class Main(object):
         self.version = changelog.version.linux_version
         self.version_source = changelog.version.complete
 
-        local_config = ConfigCoreDump(fp=open("debian/config.defines.dump", "rb"))
+        self.config = ConfigCoreDump(fp=open("debian/config.defines.dump", "rb"))
 
-        self.version_abi = local_config['version', ]['abiname']
+        self.version_abi = self.config['version', ]['abiname']
 
     def __call__(self):
         self.dir = tempfile.mkdtemp(prefix='abiupdate')
@@ -99,13 +99,18 @@ class Main(object):
         return base_out
 
     def get_abi(self, arch, prefix):
-        filename = "linux-headers-%s-%s_%s_%s.deb" % (self.version_abi, prefix, self.version_source, arch)
+        try:
+            version_abi = (self.config['version',]['abiname_base'] + '-' +
+                           self.config['abi', arch]['abiname'])
+        except KeyError:
+            version_abi = self.version_abi
+        filename = "linux-headers-%s-%s_%s_%s.deb" % (version_abi, prefix, self.version_source, arch)
         f = self.retrieve_package(self.url, filename, arch)
         d = self.extract_package(f, "linux-headers-%s_%s" % (prefix, arch))
-        f1 = d + "/usr/src/linux-headers-%s-%s/Module.symvers" % (self.version_abi, prefix)
+        f1 = d + "/usr/src/linux-headers-%s-%s/Module.symvers" % (version_abi, prefix)
         s = Symbols(open(f1))
         shutil.rmtree(d)
-        return s
+        return version_abi, s
 
     def get_config(self):
         filename = "linux-support-%s_%s_all.deb" % (self.version_abi, self.version_source)
@@ -129,8 +134,8 @@ class Main(object):
             f_out.write(r)
         return filename_out
 
-    def save_abi(self, symbols, arch, featureset, flavour):
-        dir = "debian/abi/%s" % self.version_abi
+    def save_abi(self, version_abi, symbols, arch, featureset, flavour):
+        dir = "debian/abi/%s" % version_abi
         if not os.path.exists(dir):
             os.makedirs(dir)
         out = "%s/%s_%s_%s" % (dir, arch, featureset, flavour)
@@ -170,8 +175,8 @@ class Main(object):
             else:
                 localversion = featureset + '-' + flavour
 
-            abi = self.get_abi(arch, localversion)
-            self.save_abi(abi, arch, featureset, flavour)
+            version_abi, abi = self.get_abi(arch, localversion)
+            self.save_abi(version_abi, abi, arch, featureset, flavour)
             self.log("Ok.\n")
         except HTTPError as e:
             self.log("Failed to retrieve %s: %s\n" % (e.filename, e))
