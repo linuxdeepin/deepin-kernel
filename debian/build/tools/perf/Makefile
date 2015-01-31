@@ -3,23 +3,19 @@ OUTDIR = tools/perf
 include ../../Makefile.inc
 
 DEB_HOST_ARCH_CPU := $(shell dpkg-architecture -qDEB_HOST_ARCH_CPU)
-NO_LIBUNWIND=1
 
 ifeq ($(DEB_HOST_ARCH_CPU),alpha)
   KERNEL_ARCH_PERF = alpha
 else ifeq ($(DEB_HOST_ARCH_CPU),amd64)
   KERNEL_ARCH_PERF = x86_64
-  NO_LIBUNWIND=
 else ifeq ($(DEB_HOST_ARCH_CPU),arm)
   KERNEL_ARCH_PERF = arm
 else ifeq ($(DEB_HOST_ARCH_CPU),arm64)
   KERNEL_ARCH_PERF = arm64
-  NO_LIBUNWIND=
 else ifeq ($(DEB_HOST_ARCH_CPU),hppa)
   KERNEL_ARCH_PERF = parisc
 else ifeq ($(DEB_HOST_ARCH_CPU),i386)
   KERNEL_ARCH_PERF = i386
-  NO_LIBUNWIND=
 else ifeq ($(DEB_HOST_ARCH_CPU),powerpc)
   KERNEL_ARCH_PERF = powerpc
 else ifeq ($(DEB_HOST_ARCH_CPU),powerpc64)
@@ -38,7 +34,7 @@ else ifeq ($(DEB_HOST_ARCH_CPU),sparc64)
   KERNEL_ARCH_PERF = sparc
 endif
 
-MAKE_PERF := $(MAKE) prefix=/usr V=1 ARCH=$(KERNEL_ARCH_PERF) EXTRA_WARNINGS=-Wno-error NO_LIBUNWIND=$(NO_LIBUNWIND)
+MAKE_PERF := $(MAKE) prefix=/usr V=1 ARCH=$(KERNEL_ARCH_PERF) EXTRA_WARNINGS=-Wno-error
 
 # Disable Gtk UI until it's more usable
 MAKE_PERF += NO_GTK2=1
