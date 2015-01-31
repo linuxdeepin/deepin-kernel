@@ -10,6 +10,8 @@ else ifeq ($(DEB_HOST_ARCH_CPU),amd64)
   KERNEL_ARCH_PERF = x86_64
 else ifeq ($(DEB_HOST_ARCH_CPU),arm)
   KERNEL_ARCH_PERF = arm
+else ifeq ($(DEB_HOST_ARCH_CPU),arm64)
+  KERNEL_ARCH_PERF = arm64
 else ifeq ($(DEB_HOST_ARCH_CPU),hppa)
   KERNEL_ARCH_PERF = parisc
 else ifeq ($(DEB_HOST_ARCH_CPU),i386)
