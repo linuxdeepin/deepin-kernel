@@ -16,6 +16,14 @@ else ifeq ($(DEB_HOST_ARCH_CPU),hppa)
   KERNEL_ARCH_PERF = parisc
 else ifeq ($(DEB_HOST_ARCH_CPU),i386)
   KERNEL_ARCH_PERF = i386
+else ifeq ($(DEB_HOST_ARCH_CPU),mips)
+  KERNEL_ARCH_PERF = mips
+else ifeq ($(DEB_HOST_ARCH_CPU),mips64)
+  KERNEL_ARCH_PERF = mips
+else ifeq ($(DEB_HOST_ARCH_CPU),mips64el)
+  KERNEL_ARCH_PERF = mips
+else ifeq ($(DEB_HOST_ARCH_CPU),mipsel)
+  KERNEL_ARCH_PERF = mips
 else ifeq ($(DEB_HOST_ARCH_CPU),powerpc)
   KERNEL_ARCH_PERF = powerpc
 else ifeq ($(DEB_HOST_ARCH_CPU),powerpc64)
