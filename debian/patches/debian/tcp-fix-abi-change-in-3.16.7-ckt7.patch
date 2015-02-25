@@ -1,0 +1,84 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Wed, 25 Feb 2015 00:29:03 +0000
+Subject: tcp: Fix ABI change in 3.16.7-ckt7
+Forwarded: not-needed
+
+Commit bdbbb8527b6f ('ipv4: tcp: get rid of ugly unicast_sock')
+added netns_ipv4::tcp_sk.  As struct netns_ipv4 is embedded in
+struct net, we can't add any members there.  Instead, move it
+to the end of the containing structure and adjust its users
+accordingly.
+
+---
+--- a/include/net/net_namespace.h
++++ b/include/net/net_namespace.h
+@@ -130,6 +130,9 @@ struct net {
+ #endif
+ 	struct sock		*diag_nlsk;
+ 	atomic_t		fnhe_genid;
++#ifndef __GENKSYMS__
++	struct sock  * __percpu	*tcp_sk;
++#endif
+ };
+ 
+ #include <linux/seq_file_net.h>
+--- a/include/net/netns/ipv4.h
++++ b/include/net/netns/ipv4.h
+@@ -52,7 +52,6 @@ struct netns_ipv4 {
+ 	struct inet_peer_base	*peers;
+ 	struct tcpm_hash_bucket	*tcp_metrics_hash;
+ 	unsigned int		tcp_metrics_hash_log;
+-	struct sock  * __percpu	*tcp_sk;
+ 	struct netns_frags	frags;
+ #ifdef CONFIG_NETFILTER
+ 	struct xt_table		*iptable_filter;
+--- a/net/ipv4/tcp_ipv4.c
++++ b/net/ipv4/tcp_ipv4.c
+@@ -684,7 +684,7 @@ static void tcp_v4_send_reset(struct soc
+ 
+ 	net = dev_net(skb_dst(skb)->dev);
+ 	arg.tos = ip_hdr(skb)->tos;
+-	ip_send_unicast_reply(*this_cpu_ptr(net->ipv4.tcp_sk),
++	ip_send_unicast_reply(*this_cpu_ptr(net->tcp_sk),
+ 			      skb, ip_hdr(skb)->saddr,
+ 			      ip_hdr(skb)->daddr, &arg, arg.iov[0].iov_len);
+ 
+@@ -768,7 +768,7 @@ static void tcp_v4_send_ack(struct sk_bu
+ 	if (oif)
+ 		arg.bound_dev_if = oif;
+ 	arg.tos = tos;
+-	ip_send_unicast_reply(*this_cpu_ptr(net->ipv4.tcp_sk),
++	ip_send_unicast_reply(*this_cpu_ptr(net->tcp_sk),
+ 			      skb, ip_hdr(skb)->saddr,
+ 			      ip_hdr(skb)->daddr, &arg, arg.iov[0].iov_len);
+ 
+@@ -2539,16 +2539,16 @@ static void __net_exit tcp_sk_exit(struc
+ 	int cpu;
+ 
+ 	for_each_possible_cpu(cpu)
+-		inet_ctl_sock_destroy(*per_cpu_ptr(net->ipv4.tcp_sk, cpu));
+-	free_percpu(net->ipv4.tcp_sk);
++		inet_ctl_sock_destroy(*per_cpu_ptr(net->tcp_sk, cpu));
++	free_percpu(net->tcp_sk);
+ }
+ 
+ static int __net_init tcp_sk_init(struct net *net)
+ {
+ 	int res, cpu;
+ 
+-	net->ipv4.tcp_sk = alloc_percpu(struct sock *);
+-	if (!net->ipv4.tcp_sk)
++	net->tcp_sk = alloc_percpu(struct sock *);
++	if (!net->tcp_sk)
+ 		return -ENOMEM;
+ 
+ 	for_each_possible_cpu(cpu) {
+@@ -2558,7 +2558,7 @@ static int __net_init tcp_sk_init(struct
+ 					   IPPROTO_TCP, net);
+ 		if (res)
+ 			goto fail;
+-		*per_cpu_ptr(net->ipv4.tcp_sk, cpu) = sk;
++		*per_cpu_ptr(net->tcp_sk, cpu) = sk;
+ 	}
+ 	net->ipv4.sysctl_tcp_ecn = 2;
+ 	return 0;
