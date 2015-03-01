@@ -1,0 +1,102 @@
+From: David Howells <dhowells@redhat.com>
+Date: Mon, 1 Dec 2014 22:52:53 +0000
+Subject: KEYS: request_key() should reget expired keys rather than give
+ EKEYEXPIRED
+Origin: https://git.kernel.org/linus/0b0a84154eff56913e91df29de5c3a03a0029e38
+
+Since the keyring facility can be viewed as a cache (at least in some
+applications), the local expiration time on the key should probably be viewed
+as a 'needs updating after this time' property rather than an absolute 'anyone
+now wanting to use this object is out of luck' property.
+
+Since request_key() is the main interface for the usage of keys, this should
+update or replace an expired key rather than issuing EKEYEXPIRED if the local
+expiration has been reached (ie. it should refresh the cache).
+
+For absolute conditions where refreshing the cache probably doesn't help, the
+key can be negatively instantiated using KEYCTL_REJECT_KEY with EKEYEXPIRED
+given as the error to issue.  This will still cause request_key() to return
+EKEYEXPIRED as that was explicitly set.
+
+In the future, if the key type has an update op available, we might want to
+upcall with the expired key and allow the upcall to update it.  We would pass
+a different operation name (the first column in /etc/request-key.conf) to the
+request-key program.
+
+request_key() returning EKEYEXPIRED is causing an NFS problem which Chuck
+Lever describes thusly:
+
+	After about 10 minutes, my NFSv4 functional tests fail because the
+	ownership of the test files goes to "-2". Looking at /proc/keys
+	shows that the id_resolv keys that map to my test user ID have
+	expired. The ownership problem persists until the expired keys are
+	purged from the keyring, and fresh keys are obtained.
+
+	I bisected the problem to 3.13 commit b2a4df200d57 ("KEYS: Expand
+	the capacity of a keyring"). This commit inadvertantly changes the
+	API contract of the internal function keyring_search_aux().
+
+	The root cause appears to be that b2a4df200d57 made "no state check"
+	the default behavior. "No state check" means the keyring search
+	iterator function skips checking the key's expiry timeout, and
+	returns expired keys.  request_key_and_link() depends on getting
+	an -EAGAIN result code to know when to perform an upcall to refresh
+	an expired key.
+
+This patch can be tested directly by:
+
+	keyctl request2 user debug:fred a @s
+	keyctl timeout %user:debug:fred 3
+	sleep 4
+	keyctl request2 user debug:fred a @s
+
+Without the patch, the last command gives error EKEYEXPIRED, but with the
+command it gives a new key.
+
+Reported-by: Carl Hetherington <cth@carlh.net>
+Reported-by: Chuck Lever <chuck.lever@oracle.com>
+Signed-off-by: David Howells <dhowells@redhat.com>
+Tested-by: Chuck Lever <chuck.lever@oracle.com>
+[bwh: Backported to 3.16:
+ - Renumber KEYRING_SEARCH_SKIP_EXPIRED
+ - Adjust context]
+---
+ security/keys/internal.h    | 1 +
+ security/keys/keyring.c     | 3 ++-
+ security/keys/request_key.c | 3 ++-
+ 3 files changed, 5 insertions(+), 2 deletions(-)
+
+--- a/security/keys/internal.h
++++ b/security/keys/internal.h
+@@ -121,6 +121,7 @@ struct keyring_search_context {
+ #define KEYRING_SEARCH_NO_UPDATE_TIME	0x0008	/* Don't update times */
+ #define KEYRING_SEARCH_NO_CHECK_PERM	0x0010	/* Don't check permissions */
+ #define KEYRING_SEARCH_DETECT_TOO_DEEP	0x0020	/* Give an error on excessive depth */
++#define KEYRING_SEARCH_SKIP_EXPIRED	0x0040	/* Ignore expired keys (intention to replace) */
+ 
+ 	int (*iterator)(const void *object, void *iterator_data);
+ 
+--- a/security/keys/keyring.c
++++ b/security/keys/keyring.c
+@@ -526,7 +526,8 @@ static int keyring_search_iterator(const
+ 		}
+ 
+ 		if (key->expiry && ctx->now.tv_sec >= key->expiry) {
+-			ctx->result = ERR_PTR(-EKEYEXPIRED);
++			if (!(ctx->flags & KEYRING_SEARCH_SKIP_EXPIRED))
++				ctx->result = ERR_PTR(-EKEYEXPIRED);
+ 			kleave(" = %d [expire]", ctx->skipped_ret);
+ 			goto skipped;
+ 		}
+--- a/security/keys/request_key.c
++++ b/security/keys/request_key.c
+@@ -533,7 +533,8 @@ struct key *request_key_and_link(struct
+ 		.cred			= current_cred(),
+ 		.match			= type->match,
+ 		.match_data		= description,
+-		.flags			= KEYRING_SEARCH_LOOKUP_DIRECT,
++		.flags			= (KEYRING_SEARCH_LOOKUP_DIRECT |
++					   KEYRING_SEARCH_SKIP_EXPIRED),
+ 	};
+ 	struct key *key;
+ 	key_ref_t key_ref;
