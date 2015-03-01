@@ -1,0 +1,108 @@
+From: Ching Huang <ching2048@areca.com.tw>
+Date: Tue, 19 Aug 2014 14:29:41 +0800
+Subject: [04/19] arcmsr: limit max. number of SCSI command request
+Origin: https://git.kernel.org/linus/3df824aff935444601101cc329ebe3f52e126a4e
+Bug-Debian: https://bugs.debian.org/698821
+
+This patch limits the max. number of SCSI commmand request to avoid command
+overflow.
+
+Signed-off-by: Ching Huang <ching2048@areca.com.tw>
+Reviewed-by: Tomas Henzl <thenzl@redhat.com>
+Signed-off-by: Christoph Hellwig <hch@lst.de>
+---
+ drivers/scsi/arcmsr/arcmsr.h     |  4 +++-
+ drivers/scsi/arcmsr/arcmsr_hba.c | 32 ++++++++++++++++++++++----------
+ 2 files changed, 25 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/scsi/arcmsr/arcmsr.h b/drivers/scsi/arcmsr/arcmsr.h
+index 1c64b60..0ae0ce3 100644
+--- a/drivers/scsi/arcmsr/arcmsr.h
++++ b/drivers/scsi/arcmsr/arcmsr.h
+@@ -45,11 +45,12 @@
+ #include <linux/interrupt.h>
+ struct device_attribute;
+ /*The limit of outstanding scsi command that firmware can handle*/
+-#define ARCMSR_MAX_OUTSTANDING_CMD						256
+ #ifdef CONFIG_XEN
+ 	#define ARCMSR_MAX_FREECCB_NUM	160
++#define ARCMSR_MAX_OUTSTANDING_CMD	155
+ #else
+ 	#define ARCMSR_MAX_FREECCB_NUM	320
++#define ARCMSR_MAX_OUTSTANDING_CMD	255
+ #endif
+ #define ARCMSR_DRIVER_VERSION		"v1.30.00.04-20140428"
+ #define ARCMSR_SCSI_INITIATOR_ID						255
+@@ -598,6 +599,7 @@ struct AdapterControlBlock
+ 				#define	FW_DEADLOCK	0x0010
+ 	atomic_t 			rq_map_token;
+ 	atomic_t			ante_token_value;
++	uint32_t	maxOutstanding;
+ 	int		msix_vector_count;
+ };/* HW_DEVICE_EXTENSION */
+ /*
+diff --git a/drivers/scsi/arcmsr/arcmsr_hba.c b/drivers/scsi/arcmsr/arcmsr_hba.c
+index b338a3b..ed61ee2 100644
+--- a/drivers/scsi/arcmsr/arcmsr_hba.c
++++ b/drivers/scsi/arcmsr/arcmsr_hba.c
+@@ -134,7 +134,7 @@ static struct scsi_host_template arcmsr_scsi_host_template = {
+ 	.eh_bus_reset_handler	= arcmsr_bus_reset,
+ 	.bios_param		= arcmsr_bios_param,
+ 	.change_queue_depth	= arcmsr_adjust_disk_queue_depth,
+-	.can_queue		= ARCMSR_MAX_FREECCB_NUM,
++	.can_queue		= ARCMSR_MAX_OUTSTANDING_CMD,
+ 	.this_id			= ARCMSR_SCSI_INITIATOR_ID,
+ 	.sg_tablesize	        	= ARCMSR_DEFAULT_SG_ENTRIES, 
+ 	.max_sectors    	    	= ARCMSR_MAX_XFER_SECTORS_C, 
+@@ -693,7 +693,7 @@ static int arcmsr_probe(struct pci_dev *pdev, const struct pci_device_id *id)
+ 	host->max_lun = ARCMSR_MAX_TARGETLUN;
+ 	host->max_id = ARCMSR_MAX_TARGETID;		/*16:8*/
+ 	host->max_cmd_len = 16;	 			/*this is issue of 64bit LBA ,over 2T byte*/
+-	host->can_queue = ARCMSR_MAX_FREECCB_NUM;	/* max simultaneous cmds */		
++	host->can_queue = ARCMSR_MAX_OUTSTANDING_CMD;
+ 	host->cmd_per_lun = ARCMSR_MAX_CMD_PERLUN;	    
+ 	host->this_id = ARCMSR_SCSI_INITIATOR_ID;
+ 	host->unique_id = (bus << 8) | dev_fun;
+@@ -2216,9 +2216,6 @@ static int arcmsr_queue_command_lck(struct scsi_cmnd *cmd,
+ 		arcmsr_handle_virtual_command(acb, cmd);
+ 		return 0;
+ 	}
+-	if (atomic_read(&acb->ccboutstandingcount) >=
+-			ARCMSR_MAX_OUTSTANDING_CMD)
+-		return SCSI_MLQUEUE_HOST_BUSY;
+ 	ccb = arcmsr_get_freeccb(acb);
+ 	if (!ccb)
+ 		return SCSI_MLQUEUE_HOST_BUSY;
+@@ -2428,12 +2425,27 @@ static bool arcmsr_get_hbc_config(struct AdapterControlBlock *pACB)
+ }
+ static bool arcmsr_get_firmware_spec(struct AdapterControlBlock *acb)
+ {
+-	if (acb->adapter_type == ACB_ADAPTER_TYPE_A)
+-		return arcmsr_get_hba_config(acb);
+-	else if (acb->adapter_type == ACB_ADAPTER_TYPE_B)
+-		return arcmsr_get_hbb_config(acb);
++	bool rtn = false;
++
++	switch (acb->adapter_type) {
++	case ACB_ADAPTER_TYPE_A:
++		rtn = arcmsr_get_hba_config(acb);
++		break;
++	case ACB_ADAPTER_TYPE_B:
++		rtn = arcmsr_get_hbb_config(acb);
++		break;
++	case ACB_ADAPTER_TYPE_C:
++		rtn = arcmsr_get_hbc_config(acb);
++		break;
++	default:
++		break;
++	}
++	if (acb->firm_numbers_queue > ARCMSR_MAX_OUTSTANDING_CMD)
++		acb->maxOutstanding = ARCMSR_MAX_OUTSTANDING_CMD;
+ 	else
+-		return arcmsr_get_hbc_config(acb);
++		acb->maxOutstanding = acb->firm_numbers_queue - 1;
++	acb->host->can_queue = acb->maxOutstanding;
++	return rtn;
+ }
+ 
+ static int arcmsr_polling_hba_ccbdone(struct AdapterControlBlock *acb,
