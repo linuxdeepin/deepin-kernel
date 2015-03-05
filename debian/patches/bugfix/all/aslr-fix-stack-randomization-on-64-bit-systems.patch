@@ -1,0 +1,98 @@
+From: Hector Marco-Gisbert <hecmargi@upv.es>
+Date: Sat, 14 Feb 2015 09:33:50 -0800
+Subject: ASLR: fix stack randomization on 64-bit systems
+Origin: http://article.gmane.org/gmane.linux.kernel/1888210
+
+The issue is that the stack for processes is not properly randomized on 64 bit
+architectures due to an integer overflow.
+
+The affected function is randomize_stack_top() in file "fs/binfmt_elf.c":
+
+static unsigned long randomize_stack_top(unsigned long stack_top)
+{
+         unsigned int random_variable = 0;
+
+         if ((current->flags & PF_RANDOMIZE) &&
+                 !(current->personality & ADDR_NO_RANDOMIZE)) {
+                 random_variable = get_random_int() & STACK_RND_MASK;
+                 random_variable <<= PAGE_SHIFT;
+         }
+         return PAGE_ALIGN(stack_top) + random_variable;
+         return PAGE_ALIGN(stack_top) - random_variable;
+}
+
+Note that, it declares the "random_variable" variable as "unsigned int". Since
+the result of the shifting operation between STACK_RND_MASK (which is
+0x3fffff on x86_64, 22 bits) and PAGE_SHIFT (which is 12 on x86_64):
+
+random_variable <<= PAGE_SHIFT;
+
+then the two leftmost bits are dropped when storing the result in the
+"random_variable". This variable shall be at least 34 bits long to hold the
+(22+12) result.
+
+These two dropped bits have an impact on the entropy of process stack.
+Concretely, the total stack entropy is reduced by four: from 2^28 to 2^30 (One
+fourth of expected entropy).
+
+This patch restores back the entropy by correcting the types involved in the
+operations in the functions randomize_stack_top() and stack_maxrandom_size().
+
+The successful fix can be tested with:
+$ for i in `seq 1 10`; do cat /proc/self/maps | grep stack; done
+7ffeda566000-7ffeda587000 rw-p 00000000 00:00 0                          [stack]
+7fff5a332000-7fff5a353000 rw-p 00000000 00:00 0                          [stack]
+7ffcdb7a1000-7ffcdb7c2000 rw-p 00000000 00:00 0                          [stack]
+7ffd5e2c4000-7ffd5e2e5000 rw-p 00000000 00:00 0                          [stack]
+...
+
+Once corrected, the leading bytes should be between 7ffc and 7fff, rather
+than always being 7fff.
+
+CVE-2015-1593
+
+Signed-off-by: Hector Marco-Gisbert <hecmargi@upv.es>
+Signed-off-by: Ismael Ripoll <iripoll@upv.es>
+[kees: rebase, fix 80 char, clean up commit message, add test example, cve]
+Signed-off-by: Kees Cook <keescook@chromium.org>
+Cc: stable@vger.kernel.org
+---
+ arch/x86/mm/mmap.c | 6 +++---
+ fs/binfmt_elf.c    | 5 +++--
+ 2 files changed, 6 insertions(+), 5 deletions(-)
+
+--- a/arch/x86/mm/mmap.c
++++ b/arch/x86/mm/mmap.c
+@@ -35,12 +35,12 @@ struct __read_mostly va_alignment va_ali
+ 	.flags = -1,
+ };
+ 
+-static unsigned int stack_maxrandom_size(void)
++static unsigned long stack_maxrandom_size(void)
+ {
+-	unsigned int max = 0;
++	unsigned long max = 0;
+ 	if ((current->flags & PF_RANDOMIZE) &&
+ 		!(current->personality & ADDR_NO_RANDOMIZE)) {
+-		max = ((-1U) & STACK_RND_MASK) << PAGE_SHIFT;
++		max = ((-1UL) & STACK_RND_MASK) << PAGE_SHIFT;
+ 	}
+ 
+ 	return max;
+--- a/fs/binfmt_elf.c
++++ b/fs/binfmt_elf.c
+@@ -554,11 +554,12 @@ out:
+ 
+ static unsigned long randomize_stack_top(unsigned long stack_top)
+ {
+-	unsigned int random_variable = 0;
++	unsigned long random_variable = 0;
+ 
+ 	if ((current->flags & PF_RANDOMIZE) &&
+ 		!(current->personality & ADDR_NO_RANDOMIZE)) {
+-		random_variable = get_random_int() & STACK_RND_MASK;
++		random_variable = (unsigned long) get_random_int();
++		random_variable &= STACK_RND_MASK;
+ 		random_variable <<= PAGE_SHIFT;
+ 	}
+ #ifdef CONFIG_STACK_GROWSUP
