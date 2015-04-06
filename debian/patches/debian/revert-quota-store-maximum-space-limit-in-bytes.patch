@@ -1,0 +1,107 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Sun, 05 Apr 2015 17:20:47 +0100
+Subject: Revert "quota: Store maximum space limit in bytes"
+Forwarded: not-needed
+
+This reverts commit 075bc52630579feccc805b9baeaa26a700ca8bad, based
+on commit b10a08194c2b615955dfab2300331a90ae9344c7 upstream.  It makes
+a module ABI change and doesn't seem worth the trouble.  We can
+probably fix the issue later in a somewhat uglier way without the ABI
+change.
+---
+--- a/fs/ocfs2/quota_local.c
++++ b/fs/ocfs2/quota_local.c
+@@ -700,8 +700,8 @@ static int ocfs2_local_read_info(struct
+ 	/* We don't need the lock and we have to acquire quota file locks
+ 	 * which will later depend on this lock */
+ 	mutex_unlock(&sb_dqopt(sb)->dqio_mutex);
+-	info->dqi_max_spc_limit = 0x7fffffffffffffffLL;
+-	info->dqi_max_ino_limit = 0x7fffffffffffffffLL;
++	info->dqi_maxblimit = 0x7fffffffffffffffLL;
++	info->dqi_maxilimit = 0x7fffffffffffffffLL;
+ 	oinfo = kmalloc(sizeof(struct ocfs2_mem_dqinfo), GFP_NOFS);
+ 	if (!oinfo) {
+ 		mlog(ML_ERROR, "failed to allocate memory for ocfs2 quota"
+--- a/fs/quota/dquot.c
++++ b/fs/quota/dquot.c
+@@ -2396,6 +2396,16 @@ out:
+ }
+ EXPORT_SYMBOL(dquot_quota_on_mount);
+ 
++static inline qsize_t qbtos(qsize_t blocks)
++{
++	return blocks << QIF_DQBLKSIZE_BITS;
++}
++
++static inline qsize_t stoqb(qsize_t space)
++{
++	return (space + QIF_DQBLKSIZE - 1) >> QIF_DQBLKSIZE_BITS;
++}
++
+ /* Generic routine for getting common part of quota structure */
+ static void do_get_dqblk(struct dquot *dquot, struct qc_dqblk *di)
+ {
+@@ -2445,13 +2455,13 @@ static int do_set_dqblk(struct dquot *dq
+ 		return -EINVAL;
+ 
+ 	if (((di->d_fieldmask & QC_SPC_SOFT) &&
+-	     di->d_spc_softlimit > dqi->dqi_max_spc_limit) ||
++	     stoqb(di->d_spc_softlimit) > dqi->dqi_maxblimit) ||
+ 	    ((di->d_fieldmask & QC_SPC_HARD) &&
+-	     di->d_spc_hardlimit > dqi->dqi_max_spc_limit) ||
++	     stoqb(di->d_spc_hardlimit) > dqi->dqi_maxblimit) ||
+ 	    ((di->d_fieldmask & QC_INO_SOFT) &&
+-	     (di->d_ino_softlimit > dqi->dqi_max_ino_limit)) ||
++	     (di->d_ino_softlimit > dqi->dqi_maxilimit)) ||
+ 	    ((di->d_fieldmask & QC_INO_HARD) &&
+-	     (di->d_ino_hardlimit > dqi->dqi_max_ino_limit)))
++	     (di->d_ino_hardlimit > dqi->dqi_maxilimit)))
+ 		return -ERANGE;
+ 
+ 	spin_lock(&dq_data_lock);
+--- a/fs/quota/quota_v1.c
++++ b/fs/quota/quota_v1.c
+@@ -169,8 +169,8 @@ static int v1_read_file_info(struct supe
+ 	}
+ 	ret = 0;
+ 	/* limits are stored as unsigned 32-bit data */
+-	dqopt->info[type].dqi_max_spc_limit = 0xffffffffULL << QUOTABLOCK_BITS;
+-	dqopt->info[type].dqi_max_ino_limit = 0xffffffff;
++	dqopt->info[type].dqi_maxblimit = 0xffffffff;
++	dqopt->info[type].dqi_maxilimit = 0xffffffff;
+ 	dqopt->info[type].dqi_igrace =
+ 			dqblk.dqb_itime ? dqblk.dqb_itime : MAX_IQ_TIME;
+ 	dqopt->info[type].dqi_bgrace =
+--- a/fs/quota/quota_v2.c
++++ b/fs/quota/quota_v2.c
+@@ -117,12 +117,12 @@ static int v2_read_file_info(struct supe
+ 	qinfo = info->dqi_priv;
+ 	if (version == 0) {
+ 		/* limits are stored as unsigned 32-bit data */
+-		info->dqi_max_spc_limit = 0xffffffffULL << QUOTABLOCK_BITS;
+-		info->dqi_max_ino_limit = 0xffffffff;
++		info->dqi_maxblimit = 0xffffffff;
++		info->dqi_maxilimit = 0xffffffff;
+ 	} else {
+-		/* used space is stored as unsigned 64-bit value in bytes */
+-		info->dqi_max_spc_limit = 0xffffffffffffffffULL; /* 2^64-1 */
+-		info->dqi_max_ino_limit = 0xffffffffffffffffULL;
++		/* used space is stored as unsigned 64-bit value */
++		info->dqi_maxblimit = 0xffffffffffffffffULL;	/* 2^64-1 */
++		info->dqi_maxilimit = 0xffffffffffffffffULL;
+ 	}
+ 	info->dqi_bgrace = le32_to_cpu(dinfo.dqi_bgrace);
+ 	info->dqi_igrace = le32_to_cpu(dinfo.dqi_igrace);
+--- a/include/linux/quota.h
++++ b/include/linux/quota.h
+@@ -211,8 +211,8 @@ struct mem_dqinfo {
+ 	unsigned long dqi_flags;
+ 	unsigned int dqi_bgrace;
+ 	unsigned int dqi_igrace;
+-	qsize_t dqi_max_spc_limit;
+-	qsize_t dqi_max_ino_limit;
++	qsize_t dqi_maxblimit;
++	qsize_t dqi_maxilimit;
+ 	void *dqi_priv;
+ };
+ 
