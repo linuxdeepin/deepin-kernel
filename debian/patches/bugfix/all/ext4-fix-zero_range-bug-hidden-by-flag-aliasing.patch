@@ -1,0 +1,66 @@
+From: Theodore Ts'o <tytso@mit.edu>
+Date: Mon, 1 Sep 2014 14:32:09 -0400
+Subject: [1/2] ext4: fix ZERO_RANGE bug hidden by flag aliasing
+Origin: https://git.kernel.org/linus/713e8dde3e71e92db2d8cc8459d236ce1fb576ce
+
+We accidently aliased EXT4_EX_NOCACHE and EXT4_GET_CONVERT_UNWRITTEN
+falgs, which apparently was hiding a bug that was unmasked when this
+flag aliasing issue was addressed (see the subsequent commit).  The
+reproduction case was:
+
+   fsx -N 10000 -l 500000 -r 4096 -t 4096 -w 4096 -Z -R -W /vdb/junk
+
+... which would cause fsx to report corruption in the data file.
+
+The fix we have is a bit of an overkill, but I'd much rather be
+conservative for now, and we can optimize ZERO_RANGE_FL handling
+later.  The fact that we need to zap the extent_status cache for the
+inode is unfortunate, but correctness is far more important than
+performance.
+
+Signed-off-by: Theodore Ts'o <tytso@mit.edu>
+Cc: Namjae Jeon <namjae.jeon@samsung.com>
+---
+ fs/ext4/extents.c | 21 ++++++++++++++-------
+ 1 file changed, 14 insertions(+), 7 deletions(-)
+
+--- a/fs/ext4/extents.c
++++ b/fs/ext4/extents.c
+@@ -4796,7 +4796,8 @@ static long ext4_zero_range(struct file
+ 		max_blocks -= lblk;
+ 
+ 	flags = EXT4_GET_BLOCKS_CREATE_UNWRIT_EXT |
+-		EXT4_GET_BLOCKS_CONVERT_UNWRITTEN;
++		EXT4_GET_BLOCKS_CONVERT_UNWRITTEN |
++		EXT4_EX_NOCACHE;
+ 	if (mode & FALLOC_FL_KEEP_SIZE)
+ 		flags |= EXT4_GET_BLOCKS_KEEP_SIZE;
+ 
+@@ -4834,15 +4835,21 @@ static long ext4_zero_range(struct file
+ 		ext4_inode_block_unlocked_dio(inode);
+ 		inode_dio_wait(inode);
+ 
++		ret = ext4_alloc_file_blocks(file, lblk, max_blocks, new_size,
++					     flags, mode);
++		if (ret)
++			goto out_dio;
+ 		/*
+ 		 * Remove entire range from the extent status tree.
++		 *
++		 * ext4_es_remove_extent(inode, lblk, max_blocks) is
++		 * NOT sufficient.  I'm not sure why this is the case,
++		 * but let's be conservative and remove the extent
++		 * status tree for the entire inode.  There should be
++		 * no outstanding delalloc extents thanks to the
++		 * filemap_write_and_wait_range() call above.
+ 		 */
+-		ret = ext4_es_remove_extent(inode, lblk, max_blocks);
+-		if (ret)
+-			goto out_dio;
+-
+-		ret = ext4_alloc_file_blocks(file, lblk, max_blocks, new_size,
+-					     flags, mode);
++		ret = ext4_es_remove_extent(inode, 0, EXT_MAX_BLOCKS);
+ 		if (ret)
+ 			goto out_dio;
+ 	}
