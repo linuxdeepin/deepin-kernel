@@ -140,7 +140,7 @@ class VersionLinux(Version):
     )
     |
     (?P<revision_backports>
-        ~bpo\d\d\+\d+
+        ~bpo\d+\+\d+
     )
     |
     (?P<revision_other>
