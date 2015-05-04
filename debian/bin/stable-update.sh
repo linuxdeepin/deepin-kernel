@@ -65,7 +65,7 @@ dch -v "$new_pkg_ver" --preserve --multimaint-merge -D UNRELEASED \
     echo "New upstream stable update: "
     while [ "v$cur_ver" != "v$new_ver" ]; do
         cur_ver="$(next_update "$cur_ver")"
-        echo "https://www.kernel.org/pub/linux/kernel/v3.x/ChangeLog-$cur_ver"
+        echo "https://www.kernel.org/pub/linux/kernel/v${cur_ver%%.*}.x/ChangeLog-$cur_ver"
     done)"
 
 # Then insert the shortlogs with sed
