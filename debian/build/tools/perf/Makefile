@@ -32,7 +32,7 @@ MAKE_PERF := $(MAKE) prefix=/usr V=1 ARCH=$(KERNEL_ARCH_PERF) EXTRA_WARNINGS=-Wn
 MAKE_PERF += NO_GTK2=1
 
 # Include version in all directory names
-MAKE_PERF += perfexecdir=share/perf_$(VERSION)-core plugindir=/usr/lib/traceevent_$(VERSION)/plugins
+MAKE_PERF += perfexecdir=lib/perf_$(VERSION)-core plugindir=/usr/lib/traceevent_$(VERSION)/plugins
 
 # perf can link against libbfd if available, but the result is
 # undistributable as they are licenced under GPL v2 and v3+
