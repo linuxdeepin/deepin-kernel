@@ -47,3 +47,5 @@ SUBDIRS = \
 OUTDIR = scripts
 
 include ..//Makefile.inc
+
+CPPFLAGS += -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64
