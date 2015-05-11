@@ -10,6 +10,7 @@ DATA = \
 	Makefile.clean \
 	Makefile.extrawarn \
 	Makefile.host \
+	Makefile.kasan \
 	Makefile.lib \
 	Makefile.modinst \
 	Makefile.modpost \
