@@ -7,7 +7,7 @@ DEB_HOST_ARCH_CPU := $(shell dpkg-architecture -qDEB_HOST_ARCH_CPU)
 ifeq ($(DEB_HOST_ARCH_CPU),alpha)
   KERNEL_ARCH_PERF = alpha
 else ifeq ($(DEB_HOST_ARCH_CPU),amd64)
-  KERNEL_ARCH_PERF = x86_64
+  KERNEL_ARCH_PERF = x86
 else ifeq ($(DEB_HOST_ARCH_CPU),arm)
   KERNEL_ARCH_PERF = arm
 else ifeq ($(DEB_HOST_ARCH_CPU),arm64)
@@ -15,7 +15,7 @@ else ifeq ($(DEB_HOST_ARCH_CPU),arm64)
 else ifeq ($(DEB_HOST_ARCH_CPU),hppa)
   KERNEL_ARCH_PERF = parisc
 else ifeq ($(DEB_HOST_ARCH_CPU),i386)
-  KERNEL_ARCH_PERF = i386
+  KERNEL_ARCH_PERF = x86
 else ifeq ($(DEB_HOST_ARCH_CPU),mips)
   KERNEL_ARCH_PERF = mips
 else ifeq ($(DEB_HOST_ARCH_CPU),mips64)
