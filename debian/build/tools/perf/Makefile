@@ -6,40 +6,24 @@ DEB_HOST_ARCH_CPU := $(shell dpkg-architecture -qDEB_HOST_ARCH_CPU)
 
 ifeq ($(DEB_HOST_ARCH_CPU),alpha)
   KERNEL_ARCH_PERF = alpha
-else ifeq ($(DEB_HOST_ARCH_CPU),amd64)
-  KERNEL_ARCH_PERF = x86
 else ifeq ($(DEB_HOST_ARCH_CPU),arm)
   KERNEL_ARCH_PERF = arm
 else ifeq ($(DEB_HOST_ARCH_CPU),arm64)
   KERNEL_ARCH_PERF = arm64
+else ifneq ($(filter mips%,$(DEB_HOST_ARCH_CPU)),)
+  KERNEL_ARCH_PERF = mips
 else ifeq ($(DEB_HOST_ARCH_CPU),hppa)
   KERNEL_ARCH_PERF = parisc
-else ifeq ($(DEB_HOST_ARCH_CPU),i386)
-  KERNEL_ARCH_PERF = x86
-else ifeq ($(DEB_HOST_ARCH_CPU),mips)
-  KERNEL_ARCH_PERF = mips
-else ifeq ($(DEB_HOST_ARCH_CPU),mips64)
-  KERNEL_ARCH_PERF = mips
-else ifeq ($(DEB_HOST_ARCH_CPU),mips64el)
-  KERNEL_ARCH_PERF = mips
-else ifeq ($(DEB_HOST_ARCH_CPU),mipsel)
-  KERNEL_ARCH_PERF = mips
-else ifeq ($(DEB_HOST_ARCH_CPU),powerpc)
+else ifneq ($(filter powerpc% ppc%,$(DEB_HOST_ARCH_CPU)),)
   KERNEL_ARCH_PERF = powerpc
-else ifeq ($(DEB_HOST_ARCH_CPU),powerpc64)
-  KERNEL_ARCH_PERF = powerpc
-else ifeq ($(DEB_HOST_ARCH_CPU),ppc64el)
-  KERNEL_ARCH_PERF = powerpc
-else ifeq ($(DEB_HOST_ARCH_CPU),s390)
-  KERNEL_ARCH_PERF = s390
-else ifeq ($(DEB_HOST_ARCH_CPU),s390x)
+else ifneq ($(filter s390%,$(DEB_HOST_ARCH_CPU)),)
   KERNEL_ARCH_PERF = s390
 else ifeq ($(DEB_HOST_ARCH_CPU),sh4)
   KERNEL_ARCH_PERF = sh
-else ifeq ($(DEB_HOST_ARCH_CPU),sparc)
+else ifneq ($(filter sparc%,$(DEB_HOST_ARCH_CPU)),)
   KERNEL_ARCH_PERF = sparc
-else ifeq ($(DEB_HOST_ARCH_CPU),sparc64)
-  KERNEL_ARCH_PERF = sparc
+else ifneq ($(filter amd64 i386,$(DEB_HOST_ARCH_CPU)),)
+  KERNEL_ARCH_PERF = x86
 endif
 
 MAKE_PERF := $(MAKE) prefix=/usr V=1 ARCH=$(KERNEL_ARCH_PERF) EXTRA_WARNINGS=-Wno-error
