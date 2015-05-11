@@ -145,6 +145,7 @@ class Main(object):
                 'arch/x86/lib/memcpy_64.S',
                 'arch/x86/lib/memset_64.S',
                 'include/',
+                'lib/hweight.c',
                 'lib/rbtree.c',
                 'scripts/',
                 'tools/',
