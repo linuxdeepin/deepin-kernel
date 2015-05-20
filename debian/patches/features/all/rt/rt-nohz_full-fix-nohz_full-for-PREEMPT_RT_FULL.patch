@@ -1,0 +1,65 @@
+Message-ID: <1428758159.10417.13.camel@gmail.com>
+From: Mike Galbraith <umgwanakikbuti@gmail.com>
+Date: Sat, 11 Apr 2015 15:15:59 +0200
+Subject: rt, nohz_full: fix nohz_full for PREEMPT_RT_FULL
+Content-Type: text/plain; charset="UTF-8"
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.0/patches-4.0.4-rt1.tar.xz
+
+A task being ticked and trying to shut the tick down will fail due
+to having just awakened ksoftirqd, subtract it from nr_running.
+
+Signed-off-by: Mike Galbraith <umgwanakikbuti@gmail.com>
+Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+---
+ kernel/sched/core.c      |   17 ++++++++++++++++-
+ kernel/time/tick-sched.c |    5 +++++
+ 2 files changed, 21 insertions(+), 1 deletion(-)
+
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -696,14 +696,29 @@ static inline bool got_nohz_idle_kick(vo
+ #endif /* CONFIG_NO_HZ_COMMON */
+ 
+ #ifdef CONFIG_NO_HZ_FULL
++
++static int ksoftirqd_running(void)
++{
++	struct task_struct *softirqd;
++
++	if (!IS_ENABLED(CONFIG_PREEMPT_RT_FULL))
++		return 0;
++	softirqd = this_cpu_ksoftirqd();
++	if (softirqd && softirqd->on_rq)
++		return 1;
++	return 0;
++}
++
+ bool sched_can_stop_tick(void)
+ {
+ 	/*
+ 	 * More than one running task need preemption.
+ 	 * nr_running update is assumed to be visible
+ 	 * after IPI is sent from wakers.
++	 *
++	 * NOTE, RT: if ksoftirqd is awake, subtract it.
+ 	 */
+-	if (this_rq()->nr_running > 1)
++	if (this_rq()->nr_running - ksoftirqd_running() > 1)
+ 		return false;
+ 
+ 	return true;
+--- a/kernel/time/tick-sched.c
++++ b/kernel/time/tick-sched.c
+@@ -227,7 +227,12 @@ void __tick_nohz_full_check(void)
+ 
+ static void nohz_full_kick_work_func(struct irq_work *work)
+ {
++	unsigned long flags;
++
++	/* ksoftirqd processes sirqs with interrupts enabled */
++	local_irq_save(flags);
+ 	__tick_nohz_full_check();
++	local_irq_restore(flags);
+ }
+ 
+ static DEFINE_PER_CPU(struct irq_work, nohz_full_kick_work) = {

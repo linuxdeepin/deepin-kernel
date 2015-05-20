@@ -1,0 +1,126 @@
+From 58fe6c3ba939278c159dfe7152889667b2685ea9 Mon Sep 17 00:00:00 2001
+From: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+Date: Wed, 18 Feb 2015 18:37:26 +0100
+Subject: [PATCH] block/mq: drop per ctx cpu_lock
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.0/patches-4.0.4-rt1.tar.xz
+
+While converting the get_cpu() to get_cpu_light() I added a cpu lock to
+ensure the same code is not invoked twice on the same CPU. And now I run
+into this:
+
+| kernel BUG at kernel/locking/rtmutex.c:996!
+| invalid opcode: 0000 [#1] PREEMPT SMP
+| CPU0: 13 PID: 75 Comm: kworker/u258:0 Tainted: G          I    3.18.7-rt1.5+ #12
+| Workqueue: writeback bdi_writeback_workfn (flush-8:0)
+| task: ffff88023742a620 ti: ffff88023743c000 task.ti: ffff88023743c000
+| RIP: 0010:[<ffffffff81523cc0>]  [<ffffffff81523cc0>] rt_spin_lock_slowlock+0x280/0x2d0
+| Call Trace:
+|  [<ffffffff815254e7>] rt_spin_lock+0x27/0x60
+taking the same lock again
+|
+|  [<ffffffff8127c771>] blk_mq_insert_requests+0x51/0x130
+|  [<ffffffff8127d4a9>] blk_mq_flush_plug_list+0x129/0x140
+|  [<ffffffff81272461>] blk_flush_plug_list+0xd1/0x250
+|  [<ffffffff81522075>] schedule+0x75/0xa0
+|  [<ffffffff8152474d>] do_nanosleep+0xdd/0x180
+|  [<ffffffff810c8312>] __hrtimer_nanosleep+0xd2/0x1c0
+|  [<ffffffff810c8456>] cpu_chill+0x56/0x80
+|  [<ffffffff8107c13d>] try_to_grab_pending+0x1bd/0x390
+|  [<ffffffff8107c431>] cancel_delayed_work+0x21/0x170
+|  [<ffffffff81279a98>] blk_mq_stop_hw_queue+0x18/0x40
+|  [<ffffffffa000ac6f>] scsi_queue_rq+0x7f/0x830 [scsi_mod]
+|  [<ffffffff8127b0de>] __blk_mq_run_hw_queue+0x1ee/0x360
+|  [<ffffffff8127b528>] blk_mq_map_request+0x108/0x190
+take the lock  ^^^
+|
+|  [<ffffffff8127c8d2>] blk_sq_make_request+0x82/0x350
+|  [<ffffffff8126f6c0>] generic_make_request+0xd0/0x120
+|  [<ffffffff8126f788>] submit_bio+0x78/0x190
+|  [<ffffffff811bd537>] _submit_bh+0x117/0x180
+|  [<ffffffff811bf528>] __block_write_full_page.constprop.38+0x138/0x3f0
+|  [<ffffffff811bf880>] block_write_full_page+0xa0/0xe0
+|  [<ffffffff811c02b3>] blkdev_writepage+0x13/0x20
+|  [<ffffffff81127b25>] __writepage+0x15/0x40
+|  [<ffffffff8112873b>] write_cache_pages+0x1fb/0x440
+|  [<ffffffff811289be>] generic_writepages+0x3e/0x60
+|  [<ffffffff8112a17c>] do_writepages+0x1c/0x30
+|  [<ffffffff811b3603>] __writeback_single_inode+0x33/0x140
+|  [<ffffffff811b462d>] writeback_sb_inodes+0x2bd/0x490
+|  [<ffffffff811b4897>] __writeback_inodes_wb+0x97/0xd0
+|  [<ffffffff811b4a9b>] wb_writeback+0x1cb/0x210
+|  [<ffffffff811b505b>] bdi_writeback_workfn+0x25b/0x380
+|  [<ffffffff8107b50b>] process_one_work+0x1bb/0x490
+|  [<ffffffff8107c7ab>] worker_thread+0x6b/0x4f0
+|  [<ffffffff81081863>] kthread+0xe3/0x100
+|  [<ffffffff8152627c>] ret_from_fork+0x7c/0xb0
+
+After looking at this for a while it seems that it is save if blk_mq_ctx is
+used multiple times, the in struct lock protects the access.
+
+Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+---
+ block/blk-mq.c |    4 ----
+ block/blk-mq.h |    8 --------
+ 2 files changed, 12 deletions(-)
+
+--- a/block/blk-mq.c
++++ b/block/blk-mq.c
+@@ -1373,9 +1373,7 @@ static void blk_sq_make_request(struct r
+ 			if (list_empty(&plug->mq_list))
+ 				trace_block_plug(q);
+ 			else if (request_count >= BLK_MAX_REQUEST_COUNT) {
+-				spin_unlock(&data.ctx->cpu_lock);
+ 				blk_flush_plug_list(plug, false);
+-				spin_lock(&data.ctx->cpu_lock);
+ 				trace_block_plug(q);
+ 			}
+ 			list_add_tail(&rq->queuelist, &plug->mq_list);
+@@ -1570,7 +1568,6 @@ static int blk_mq_hctx_cpu_offline(struc
+ 		blk_mq_hctx_clear_pending(hctx, ctx);
+ 	}
+ 	spin_unlock(&ctx->lock);
+-	__blk_mq_put_ctx(ctx);
+ 
+ 	if (list_empty(&tmp))
+ 		return NOTIFY_OK;
+@@ -1764,7 +1761,6 @@ static void blk_mq_init_cpu_queues(struc
+ 		memset(__ctx, 0, sizeof(*__ctx));
+ 		__ctx->cpu = i;
+ 		spin_lock_init(&__ctx->lock);
+-		spin_lock_init(&__ctx->cpu_lock);
+ 		INIT_LIST_HEAD(&__ctx->rq_list);
+ 		__ctx->queue = q;
+ 
+--- a/block/blk-mq.h
++++ b/block/blk-mq.h
+@@ -9,7 +9,6 @@ struct blk_mq_ctx {
+ 		struct list_head	rq_list;
+ 	}  ____cacheline_aligned_in_smp;
+ 
+-	spinlock_t		cpu_lock;
+ 	unsigned int		cpu;
+ 	unsigned int		index_hw;
+ 
+@@ -80,7 +79,6 @@ static inline struct blk_mq_ctx *__blk_m
+ 	struct blk_mq_ctx *ctx;
+ 
+ 	ctx = per_cpu_ptr(q->queue_ctx, cpu);
+-	spin_lock(&ctx->cpu_lock);
+ 	return ctx;
+ }
+ 
+@@ -95,14 +93,8 @@ static inline struct blk_mq_ctx *blk_mq_
+ 	return __blk_mq_get_ctx(q, get_cpu_light());
+ }
+ 
+-static void __blk_mq_put_ctx(struct blk_mq_ctx *ctx)
+-{
+-	spin_unlock(&ctx->cpu_lock);
+-}
+-
+ static inline void blk_mq_put_ctx(struct blk_mq_ctx *ctx)
+ {
+-	__blk_mq_put_ctx(ctx);
+ 	put_cpu_light();
+ }
+ 

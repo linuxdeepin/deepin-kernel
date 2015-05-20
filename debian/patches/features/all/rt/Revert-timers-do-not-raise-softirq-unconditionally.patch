@@ -1,0 +1,147 @@
+From 68c147023af2485ad55e27ce69ebe33d126941b8 Mon Sep 17 00:00:00 2001
+From: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+Date: Wed, 28 Jan 2015 14:10:02 +0100
+Subject: [PATCH] Revert "timers: do not raise softirq unconditionally"
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.0/patches-4.0.4-rt1.tar.xz
+
+The patch I revert here triggers the HRtimer switch from hardirq instead
+of from softirq. As a result we get a periodic interrupt before the
+switch is complete (that is a hrtimer has been programmed) and so the
+tick still programms periodic mode. Since the timer has been shutdown,
+dev->next_event is set to max and the next increment makes it negative.
+And now we wait…
+
+Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+---
+ include/linux/hrtimer.h |    3 ++-
+ kernel/time/hrtimer.c   |   31 ++++++++++++++++++++++++-------
+ kernel/time/timer.c     |   46 ++--------------------------------------------
+ 3 files changed, 28 insertions(+), 52 deletions(-)
+
+--- a/include/linux/hrtimer.h
++++ b/include/linux/hrtimer.h
+@@ -457,8 +457,9 @@ extern int schedule_hrtimeout_range_cloc
+ 		unsigned long delta, const enum hrtimer_mode mode, int clock);
+ extern int schedule_hrtimeout(ktime_t *expires, const enum hrtimer_mode mode);
+ 
+-/* Called from the periodic timer tick */
++/* Soft interrupt function to run the hrtimer queues: */
+ extern void hrtimer_run_queues(void);
++extern void hrtimer_run_pending(void);
+ 
+ /* Bootup initialization: */
+ extern void __init hrtimers_init(void);
+--- a/kernel/time/hrtimer.c
++++ b/kernel/time/hrtimer.c
+@@ -1652,6 +1652,30 @@ static void run_hrtimer_softirq(struct s
+ }
+ 
+ /*
++ * Called from timer softirq every jiffy, expire hrtimers:
++ *
++ * For HRT its the fall back code to run the softirq in the timer
++ * softirq context in case the hrtimer initialization failed or has
++ * not been done yet.
++ */
++void hrtimer_run_pending(void)
++{
++	if (hrtimer_hres_active())
++		return;
++
++	/*
++	 * This _is_ ugly: We have to check in the softirq context,
++	 * whether we can switch to highres and / or nohz mode. The
++	 * clocksource switch happens in the timer interrupt with
++	 * xtime_lock held. Notification from there only sets the
++	 * check bit in the tick_oneshot code, otherwise we might
++	 * deadlock vs. xtime_lock.
++	 */
++	if (tick_check_oneshot_change(!hrtimer_is_hres_enabled()))
++		hrtimer_switch_to_hres();
++}
++
++/*
+  * Called from hardirq context every jiffy
+  */
+ void hrtimer_run_queues(void)
+@@ -1664,13 +1688,6 @@ void hrtimer_run_queues(void)
+ 	if (hrtimer_hres_active())
+ 		return;
+ 
+-	/*
+-	 * Check whether we can switch to highres mode.
+-	 */
+-	if (tick_check_oneshot_change(!hrtimer_is_hres_enabled())
+-	    && hrtimer_switch_to_hres())
+-		return;
+-
+ 	for (index = 0; index < HRTIMER_MAX_CLOCK_BASES; index++) {
+ 		base = &cpu_base->clock_base[index];
+ 		if (!timerqueue_getnext(&base->active))
+--- a/kernel/time/timer.c
++++ b/kernel/time/timer.c
+@@ -1463,6 +1463,8 @@ static void run_timer_softirq(struct sof
+ {
+ 	struct tvec_base *base = __this_cpu_read(tvec_bases);
+ 
++	hrtimer_run_pending();
++
+ 	if (time_after_eq(jiffies, base->timer_jiffies))
+ 		__run_timers(base);
+ }
+@@ -1472,52 +1474,8 @@ static void run_timer_softirq(struct sof
+  */
+ void run_local_timers(void)
+ {
+-	struct tvec_base *base = __this_cpu_read(tvec_bases);
+-
+ 	hrtimer_run_queues();
+-	/*
+-	 * We can access this lockless as we are in the timer
+-	 * interrupt. If there are no timers queued, nothing to do in
+-	 * the timer softirq.
+-	 */
+-#ifdef CONFIG_PREEMPT_RT_FULL
+-
+-#ifndef CONFIG_SMP
+-	/*
+-	 * The spin_do_trylock() later may fail as the lock may be hold before
+-	 * the interrupt arrived. The spin-lock debugging code will raise a
+-	 * warning if the try_lock fails on UP. Since this is only an
+-	 * optimization for the FULL_NO_HZ case (not to run the timer softirq on
+-	 * an nohz_full CPU) we don't really care and shedule the softirq.
+-	 */
+ 	raise_softirq(TIMER_SOFTIRQ);
+-	return;
+-#endif
+-
+-	/* On RT, irq work runs from softirq */
+-	if (irq_work_needs_cpu()) {
+-		raise_softirq(TIMER_SOFTIRQ);
+-		return;
+-	}
+-
+-	if (!spin_do_trylock(&base->lock)) {
+-		raise_softirq(TIMER_SOFTIRQ);
+-		return;
+-	}
+-#endif
+-
+-	if (!base->active_timers)
+-		goto out;
+-
+-	/* Check whether the next pending timer has expired */
+-	if (time_before_eq(base->next_timer, jiffies))
+-		raise_softirq(TIMER_SOFTIRQ);
+-out:
+-#ifdef CONFIG_PREEMPT_RT_FULL
+-	rt_spin_unlock_after_trylock_in_irq(&base->lock);
+-#endif
+-	/* The ; ensures that gcc won't complain in the !RT case */
+-	;
+ }
+ 
+ #ifdef __ARCH_WANT_SYS_ALARM
