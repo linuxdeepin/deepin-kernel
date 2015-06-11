@@ -1,16 +1,46 @@
 From: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
 Subject: [PATCH] mm/memcontrol: do no disable interrupts
 Date: Wed, 28 Jan 2015 17:14:16 +0100
-Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.0/patches-4.0.4-rt1.tar.xz
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.0/patches-4.0.5-rt3.tar.xz
 
 There are a few local_irq_disable() which then take sleeping locks. This
 patch converts them local locks.
 
 Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
 ---
- mm/memcontrol.c |   15 +++++++++------
- 1 file changed, 9 insertions(+), 6 deletions(-)
+ include/linux/swap.h |    1 +
+ mm/compaction.c      |    6 ++++--
+ mm/memcontrol.c      |   21 ++++++++++++---------
+ mm/swap.c            |    2 +-
+ 4 files changed, 18 insertions(+), 12 deletions(-)
 
+--- a/include/linux/swap.h
++++ b/include/linux/swap.h
+@@ -298,6 +298,7 @@ extern unsigned long nr_free_pagecache_p
+ 
+ 
+ /* linux/mm/swap.c */
++DECLARE_LOCAL_IRQ_LOCK(swapvec_lock);
+ extern void lru_cache_add(struct page *);
+ extern void lru_cache_add_anon(struct page *page);
+ extern void lru_cache_add_file(struct page *page);
+--- a/mm/compaction.c
++++ b/mm/compaction.c
+@@ -1387,10 +1387,12 @@ static int compact_zone(struct zone *zon
+ 				cc->migrate_pfn & ~((1UL << cc->order) - 1);
+ 
+ 			if (last_migrated_pfn < current_block_start) {
+-				cpu = get_cpu();
++				cpu = get_cpu_light();
++				local_lock_irq(swapvec_lock);
+ 				lru_add_drain_cpu(cpu);
++				local_unlock_irq(swapvec_lock);
+ 				drain_local_pages(zone);
+-				put_cpu();
++				put_cpu_light();
+ 				/* No more flushing until we migrate again */
+ 				last_migrated_pfn = 0;
+ 			}
 --- a/mm/memcontrol.c
 +++ b/mm/memcontrol.c
 @@ -60,6 +60,8 @@
@@ -75,3 +105,36 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  
  	if (!mem_cgroup_is_root(memcg))
  		css_put_many(&memcg->css, nr_pages);
+@@ -5816,6 +5819,7 @@ void mem_cgroup_swapout(struct page *pag
+ {
+ 	struct mem_cgroup *memcg;
+ 	unsigned short oldid;
++	unsigned long flags;
+ 
+ 	VM_BUG_ON_PAGE(PageLRU(page), page);
+ 	VM_BUG_ON_PAGE(page_count(page), page);
+@@ -5838,11 +5842,10 @@ void mem_cgroup_swapout(struct page *pag
+ 	if (!mem_cgroup_is_root(memcg))
+ 		page_counter_uncharge(&memcg->memory, 1);
+ 
+-	/* XXX: caller holds IRQ-safe mapping->tree_lock */
+-	VM_BUG_ON(!irqs_disabled());
+-
++	local_lock_irqsave(event_lock, flags);
+ 	mem_cgroup_charge_statistics(memcg, page, -1);
+ 	memcg_check_events(memcg, page);
++	local_unlock_irqrestore(event_lock, flags);
+ }
+ 
+ /**
+--- a/mm/swap.c
++++ b/mm/swap.c
+@@ -46,7 +46,7 @@ static DEFINE_PER_CPU(struct pagevec, lr
+ static DEFINE_PER_CPU(struct pagevec, lru_deactivate_pvecs);
+ 
+ static DEFINE_LOCAL_IRQ_LOCK(rotate_lock);
+-static DEFINE_LOCAL_IRQ_LOCK(swapvec_lock);
++DEFINE_LOCAL_IRQ_LOCK(swapvec_lock);
+ 
+ /*
+  * This path almost never happens for VM activity - pages are normally
