@@ -1,4 +1,5 @@
 SUBDIRS = \
+	hv \
 	perf \
 	usb/usbip
 
