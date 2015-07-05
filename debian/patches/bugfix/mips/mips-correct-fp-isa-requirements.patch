@@ -1,0 +1,275 @@
+From: "Maciej W. Rozycki" <macro@linux-mips.org>
+Date: Fri, 3 Apr 2015 23:26:49 +0100
+Subject: MIPS: Correct FP ISA requirements
+Origin: https://git.kernel.org/linus/2d83fea786d7aeb5b3b76bd492d9b3bccc0f823c
+Bug-Debian: https://bugs.debian.org/781892
+
+Correct ISA requirements for floating-point instructions:
+
+* the CU3 exception signifies a real COP3 instruction in MIPS I & II,
+
+* the BC1FL and BC1TL instructions are not supported in MIPS I,
+
+* the SQRT.fmt instructions are indeed supported in MIPS II,
+
+* the LDC1 and SDC1 instructions are indeed supported in MIPS32r1,
+
+* the CEIL.W.fmt, FLOOR.W.fmt, ROUND.W.fmt and TRUNC.W.fmt instructions
+  are indeed supported in MIPS32,
+
+* the CVT.L.fmt and CVT.fmt.L instructions are indeed supported in
+  MIPS32r2 and MIPS32r6,
+
+* the CEIL.L.fmt, FLOOR.L.fmt, ROUND.L.fmt and TRUNC.L.fmt instructions
+  are indeed supported in MIPS32r2 and MIPS32r6,
+
+* the RSQRT.fmt and RECIP.fmt instructions are indeed supported in
+  MIPS64r1,
+
+Also simplify conditionals for MIPS III and MIPS IV FPU instructions and
+the handling of the MOVCI minor opcode.
+
+Signed-off-by: Maciej W. Rozycki <macro@linux-mips.org>
+Cc: linux-mips@linux-mips.org
+Patchwork: https://patchwork.linux-mips.org/patch/9700/
+Signed-off-by: Ralf Baechle <ralf@linux-mips.org>
+---
+ arch/mips/include/asm/cpu-features.h |  7 +++--
+ arch/mips/kernel/traps.c             | 23 ++++++++-------
+ arch/mips/math-emu/cp1emu.c          | 55 ++++++++++++++++++------------------
+ 3 files changed, 43 insertions(+), 42 deletions(-)
+
+--- a/arch/mips/include/asm/cpu-features.h
++++ b/arch/mips/include/asm/cpu-features.h
+@@ -220,8 +220,11 @@
+ #define cpu_has_mips_4_5_r	(cpu_has_mips_4 | cpu_has_mips_5_r)
+ #define cpu_has_mips_5_r	(cpu_has_mips_5 | cpu_has_mips_r)
+ 
+-#define cpu_has_mips_4_5_r2_r6	(cpu_has_mips_4_5 | cpu_has_mips_r2 | \
+-				 cpu_has_mips_r6)
++#define cpu_has_mips_3_4_5_64_r2_r6					\
++				(cpu_has_mips_3 | cpu_has_mips_4_5_64_r2_r6)
++#define cpu_has_mips_4_5_64_r2_r6					\
++				(cpu_has_mips_4_5 | cpu_has_mips64r1 |	\
++				 cpu_has_mips_r2 | cpu_has_mips_r6)
+ 
+ #define cpu_has_mips32	(cpu_has_mips32r1 | cpu_has_mips32r2 | cpu_has_mips32r6)
+ #define cpu_has_mips64	(cpu_has_mips64r1 | cpu_has_mips64r2 | cpu_has_mips64r6)
+--- a/arch/mips/kernel/traps.c
++++ b/arch/mips/kernel/traps.c
+@@ -1350,19 +1350,18 @@ asmlinkage void do_cpu(struct pt_regs *r
+ 
+ 	case 3:
+ 		/*
+-		 * Old (MIPS I and MIPS II) processors will set this code
+-		 * for COP1X opcode instructions that replaced the original
+-		 * COP3 space.	We don't limit COP1 space instructions in
+-		 * the emulator according to the CPU ISA, so we want to
+-		 * treat COP1X instructions consistently regardless of which
+-		 * code the CPU chose.	Therefore we redirect this trap to
+-		 * the FP emulator too.
+-		 *
+-		 * Then some newer FPU-less processors use this code
+-		 * erroneously too, so they are covered by this choice
+-		 * as well.
++		 * The COP3 opcode space and consequently the CP0.Status.CU3
++		 * bit and the CP0.Cause.CE=3 encoding have been removed as
++		 * of the MIPS III ISA.  From the MIPS IV and MIPS32r2 ISAs
++		 * up the space has been reused for COP1X instructions, that
++		 * are enabled by the CP0.Status.CU1 bit and consequently
++		 * use the CP0.Cause.CE=1 encoding for Coprocessor Unusable
++		 * exceptions.  Some FPU-less processors that implement one
++		 * of these ISAs however use this code erroneously for COP1X
++		 * instructions.  Therefore we redirect this trap to the FP
++		 * emulator too.
+ 		 */
+-		if (raw_cpu_has_fpu) {
++		if (raw_cpu_has_fpu || !cpu_has_mips_4_5_64_r2_r6) {
+ 			force_sig(SIGILL, current);
+ 			break;
+ 		}
+--- a/arch/mips/math-emu/cp1emu.c
++++ b/arch/mips/math-emu/cp1emu.c
+@@ -1103,17 +1103,18 @@ emul:
+ 			likely = 0;
+ 			switch (MIPSInst_RT(ir) & 3) {
+ 			case bcfl_op:
+-				likely = 1;
++				if (cpu_has_mips_2_3_4_5_r)
++					likely = 1;
++				/* Fall through */
+ 			case bcf_op:
+ 				cond = !cond;
+ 				break;
+ 			case bctl_op:
+-				likely = 1;
++				if (cpu_has_mips_2_3_4_5_r)
++					likely = 1;
++				/* Fall through */
+ 			case bct_op:
+ 				break;
+-			default:
+-				/* thats an illegal instruction */
+-				return SIGILL;
+ 			}
+ 
+ 			set_delay_slot(xcp);
+@@ -1153,36 +1154,34 @@ emul:
+ 
+ 				switch (MIPSInst_OPCODE(ir)) {
+ 				case lwc1_op:
+-					goto emul;
+-
+ 				case swc1_op:
+ 					goto emul;
+ 
+ 				case ldc1_op:
+ 				case sdc1_op:
+-					if (cpu_has_mips_2_3_4_5 ||
+-					    cpu_has_mips64)
++					if (cpu_has_mips_2_3_4_5_r)
+ 						goto emul;
+ 
+ 					return SIGILL;
+-					goto emul;
+ 
+ 				case cop1_op:
+ 					goto emul;
+ 
+ 				case cop1x_op:
+-					if (cpu_has_mips_4_5 || cpu_has_mips64 || cpu_has_mips32r2)
++					if (cpu_has_mips_4_5_64_r2_r6)
+ 						/* its one of ours */
+ 						goto emul;
+ 
+ 					return SIGILL;
+ 
+ 				case spec_op:
+-					if (!cpu_has_mips_4_5_r)
+-						return SIGILL;
++					switch (MIPSInst_FUNC(ir)) {
++					case movc_op:
++						if (cpu_has_mips_4_5_r)
++							goto emul;
+ 
+-					if (MIPSInst_FUNC(ir) == movc_op)
+-						goto emul;
++						return SIGILL;
++					}
+ 					break;
+ 				}
+ 
+@@ -1216,7 +1215,7 @@ emul:
+ 		break;
+ 
+ 	case cop1x_op:
+-		if (!cpu_has_mips_4_5 && !cpu_has_mips64 && !cpu_has_mips32r2)
++		if (!cpu_has_mips_4_5_64_r2_r6)
+ 			return SIGILL;
+ 
+ 		sig = fpux_emu(xcp, ctx, ir, fault_addr);
+@@ -1549,7 +1548,7 @@ static int fpu_emu(struct pt_regs *xcp,
+ 
+ 			/* unary  ops */
+ 		case fsqrt_op:
+-			if (!cpu_has_mips_4_5_r)
++			if (!cpu_has_mips_2_3_4_5_r)
+ 				return SIGILL;
+ 
+ 			handler.u = ieee754sp_sqrt;
+@@ -1561,14 +1560,14 @@ static int fpu_emu(struct pt_regs *xcp,
+ 		 * achieve full IEEE-754 accuracy - however this emulator does.
+ 		 */
+ 		case frsqrt_op:
+-			if (!cpu_has_mips_4_5_r2_r6)
++			if (!cpu_has_mips_4_5_64_r2_r6)
+ 				return SIGILL;
+ 
+ 			handler.u = fpemu_sp_rsqrt;
+ 			goto scopuop;
+ 
+ 		case frecip_op:
+-			if (!cpu_has_mips_4_5_r2_r6)
++			if (!cpu_has_mips_4_5_64_r2_r6)
+ 				return SIGILL;
+ 
+ 			handler.u = fpemu_sp_recip;
+@@ -1670,7 +1669,7 @@ copcsr:
+ 		case ftrunc_op:
+ 		case fceil_op:
+ 		case ffloor_op:
+-			if (!cpu_has_mips_2_3_4_5 && !cpu_has_mips64)
++			if (!cpu_has_mips_2_3_4_5_r)
+ 				return SIGILL;
+ 
+ 			oldrm = ieee754_csr.rm;
+@@ -1682,7 +1681,7 @@ copcsr:
+ 			goto copcsr;
+ 
+ 		case fcvtl_op:
+-			if (!cpu_has_mips_3_4_5 && !cpu_has_mips64)
++			if (!cpu_has_mips_3_4_5_64_r2_r6)
+ 				return SIGILL;
+ 
+ 			SPFROMREG(fs, MIPSInst_FS(ir));
+@@ -1694,7 +1693,7 @@ copcsr:
+ 		case ftruncl_op:
+ 		case fceill_op:
+ 		case ffloorl_op:
+-			if (!cpu_has_mips_3_4_5 && !cpu_has_mips64)
++			if (!cpu_has_mips_3_4_5_64_r2_r6)
+ 				return SIGILL;
+ 
+ 			oldrm = ieee754_csr.rm;
+@@ -1763,13 +1762,13 @@ copcsr:
+ 		 * achieve full IEEE-754 accuracy - however this emulator does.
+ 		 */
+ 		case frsqrt_op:
+-			if (!cpu_has_mips_4_5_r2_r6)
++			if (!cpu_has_mips_4_5_64_r2_r6)
+ 				return SIGILL;
+ 
+ 			handler.u = fpemu_dp_rsqrt;
+ 			goto dcopuop;
+ 		case frecip_op:
+-			if (!cpu_has_mips_4_5_r2_r6)
++			if (!cpu_has_mips_4_5_64_r2_r6)
+ 				return SIGILL;
+ 
+ 			handler.u = fpemu_dp_recip;
+@@ -1859,7 +1858,7 @@ dcopuop:
+ 			goto copcsr;
+ 
+ 		case fcvtl_op:
+-			if (!cpu_has_mips_3_4_5 && !cpu_has_mips64)
++			if (!cpu_has_mips_3_4_5_64_r2_r6)
+ 				return SIGILL;
+ 
+ 			DPFROMREG(fs, MIPSInst_FS(ir));
+@@ -1871,7 +1870,7 @@ dcopuop:
+ 		case ftruncl_op:
+ 		case fceill_op:
+ 		case ffloorl_op:
+-			if (!cpu_has_mips_3_4_5 && !cpu_has_mips64)
++			if (!cpu_has_mips_3_4_5_64_r2_r6)
+ 				return SIGILL;
+ 
+ 			oldrm = ieee754_csr.rm;
+@@ -1930,7 +1929,7 @@ dcopuop:
+ 
+ 	case l_fmt:
+ 
+-		if (!cpu_has_mips_3_4_5 && !cpu_has_mips64)
++		if (!cpu_has_mips_3_4_5_64_r2_r6)
+ 			return SIGILL;
+ 
+ 		DIFROMREG(bits, MIPSInst_FS(ir));
+@@ -1994,7 +1993,7 @@ dcopuop:
+ 		SITOREG(rv.w, MIPSInst_FD(ir));
+ 		break;
+ 	case l_fmt:
+-		if (!cpu_has_mips_3_4_5 && !cpu_has_mips64)
++		if (!cpu_has_mips_3_4_5_64_r2_r6)
+ 			return SIGILL;
+ 
+ 		DITOREG(rv.l, MIPSInst_FD(ir));
