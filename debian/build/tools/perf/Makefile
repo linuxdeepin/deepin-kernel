@@ -68,4 +68,8 @@ ifdef KERNEL_ARCH_PERF
 endif
 
 clean:
+ifdef KERNEL_ARCH_PERF
+	mkdir -p out
+	+$(MAKE_PERF) -C $(top_srcdir)/tools/perf -f Makefile.perf O=$(CURDIR)/out clean
 	rm -rf out
+endif
