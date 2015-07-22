@@ -1,0 +1,167 @@
+From 1fb321e7971c26d03e20a7f8d3bacc654c6abc5f Mon Sep 17 00:00:00 2001
+From: Peter Zijlstra <peterz@infradead.org>
+Date: Fri, 1 May 2015 08:27:50 -0700
+Subject: [PATCH 1/2] sched: Implement lockless wake-queues
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.0/patches-4.0.8-rt6.tar.xz
+
+This is useful for locking primitives that can effect multiple
+wakeups per operation and want to avoid lock internal lock contention
+by delaying the wakeups until we've released the lock internal locks.
+
+Alternatively it can be used to avoid issuing multiple wakeups, and
+thus save a few cycles, in packet processing. Queue all target tasks
+and wakeup once you've processed all packets. That way you avoid
+waking the target task multiple times if there were multiple packets
+for the same task.
+
+Properties of a wake_q are:
+- Lockless, as queue head must reside on the stack.
+- Being a queue, maintains wakeup order passed by the callers. This can
+  be important for otherwise, in scenarios where highly contended locks
+  could affect any reliance on lock fairness.
+- A queued task cannot be added again until it is woken up.
+
+This patch adds the needed infrastructure into the scheduler code
+and uses the new wake_list to delay the futex wakeups until
+after we've released the hash bucket locks.
+
+Cc: stable-rt@vger.kernel.org
+Signed-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>
+[tweaks, adjustments, comments, etc.]
+Signed-off-by: Davidlohr Bueso <dbueso@suse.de>
+Signed-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>
+Acked-by: Thomas Gleixner <tglx@linutronix.de>
+Cc: Borislav Petkov <bp@alien8.de>
+Cc: Chris Mason <clm@fb.com>
+Cc: Davidlohr Bueso <dave@stgolabs.net>
+Cc: George Spelvin <linux@horizon.com>
+Cc: H. Peter Anvin <hpa@zytor.com>
+Cc: Linus Torvalds <torvalds@linux-foundation.org>
+Cc: Manfred Spraul <manfred@colorfullife.com>
+Cc: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+Cc: Steven Rostedt <rostedt@goodmis.org>
+Link: http://lkml.kernel.org/r/1430494072-30283-2-git-send-email-dave@stgolabs.net
+Signed-off-by: Ingo Molnar <mingo@kernel.org>
+Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+---
+ include/linux/sched.h |   46 ++++++++++++++++++++++++++++++++++++++++++++++
+ kernel/sched/core.c   |   46 ++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 92 insertions(+)
+
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -907,6 +907,50 @@ enum cpu_idle_type {
+ #define SCHED_CAPACITY_SCALE	(1L << SCHED_CAPACITY_SHIFT)
+ 
+ /*
++ * Wake-queues are lists of tasks with a pending wakeup, whose
++ * callers have already marked the task as woken internally,
++ * and can thus carry on. A common use case is being able to
++ * do the wakeups once the corresponding user lock as been
++ * released.
++ *
++ * We hold reference to each task in the list across the wakeup,
++ * thus guaranteeing that the memory is still valid by the time
++ * the actual wakeups are performed in wake_up_q().
++ *
++ * One per task suffices, because there's never a need for a task to be
++ * in two wake queues simultaneously; it is forbidden to abandon a task
++ * in a wake queue (a call to wake_up_q() _must_ follow), so if a task is
++ * already in a wake queue, the wakeup will happen soon and the second
++ * waker can just skip it.
++ *
++ * The WAKE_Q macro declares and initializes the list head.
++ * wake_up_q() does NOT reinitialize the list; it's expected to be
++ * called near the end of a function, where the fact that the queue is
++ * not used again will be easy to see by inspection.
++ *
++ * Note that this can cause spurious wakeups. schedule() callers
++ * must ensure the call is done inside a loop, confirming that the
++ * wakeup condition has in fact occurred.
++ */
++struct wake_q_node {
++	struct wake_q_node *next;
++};
++
++struct wake_q_head {
++	struct wake_q_node *first;
++	struct wake_q_node **lastp;
++};
++
++#define WAKE_Q_TAIL ((struct wake_q_node *) 0x01)
++
++#define WAKE_Q(name)					\
++	struct wake_q_head name = { WAKE_Q_TAIL, &name.first }
++
++extern void wake_q_add(struct wake_q_head *head,
++		       struct task_struct *task);
++extern void wake_up_q(struct wake_q_head *head);
++
++/*
+  * sched-domains (multiprocessor balancing) declarations:
+  */
+ #ifdef CONFIG_SMP
+@@ -1505,6 +1549,8 @@ struct task_struct {
+ 	/* Protection of the PI data structures: */
+ 	raw_spinlock_t pi_lock;
+ 
++	struct wake_q_node wake_q;
++
+ #ifdef CONFIG_RT_MUTEXES
+ 	/* PI waiters blocked on a rt_mutex held by this task */
+ 	struct rb_root pi_waiters;
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -538,6 +538,52 @@ static bool set_nr_if_polling(struct tas
+ #endif
+ #endif
+ 
++void wake_q_add(struct wake_q_head *head, struct task_struct *task)
++{
++	struct wake_q_node *node = &task->wake_q;
++
++	/*
++	 * Atomically grab the task, if ->wake_q is !nil already it means
++	 * its already queued (either by us or someone else) and will get the
++	 * wakeup due to that.
++	 *
++	 * This cmpxchg() implies a full barrier, which pairs with the write
++	 * barrier implied by the wakeup in wake_up_list().
++	 */
++	if (cmpxchg(&node->next, NULL, WAKE_Q_TAIL))
++		return;
++
++	get_task_struct(task);
++
++	/*
++	 * The head is context local, there can be no concurrency.
++	 */
++	*head->lastp = node;
++	head->lastp = &node->next;
++}
++
++void wake_up_q(struct wake_q_head *head)
++{
++	struct wake_q_node *node = head->first;
++
++	while (node != WAKE_Q_TAIL) {
++		struct task_struct *task;
++
++		task = container_of(node, struct task_struct, wake_q);
++		BUG_ON(!task);
++		/* task can safely be re-inserted now */
++		node = node->next;
++		task->wake_q.next = NULL;
++
++		/*
++		 * wake_up_process() implies a wmb() to pair with the queueing
++		 * in wake_q_add() so as not to miss wakeups.
++		 */
++		wake_up_process(task);
++		put_task_struct(task);
++	}
++}
++
+ /*
+  * resched_curr - mark rq's current task 'to be rescheduled now'.
+  *
