@@ -1,0 +1,90 @@
+From: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+Date: Wed, 9 Apr 2014 10:37:23 +0200
+Subject: block: mq: use cpu_light()
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.1/patches-4.1.3-rt3.tar.xz
+
+there is a might sleep splat because get_cpu() disables preemption and
+later we grab a lock. As a workaround for this we use get_cpu_light()
+and an additional lock to prevent taking the same ctx.
+
+There is a lock member in the ctx already but there some functions which do ++
+on the member and this works with irq off but on RT we would need the extra lock.
+
+Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+---
+ block/blk-mq.c |    4 ++++
+ block/blk-mq.h |   17 ++++++++++++++---
+ 2 files changed, 18 insertions(+), 3 deletions(-)
+
+--- a/block/blk-mq.c
++++ b/block/blk-mq.c
+@@ -1366,7 +1366,9 @@ static void blk_sq_make_request(struct r
+ 			if (list_empty(&plug->mq_list))
+ 				trace_block_plug(q);
+ 			else if (request_count >= BLK_MAX_REQUEST_COUNT) {
++				spin_unlock(&data.ctx->cpu_lock);
+ 				blk_flush_plug_list(plug, false);
++				spin_lock(&data.ctx->cpu_lock);
+ 				trace_block_plug(q);
+ 			}
+ 			list_add_tail(&rq->queuelist, &plug->mq_list);
+@@ -1559,6 +1561,7 @@ static int blk_mq_hctx_cpu_offline(struc
+ 		blk_mq_hctx_clear_pending(hctx, ctx);
+ 	}
+ 	spin_unlock(&ctx->lock);
++	__blk_mq_put_ctx(ctx);
+ 
+ 	if (list_empty(&tmp))
+ 		return NOTIFY_OK;
+@@ -1752,6 +1755,7 @@ static void blk_mq_init_cpu_queues(struc
+ 		memset(__ctx, 0, sizeof(*__ctx));
+ 		__ctx->cpu = i;
+ 		spin_lock_init(&__ctx->lock);
++		spin_lock_init(&__ctx->cpu_lock);
+ 		INIT_LIST_HEAD(&__ctx->rq_list);
+ 		__ctx->queue = q;
+ 
+--- a/block/blk-mq.h
++++ b/block/blk-mq.h
+@@ -9,6 +9,7 @@ struct blk_mq_ctx {
+ 		struct list_head	rq_list;
+ 	}  ____cacheline_aligned_in_smp;
+ 
++	spinlock_t		cpu_lock;
+ 	unsigned int		cpu;
+ 	unsigned int		index_hw;
+ 
+@@ -76,7 +77,11 @@ struct blk_align_bitmap {
+ static inline struct blk_mq_ctx *__blk_mq_get_ctx(struct request_queue *q,
+ 					   unsigned int cpu)
+ {
+-	return per_cpu_ptr(q->queue_ctx, cpu);
++	struct blk_mq_ctx *ctx;
++
++	ctx = per_cpu_ptr(q->queue_ctx, cpu);
++	spin_lock(&ctx->cpu_lock);
++	return ctx;
+ }
+ 
+ /*
+@@ -87,12 +92,18 @@ static inline struct blk_mq_ctx *__blk_m
+  */
+ static inline struct blk_mq_ctx *blk_mq_get_ctx(struct request_queue *q)
+ {
+-	return __blk_mq_get_ctx(q, get_cpu());
++	return __blk_mq_get_ctx(q, get_cpu_light());
++}
++
++static void __blk_mq_put_ctx(struct blk_mq_ctx *ctx)
++{
++	spin_unlock(&ctx->cpu_lock);
+ }
+ 
+ static inline void blk_mq_put_ctx(struct blk_mq_ctx *ctx)
+ {
+-	put_cpu();
++	__blk_mq_put_ctx(ctx);
++	put_cpu_light();
+ }
+ 
+ struct blk_mq_alloc_data {

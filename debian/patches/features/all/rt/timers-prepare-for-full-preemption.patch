@@ -1,0 +1,146 @@
+From: Ingo Molnar <mingo@elte.hu>
+Date: Fri, 3 Jul 2009 08:29:34 -0500
+Subject: timers: Prepare for full preemption
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.1/patches-4.1.3-rt3.tar.xz
+
+When softirqs can be preempted we need to make sure that cancelling
+the timer from the active thread can not deadlock vs. a running timer
+callback. Add a waitqueue to resolve that.
+
+Signed-off-by: Ingo Molnar <mingo@elte.hu>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+
+---
+ include/linux/timer.h |    2 +-
+ kernel/sched/core.c   |    8 ++++++--
+ kernel/time/timer.c   |   37 ++++++++++++++++++++++++++++++++++---
+ 3 files changed, 41 insertions(+), 6 deletions(-)
+
+--- a/include/linux/timer.h
++++ b/include/linux/timer.h
+@@ -241,7 +241,7 @@ extern void add_timer(struct timer_list
+ 
+ extern int try_to_del_timer_sync(struct timer_list *timer);
+ 
+-#ifdef CONFIG_SMP
++#if defined(CONFIG_SMP) || defined(CONFIG_PREEMPT_RT_FULL)
+   extern int del_timer_sync(struct timer_list *timer);
+ #else
+ # define del_timer_sync(t)		del_timer(t)
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -641,12 +641,14 @@ void resched_cpu(int cpu)
+  */
+ int get_nohz_timer_target(int pinned)
+ {
+-	int cpu = smp_processor_id();
++	int cpu;
+ 	int i;
+ 	struct sched_domain *sd;
+ 
++	preempt_disable_rt();
++	cpu = smp_processor_id();
+ 	if (pinned || !get_sysctl_timer_migration() || !idle_cpu(cpu))
+-		return cpu;
++		goto preempt_en_rt;
+ 
+ 	rcu_read_lock();
+ 	for_each_domain(cpu, sd) {
+@@ -659,6 +661,8 @@ int get_nohz_timer_target(int pinned)
+ 	}
+ unlock:
+ 	rcu_read_unlock();
++preempt_en_rt:
++	preempt_enable_rt();
+ 	return cpu;
+ }
+ /*
+--- a/kernel/time/timer.c
++++ b/kernel/time/timer.c
+@@ -78,6 +78,9 @@ struct tvec_root {
+ struct tvec_base {
+ 	spinlock_t lock;
+ 	struct timer_list *running_timer;
++#ifdef CONFIG_PREEMPT_RT_FULL
++	wait_queue_head_t wait_for_running_timer;
++#endif
+ 	unsigned long timer_jiffies;
+ 	unsigned long next_timer;
+ 	unsigned long active_timers;
+@@ -979,6 +982,29 @@ void add_timer_on(struct timer_list *tim
+ }
+ EXPORT_SYMBOL_GPL(add_timer_on);
+ 
++#ifdef CONFIG_PREEMPT_RT_FULL
++/*
++ * Wait for a running timer
++ */
++static void wait_for_running_timer(struct timer_list *timer)
++{
++	struct tvec_base *base = timer->base;
++
++	if (base->running_timer == timer)
++		wait_event(base->wait_for_running_timer,
++			   base->running_timer != timer);
++}
++
++# define wakeup_timer_waiters(b)	wake_up(&(b)->wait_for_running_timer)
++#else
++static inline void wait_for_running_timer(struct timer_list *timer)
++{
++	cpu_relax();
++}
++
++# define wakeup_timer_waiters(b)	do { } while (0)
++#endif
++
+ /**
+  * del_timer - deactive a timer.
+  * @timer: the timer to be deactivated
+@@ -1036,7 +1062,7 @@ int try_to_del_timer_sync(struct timer_l
+ }
+ EXPORT_SYMBOL(try_to_del_timer_sync);
+ 
+-#ifdef CONFIG_SMP
++#if defined(CONFIG_SMP) || defined(CONFIG_PREEMPT_RT_FULL)
+ static DEFINE_PER_CPU(struct tvec_base, __tvec_bases);
+ 
+ /**
+@@ -1098,7 +1124,7 @@ int del_timer_sync(struct timer_list *ti
+ 		int ret = try_to_del_timer_sync(timer);
+ 		if (ret >= 0)
+ 			return ret;
+-		cpu_relax();
++		wait_for_running_timer(timer);
+ 	}
+ }
+ EXPORT_SYMBOL(del_timer_sync);
+@@ -1219,15 +1245,17 @@ static inline void __run_timers(struct t
+ 			if (irqsafe) {
+ 				spin_unlock(&base->lock);
+ 				call_timer_fn(timer, fn, data);
++				base->running_timer = NULL;
+ 				spin_lock(&base->lock);
+ 			} else {
+ 				spin_unlock_irq(&base->lock);
+ 				call_timer_fn(timer, fn, data);
++				base->running_timer = NULL;
+ 				spin_lock_irq(&base->lock);
+ 			}
+ 		}
+ 	}
+-	base->running_timer = NULL;
++	wakeup_timer_waiters(base);
+ 	spin_unlock_irq(&base->lock);
+ }
+ 
+@@ -1625,6 +1653,9 @@ static void __init init_timer_cpu(struct
+ 	base->cpu = cpu;
+ 	per_cpu(tvec_bases, cpu) = base;
+ 	spin_lock_init(&base->lock);
++#ifdef CONFIG_PREEMPT_RT_FULL
++	init_waitqueue_head(&base->wait_for_running_timer);
++#endif
+ 
+ 	for (j = 0; j < TVN_SIZE; j++) {
+ 		INIT_LIST_HEAD(base->tv5.vec + j);

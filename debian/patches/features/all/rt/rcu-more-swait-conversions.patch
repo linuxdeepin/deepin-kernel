@@ -1,0 +1,175 @@
+From: Thomas Gleixner <tglx@linutronix.de>
+Date: Wed, 31 Jul 2013 19:00:35 +0200
+Subject: rcu: use simple waitqueues
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.1/patches-4.1.3-rt3.tar.xz
+
+Convert RCU's wait-queues into simple waitqueues.
+
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+
+Merged Steven's
+
+ static void rcu_nocb_gp_cleanup(struct rcu_state *rsp, struct rcu_node *rnp) {
+-       swait_wake(&rnp->nocb_gp_wq[rnp->completed & 0x1]);
++       wake_up_all(&rnp->nocb_gp_wq[rnp->completed & 0x1]);
+ }
+
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+---
+ kernel/rcu/tree.c        |    8 ++++----
+ kernel/rcu/tree.h        |    7 ++++---
+ kernel/rcu/tree_plugin.h |   18 +++++++++---------
+ 3 files changed, 17 insertions(+), 16 deletions(-)
+
+--- a/kernel/rcu/tree.c
++++ b/kernel/rcu/tree.c
+@@ -1567,7 +1567,7 @@ static void rcu_gp_kthread_wake(struct r
+ 	    !ACCESS_ONCE(rsp->gp_flags) ||
+ 	    !rsp->gp_kthread)
+ 		return;
+-	wake_up(&rsp->gp_wq);
++	swait_wake(&rsp->gp_wq);
+ }
+ 
+ /*
+@@ -2008,7 +2008,7 @@ static int __noreturn rcu_gp_kthread(voi
+ 					       ACCESS_ONCE(rsp->gpnum),
+ 					       TPS("reqwait"));
+ 			rsp->gp_state = RCU_GP_WAIT_GPS;
+-			wait_event_interruptible(rsp->gp_wq,
++			swait_event_interruptible(rsp->gp_wq,
+ 						 ACCESS_ONCE(rsp->gp_flags) &
+ 						 RCU_GP_FLAG_INIT);
+ 			/* Locking provides needed memory barrier. */
+@@ -2037,7 +2037,7 @@ static int __noreturn rcu_gp_kthread(voi
+ 					       ACCESS_ONCE(rsp->gpnum),
+ 					       TPS("fqswait"));
+ 			rsp->gp_state = RCU_GP_WAIT_FQS;
+-			ret = wait_event_interruptible_timeout(rsp->gp_wq,
++			ret = swait_event_interruptible_timeout(rsp->gp_wq,
+ 					((gf = ACCESS_ONCE(rsp->gp_flags)) &
+ 					 RCU_GP_FLAG_FQS) ||
+ 					(!ACCESS_ONCE(rnp->qsmask) &&
+@@ -4049,7 +4049,7 @@ static void __init rcu_init_one(struct r
+ 		}
+ 	}
+ 
+-	init_waitqueue_head(&rsp->gp_wq);
++	init_swait_head(&rsp->gp_wq);
+ 	rnp = rsp->level[rcu_num_lvls - 1];
+ 	for_each_possible_cpu(i) {
+ 		while (i > rnp->grphi)
+--- a/kernel/rcu/tree.h
++++ b/kernel/rcu/tree.h
+@@ -27,6 +27,7 @@
+ #include <linux/threads.h>
+ #include <linux/cpumask.h>
+ #include <linux/seqlock.h>
++#include <linux/wait-simple.h>
+ 
+ /*
+  * Define shape of hierarchy based on NR_CPUS, CONFIG_RCU_FANOUT, and
+@@ -210,7 +211,7 @@ struct rcu_node {
+ 				/*  This can happen due to race conditions. */
+ #endif /* #ifdef CONFIG_RCU_BOOST */
+ #ifdef CONFIG_RCU_NOCB_CPU
+-	wait_queue_head_t nocb_gp_wq[2];
++	struct swait_head nocb_gp_wq[2];
+ 				/* Place for rcu_nocb_kthread() to wait GP. */
+ #endif /* #ifdef CONFIG_RCU_NOCB_CPU */
+ 	int need_future_gp[2];
+@@ -349,7 +350,7 @@ struct rcu_data {
+ 	atomic_long_t nocb_q_count_lazy; /*  invocation (all stages). */
+ 	struct rcu_head *nocb_follower_head; /* CBs ready to invoke. */
+ 	struct rcu_head **nocb_follower_tail;
+-	wait_queue_head_t nocb_wq;	/* For nocb kthreads to sleep on. */
++	struct swait_head nocb_wq;	/* For nocb kthreads to sleep on. */
+ 	struct task_struct *nocb_kthread;
+ 	int nocb_defer_wakeup;		/* Defer wakeup of nocb_kthread. */
+ 
+@@ -438,7 +439,7 @@ struct rcu_state {
+ 	unsigned long gpnum;			/* Current gp number. */
+ 	unsigned long completed;		/* # of last completed gp. */
+ 	struct task_struct *gp_kthread;		/* Task for grace periods. */
+-	wait_queue_head_t gp_wq;		/* Where GP task waits. */
++	struct swait_head gp_wq;		/* Where GP task waits. */
+ 	short gp_flags;				/* Commands for GP task. */
+ 	short gp_state;				/* GP kthread sleep state. */
+ 
+--- a/kernel/rcu/tree_plugin.h
++++ b/kernel/rcu/tree_plugin.h
+@@ -1864,7 +1864,7 @@ early_param("rcu_nocb_poll", parse_rcu_n
+  */
+ static void rcu_nocb_gp_cleanup(struct rcu_state *rsp, struct rcu_node *rnp)
+ {
+-	wake_up_all(&rnp->nocb_gp_wq[rnp->completed & 0x1]);
++	swait_wake_all(&rnp->nocb_gp_wq[rnp->completed & 0x1]);
+ }
+ 
+ /*
+@@ -1882,8 +1882,8 @@ static void rcu_nocb_gp_set(struct rcu_n
+ 
+ static void rcu_init_one_nocb(struct rcu_node *rnp)
+ {
+-	init_waitqueue_head(&rnp->nocb_gp_wq[0]);
+-	init_waitqueue_head(&rnp->nocb_gp_wq[1]);
++	init_swait_head(&rnp->nocb_gp_wq[0]);
++	init_swait_head(&rnp->nocb_gp_wq[1]);
+ }
+ 
+ #ifndef CONFIG_RCU_NOCB_CPU_ALL
+@@ -1908,7 +1908,7 @@ static void wake_nocb_leader(struct rcu_
+ 	if (ACCESS_ONCE(rdp_leader->nocb_leader_sleep) || force) {
+ 		/* Prior smp_mb__after_atomic() orders against prior enqueue. */
+ 		ACCESS_ONCE(rdp_leader->nocb_leader_sleep) = false;
+-		wake_up(&rdp_leader->nocb_wq);
++		swait_wake(&rdp_leader->nocb_wq);
+ 	}
+ }
+ 
+@@ -2121,7 +2121,7 @@ static void rcu_nocb_wait_gp(struct rcu_
+ 	 */
+ 	trace_rcu_future_gp(rnp, rdp, c, TPS("StartWait"));
+ 	for (;;) {
+-		wait_event_interruptible(
++		swait_event_interruptible(
+ 			rnp->nocb_gp_wq[c & 0x1],
+ 			(d = ULONG_CMP_GE(ACCESS_ONCE(rnp->completed), c)));
+ 		if (likely(d))
+@@ -2149,7 +2149,7 @@ static void nocb_leader_wait(struct rcu_
+ 	/* Wait for callbacks to appear. */
+ 	if (!rcu_nocb_poll) {
+ 		trace_rcu_nocb_wake(my_rdp->rsp->name, my_rdp->cpu, "Sleep");
+-		wait_event_interruptible(my_rdp->nocb_wq,
++		swait_event_interruptible(my_rdp->nocb_wq,
+ 				!ACCESS_ONCE(my_rdp->nocb_leader_sleep));
+ 		/* Memory barrier handled by smp_mb() calls below and repoll. */
+ 	} else if (firsttime) {
+@@ -2224,7 +2224,7 @@ static void nocb_leader_wait(struct rcu_
+ 			 * List was empty, wake up the follower.
+ 			 * Memory barriers supplied by atomic_long_add().
+ 			 */
+-			wake_up(&rdp->nocb_wq);
++			swait_wake(&rdp->nocb_wq);
+ 		}
+ 	}
+ 
+@@ -2245,7 +2245,7 @@ static void nocb_follower_wait(struct rc
+ 		if (!rcu_nocb_poll) {
+ 			trace_rcu_nocb_wake(rdp->rsp->name, rdp->cpu,
+ 					    "FollowerSleep");
+-			wait_event_interruptible(rdp->nocb_wq,
++			swait_event_interruptible(rdp->nocb_wq,
+ 						 ACCESS_ONCE(rdp->nocb_follower_head));
+ 		} else if (firsttime) {
+ 			/* Don't drown trace log with "Poll"! */
+@@ -2404,7 +2404,7 @@ void __init rcu_init_nohz(void)
+ static void __init rcu_boot_init_nocb_percpu_data(struct rcu_data *rdp)
+ {
+ 	rdp->nocb_tail = &rdp->nocb_head;
+-	init_waitqueue_head(&rdp->nocb_wq);
++	init_swait_head(&rdp->nocb_wq);
+ 	rdp->nocb_follower_tail = &rdp->nocb_follower_head;
+ }
+ 

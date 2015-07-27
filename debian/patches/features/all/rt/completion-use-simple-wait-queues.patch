@@ -1,0 +1,225 @@
+Subject: completion: Use simple wait queues
+From: Thomas Gleixner <tglx@linutronix.de>
+Date: Fri, 11 Jan 2013 11:23:51 +0100
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.1/patches-4.1.3-rt3.tar.xz
+
+Completions have no long lasting callbacks and therefor do not need
+the complex waitqueue variant. Use simple waitqueues which reduces the
+contention on the waitqueue lock.
+
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+---
+ drivers/net/wireless/orinoco/orinoco_usb.c |    2 -
+ drivers/usb/gadget/function/f_fs.c         |    2 -
+ drivers/usb/gadget/legacy/inode.c          |    4 +--
+ include/linux/completion.h                 |    9 +++-----
+ include/linux/uprobes.h                    |    1 
+ kernel/sched/completion.c                  |   32 ++++++++++++++---------------
+ kernel/sched/core.c                        |   10 +++++++--
+ 7 files changed, 33 insertions(+), 27 deletions(-)
+
+--- a/drivers/net/wireless/orinoco/orinoco_usb.c
++++ b/drivers/net/wireless/orinoco/orinoco_usb.c
+@@ -697,7 +697,7 @@ static void ezusb_req_ctx_wait(struct ez
+ 			while (!ctx->done.done && msecs--)
+ 				udelay(1000);
+ 		} else {
+-			wait_event_interruptible(ctx->done.wait,
++			swait_event_interruptible(ctx->done.wait,
+ 						 ctx->done.done);
+ 		}
+ 		break;
+--- a/drivers/usb/gadget/function/f_fs.c
++++ b/drivers/usb/gadget/function/f_fs.c
+@@ -1403,7 +1403,7 @@ static void ffs_data_put(struct ffs_data
+ 		pr_info("%s(): freeing\n", __func__);
+ 		ffs_data_clear(ffs);
+ 		BUG_ON(waitqueue_active(&ffs->ev.waitq) ||
+-		       waitqueue_active(&ffs->ep0req_completion.wait));
++		       swaitqueue_active(&ffs->ep0req_completion.wait));
+ 		kfree(ffs->dev_name);
+ 		kfree(ffs);
+ 	}
+--- a/drivers/usb/gadget/legacy/inode.c
++++ b/drivers/usb/gadget/legacy/inode.c
+@@ -345,7 +345,7 @@ ep_io (struct ep_data *epdata, void *buf
+ 	spin_unlock_irq (&epdata->dev->lock);
+ 
+ 	if (likely (value == 0)) {
+-		value = wait_event_interruptible (done.wait, done.done);
++		value = swait_event_interruptible (done.wait, done.done);
+ 		if (value != 0) {
+ 			spin_lock_irq (&epdata->dev->lock);
+ 			if (likely (epdata->ep != NULL)) {
+@@ -354,7 +354,7 @@ ep_io (struct ep_data *epdata, void *buf
+ 				usb_ep_dequeue (epdata->ep, epdata->req);
+ 				spin_unlock_irq (&epdata->dev->lock);
+ 
+-				wait_event (done.wait, done.done);
++				swait_event (done.wait, done.done);
+ 				if (epdata->status == -ECONNRESET)
+ 					epdata->status = -EINTR;
+ 			} else {
+--- a/include/linux/completion.h
++++ b/include/linux/completion.h
+@@ -7,8 +7,7 @@
+  * Atomic wait-for-completion handler data structures.
+  * See kernel/sched/completion.c for details.
+  */
+-
+-#include <linux/wait.h>
++#include <linux/wait-simple.h>
+ 
+ /*
+  * struct completion - structure used to maintain state for a "completion"
+@@ -24,11 +23,11 @@
+  */
+ struct completion {
+ 	unsigned int done;
+-	wait_queue_head_t wait;
++	struct swait_head wait;
+ };
+ 
+ #define COMPLETION_INITIALIZER(work) \
+-	{ 0, __WAIT_QUEUE_HEAD_INITIALIZER((work).wait) }
++	{ 0, SWAIT_HEAD_INITIALIZER((work).wait) }
+ 
+ #define COMPLETION_INITIALIZER_ONSTACK(work) \
+ 	({ init_completion(&work); work; })
+@@ -73,7 +72,7 @@ struct completion {
+ static inline void init_completion(struct completion *x)
+ {
+ 	x->done = 0;
+-	init_waitqueue_head(&x->wait);
++	init_swait_head(&x->wait);
+ }
+ 
+ /**
+--- a/include/linux/uprobes.h
++++ b/include/linux/uprobes.h
+@@ -27,6 +27,7 @@
+ #include <linux/errno.h>
+ #include <linux/rbtree.h>
+ #include <linux/types.h>
++#include <linux/wait.h>
+ 
+ struct vm_area_struct;
+ struct mm_struct;
+--- a/kernel/sched/completion.c
++++ b/kernel/sched/completion.c
+@@ -30,10 +30,10 @@ void complete(struct completion *x)
+ {
+ 	unsigned long flags;
+ 
+-	spin_lock_irqsave(&x->wait.lock, flags);
++	raw_spin_lock_irqsave(&x->wait.lock, flags);
+ 	x->done++;
+-	__wake_up_locked(&x->wait, TASK_NORMAL, 1);
+-	spin_unlock_irqrestore(&x->wait.lock, flags);
++	__swait_wake_locked(&x->wait, TASK_NORMAL, 1);
++	raw_spin_unlock_irqrestore(&x->wait.lock, flags);
+ }
+ EXPORT_SYMBOL(complete);
+ 
+@@ -50,10 +50,10 @@ void complete_all(struct completion *x)
+ {
+ 	unsigned long flags;
+ 
+-	spin_lock_irqsave(&x->wait.lock, flags);
++	raw_spin_lock_irqsave(&x->wait.lock, flags);
+ 	x->done += UINT_MAX/2;
+-	__wake_up_locked(&x->wait, TASK_NORMAL, 0);
+-	spin_unlock_irqrestore(&x->wait.lock, flags);
++	__swait_wake_locked(&x->wait, TASK_NORMAL, 0);
++	raw_spin_unlock_irqrestore(&x->wait.lock, flags);
+ }
+ EXPORT_SYMBOL(complete_all);
+ 
+@@ -62,20 +62,20 @@ do_wait_for_common(struct completion *x,
+ 		   long (*action)(long), long timeout, int state)
+ {
+ 	if (!x->done) {
+-		DECLARE_WAITQUEUE(wait, current);
++		DEFINE_SWAITER(wait);
+ 
+-		__add_wait_queue_tail_exclusive(&x->wait, &wait);
++		swait_prepare_locked(&x->wait, &wait);
+ 		do {
+ 			if (signal_pending_state(state, current)) {
+ 				timeout = -ERESTARTSYS;
+ 				break;
+ 			}
+ 			__set_current_state(state);
+-			spin_unlock_irq(&x->wait.lock);
++			raw_spin_unlock_irq(&x->wait.lock);
+ 			timeout = action(timeout);
+-			spin_lock_irq(&x->wait.lock);
++			raw_spin_lock_irq(&x->wait.lock);
+ 		} while (!x->done && timeout);
+-		__remove_wait_queue(&x->wait, &wait);
++		swait_finish_locked(&x->wait, &wait);
+ 		if (!x->done)
+ 			return timeout;
+ 	}
+@@ -89,9 +89,9 @@ static inline long __sched
+ {
+ 	might_sleep();
+ 
+-	spin_lock_irq(&x->wait.lock);
++	raw_spin_lock_irq(&x->wait.lock);
+ 	timeout = do_wait_for_common(x, action, timeout, state);
+-	spin_unlock_irq(&x->wait.lock);
++	raw_spin_unlock_irq(&x->wait.lock);
+ 	return timeout;
+ }
+ 
+@@ -277,12 +277,12 @@ bool try_wait_for_completion(struct comp
+ 	if (!READ_ONCE(x->done))
+ 		return 0;
+ 
+-	spin_lock_irqsave(&x->wait.lock, flags);
++	raw_spin_lock_irqsave(&x->wait.lock, flags);
+ 	if (!x->done)
+ 		ret = 0;
+ 	else
+ 		x->done--;
+-	spin_unlock_irqrestore(&x->wait.lock, flags);
++	raw_spin_unlock_irqrestore(&x->wait.lock, flags);
+ 	return ret;
+ }
+ EXPORT_SYMBOL(try_wait_for_completion);
+@@ -311,7 +311,7 @@ bool completion_done(struct completion *
+ 	 * after it's acquired the lock.
+ 	 */
+ 	smp_rmb();
+-	spin_unlock_wait(&x->wait.lock);
++	raw_spin_unlock_wait(&x->wait.lock);
+ 	return true;
+ }
+ EXPORT_SYMBOL(completion_done);
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -2802,7 +2802,10 @@ void migrate_disable(void)
+ 	}
+ 
+ #ifdef CONFIG_SCHED_DEBUG
+-	WARN_ON_ONCE(p->migrate_disable_atomic);
++	if (unlikely(p->migrate_disable_atomic)) {
++		tracing_off();
++		WARN_ON_ONCE(1);
++	}
+ #endif
+ 
+ 	if (p->migrate_disable) {
+@@ -2832,7 +2835,10 @@ void migrate_enable(void)
+ 	}
+ 
+ #ifdef CONFIG_SCHED_DEBUG
+-	WARN_ON_ONCE(p->migrate_disable_atomic);
++	if (unlikely(p->migrate_disable_atomic)) {
++		tracing_off();
++		WARN_ON_ONCE(1);
++	}
+ #endif
+ 	WARN_ON_ONCE(p->migrate_disable <= 0);
+ 

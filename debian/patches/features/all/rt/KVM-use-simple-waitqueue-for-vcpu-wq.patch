@@ -1,0 +1,342 @@
+From: Marcelo Tosatti <mtosatti@redhat.com>
+Date: Wed, 8 Apr 2015 20:33:24 -0300
+Subject: KVM: use simple waitqueue for vcpu->wq
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.1/patches-4.1.3-rt3.tar.xz
+
+The problem:
+
+On -RT, an emulated LAPIC timer instances has the following path:
+
+1) hard interrupt
+2) ksoftirqd is scheduled
+3) ksoftirqd wakes up vcpu thread
+4) vcpu thread is scheduled
+
+This extra context switch introduces unnecessary latency in the
+LAPIC path for a KVM guest.
+
+The solution:
+
+Allow waking up vcpu thread from hardirq context,
+thus avoiding the need for ksoftirqd to be scheduled.
+
+Normal waitqueues make use of spinlocks, which on -RT
+are sleepable locks. Therefore, waking up a waitqueue
+waiter involves locking a sleeping lock, which
+is not allowed from hard interrupt context.
+
+cyclictest command line:
+# cyclictest -m -n -q -p99 -l 1000000 -h60  -D 1m
+
+This patch reduces the average latency in my tests from 14us to 11us.
+
+Signed-off-by: Marcelo Tosatti <mtosatti@redhat.com>
+Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+---
+ arch/arm/kvm/arm.c                  |    4 ++--
+ arch/arm/kvm/psci.c                 |    4 ++--
+ arch/powerpc/include/asm/kvm_host.h |    4 ++--
+ arch/powerpc/kvm/book3s_hv.c        |   23 +++++++++++------------
+ arch/s390/include/asm/kvm_host.h    |    2 +-
+ arch/s390/kvm/interrupt.c           |    8 ++++----
+ arch/x86/kvm/lapic.c                |    6 +++---
+ include/linux/kvm_host.h            |    4 ++--
+ virt/kvm/async_pf.c                 |    4 ++--
+ virt/kvm/kvm_main.c                 |   16 ++++++++--------
+ 10 files changed, 37 insertions(+), 38 deletions(-)
+
+--- a/arch/arm/kvm/arm.c
++++ b/arch/arm/kvm/arm.c
+@@ -474,9 +474,9 @@ bool kvm_arch_intc_initialized(struct kv
+ 
+ static void vcpu_pause(struct kvm_vcpu *vcpu)
+ {
+-	wait_queue_head_t *wq = kvm_arch_vcpu_wq(vcpu);
++	struct swait_head *wq = kvm_arch_vcpu_wq(vcpu);
+ 
+-	wait_event_interruptible(*wq, !vcpu->arch.pause);
++	swait_event_interruptible(*wq, !vcpu->arch.pause);
+ }
+ 
+ static int kvm_vcpu_initialized(struct kvm_vcpu *vcpu)
+--- a/arch/arm/kvm/psci.c
++++ b/arch/arm/kvm/psci.c
+@@ -68,7 +68,7 @@ static unsigned long kvm_psci_vcpu_on(st
+ {
+ 	struct kvm *kvm = source_vcpu->kvm;
+ 	struct kvm_vcpu *vcpu = NULL;
+-	wait_queue_head_t *wq;
++	struct swait_head *wq;
+ 	unsigned long cpu_id;
+ 	unsigned long context_id;
+ 	phys_addr_t target_pc;
+@@ -117,7 +117,7 @@ static unsigned long kvm_psci_vcpu_on(st
+ 	smp_mb();		/* Make sure the above is visible */
+ 
+ 	wq = kvm_arch_vcpu_wq(vcpu);
+-	wake_up_interruptible(wq);
++	swait_wake_interruptible(wq);
+ 
+ 	return PSCI_RET_SUCCESS;
+ }
+--- a/arch/powerpc/include/asm/kvm_host.h
++++ b/arch/powerpc/include/asm/kvm_host.h
+@@ -280,7 +280,7 @@ struct kvmppc_vcore {
+ 	u8 in_guest;
+ 	struct list_head runnable_threads;
+ 	spinlock_t lock;
+-	wait_queue_head_t wq;
++	struct swait_head wq;
+ 	spinlock_t stoltb_lock;	/* protects stolen_tb and preempt_tb */
+ 	u64 stolen_tb;
+ 	u64 preempt_tb;
+@@ -613,7 +613,7 @@ struct kvm_vcpu_arch {
+ 	u8 prodded;
+ 	u32 last_inst;
+ 
+-	wait_queue_head_t *wqp;
++	struct swait_head *wqp;
+ 	struct kvmppc_vcore *vcore;
+ 	int ret;
+ 	int trap;
+--- a/arch/powerpc/kvm/book3s_hv.c
++++ b/arch/powerpc/kvm/book3s_hv.c
+@@ -115,11 +115,11 @@ static bool kvmppc_ipi_thread(int cpu)
+ static void kvmppc_fast_vcpu_kick_hv(struct kvm_vcpu *vcpu)
+ {
+ 	int cpu = vcpu->cpu;
+-	wait_queue_head_t *wqp;
++	struct swait_head *wqp;
+ 
+ 	wqp = kvm_arch_vcpu_wq(vcpu);
+-	if (waitqueue_active(wqp)) {
+-		wake_up_interruptible(wqp);
++	if (swaitqueue_active(wqp)) {
++		swait_wake_interruptible(wqp);
+ 		++vcpu->stat.halt_wakeup;
+ 	}
+ 
+@@ -686,8 +686,8 @@ int kvmppc_pseries_do_hcall(struct kvm_v
+ 		tvcpu->arch.prodded = 1;
+ 		smp_mb();
+ 		if (vcpu->arch.ceded) {
+-			if (waitqueue_active(&vcpu->wq)) {
+-				wake_up_interruptible(&vcpu->wq);
++			if (swaitqueue_active(&vcpu->wq)) {
++				swait_wake_interruptible(&vcpu->wq);
+ 				vcpu->stat.halt_wakeup++;
+ 			}
+ 		}
+@@ -1426,7 +1426,7 @@ static struct kvmppc_vcore *kvmppc_vcore
+ 	INIT_LIST_HEAD(&vcore->runnable_threads);
+ 	spin_lock_init(&vcore->lock);
+ 	spin_lock_init(&vcore->stoltb_lock);
+-	init_waitqueue_head(&vcore->wq);
++	init_swait_head(&vcore->wq);
+ 	vcore->preempt_tb = TB_NIL;
+ 	vcore->lpcr = kvm->arch.lpcr;
+ 	vcore->first_vcpuid = core * threads_per_subcore;
+@@ -2073,10 +2073,9 @@ static void kvmppc_vcore_blocked(struct
+ {
+ 	struct kvm_vcpu *vcpu;
+ 	int do_sleep = 1;
++	DEFINE_SWAITER(wait);
+ 
+-	DEFINE_WAIT(wait);
+-
+-	prepare_to_wait(&vc->wq, &wait, TASK_INTERRUPTIBLE);
++	swait_prepare(&vc->wq, &wait, TASK_INTERRUPTIBLE);
+ 
+ 	/*
+ 	 * Check one last time for pending exceptions and ceded state after
+@@ -2090,7 +2089,7 @@ static void kvmppc_vcore_blocked(struct
+ 	}
+ 
+ 	if (!do_sleep) {
+-		finish_wait(&vc->wq, &wait);
++		swait_finish(&vc->wq, &wait);
+ 		return;
+ 	}
+ 
+@@ -2098,7 +2097,7 @@ static void kvmppc_vcore_blocked(struct
+ 	trace_kvmppc_vcore_blocked(vc, 0);
+ 	spin_unlock(&vc->lock);
+ 	schedule();
+-	finish_wait(&vc->wq, &wait);
++	swait_finish(&vc->wq, &wait);
+ 	spin_lock(&vc->lock);
+ 	vc->vcore_state = VCORE_INACTIVE;
+ 	trace_kvmppc_vcore_blocked(vc, 1);
+@@ -2142,7 +2141,7 @@ static int kvmppc_run_vcpu(struct kvm_ru
+ 			kvmppc_start_thread(vcpu);
+ 			trace_kvm_guest_enter(vcpu);
+ 		} else if (vc->vcore_state == VCORE_SLEEPING) {
+-			wake_up(&vc->wq);
++			swait_wake(&vc->wq);
+ 		}
+ 
+ 	}
+--- a/arch/s390/include/asm/kvm_host.h
++++ b/arch/s390/include/asm/kvm_host.h
+@@ -419,7 +419,7 @@ struct kvm_s390_irq_payload {
+ struct kvm_s390_local_interrupt {
+ 	spinlock_t lock;
+ 	struct kvm_s390_float_interrupt *float_int;
+-	wait_queue_head_t *wq;
++	struct swait_head *wq;
+ 	atomic_t *cpuflags;
+ 	DECLARE_BITMAP(sigp_emerg_pending, KVM_MAX_VCPUS);
+ 	struct kvm_s390_irq_payload irq;
+--- a/arch/s390/kvm/interrupt.c
++++ b/arch/s390/kvm/interrupt.c
+@@ -875,13 +875,13 @@ int kvm_s390_handle_wait(struct kvm_vcpu
+ 
+ void kvm_s390_vcpu_wakeup(struct kvm_vcpu *vcpu)
+ {
+-	if (waitqueue_active(&vcpu->wq)) {
++	if (swaitqueue_active(&vcpu->wq)) {
+ 		/*
+ 		 * The vcpu gave up the cpu voluntarily, mark it as a good
+ 		 * yield-candidate.
+ 		 */
+ 		vcpu->preempted = true;
+-		wake_up_interruptible(&vcpu->wq);
++		swait_wake_interruptible(&vcpu->wq);
+ 		vcpu->stat.halt_wakeup++;
+ 	}
+ }
+@@ -987,7 +987,7 @@ int kvm_s390_inject_program_int(struct k
+ 	spin_lock(&li->lock);
+ 	irq.u.pgm.code = code;
+ 	__inject_prog(vcpu, &irq);
+-	BUG_ON(waitqueue_active(li->wq));
++	BUG_ON(swaitqueue_active(li->wq));
+ 	spin_unlock(&li->lock);
+ 	return 0;
+ }
+@@ -1006,7 +1006,7 @@ int kvm_s390_inject_prog_irq(struct kvm_
+ 	spin_lock(&li->lock);
+ 	irq.u.pgm = *pgm_info;
+ 	rc = __inject_prog(vcpu, &irq);
+-	BUG_ON(waitqueue_active(li->wq));
++	BUG_ON(swaitqueue_active(li->wq));
+ 	spin_unlock(&li->lock);
+ 	return rc;
+ }
+--- a/arch/x86/kvm/lapic.c
++++ b/arch/x86/kvm/lapic.c
+@@ -1104,7 +1104,7 @@ static void apic_update_lvtt(struct kvm_
+ static void apic_timer_expired(struct kvm_lapic *apic)
+ {
+ 	struct kvm_vcpu *vcpu = apic->vcpu;
+-	wait_queue_head_t *q = &vcpu->wq;
++	struct swait_head *q = &vcpu->wq;
+ 	struct kvm_timer *ktimer = &apic->lapic_timer;
+ 
+ 	if (atomic_read(&apic->lapic_timer.pending))
+@@ -1113,8 +1113,8 @@ static void apic_timer_expired(struct kv
+ 	atomic_inc(&apic->lapic_timer.pending);
+ 	kvm_set_pending_timer(vcpu);
+ 
+-	if (waitqueue_active(q))
+-		wake_up_interruptible(q);
++	if (swaitqueue_active(q))
++		swait_wake_interruptible(q);
+ 
+ 	if (apic_lvtt_tscdeadline(apic))
+ 		ktimer->expired_tscdeadline = ktimer->tscdeadline;
+--- a/include/linux/kvm_host.h
++++ b/include/linux/kvm_host.h
+@@ -230,7 +230,7 @@ struct kvm_vcpu {
+ 
+ 	int fpu_active;
+ 	int guest_fpu_loaded, guest_xcr0_loaded;
+-	wait_queue_head_t wq;
++	struct swait_head wq;
+ 	struct pid *pid;
+ 	int sigset_active;
+ 	sigset_t sigset;
+@@ -690,7 +690,7 @@ static inline bool kvm_arch_has_noncoher
+ }
+ #endif
+ 
+-static inline wait_queue_head_t *kvm_arch_vcpu_wq(struct kvm_vcpu *vcpu)
++static inline struct swait_head *kvm_arch_vcpu_wq(struct kvm_vcpu *vcpu)
+ {
+ #ifdef __KVM_HAVE_ARCH_WQP
+ 	return vcpu->arch.wqp;
+--- a/virt/kvm/async_pf.c
++++ b/virt/kvm/async_pf.c
+@@ -94,8 +94,8 @@ static void async_pf_execute(struct work
+ 
+ 	trace_kvm_async_pf_completed(addr, gva);
+ 
+-	if (waitqueue_active(&vcpu->wq))
+-		wake_up_interruptible(&vcpu->wq);
++	if (swaitqueue_active(&vcpu->wq))
++		swait_wake_interruptible(&vcpu->wq);
+ 
+ 	mmput(mm);
+ 	kvm_put_kvm(vcpu->kvm);
+--- a/virt/kvm/kvm_main.c
++++ b/virt/kvm/kvm_main.c
+@@ -218,7 +218,7 @@ int kvm_vcpu_init(struct kvm_vcpu *vcpu,
+ 	vcpu->kvm = kvm;
+ 	vcpu->vcpu_id = id;
+ 	vcpu->pid = NULL;
+-	init_waitqueue_head(&vcpu->wq);
++	init_swait_head(&vcpu->wq);
+ 	kvm_async_pf_vcpu_init(vcpu);
+ 
+ 	page = alloc_page(GFP_KERNEL | __GFP_ZERO);
+@@ -1779,7 +1779,7 @@ static int kvm_vcpu_check_block(struct k
+ void kvm_vcpu_block(struct kvm_vcpu *vcpu)
+ {
+ 	ktime_t start, cur;
+-	DEFINE_WAIT(wait);
++	DEFINE_SWAITER(wait);
+ 	bool waited = false;
+ 
+ 	start = cur = ktime_get();
+@@ -1800,7 +1800,7 @@ void kvm_vcpu_block(struct kvm_vcpu *vcp
+ 	}
+ 
+ 	for (;;) {
+-		prepare_to_wait(&vcpu->wq, &wait, TASK_INTERRUPTIBLE);
++		swait_prepare(&vcpu->wq, &wait, TASK_INTERRUPTIBLE);
+ 
+ 		if (kvm_vcpu_check_block(vcpu) < 0)
+ 			break;
+@@ -1809,7 +1809,7 @@ void kvm_vcpu_block(struct kvm_vcpu *vcp
+ 		schedule();
+ 	}
+ 
+-	finish_wait(&vcpu->wq, &wait);
++	swait_finish(&vcpu->wq, &wait);
+ 	cur = ktime_get();
+ 
+ out:
+@@ -1825,11 +1825,11 @@ void kvm_vcpu_kick(struct kvm_vcpu *vcpu
+ {
+ 	int me;
+ 	int cpu = vcpu->cpu;
+-	wait_queue_head_t *wqp;
++	struct swait_head *wqp;
+ 
+ 	wqp = kvm_arch_vcpu_wq(vcpu);
+-	if (waitqueue_active(wqp)) {
+-		wake_up_interruptible(wqp);
++	if (swaitqueue_active(wqp)) {
++		swait_wake_interruptible(wqp);
+ 		++vcpu->stat.halt_wakeup;
+ 	}
+ 
+@@ -1930,7 +1930,7 @@ void kvm_vcpu_on_spin(struct kvm_vcpu *m
+ 				continue;
+ 			if (vcpu == me)
+ 				continue;
+-			if (waitqueue_active(&vcpu->wq) && !kvm_arch_vcpu_runnable(vcpu))
++			if (swaitqueue_active(&vcpu->wq) && !kvm_arch_vcpu_runnable(vcpu))
+ 				continue;
+ 			if (!kvm_vcpu_eligible_for_directed_yield(vcpu))
+ 				continue;

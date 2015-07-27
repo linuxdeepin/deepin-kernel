@@ -1,0 +1,163 @@
+From: Thomas Gleixner <tglx@linutronix.de>
+Date: Tue, 14 Jul 2015 14:26:34 +0200
+Subject: mm/slub: move slab initialization into irq enabled region
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.1/patches-4.1.3-rt3.tar.xz
+
+Initializing a new slab can introduce rather large latencies because most
+of the initialization runs always with interrupts disabled.
+
+There is no point in doing so.  The newly allocated slab is not visible
+yet, so there is no reason to protect it against concurrent alloc/free.
+
+Move the expensive parts of the initialization into allocate_slab(), so
+for all allocations with GFP_WAIT set, interrupts are enabled.
+
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Acked-by: Christoph Lameter <cl@linux.com>
+Cc: Pekka Enberg <penberg@kernel.org>
+Cc: David Rientjes <rientjes@google.com>
+Cc: Joonsoo Kim <iamjoonsoo.kim@lge.com>
+Cc: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+Cc: Steven Rostedt <rostedt@goodmis.org>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+---
+
+ mm/slub.c |   89 +++++++++++++++++++++++++++++---------------------------------
+ 1 file changed, 42 insertions(+), 47 deletions(-)
+
+--- a/mm/slub.c
++++ b/mm/slub.c
+@@ -1306,6 +1306,17 @@ static inline void slab_free_hook(struct
+ 	kasan_slab_free(s, x);
+ }
+ 
++static void setup_object(struct kmem_cache *s, struct page *page,
++				void *object)
++{
++	setup_object_debug(s, page, object);
++	if (unlikely(s->ctor)) {
++		kasan_unpoison_object_data(s, object);
++		s->ctor(object);
++		kasan_poison_object_data(s, object);
++	}
++}
++
+ /*
+  * Slab allocation and freeing
+  */
+@@ -1336,6 +1347,8 @@ static struct page *allocate_slab(struct
+ 	struct page *page;
+ 	struct kmem_cache_order_objects oo = s->oo;
+ 	gfp_t alloc_gfp;
++	void *start, *p;
++	int idx, order;
+ 
+ 	flags &= gfp_allowed_mask;
+ 
+@@ -1359,13 +1372,13 @@ static struct page *allocate_slab(struct
+ 		 * Try a lower order alloc if possible
+ 		 */
+ 		page = alloc_slab_page(s, alloc_gfp, node, oo);
+-
+-		if (page)
+-			stat(s, ORDER_FALLBACK);
++		if (unlikely(!page))
++			goto out;
++		stat(s, ORDER_FALLBACK);
+ 	}
+ 
+-	if (kmemcheck_enabled && page
+-		&& !(s->flags & (SLAB_NOTRACK | DEBUG_DEFAULT_FLAGS))) {
++	if (kmemcheck_enabled &&
++	    !(s->flags & (SLAB_NOTRACK | DEBUG_DEFAULT_FLAGS))) {
+ 		int pages = 1 << oo_order(oo);
+ 
+ 		kmemcheck_alloc_shadow(page, oo_order(oo), alloc_gfp, node);
+@@ -1380,51 +1393,9 @@ static struct page *allocate_slab(struct
+ 			kmemcheck_mark_unallocated_pages(page, pages);
+ 	}
+ 
+-	if (flags & __GFP_WAIT)
+-		local_irq_disable();
+-	if (!page)
+-		return NULL;
+-
+ 	page->objects = oo_objects(oo);
+-	mod_zone_page_state(page_zone(page),
+-		(s->flags & SLAB_RECLAIM_ACCOUNT) ?
+-		NR_SLAB_RECLAIMABLE : NR_SLAB_UNRECLAIMABLE,
+-		1 << oo_order(oo));
+-
+-	return page;
+-}
+-
+-static void setup_object(struct kmem_cache *s, struct page *page,
+-				void *object)
+-{
+-	setup_object_debug(s, page, object);
+-	if (unlikely(s->ctor)) {
+-		kasan_unpoison_object_data(s, object);
+-		s->ctor(object);
+-		kasan_poison_object_data(s, object);
+-	}
+-}
+-
+-static struct page *new_slab(struct kmem_cache *s, gfp_t flags, int node)
+-{
+-	struct page *page;
+-	void *start;
+-	void *p;
+-	int order;
+-	int idx;
+-
+-	if (unlikely(flags & GFP_SLAB_BUG_MASK)) {
+-		pr_emerg("gfp: %u\n", flags & GFP_SLAB_BUG_MASK);
+-		BUG();
+-	}
+-
+-	page = allocate_slab(s,
+-		flags & (GFP_RECLAIM_MASK | GFP_CONSTRAINT_MASK), node);
+-	if (!page)
+-		goto out;
+ 
+ 	order = compound_order(page);
+-	inc_slabs_node(s, page_to_nid(page), page->objects);
+ 	page->slab_cache = s;
+ 	__SetPageSlab(page);
+ 	if (page->pfmemalloc)
+@@ -1448,10 +1419,34 @@ static struct page *new_slab(struct kmem
+ 	page->freelist = start;
+ 	page->inuse = page->objects;
+ 	page->frozen = 1;
++
+ out:
++	if (flags & __GFP_WAIT)
++		local_irq_disable();
++	if (!page)
++		return NULL;
++
++	mod_zone_page_state(page_zone(page),
++		(s->flags & SLAB_RECLAIM_ACCOUNT) ?
++		NR_SLAB_RECLAIMABLE : NR_SLAB_UNRECLAIMABLE,
++		1 << oo_order(oo));
++
++	inc_slabs_node(s, page_to_nid(page), page->objects);
++
+ 	return page;
+ }
+ 
++static struct page *new_slab(struct kmem_cache *s, gfp_t flags, int node)
++{
++	if (unlikely(flags & GFP_SLAB_BUG_MASK)) {
++		pr_emerg("gfp: %u\n", flags & GFP_SLAB_BUG_MASK);
++		BUG();
++	}
++
++	return allocate_slab(s,
++		flags & (GFP_RECLAIM_MASK | GFP_CONSTRAINT_MASK), node);
++}
++
+ static void __free_slab(struct kmem_cache *s, struct page *page)
+ {
+ 	int order = compound_order(page);
