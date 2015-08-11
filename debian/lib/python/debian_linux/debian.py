@@ -434,3 +434,24 @@ class Package(dict):
     def values(self):
         for i in self.keys():
             yield self[i]
+
+
+class TestsControl(dict):
+    _fields = {
+        'Tests': str,
+        'Test-Command': str,
+        'Restrictions': str,
+        'Features': str,
+        'Depends': PackageRelation,
+        'Tests-Directory': str,
+        'Classes': str,
+    }
+
+    def __setitem__(self, key, value):
+        try:
+            cls = self._fields[key]
+            if not isinstance(value, cls):
+                value = cls(value)
+        except KeyError:
+            pass
+        super(TestsControl, self).__setitem__(key, value)

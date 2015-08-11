@@ -26,6 +26,8 @@ class Templates(object):
                     f = codecs.open(filename, 'r', 'utf-8')
                     if prefix == 'control':
                         return read_control(f)
+                    if prefix == 'tests-control':
+                        return read_tests_control(f)
                     return f.read()
 
     def get(self, key, default=None):
@@ -41,6 +43,10 @@ class Templates(object):
 def read_control(f):
     from .debian import Package
     return _read_rfc822(f, Package)
+
+def read_tests_control(f):
+    from .debian import TestsControl
+    return _read_rfc822(f, TestsControl)
 
 def _read_rfc822(f, cls):
     entries = []
