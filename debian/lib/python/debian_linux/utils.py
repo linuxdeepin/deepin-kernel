@@ -40,12 +40,14 @@ class Templates(object):
 
 def read_control(f):
     from .debian import Package
+    return _read_rfc822(f, Package)
 
+def _read_rfc822(f, cls):
     entries = []
     eof = False
 
     while not eof:
-        e = Package()
+        e = cls()
         last = None
         lines = []
         while True:
