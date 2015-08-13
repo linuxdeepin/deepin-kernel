@@ -142,7 +142,7 @@ class Main(object):
                 'Makefile',
                 'arch/*/include/',
                 'arch/*/Makefile',
-                'arch/x86/syscalls/',
+                'arch/x86/entry/syscalls/',
                 'arch/x86/lib/memcpy_64.S',
                 'arch/x86/lib/memset_64.S',
                 'arch/x86/tools/',
