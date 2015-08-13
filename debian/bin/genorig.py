@@ -138,6 +138,7 @@ class Main(object):
 
         to_copy = (
                 'COPYING',
+                'Documentation/locking/lockdep-design.txt',
                 'Kbuild',
                 'Makefile',
                 'arch/*/include/',
@@ -147,6 +148,7 @@ class Main(object):
                 'arch/x86/lib/memset_64.S',
                 'arch/x86/tools/',
                 'include/',
+                'kernel/locking/',
                 'lib/hweight.c',
                 'lib/rbtree.c',
                 'scripts/',
