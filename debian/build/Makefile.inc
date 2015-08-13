@@ -7,7 +7,8 @@ SHELL = /bin/sh -e
 CC = gcc
 CXX = g++
 CFLAGS ?= -O2 -Wall
-CPPFLAGS = -I$(top_srcdir)/$(OUTDIR) -I$(top_srcdir)/debian/build/$(OUTDIR)
+CPPFLAGS = -I$(top_srcdir)/$(OUTDIR) -I$(top_srcdir)/debian/build/$(OUTDIR) \
+	-isystem $(top_srcdir)/debian/build/include
 CXXFLAGS = $(CFLAGS)
 
 all: all-local all-recursive
