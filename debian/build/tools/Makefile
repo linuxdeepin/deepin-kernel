@@ -1,5 +1,6 @@
 SUBDIRS = \
 	hv \
+	lib/lockdep \
 	perf \
 	usb/usbip
 
