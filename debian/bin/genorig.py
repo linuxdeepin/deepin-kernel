@@ -143,6 +143,8 @@ class Main(object):
                 'Makefile',
                 'arch/*/include/',
                 'arch/*/Makefile',
+                'arch/mips/Kbuild.platforms',
+                'arch/mips/*/Platform',
                 'arch/x86/entry/syscalls/',
                 'arch/x86/lib/memcpy_64.S',
                 'arch/x86/lib/memset_64.S',
