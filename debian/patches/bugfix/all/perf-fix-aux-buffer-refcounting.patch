@@ -1,0 +1,135 @@
+From: Peter Zijlstra <peterz@infradead.org>
+Date: Thu, 18 Jun 2015 12:32:49 +0200
+Subject: perf: Fix AUX buffer refcounting
+Origin: https://git.kernel.org/linus/57ffc5ca679f499f4704fd9b6a372916f59930ee
+
+Its currently possible to drop the last refcount to the aux buffer
+from NMI context, which results in the expected fireworks.
+
+The refcounting needs a bigger overhaul, but to cure the immediate
+problem, delay the freeing by using an irq_work.
+
+Reviewed-and-tested-by: Alexander Shishkin <alexander.shishkin@linux.intel.com>
+Reported-by: Vince Weaver <vincent.weaver@maine.edu>
+Signed-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>
+Cc: Arnaldo Carvalho de Melo <acme@kernel.org>
+Cc: Linus Torvalds <torvalds@linux-foundation.org>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Stephane Eranian <eranian@gmail.com>
+Cc: Thomas Gleixner <tglx@linutronix.de>
+Link: http://lkml.kernel.org/r/20150618103249.GK19282@twins.programming.kicks-ass.net
+Signed-off-by: Ingo Molnar <mingo@kernel.org>
+---
+ kernel/events/core.c        |  8 --------
+ kernel/events/internal.h    | 10 ++++++++++
+ kernel/events/ring_buffer.c | 27 +++++++++++++++++++++++++--
+ 3 files changed, 35 insertions(+), 10 deletions(-)
+
+--- a/kernel/events/core.c
++++ b/kernel/events/core.c
+@@ -4381,14 +4381,6 @@ static void ring_buffer_wakeup(struct pe
+ 	rcu_read_unlock();
+ }
+ 
+-static void rb_free_rcu(struct rcu_head *rcu_head)
+-{
+-	struct ring_buffer *rb;
+-
+-	rb = container_of(rcu_head, struct ring_buffer, rcu_head);
+-	rb_free(rb);
+-}
+-
+ struct ring_buffer *ring_buffer_get(struct perf_event *event)
+ {
+ 	struct ring_buffer *rb;
+--- a/kernel/events/internal.h
++++ b/kernel/events/internal.h
+@@ -11,6 +11,7 @@
+ struct ring_buffer {
+ 	atomic_t			refcount;
+ 	struct rcu_head			rcu_head;
++	struct irq_work			irq_work;
+ #ifdef CONFIG_PERF_USE_VMALLOC
+ 	struct work_struct		work;
+ 	int				page_order;	/* allocation order  */
+@@ -55,6 +56,15 @@ struct ring_buffer {
+ };
+ 
+ extern void rb_free(struct ring_buffer *rb);
++
++static inline void rb_free_rcu(struct rcu_head *rcu_head)
++{
++	struct ring_buffer *rb;
++
++	rb = container_of(rcu_head, struct ring_buffer, rcu_head);
++	rb_free(rb);
++}
++
+ extern struct ring_buffer *
+ rb_alloc(int nr_pages, long watermark, int cpu, int flags);
+ extern void perf_event_wakeup(struct perf_event *event);
+--- a/kernel/events/ring_buffer.c
++++ b/kernel/events/ring_buffer.c
+@@ -221,6 +221,8 @@ void perf_output_end(struct perf_output_
+ 	rcu_read_unlock();
+ }
+ 
++static void rb_irq_work(struct irq_work *work);
++
+ static void
+ ring_buffer_init(struct ring_buffer *rb, long watermark, int flags)
+ {
+@@ -241,6 +243,16 @@ ring_buffer_init(struct ring_buffer *rb,
+ 
+ 	INIT_LIST_HEAD(&rb->event_list);
+ 	spin_lock_init(&rb->event_lock);
++	init_irq_work(&rb->irq_work, rb_irq_work);
++}
++
++static void ring_buffer_put_async(struct ring_buffer *rb)
++{
++	if (!atomic_dec_and_test(&rb->refcount))
++		return;
++
++	rb->rcu_head.next = (void *)rb;
++	irq_work_queue(&rb->irq_work);
+ }
+ 
+ /*
+@@ -319,7 +331,7 @@ err_put:
+ 	rb_free_aux(rb);
+ 
+ err:
+-	ring_buffer_put(rb);
++	ring_buffer_put_async(rb);
+ 	handle->event = NULL;
+ 
+ 	return NULL;
+@@ -370,7 +382,7 @@ void perf_aux_output_end(struct perf_out
+ 
+ 	local_set(&rb->aux_nest, 0);
+ 	rb_free_aux(rb);
+-	ring_buffer_put(rb);
++	ring_buffer_put_async(rb);
+ }
+ 
+ /*
+@@ -557,7 +569,18 @@ static void __rb_free_aux(struct ring_bu
+ void rb_free_aux(struct ring_buffer *rb)
+ {
+ 	if (atomic_dec_and_test(&rb->aux_refcount))
++		irq_work_queue(&rb->irq_work);
++}
++
++static void rb_irq_work(struct irq_work *work)
++{
++	struct ring_buffer *rb = container_of(work, struct ring_buffer, irq_work);
++
++	if (!atomic_read(&rb->aux_refcount))
+ 		__rb_free_aux(rb);
++
++	if (rb->rcu_head.next == (void *)rb)
++		call_rcu(&rb->rcu_head, rb_free_rcu);
+ }
+ 
+ #ifndef CONFIG_PERF_USE_VMALLOC
