@@ -58,11 +58,11 @@ def read_control(f):
                 break
             if line[0] in ' \t':
                 if not last:
-                    raise ValueError(u'Continuation line seen before first header')
+                    raise ValueError('Continuation line seen before first header')
                 lines.append(line.lstrip())
                 continue
             if last:
-                e[last] = u'\n'.join(lines)
+                e[last] = '\n'.join(lines)
             i = line.find(':')
             if i < 0:
                 raise ValueError(u"Not a header, not a continuation: ``%s''" % line)
