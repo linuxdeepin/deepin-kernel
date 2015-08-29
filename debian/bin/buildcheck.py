@@ -220,7 +220,7 @@ class CheckImage(object):
         usage = (float(size)/value) * 100.0
         out.write('Image size %d/%d, using %.2f%%.  ' % (size, value, usage))
         if size > value:
-            sys.write('Too large.  Refusing to continue.\n')
+            out.write('Too large.  Refusing to continue.\n')
             return 1
         elif usage >= 99.0:
             out.write('Under 1%% space in %s.  ' % self.changelog.distribution)
