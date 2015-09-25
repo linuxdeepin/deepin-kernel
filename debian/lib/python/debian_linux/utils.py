@@ -19,13 +19,14 @@ class Templates(object):
     def _read(self, name):
         prefix, id = name.split('.', 1)
 
-        for dir in self.dirs:
-            filename = "%s/%s.in" % (dir, name)
-            if os.path.exists(filename):
-                f = codecs.open(filename, 'r', 'utf-8')
-                if prefix == 'control':
-                    return read_control(f)
-                return f.read()
+        for suffix in ['.in', '']:
+            for dir in self.dirs:
+                filename = "%s/%s%s" % (dir, name, suffix)
+                if os.path.exists(filename):
+                    f = codecs.open(filename, 'r', 'utf-8')
+                    if prefix == 'control':
+                        return read_control(f)
+                    return f.read()
 
     def get(self, key, default=None):
         if key in self._cache:
@@ -57,11 +58,11 @@ def read_control(f):
                 break
             if line[0] in ' \t':
                 if not last:
-                    raise ValueError(u'Continuation line seen before first header')
+                    raise ValueError('Continuation line seen before first header')
                 lines.append(line.lstrip())
                 continue
             if last:
-                e[last] = u'\n'.join(lines)
+                e[last] = '\n'.join(lines)
             i = line.find(':')
             if i < 0:
                 raise ValueError(u"Not a header, not a continuation: ``%s''" % line)

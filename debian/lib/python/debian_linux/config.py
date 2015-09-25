@@ -1,9 +1,14 @@
 import os
 import os.path
+import pickle
 import re
 import sys
 import textwrap
-import cPickle
+
+try:
+    from configparser import RawConfigParser
+except ImportError:
+    from ConfigParser import RawConfigParser
 
 __all__ = [
     'ConfigCoreDump',
@@ -20,6 +25,14 @@ class SchemaItemBoolean(object):
         if i in ("false", "0"):
             return False
         raise Error
+
+
+class SchemaItemInteger(object):
+    def __call__(self, i):
+        try:
+            return int(i.strip(), 0)
+        except ValueError:
+            raise Error
 
 
 class SchemaItemList(object):
@@ -78,12 +91,12 @@ class ConfigCore(dict):
         return ret
 
     def dump(self, fp):
-        cPickle.dump(self, fp, 0)
+        pickle.dump(self, fp, 0)
 
 
 class ConfigCoreDump(object):
     def __new__(self, fp):
-        return cPickle.load(fp)
+        return pickle.load(fp)
 
 
 class ConfigCoreHierarchy(object):
@@ -98,7 +111,7 @@ class ConfigCoreHierarchy(object):
 
     def __new__(cls, schema, dirs=[]):
         schema_complete = cls.schema_base.copy()
-        for key, value in schema.iteritems():
+        for key, value in schema.items():
             schema_complete.setdefault(key, {}).update(value)
         return cls.Reader(dirs, schema_complete)()
 
@@ -195,7 +208,6 @@ class ConfigParser(object):
     def __init__(self, schemas):
         self.schemas = schemas
 
-        from ConfigParser import RawConfigParser
         self._config = config = RawConfigParser()
 
     def __getitem__(self, key):
@@ -225,7 +237,7 @@ class ConfigParser(object):
 
     def _convert_one(self, schema, data):
         ret = {}
-        for key, value in data.iteritems():
+        for key, value in data.items():
             if key in schema:
                 value = schema[key](value)
             ret[key] = value
@@ -241,9 +253,9 @@ class ConfigParser(object):
 if __name__ == '__main__':
     import sys
     sys.path.append('debian/lib/python')
-    config = ConfigCoreDump(open('debian/config.defines.dump'))
-    for section, items in sorted(config.iteritems()):
-        print u"[%s]" % (section,)
-        for item, value in sorted(items.iteritems()):
-            print u"%s: %s" % (item, value)
-        print
+    config = ConfigCoreDump(open('debian/config.defines.dump', 'rb'))
+    for section, items in sorted(config.items(), key=lambda a:tuple(i or '' for i in a[0])):
+        print(u"[%s]" % (section,))
+        for item, value in sorted(items.items()):
+            print(u"%s: %s" % (item, value))
+        print()

@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 import sys
 sys.path.append("debian/lib/python")
@@ -186,7 +186,7 @@ class Main(object):
         try:
             if os.spawnv(os.P_WAIT, '/bin/sh', ['sh', '-c', ' '.join(cmdline)]):
                 raise RuntimeError("Can't patch source")
-            os.chmod(out, 0644)
+            os.chmod(out, 0o644)
         except:
             try:
                 os.unlink(out)

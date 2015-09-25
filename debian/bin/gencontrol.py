@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 import sys
 sys.path.append("debian/lib/python")
@@ -21,7 +21,7 @@ class gencontrol(Gencontrol):
         self.do_source(packages)
         self.do_main(packages, makefile)
 
-        self.write_control(packages.itervalues())
+        self.write_control(packages.values())
         self.write_makefile(makefile)
 
     def do_source(self, packages):

@@ -1,5 +1,4 @@
 import collections
-import itertools
 import os.path
 import re
 
@@ -35,7 +34,7 @@ class Changelog(list):
     def __init__(self, dir='', version=None):
         if version is None:
             version = Version
-        f = file(os.path.join(dir, "debian/changelog"))
+        f = open(os.path.join(dir, "debian/changelog"), encoding="UTF-8")
         while True:
             line = f.readline()
             if not line:
@@ -53,7 +52,7 @@ class Changelog(list):
 
 
 class Version(object):
-    _version_rules = ur"""
+    _version_rules = r"""
 ^
 (?:
     (?P<epoch>
@@ -82,7 +81,7 @@ $
         self.upstream = match.group("upstream")
         self.revision = match.group("revision")
 
-    def __unicode__(self):
+    def __str__(self):
         return self.complete
 
     @property
@@ -105,14 +104,15 @@ $
 
 
 class VersionLinux(Version):
-    _version_linux_rules = ur"""
+    _version_linux_rules = r"""
 ^
 (?P<version>
     \d+\.\d+
 )
 (?P<update>
-    \.\d+
-)?
+    (?:\.\d+)?
+    (?:-[a-z]+\d+)?
+)
 (?:
     ~
     (?P<modifier>
@@ -130,13 +130,20 @@ class VersionLinux(Version):
 (\.\d+)?
 (?:
     (?P<revision_experimental>
-        ~experimental\.\d+
+        ~exp\d+
     )
+    |
+    (?P<revision_security>
+        [~+]deb\d+u\d+
+    )?
+    (?P<revision_backports>
+        ~bpo\d+\+\d+
+    )?
     |
     (?P<revision_other>
         [^-]+
     )
-)?
+)
 $
 """
     _version_linux_re = re.compile(_version_linux_rules, re.X)
@@ -151,12 +158,14 @@ $
         self.linux_version = d['version']
         if d['modifier'] is not None:
             assert not d['update']
-            self.linux_upstream = u'-'.join((d['version'], d['modifier']))
+            self.linux_upstream = '-'.join((d['version'], d['modifier']))
         else:
             self.linux_upstream = d['version']
-        self.linux_upstream_full = self.linux_upstream + (d['update'] or u'')
+        self.linux_upstream_full = self.linux_upstream + d['update']
         self.linux_dfsg = d['dfsg']
         self.linux_revision_experimental = match.group('revision_experimental') and True
+        self.linux_revision_security = match.group('revision_security') and True
+        self.linux_revision_backports = match.group('revision_backports') and True
         self.linux_revision_other = match.group('revision_other') and True
 
 
@@ -177,8 +186,8 @@ class PackageArchitecture(collections.MutableSet):
     def __len__(self):
         return self._data.__len__()
 
-    def __unicode__(self):
-        return u' '.join(sorted(self))
+    def __str__(self):
+        return ' '.join(sorted(self))
 
     def add(self, value):
         self._data.add(value)
@@ -187,7 +196,7 @@ class PackageArchitecture(collections.MutableSet):
         self._data.discard(value)
 
     def extend(self, value):
-        if isinstance(value, basestring):
+        if isinstance(value, str):
             for i in re.split('\s', value.strip()):
                 self.add(i)
         else:
@@ -205,14 +214,14 @@ class PackageDescription(object):
             self.append(long)
             self.append_short(short)
 
-    def __unicode__(self):
+    def __str__(self):
         wrap = utils.TextWrapper(width=74, fix_sentence_endings=True).wrap
-        short = u', '.join(self.short)
+        short = ', '.join(self.short)
         long_pars = []
         for i in self.long:
             long_pars.append(wrap(i))
-        long = u'\n .\n '.join([u'\n '.join(i) for i in long_pars])
-        return short + u'\n ' + long
+        long = '\n .\n '.join(['\n '.join(i) for i in long_pars])
+        return short + '\n ' + long
 
     def append(self, str):
         str = str.strip()
@@ -237,8 +246,8 @@ class PackageRelation(list):
         if value:
             self.extend(value, override_arches)
 
-    def __unicode__(self):
-        return u', '.join((unicode(i) for i in self))
+    def __str__(self):
+        return ', '.join(str(i) for i in self)
 
     def _search_value(self, value):
         for i in self:
@@ -247,7 +256,7 @@ class PackageRelation(list):
         return None
 
     def append(self, value, override_arches=None):
-        if isinstance(value, basestring):
+        if isinstance(value, str):
             value = PackageRelationGroup(value, override_arches)
         elif not isinstance(value, PackageRelationGroup):
             raise ValueError(u"got %s" % type(value))
@@ -258,8 +267,8 @@ class PackageRelation(list):
             super(PackageRelation, self).append(value)
 
     def extend(self, value, override_arches=None):
-        if isinstance(value, basestring):
-            value = (j.strip() for j in re.split(u',', value.strip()))
+        if isinstance(value, str):
+            value = (j.strip() for j in re.split(',', value.strip()))
         for i in value:
             self.append(i, override_arches)
 
@@ -269,31 +278,31 @@ class PackageRelationGroup(list):
         if value:
             self.extend(value, override_arches)
 
-    def __unicode__(self):
-        return u' | '.join((unicode(i) for i in self))
+    def __str__(self):
+        return ' | '.join(str(i) for i in self)
 
     def _search_value(self, value):
-        for i, j in itertools.izip(self, value):
+        for i, j in zip(self, value):
             if i.name != j.name or i.version != j.version:
                 return None
         return self
 
     def _update_arches(self, value):
-        for i, j in itertools.izip(self, value):
+        for i, j in zip(self, value):
             if i.arches:
                 for arch in j.arches:
                     if arch not in i.arches:
                         i.arches.append(arch)
 
     def append(self, value, override_arches=None):
-        if isinstance(value, basestring):
+        if isinstance(value, str):
             value = PackageRelationEntry(value, override_arches)
         elif not isinstance(value, PackageRelationEntry):
             raise ValueError
         super(PackageRelationGroup, self).append(value)
 
     def extend(self, value, override_arches=None):
-        if isinstance(value, basestring):
+        if isinstance(value, str):
             value = (j.strip() for j in re.split('\|', value.strip()))
         for i in value:
             self.append(i, override_arches)
@@ -313,12 +322,12 @@ class PackageRelationEntry(object):
         OP_GT = 6
 
         operators = {
-                u'<<': OP_LT,
-                u'<=': OP_LE,
-                u'=': OP_EQ,
-                u'!=': OP_NE,
-                u'>=': OP_GE,
-                u'>>': OP_GT,
+                '<<': OP_LT,
+                '<=': OP_LE,
+                '=': OP_EQ,
+                '!=': OP_NE,
+                '>=': OP_GE,
+                '>>': OP_GT,
         }
 
         operators_neg = {
@@ -330,7 +339,7 @@ class PackageRelationEntry(object):
                 OP_GT: OP_LE,
         }
 
-        operators_text = dict([(b, a) for a, b in operators.iteritems()])
+        operators_text = dict((b, a) for a, b in operators.items())
 
         __slots__ = '_op',
 
@@ -340,11 +349,11 @@ class PackageRelationEntry(object):
         def __neg__(self):
             return self.__class__(self.operators_text[self.operators_neg[self._op]])
 
-        def __unicode__(self):
+        def __str__(self):
             return self.operators_text[self._op]
 
     def __init__(self, value=None, override_arches=None):
-        if not isinstance(value, basestring):
+        if not isinstance(value, str):
             raise ValueError
 
         self.parse(value)
@@ -352,13 +361,13 @@ class PackageRelationEntry(object):
         if override_arches:
             self.arches = list(override_arches)
 
-    def __unicode__(self):
+    def __str__(self):
         ret = [self.name]
         if self.operator is not None and self.version is not None:
-            ret.extend((u' (', unicode(self.operator), u' ', self.version, u')'))
+            ret.extend((' (', str(self.operator), ' ', self.version, ')'))
         if self.arches:
-            ret.extend((u' [', u' '.join(self.arches), u']'))
-        return u''.join(ret)
+            ret.extend((' [', ' '.join(self.arches), ']'))
+        return ''.join(ret)
 
     def parse(self, value):
         match = self._re.match(value)
@@ -379,14 +388,14 @@ class PackageRelationEntry(object):
 
 class Package(dict):
     _fields = collections.OrderedDict((
-        ('Package', unicode),
-        ('Source', unicode),
+        ('Package', str),
+        ('Source', str),
         ('Architecture', PackageArchitecture),
-        ('Section', unicode),
-        ('Priority', unicode),
-        ('Maintainer', unicode),
-        ('Uploaders', unicode),
-        ('Standards-Version', unicode),
+        ('Section', str),
+        ('Priority', str),
+        ('Maintainer', str),
+        ('Uploaders', str),
+        ('Standards-Version', str),
         ('Build-Depends', PackageRelation),
         ('Build-Depends-Indep', PackageRelation),
         ('Provides', PackageRelation),
@@ -411,7 +420,7 @@ class Package(dict):
 
     def iterkeys(self):
         keys = set(self.keys())
-        for i in self._fields.iterkeys():
+        for i in self._fields.keys():
             if i in self:
                 keys.remove(i)
                 yield i
