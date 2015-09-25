@@ -66,6 +66,10 @@ ifdef KERNEL_ARCH_PERF
 # - 'perf trace' doesn't take much more typing
 	rm -f $(DESTDIR)/usr/bin/trace_$(VERSION)
 endif
+	mkdir -p $(DESTDIR)/usr/share/bash-completion/
+	mv $(DESTDIR)/etc/bash_completion.d \
+		$(DESTDIR)/usr/share/bash-completion/completions
+	rmdir --ignore-fail-on-non-empty $(DESTDIR)/etc
 
 clean:
 ifdef KERNEL_ARCH_PERF
