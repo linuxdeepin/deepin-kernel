@@ -8,7 +8,8 @@ unexport MAKEFLAGS
 all:
 	cd $(srcdir) && ./autogen.sh
 	mkdir -p out
-	cd out && $(srcdir)/configure \
+	cd out && \
+	$(shell dpkg-buildflags --export=cmdline) $(srcdir)/configure \
 		--prefix=/usr \
 		--with-tcp-wrappers \
 		--with-usbids-dir=/usr/share/misc \

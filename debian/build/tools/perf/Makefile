@@ -26,7 +26,7 @@ else ifneq ($(filter amd64 i386,$(DEB_HOST_ARCH_CPU)),)
   KERNEL_ARCH_PERF = x86
 endif
 
-MAKE_PERF := $(MAKE) prefix=/usr V=1 ARCH=$(KERNEL_ARCH_PERF) EXTRA_WARNINGS=-Wno-error
+MAKE_PERF := $(MAKE) prefix=/usr V=1 ARCH=$(KERNEL_ARCH_PERF) EXTRA_WARNINGS=-Wno-error EXTRA_CFLAGS='$(CFLAGS) $(CPPFLAGS)' LDFLAGS='$(LDFLAGS)'
 
 # Disable Gtk UI until it's more usable
 MAKE_PERF += NO_GTK2=1
