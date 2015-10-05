@@ -159,7 +159,7 @@ class CheckAbi(object):
                 type, ignore = ignore.split(':')
             if type in ('name', 'module'):
                 p = self._ignore_pattern(ignore)
-                for symbol in symbols.itervalues():
+                for symbol in symbols.values():
                     if p.match(getattr(symbol, type)):
                         filtered.add(symbol.name)
             else:
