@@ -418,8 +418,8 @@ class Package(dict):
             pass
         super(Package, self).__setitem__(key, value)
 
-    def iterkeys(self):
-        keys = set(self.keys())
+    def keys(self):
+        keys = set(super(Package, self).keys())
         for i in self._fields.keys():
             if i in self:
                 keys.remove(i)
@@ -427,10 +427,10 @@ class Package(dict):
         for i in keys:
             yield i
 
-    def iteritems(self):
-        for i in self.iterkeys():
+    def items(self):
+        for i in self.keys():
             yield (i, self[i])
 
-    def itervalues(self):
-        for i in self.iterkeys():
+    def values(self):
+        for i in self.keys():
             yield self[i]

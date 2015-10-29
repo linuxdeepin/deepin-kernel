@@ -254,7 +254,7 @@ class Gencontrol(object):
 
     def process_package(self, in_entry, vars={}):
         entry = in_entry.__class__()
-        for key, value in in_entry.iteritems():
+        for key, value in in_entry.items():
             if isinstance(value, PackageRelation):
                 value = self.process_relation(value, vars)
             elif isinstance(value, PackageDescription):
@@ -295,6 +295,6 @@ class Gencontrol(object):
 
     def write_rfc822(self, f, list):
         for entry in list:
-            for key, value in entry.iteritems():
+            for key, value in entry.items():
                 f.write(u"%s: %s\n" % (key, value))
             f.write('\n')
