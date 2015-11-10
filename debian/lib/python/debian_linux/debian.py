@@ -284,7 +284,7 @@ class PackageRelationGroup(list):
     def _search_value(self, value):
         for i, j in zip(self, value):
             if i.name != j.name or i.operator != j.operator or \
-               i.version != j.version:
+               i.version != j.version or i.restrictions != j.restrictions:
                 return None
         return self
 
@@ -310,9 +310,9 @@ class PackageRelationGroup(list):
 
 
 class PackageRelationEntry(object):
-    __slots__ = "name", "operator", "version", "arches"
+    __slots__ = "name", "operator", "version", "arches", "restrictions"
 
-    _re = re.compile(r'^(\S+)(?: \((<<|<=|=|!=|>=|>>)\s*([^)]+)\))?(?: \[([^]]+)\])?$')
+    _re = re.compile(r'^(\S+)(?: \((<<|<=|=|!=|>=|>>)\s*([^)]+)\))?(?: \[([^]]+)\])?(?: <([^>]+)>)?$')
 
     class _operator(object):
         OP_LT = 1
@@ -371,6 +371,8 @@ class PackageRelationEntry(object):
             ret.extend((' (', str(self.operator), ' ', self.version, ')'))
         if self.arches:
             ret.extend((' [', ' '.join(self.arches), ']'))
+        if self.restrictions:
+            ret.extend((' <', ' '.join(self.restrictions), '>'))
         return ''.join(ret)
 
     def parse(self, value):
@@ -388,6 +390,10 @@ class PackageRelationEntry(object):
             self.arches = re.split('\s+', match[3])
         else:
             self.arches = []
+        if match[4] is not None:
+            self.restrictions = re.split('\s+', match[4])
+        else:
+            self.restrictions = []
 
 
 class Package(dict):
