@@ -41,6 +41,9 @@ class Gencontrol(Base):
         'xen': {
             'flavours': config.SchemaItemList(),
             'versions': config.SchemaItemList(),
+        },
+        'docs': {
+            'enabled': config.SchemaItemBoolean(),
         }
     }
 
@@ -113,6 +116,8 @@ class Gencontrol(Base):
 
     def do_main_packages(self, packages, vars, makeflags, extra):
         packages.extend(self.process_packages(self.templates["control.main"], self.vars))
+        if self.config.merge('docs', None, None).get('enabled', True):
+            packages.extend(self.process_packages(self.templates["control.docs"], self.vars))
 
     arch_makeflags = (
         ('kernel-arch', 'KERNEL_ARCH', False),
