@@ -283,7 +283,8 @@ class PackageRelationGroup(list):
 
     def _search_value(self, value):
         for i, j in zip(self, value):
-            if i.name != j.name or i.version != j.version:
+            if i.name != j.name or i.operator != j.operator or \
+               i.version != j.version:
                 return None
         return self
 
@@ -351,6 +352,9 @@ class PackageRelationEntry(object):
 
         def __str__(self):
             return self.operators_text[self._op]
+
+        def __eq__(self, other):
+            return type(other) == type(self) and self._op == other._op
 
     def __init__(self, value=None, override_arches=None):
         if not isinstance(value, str):
