@@ -154,7 +154,7 @@ class Gencontrol(Base):
         cmds_binary_arch = ["$(MAKE) -f debian/rules.real binary-arch-arch %s" % makeflags]
         makefile.add('binary-arch_%s_real' % arch, cmds=cmds_binary_arch)
 
-        # Shortcut to aid architecture bootstrapping
+        # For stage1 build profile
         makefile.add('binary-libc-dev_%s' % arch,
                      ['source_none_real'],
                      ["$(MAKE) -f debian/rules.real install-libc-dev_%s %s" %
@@ -186,6 +186,10 @@ class Gencontrol(Base):
                 if kw_proc.returncode != 0:
                     raise RuntimeError('kernel-wedge exited with code %d' %
                                        kw_proc.returncode)
+
+                # kernel-wedge currently chokes on Build-Profiles so add it now
+                for package in udeb_packages:
+                    package['Build-Profiles'] = '<!stage1>'
 
                 self.merge_packages(packages, udeb_packages, arch)
 
@@ -265,9 +269,14 @@ class Gencontrol(Base):
 
         compiler = config_entry_base.get('compiler', 'gcc')
 
+        # Work out dependency from linux-headers to compiler.  Strip
+        # restrictions, as they don't apply to binary Depends.
         relations_compiler_headers = PackageRelation(
             config_entry_relations.get('headers%' + compiler) or
             config_entry_relations.get(compiler))
+        for group in relations_compiler_headers:
+            for entry in group:
+                entry.restrictions = []
 
         relations_compiler_build_dep = PackageRelation(config_entry_relations[compiler])
         for group in relations_compiler_build_dep:
