@@ -44,6 +44,8 @@ class Gencontrol(Base):
         },
         'packages': {
             'docs': config.SchemaItemBoolean(),
+            'installer': config.SchemaItemBoolean(),
+
         }
     }
 
@@ -173,7 +175,7 @@ class Gencontrol(Base):
                 warnings.warn('Disable installer modules on request (DEBIAN_KERNEL_DISABLE_INSTALLER set)')
             else:
                 raise RuntimeError('Unable to disable installer modules in release build (DEBIAN_KERNEL_DISABLE_INSTALLER set)')
-        else:
+        elif self.config.merge('packages').get('installer', True):
             # Add udebs using kernel-wedge
             installer_def_dir = 'debian/installer'
             installer_arch_dir = os.path.join(installer_def_dir, arch)
