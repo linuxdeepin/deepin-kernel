@@ -42,8 +42,8 @@ class Gencontrol(Base):
             'flavours': config.SchemaItemList(),
             'versions': config.SchemaItemList(),
         },
-        'docs': {
-            'enabled': config.SchemaItemBoolean(),
+        'packages': {
+            'docs': config.SchemaItemBoolean(),
         }
     }
 
@@ -109,7 +109,7 @@ class Gencontrol(Base):
         makeflags = makeflags.copy()
         makeflags['ALL_FEATURESETS'] = ' '.join(fs_enabled)
         makeflags['ALL_TRIPLETS'] = ' '.join(triplet_enabled)
-        if not self.config.merge('docs').get('enabled', True):
+        if not self.config.merge('packages').get('docs', True):
             makeflags['DO_DOCS'] = False
         super(Gencontrol, self).do_main_makefile(makefile, makeflags, extra)
 
@@ -118,7 +118,7 @@ class Gencontrol(Base):
 
     def do_main_packages(self, packages, vars, makeflags, extra):
         packages.extend(self.process_packages(self.templates["control.main"], self.vars))
-        if self.config.merge('docs').get('enabled', True):
+        if self.config.merge('packages').get('docs', True):
             packages.extend(self.process_packages(self.templates["control.docs"], self.vars))
 
     arch_makeflags = (
