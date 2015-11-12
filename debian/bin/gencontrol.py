@@ -41,6 +41,9 @@ class Gencontrol(Base):
         'xen': {
             'flavours': config.SchemaItemList(),
             'versions': config.SchemaItemList(),
+        },
+        'docs': {
+            'enabled': config.SchemaItemBoolean(),
         }
     }
 
@@ -106,6 +109,8 @@ class Gencontrol(Base):
         makeflags = makeflags.copy()
         makeflags['ALL_FEATURESETS'] = ' '.join(fs_enabled)
         makeflags['ALL_TRIPLETS'] = ' '.join(triplet_enabled)
+        if not self.config.merge('docs', None, None).get('enabled', True):
+            makeflags['DO_DOCS'] = False
         super(Gencontrol, self).do_main_makefile(makefile, makeflags, extra)
 
         # linux-source-$UPSTREAMVERSION will contain all kconfig files
@@ -113,6 +118,8 @@ class Gencontrol(Base):
 
     def do_main_packages(self, packages, vars, makeflags, extra):
         packages.extend(self.process_packages(self.templates["control.main"], self.vars))
+        if self.config.merge('docs', None, None).get('enabled', True):
+            packages.extend(self.process_packages(self.templates["control.docs"], self.vars))
 
     arch_makeflags = (
         ('kernel-arch', 'KERNEL_ARCH', False),
