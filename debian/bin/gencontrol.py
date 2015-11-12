@@ -45,6 +45,7 @@ class Gencontrol(Base):
         'packages': {
             'docs': config.SchemaItemBoolean(),
             'installer': config.SchemaItemBoolean(),
+            'libc-dev': config.SchemaItemBoolean(),
 
         }
     }
@@ -151,12 +152,16 @@ class Gencontrol(Base):
         else:
             headers_arch = self.templates["control.headers.arch"]
             packages_headers_arch = self.process_packages(headers_arch, vars)
+            packages_headers_arch[-1]['Depends'].extend(PackageRelation())
+            extra['headers_arch_depends'] = packages_headers_arch[-1]['Depends']
 
-        libc_dev = self.templates["control.libc-dev"]
-        packages_headers_arch[0:0] = self.process_packages(libc_dev, {})
+        if self.config.merge('packages').get('libc-dev', True):
+            libc_dev = self.templates["control.libc-dev"]
+            packages_headers_arch[0:0] = self.process_packages(libc_dev, {})
+        else:
+            makeflags['DO_LIBC'] = False
 
-        packages_headers_arch[-1]['Depends'].extend(PackageRelation())
-        extra['headers_arch_depends'] = packages_headers_arch[-1]['Depends']
+
 
         self.merge_packages(packages, packages_headers_arch, arch)
 
