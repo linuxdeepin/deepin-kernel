@@ -42,8 +42,11 @@ class Gencontrol(Base):
             'flavours': config.SchemaItemList(),
             'versions': config.SchemaItemList(),
         },
-        'docs': {
-            'enabled': config.SchemaItemBoolean(),
+        'packages': {
+            'docs': config.SchemaItemBoolean(),
+            'installer': config.SchemaItemBoolean(),
+            'libc-dev': config.SchemaItemBoolean(),
+
         }
     }
 
@@ -109,7 +112,7 @@ class Gencontrol(Base):
         makeflags = makeflags.copy()
         makeflags['ALL_FEATURESETS'] = ' '.join(fs_enabled)
         makeflags['ALL_TRIPLETS'] = ' '.join(triplet_enabled)
-        if not self.config.merge('docs').get('enabled', True):
+        if not self.config.merge('packages').get('docs', True):
             makeflags['DO_DOCS'] = False
         super(Gencontrol, self).do_main_makefile(makefile, makeflags, extra)
 
@@ -118,7 +121,7 @@ class Gencontrol(Base):
 
     def do_main_packages(self, packages, vars, makeflags, extra):
         packages.extend(self.process_packages(self.templates["control.main"], self.vars))
-        if self.config.merge('docs').get('enabled', True):
+        if self.config.merge('packages').get('docs', True):
             packages.extend(self.process_packages(self.templates["control.docs"], self.vars))
 
     arch_makeflags = (
@@ -149,12 +152,16 @@ class Gencontrol(Base):
         else:
             headers_arch = self.templates["control.headers.arch"]
             packages_headers_arch = self.process_packages(headers_arch, vars)
+            packages_headers_arch[-1]['Depends'].extend(PackageRelation())
+            extra['headers_arch_depends'] = packages_headers_arch[-1]['Depends']
 
-        libc_dev = self.templates["control.libc-dev"]
-        packages_headers_arch[0:0] = self.process_packages(libc_dev, {})
+        if self.config.merge('packages').get('libc-dev', True):
+            libc_dev = self.templates["control.libc-dev"]
+            packages_headers_arch[0:0] = self.process_packages(libc_dev, {})
+        else:
+            makeflags['DO_LIBC'] = False
 
-        packages_headers_arch[-1]['Depends'].extend(PackageRelation())
-        extra['headers_arch_depends'] = packages_headers_arch[-1]['Depends']
+
 
         self.merge_packages(packages, packages_headers_arch, arch)
 
@@ -173,7 +180,7 @@ class Gencontrol(Base):
                 warnings.warn('Disable installer modules on request (DEBIAN_KERNEL_DISABLE_INSTALLER set)')
             else:
                 raise RuntimeError('Unable to disable installer modules in release build (DEBIAN_KERNEL_DISABLE_INSTALLER set)')
-        else:
+        elif self.config.merge('packages').get('installer', True):
             # Add udebs using kernel-wedge
             installer_def_dir = 'debian/installer'
             installer_arch_dir = os.path.join(installer_def_dir, arch)
