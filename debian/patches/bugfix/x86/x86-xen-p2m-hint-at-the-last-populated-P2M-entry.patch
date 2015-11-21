@@ -1,0 +1,79 @@
+From 98dd166ea3a3c3b57919e20d9b0d1237fcd0349d Mon Sep 17 00:00:00 2001
+From: David Vrabel <david.vrabel@citrix.com>
+Date: Mon, 7 Sep 2015 17:14:08 +0100
+Subject: [PATCH] x86/xen/p2m: hint at the last populated P2M entry
+Origin: https://git.kernel.org/linus/98dd166ea3a3c3b57919e20d9b0d1237fcd0349d
+
+With commit 633d6f17cd91ad5bf2370265946f716e42d388c6 (x86/xen: prepare
+p2m list for memory hotplug) the P2M may be sized to accomdate a much
+larger amount of memory than the domain currently has.
+
+When saving a domain, the toolstack must scan all the P2M looking for
+populated pages.  This results in a performance regression due to the
+unnecessary scanning.
+
+Instead of reporting (via shared_info) the maximum possible size of
+the P2M, hint at the last PFN which might be populated.  This hint is
+increased as new leaves are added to the P2M (in the expectation that
+they will be used for populated entries).
+
+Signed-off-by: David Vrabel <david.vrabel@citrix.com>
+Cc: <stable@vger.kernel.org> # 4.0+
+---
+ arch/x86/xen/p2m.c | 19 ++++++++++++++++++-
+ 1 file changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/arch/x86/xen/p2m.c b/arch/x86/xen/p2m.c
+index bfc08b1..660b3cf 100644
+--- a/arch/x86/xen/p2m.c
++++ b/arch/x86/xen/p2m.c
+@@ -112,6 +112,15 @@ static unsigned long *p2m_identity;
+ static pte_t *p2m_missing_pte;
+ static pte_t *p2m_identity_pte;
+ 
++/*
++ * Hint at last populated PFN.
++ *
++ * Used to set HYPERVISOR_shared_info->arch.max_pfn so the toolstack
++ * can avoid scanning the whole P2M (which may be sized to account for
++ * hotplugged memory).
++ */
++static unsigned long xen_p2m_last_pfn;
++
+ static inline unsigned p2m_top_index(unsigned long pfn)
+ {
+ 	BUG_ON(pfn >= MAX_P2M_PFN);
+@@ -270,7 +279,7 @@ void xen_setup_mfn_list_list(void)
+ 
+ 	HYPERVISOR_shared_info->arch.pfn_to_mfn_frame_list_list =
+ 		virt_to_mfn(p2m_top_mfn);
+-	HYPERVISOR_shared_info->arch.max_pfn = xen_max_p2m_pfn;
++	HYPERVISOR_shared_info->arch.max_pfn = xen_p2m_last_pfn;
+ }
+ 
+ /* Set up p2m_top to point to the domain-builder provided p2m pages */
+@@ -406,6 +415,8 @@ void __init xen_vmalloc_p2m_tree(void)
+ 	static struct vm_struct vm;
+ 	unsigned long p2m_limit;
+ 
++	xen_p2m_last_pfn = xen_max_p2m_pfn;
++
+ 	p2m_limit = (phys_addr_t)P2M_LIMIT * 1024 * 1024 * 1024 / PAGE_SIZE;
+ 	vm.flags = VM_ALLOC;
+ 	vm.size = ALIGN(sizeof(unsigned long) * max(xen_max_p2m_pfn, p2m_limit),
+@@ -608,6 +619,12 @@ static bool alloc_p2m(unsigned long pfn)
+ 			free_p2m_page(p2m);
+ 	}
+ 
++	/* Expanded the p2m? */
++	if (pfn > xen_p2m_last_pfn) {
++		xen_p2m_last_pfn = pfn;
++		HYPERVISOR_shared_info->arch.max_pfn = xen_p2m_last_pfn;
++	}
++
+ 	return true;
+ }
+ 
+-- 
+2.5.3
+
