@@ -148,26 +148,50 @@ class Main(object):
         orig = os.path.join(self.dir, self.orig)
         temp = os.path.join(self.dir, 'temp')
 
-        to_copy = (
-                'COPYING',
-                'Documentation/locking/lockdep-design.txt',
-                'Kbuild',
-                'Makefile',
-                'arch/*/include/',
-                'arch/*/Makefile',
-                'arch/mips/Kbuild.platforms',
-                'arch/mips/*/Platform',
-                'arch/x86/entry/syscalls/',
-                'arch/x86/lib/memcpy_64.S',
-                'arch/x86/lib/memset_64.S',
-                'arch/x86/tools/',
-                'include/',
-                'kernel/locking/',
-                'lib/hweight.c',
-                'lib/rbtree.c',
-                'scripts/',
-                'tools/',
-        )
+        to_copy = [
+            'COPYING',
+            'Kbuild',
+            'Makefile',
+            'arch/*/include/uapi/',
+            'arch/*/Makefile',
+            'arch/mips/Kbuild.platforms',
+            'arch/mips/*/Platform',
+            'arch/x86/entry/syscalls/',
+            'arch/x86/include/asm/msr-index.h', # belongs in uapi
+            'arch/x86/tools/',
+            'include/uapi/',
+            'scripts/',
+            'tools/',
+        ]
+
+        # Extra files required by kbuild
+        to_copy += [
+            'include/linux/export.h',
+            'include/linux/kbuild.h',
+            'include/linux/license.h',
+            'include/linux/mod_devicetable.h',
+        ]
+
+        # Extra files required by lockdep
+        to_copy += [
+            'Documentation/locking/lockdep-design.txt',
+            'include/linux/hash.h',
+            'include/linux/list.h',
+            'include/linux/lockdep.h',
+            'include/linux/poison.h',
+            'include/linux/rbtree_augmented.h',
+            'kernel/locking/',
+        ]
+
+        # Extra files required by perf
+        with open(os.path.join(temp, 'tools/perf/MANIFEST')) as manifest:
+            for path in manifest:
+                path = path.strip()
+                for known in to_copy:
+                    if known[-1] == '/' and path.startswith(known):
+                        break
+                else:
+                    to_copy.append(path)
 
         glob = FileGlob(temp)
         for i in to_copy:
