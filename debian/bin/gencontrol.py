@@ -8,7 +8,7 @@ from debian_linux.gencontrol import PackagesList, Makefile, MakeFlags, Gencontro
 from debian_linux.utils import *
 
 class gencontrol(Gencontrol):
-    makefile_targets = ('binary-arch', 'binary-indep', 'build')
+    makefile_targets = ('binary-arch', 'binary-indep', 'build-arch', 'build-indep')
 
     def __init__(self, underlay = None):
         self.templates = Templates(['debian/templates'])

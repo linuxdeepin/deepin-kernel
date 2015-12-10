@@ -21,9 +21,6 @@ install:
 	cp -R $(top_srcdir)/$(OUTDIR)/include/liblockdep $(DESTDIR)/usr/include/
 	ln -s liblockdep.so.$(VERSION) \
 		$(DESTDIR)/usr/lib/$(DEB_HOST_MULTIARCH)/liblockdep.so
-# Upstream lockdep preload script is not suitable for installation
-	sed 's/@VERSION@/$(VERSION)/' lockdep.in > $(DESTDIR)/usr/bin/lockdep
-	chmod 755 $(DESTDIR)/usr/bin/lockdep
 
 clean:
 	rm -rf out
