@@ -1,0 +1,115 @@
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Thu, 19 Nov 2015 09:58:05 +0000
+Subject: drm/i915: Mark uneven memory banks on gen4 desktop as unknown
+ swizzling
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+Origin: http://cgit.freedesktop.org/drm-intel/commit?id=a53f2afb7e3dfc2c7acbb0c015b44783d99d8119
+Bug-Debian: https://bugs.debian.org/780363
+
+We have varied reports of swizzling corruption on gen4 desktop, and
+confirmation that one at least is triggered by uneven memory banks
+(L-shaped memory). The implication is that the swizzling varies between
+the paired channels and the remainder of memory on the single channel. As
+the object then has unpredictable swizzling (it will vary depending on
+exact page allocation and may even change during the object's lifetime as
+the pages are replaced), we have to report to userspace that the swizzling
+is unknown.
+
+However, some existing userspace is buggy when it meets an unknown
+swizzling configuration and so we need to tell another white lie and
+mark the swizzling as NONE but report it as UNKNOWN through the extended
+get-tiling-ioctl. See
+
+commit 5eb3e5a5e11d14f9deb2a4b83555443b69ab9940
+Author: Chris Wilson <chris@chris-wilson.co.uk>
+Date:   Sun Jun 28 09:19:26 2015 +0100
+
+    drm/i915: Declare the swizzling unknown for L-shaped configurations
+
+for the previous example where we found that telling the truth to
+userspace just ends up in a world of hurt.
+
+Also since we don't truly know what the swizzling is on the pages, we
+need to keep them pinned to prevent swapping as the reports also
+suggest that some gen4 devices have previously undetected bit17
+swizzling.
+
+v2: Combine unknown + quirk patches to prevent userspace ever seeing
+unknown swizzling through the normal get-tiling-ioctl. Also use the same
+path for the existing uneven bank detection for mobile gen4.
+
+Reported-by: Matti Hämäläinen <ccr@tnsp.org>
+Tested-by: Matti Hämäläinen <ccr@tnsp.org>
+References: https://bugs.freedesktop.org/show_bug.cgi?id=90725
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Matti Hämäläinen <ccr@tnsp.org>
+Cc: Daniel Vetter <daniel.vetter@ffwll.ch>
+Cc: Jani Nikula <jani.nikula@intel.com>
+Cc: stable@vger.kernel.org
+Reviewed-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+Link: http://patchwork.freedesktop.org/patch/msgid/1447927085-31726-1-git-send-email-chris@chris-wilson.co.uk
+Signed-off-by: Jani Nikula <jani.nikula@intel.com>
+---
+ drivers/gpu/drm/i915/i915_gem_fence.c | 36 ++++++++++++++++++++++++++---------
+ 1 file changed, 27 insertions(+), 9 deletions(-)
+
+--- a/drivers/gpu/drm/i915/i915_gem_fence.c
++++ b/drivers/gpu/drm/i915/i915_gem_fence.c
+@@ -647,11 +647,10 @@ i915_gem_detect_bit_6_swizzle(struct drm
+ 		}
+ 
+ 		/* check for L-shaped memory aka modified enhanced addressing */
+-		if (IS_GEN4(dev)) {
+-			uint32_t ddc2 = I915_READ(DCC2);
+-
+-			if (!(ddc2 & DCC2_MODIFIED_ENHANCED_DISABLE))
+-				dev_priv->quirks |= QUIRK_PIN_SWIZZLED_PAGES;
++		if (IS_GEN4(dev) &&
++		    !(I915_READ(DCC2) & DCC2_MODIFIED_ENHANCED_DISABLE)) {
++			swizzle_x = I915_BIT_6_SWIZZLE_UNKNOWN;
++			swizzle_y = I915_BIT_6_SWIZZLE_UNKNOWN;
+ 		}
+ 
+ 		if (dcc == 0xffffffff) {
+@@ -680,16 +679,35 @@ i915_gem_detect_bit_6_swizzle(struct drm
+ 		 * matching, which was the case for the swizzling required in
+ 		 * the table above, or from the 1-ch value being less than
+ 		 * the minimum size of a rank.
++		 *
++		 * Reports indicate that the swizzling actually
++		 * varies depending upon page placement inside the
++		 * channels, i.e. we see swizzled pages where the
++		 * banks of memory are paired and unswizzled on the
++		 * uneven portion, so leave that as unknown.
+ 		 */
+-		if (I915_READ16(C0DRB3) != I915_READ16(C1DRB3)) {
+-			swizzle_x = I915_BIT_6_SWIZZLE_NONE;
+-			swizzle_y = I915_BIT_6_SWIZZLE_NONE;
+-		} else {
++		if (I915_READ16(C0DRB3) == I915_READ16(C1DRB3)) {
+ 			swizzle_x = I915_BIT_6_SWIZZLE_9_10;
+ 			swizzle_y = I915_BIT_6_SWIZZLE_9;
+ 		}
+ 	}
+ 
++	if (swizzle_x == I915_BIT_6_SWIZZLE_UNKNOWN ||
++	    swizzle_y == I915_BIT_6_SWIZZLE_UNKNOWN) {
++		/* Userspace likes to explode if it sees unknown swizzling,
++		 * so lie. We will finish the lie when reporting through
++		 * the get-tiling-ioctl by reporting the physical swizzle
++		 * mode as unknown instead.
++		 *
++		 * As we don't strictly know what the swizzling is, it may be
++		 * bit17 dependent, and so we need to also prevent the pages
++		 * from being moved.
++		 */
++		dev_priv->quirks |= QUIRK_PIN_SWIZZLED_PAGES;
++		swizzle_x = I915_BIT_6_SWIZZLE_NONE;
++		swizzle_y = I915_BIT_6_SWIZZLE_NONE;
++	}
++
+ 	dev_priv->mm.bit_6_swizzle_x = swizzle_x;
+ 	dev_priv->mm.bit_6_swizzle_y = swizzle_y;
+ }
