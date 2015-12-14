@@ -152,8 +152,10 @@ class Main(object):
             'COPYING',
             'Kbuild',
             'Makefile',
+            'arch/*/include/asm/Kbuild',	# may select generic uapi headers
             'arch/*/include/uapi/',
             'arch/*/Makefile',
+            'arch/arm/include/asm/types.h',	# belongs in uapi
             'arch/mips/Kbuild.platforms',
             'arch/mips/*/Platform',
             'arch/x86/entry/syscalls/',
