@@ -1,0 +1,82 @@
+From: Hannes Frederic Sowa <hannes@stressinduktion.org>
+Subject: net: add validation for the socket syscall protocol argument
+Date: Mon, 14 Dec 2015 17:17:49 +0100
+Origin: http://article.gmane.org/gmane.linux.network/391482
+
+郭永刚 reported that one could simply crash the kernel as root by
+using a simple program:
+
+	int socket_fd;
+	struct sockaddr_in addr;
+	addr.sin_port = 0;
+	addr.sin_addr.s_addr = INADDR_ANY;
+	addr.sin_family = 10;
+
+	socket_fd = socket(10,3,0x40000000);
+	connect(socket_fd , &addr,16);
+
+AF_INET, AF_INET6 sockets actually only support 8-bit protocol
+identifiers. inet_sock's skc_protocol field thus is sized accordingly,
+thus larger protocol identifiers simply cut off the higher bits and
+store a zero in the protocol fields.
+
+This could lead to e.g. NULL function pointer because as a result of
+the cut off inet_num is zero and we call down to inet_autobind, which
+is NULL for raw sockets.
+
+kernel: Call Trace:
+kernel:  [<ffffffff816db90e>] ? inet_autobind+0x2e/0x70
+kernel:  [<ffffffff816db9a4>] inet_dgram_connect+0x54/0x80
+kernel:  [<ffffffff81645069>] SYSC_connect+0xd9/0x110
+kernel:  [<ffffffff810ac51b>] ? ptrace_notify+0x5b/0x80
+kernel:  [<ffffffff810236d8>] ? syscall_trace_enter_phase2+0x108/0x200
+kernel:  [<ffffffff81645e0e>] SyS_connect+0xe/0x10
+kernel:  [<ffffffff81779515>] tracesys_phase2+0x84/0x89
+
+I found no particular commit which introduced this problem.
+
+CVE: CVE-2015-8543
+Reported-by: 郭永刚 <guoyonggang@360.cn>
+Signed-off-by: Hannes Frederic Sowa <hannes@stressinduktion.org>
+---
+ net/ipv4/af_inet.c  | 3 +++
+ net/ipv6/af_inet6.c | 3 +++
+ net/socket.c        | 3 +++
+ 3 files changed, 9 insertions(+)
+
+--- a/net/ipv4/af_inet.c
++++ b/net/ipv4/af_inet.c
+@@ -261,6 +261,9 @@ static int inet_create(struct net *net,
+ 	int try_loading_module = 0;
+ 	int err;
+ 
++	if (protocol >= IPPROTO_MAX)
++		return -EINVAL;
++
+ 	sock->state = SS_UNCONNECTED;
+ 
+ 	/* Look for the requested type/protocol pair. */
+--- a/net/ipv6/af_inet6.c
++++ b/net/ipv6/af_inet6.c
+@@ -109,6 +109,9 @@ static int inet6_create(struct net *net,
+ 	int try_loading_module = 0;
+ 	int err;
+ 
++	if (protocol >= IPPROTO_MAX)
++		return -EINVAL;
++
+ 	/* Look for the requested type/protocol pair. */
+ lookup_protocol:
+ 	err = -ESOCKTNOSUPPORT;
+--- a/net/socket.c
++++ b/net/socket.c
+@@ -1105,6 +1105,9 @@ int __sock_create(struct net *net, int f
+ 		return -EAFNOSUPPORT;
+ 	if (type < 0 || type >= SOCK_MAX)
+ 		return -EINVAL;
++	/* upper bound should be tested by per-protocol .create callbacks */
++	if (protocol < 0)
++		return -EINVAL;
+ 
+ 	/* Compatibility.
+ 
