@@ -44,6 +44,7 @@ class Gencontrol(Base):
         },
         'packages': {
             'docs': config.SchemaItemBoolean(),
+            'headers-all': config.SchemaItemBoolean(),
             'installer': config.SchemaItemBoolean(),
             'libc-dev': config.SchemaItemBoolean(),
 
@@ -134,10 +135,6 @@ class Gencontrol(Base):
         self._setup_makeflags(self.arch_makeflags, makeflags, config_base)
 
     def do_arch_packages(self, packages, makefile, arch, vars, makeflags, extra):
-        # Some userland architectures require kernels from another
-        # (Debian) architecture, e.g. x32/amd64.
-        foreign_kernel = not self.config['base', arch].get('featuresets')
-
         if self.version.linux_modifier is None:
             try:
                 abiname_part = '-%s' % self.config['abi', arch]['abiname']
@@ -146,14 +143,19 @@ class Gencontrol(Base):
             makeflags['ABINAME'] = vars['abiname'] = \
                 self.abiname_version + abiname_part
 
-        if foreign_kernel:
-            packages_headers_arch = []
-            makeflags['FOREIGN_KERNEL'] = True
-        else:
+        # Some userland architectures require kernels from another
+        # (Debian) architecture, e.g. x32/amd64.
+        # And some derivatives don't need the headers-all packages
+        # for other reasons.
+        if (self.config['base', arch].get('featuresets') and
+            self.config.merge('packages').get('headers-all', True)):
             headers_arch = self.templates["control.headers.arch"]
             packages_headers_arch = self.process_packages(headers_arch, vars)
             packages_headers_arch[-1]['Depends'].extend(PackageRelation())
             extra['headers_arch_depends'] = packages_headers_arch[-1]['Depends']
+        else:
+            packages_headers_arch = []
+            makeflags['DO_HEADERS_ALL'] = False
 
         if self.config.merge('packages').get('libc-dev', True):
             libc_dev = self.templates["control.libc-dev"]
@@ -364,7 +366,8 @@ class Gencontrol(Base):
             package_headers = self.process_package(headers[0], vars)
             package_headers['Depends'].extend(relations_compiler_headers)
             packages_own.append(package_headers)
-            extra['headers_arch_depends'].append('%s (= ${binary:Version})' % packages_own[-1]['Package'])
+            if extra.get('headers_arch_depends'):
+                extra['headers_arch_depends'].append('%s (= ${binary:Version})' % packages_own[-1]['Package'])
 
         build_debug = config_entry_build.get('debug-info')
 
