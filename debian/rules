@@ -1,0 +1,148 @@
+#!/usr/bin/make -f
+
+SHELL    := sh -e
+DEB_HOST_ARCH := $(shell dpkg-architecture -qDEB_HOST_ARCH)
+SOURCE := $(shell dpkg-parsechangelog | sed -ne 's,^Source: *\(.*\)$$,\1,p')
+VERSION := $(shell dpkg-parsechangelog | sed -ne 's,^Version: *\(.*\)$$,\1,p')
+VERSION_UPSTREAM := $(shell echo "$(VERSION)" | sed -e 's,-[^-]*$$,,')
+VERSION_BINNMU := $(shell echo "$(VERSION)" | sed -ne 's,.*+b\(.*\)$$,\1,p')
+
+MAJOR_VERSION := $(shell echo "$(VERSION_UPSTREAM)" | sed -ne 's,\([0-9]*\).*$$,\1,p')
+MINOR_VERSION := $(shell echo "$(VERSION_UPSTREAM)" | sed -ne 's,[0-9]*\.\([0-9]*\).*$$,\1,p')
+TESTING := $(shell echo "$(VERSION_UPSTREAM)" | sed -ne 's,.*~\(.*\)$$,\1,p')
+ORIG_UPSTREAM_VERSION := $(shell echo "$(VERSION_UPSTREAM)" | sed -e 's,~,-,')
+
+
+include debian/rules.defs
+
+ifneq (,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
+  DEBIAN_KERNEL_JOBS := $(subst parallel=,,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
+endif
+ifdef DEBIAN_KERNEL_JOBS
+  MAKEFLAGS += -j$(DEBIAN_KERNEL_JOBS)
+endif
+BUILD_STAGE1 := $(filter stage1,$(DEB_BUILD_PROFILES))
+
+.NOTPARALLEL:
+
+source: debian/control
+	dh_testdir
+	$(MAKE) -f debian/rules.gen source
+
+setup: debian/control
+	dh_testdir
+	$(MAKE) -f debian/rules.gen setup_$(DEB_HOST_ARCH)
+
+build: build-arch build-indep
+
+build-arch: debian/control
+	dh_testdir
+ifndef BUILD_STAGE1
+	$(MAKE) -f debian/rules.gen build-arch_$(DEB_HOST_ARCH)
+endif
+
+build-indep: debian/control
+	dh_testdir
+ifndef BUILD_STAGE1
+	$(MAKE) -f debian/rules.gen build-indep
+endif
+
+binary:	binary-indep binary-arch
+
+binary-arch:
+	dh_testdir
+ifdef BUILD_STAGE1
+	$(MAKE) -f debian/rules.gen binary-libc-dev_$(DEB_HOST_ARCH)
+else
+	$(MAKE) -f debian/rules.gen binary-arch_$(DEB_HOST_ARCH)
+endif
+
+binary-indep:
+	dh_testdir
+ifndef BUILD_STAGE1
+	$(MAKE) -f debian/rules.gen binary-indep
+endif
+
+DIR_ORIG = ../orig/$(SOURCE)-$(VERSION_UPSTREAM)
+TAR_ORIG_NAME = $(SOURCE)_$(VERSION_UPSTREAM).orig.tar.xz
+TAR_ORIG = $(firstword $(wildcard ../$(TAR_ORIG_NAME)) $(wildcard ../orig/$(TAR_ORIG_NAME)))
+TAR_UPSTREAM = ../orig/$(SOURCE)-$(ORIG_UPSTREAM_VERSION).tar.xz
+URL := https://www.kernel.org/pub/linux/kernel
+
+ifeq ($(MAJOR_VERSION),1)
+    URL := $(URL)/v$(MAJOR_VERSION).$(MINOR_VERSION)
+endif
+
+ifeq ($(MAJOR_VERSION),2)
+    URL := $(URL)/v$(MAJOR_VERSION).$(MINOR_VERSION)
+endif
+
+ifeq ($(MAJOR_VERSION),3)
+ifeq ($(MINOR_VERSION),0)
+    URL := $(URL)/v$(MAJOR_VERSION).$(MINOR_VERSION)
+else
+    URL := $(URL)/v$(MAJOR_VERSION).x
+endif
+endif
+
+ifeq ($(MAJOR_VERSION),4)
+    URL := $(URL)/v$(MAJOR_VERSION).x
+endif
+
+ifneq ($(TESTING),)
+    URL := $(URL)/testing
+endif
+
+orig: $(DIR_ORIG)
+	rsync --delete --exclude /debian --exclude .svk --exclude .svn --exclude .git --link-dest=$(DIR_ORIG)/ -a $(DIR_ORIG)/ .
+	QUILT_PATCHES='$(CURDIR)/debian/patches' QUILT_PC=.pc quilt push --quiltrc - -a -q --fuzz=0
+
+$(DIR_ORIG): genorig
+	mkdir -p ../orig
+	tar -C ../orig -xaf ../orig/$(TAR_ORIG_NAME)
+
+genorig: ../orig/$(TAR_ORIG_NAME)
+
+../orig/$(TAR_ORIG_NAME): debian/bin/genorig.py $(TAR_UPSTREAM)
+	@echo $^
+	$^
+
+$(TAR_UPSTREAM):
+	mkdir -p ../orig
+	wget -c $(URL)/$(notdir $@) -O $@ || (echo "removing $@"; rm -fr $@; exit 1)
+
+maintainerclean:
+	rm -f debian/config.defines.dump debian/control debian/control.md5sum debian/linux-* debian/rules.gen debian/po/*.po
+	rm -rf $(filter-out debian .svk .svn .git, $(wildcard * .[^.]*))
+
+clean: debian/control
+	dh_testdir
+	rm -rf $(BUILD_DIR) $(STAMPS_DIR) debian/lib/python/debian_linux/*.pyc debian/lib/python/debian_linux/__pycache__ $$(find debian -maxdepth 1 -type d -name 'linux-*') debian/*-modules-*-di* debian/kernel-image-*-di* debian/xen-linux-system-*
+	dh_clean
+
+CONTROL_FILES = debian/changelog $(wildcard debian/templates/*.in)
+CONTROL_FILES += debian/config/defines $(wildcard debian/config/*/defines) $(wildcard debian/config/*/*/defines)
+CONTROL_FILES += $(wildcard debian/installer/*/kernel-versions) $(wildcard debian/installer/*/package-list) debian/installer/package-list
+debian/control debian/rules.gen: debian/bin/gencontrol.py $(CONTROL_FILES)
+ifeq ($(wildcard debian/control.md5sum),)
+	$(MAKE) -f debian/rules debian/control-real
+else ifeq ($(VERSION_BINNMU),)
+	md5sum --check debian/control.md5sum --status || \
+		$(MAKE) -f debian/rules debian/control-real
+else
+	grep -v debian/changelog debian/control.md5sum | md5sum --check - --status || \
+		$(MAKE) -f debian/rules debian/control-real
+endif
+
+debian/control-real: debian/bin/gencontrol.py $(CONTROL_FILES)
+	$<
+	md5sum $^ > debian/control.md5sum
+	@echo
+	@echo This target is made to fail intentionally, to make sure
+	@echo that it is NEVER run during the automated build. Please
+	@echo ignore the following error, the debian/control file has
+	@echo been generated SUCCESSFULLY.
+	@echo
+	exit 1
+
+.PHONY: clean build setup binary-indep binary-arch binary
