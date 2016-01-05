@@ -1,0 +1,67 @@
+commit bf6b4e63b11255ef1e993ddd4f64a88e6c717216
+Author: Yang Bo <yangbo@linuxdeepin.com>
+Date:   Sun Jan 3 20:11:05 2016 +0800
+
+    UBUNTU: SAUCE: drivers/rtc/interface.c: ignore exprired times when enqueing new timers
+    
+    BugLink: http://bugs.launchpad.net/bugs/1333569
+    
+    This patch fixes a RTC wakealarm issue, namely, the event fires during
+    hibernate and is not cleared from the list, causing hwlock to block.
+    The original fix has been sent to LKML twice [1] but has had no response
+    and not yet been picked up. Rather than wait for ever for the maintainter
+    to pick it up, I'm sending it as a fix for Vivid.
+    
+    [1] https://lkml.org/lkml/2014/9/26/70
+    
+    Note that the skipped expired timer events get reaped later on, so we
+    don't bother reaping them in this fix, instead ignoring them is the best
+    strategy.
+    
+    The current enqueuing does not trigger an alarm if any expired timers
+    already exist on the timerqueue. This can occur when a RTC wake alarm
+    is used to wake a machine out of hibernate and the resumed state has
+    old expired timers that have not been removed from the timer queue.
+    This fix skips over any expired timers and triggers an alarm if there
+    are no pending timers on the timerqueue.
+    
+    The bug was found running the example RTC timer program from
+    Documentation/rtc.txt; it runs fine before a hibernate but will block
+    forever on RTC reads after a resume from a hibernate that is woken
+    up using a RTC wakealarm.
+    
+    Signed-off-by: Colin Ian King <colin.king@canonical.com>
+    Acked-by: Andy Whitcroft <apw@canonical.com>
+    Acked-by: Chris J Arges <chris.j.arges@canonical.com>
+    Signed-off-by: Leann Ogasawara <leann.ogasawara@canonical.com>
+    Signed-off-by: Yang Bo <yangbo@linuxdeepin.com>
+
+diff --git a/drivers/rtc/interface.c b/drivers/rtc/interface.c
+index 5836751..9bb934e 100644
+--- a/drivers/rtc/interface.c
++++ b/drivers/rtc/interface.c
+@@ -748,9 +748,23 @@ EXPORT_SYMBOL_GPL(rtc_irq_set_freq);
+  */
+ static int rtc_timer_enqueue(struct rtc_device *rtc, struct rtc_timer *timer)
+ {
++	struct timerqueue_node *next = timerqueue_getnext(&rtc->timerqueue);
++	struct rtc_time tm;
++	ktime_t now;
++
+ 	timer->enabled = 1;
++	__rtc_read_time(rtc, &tm);
++	now = rtc_tm_to_ktime(tm);
++
++	/* Skip over expired timers */
++	while (next) {
++		if (next->expires.tv64 >= now.tv64)
++			break;
++		next = timerqueue_iterate_next(next);
++	}
++
+ 	timerqueue_add(&rtc->timerqueue, &timer->node);
+-	if (&timer->node == timerqueue_getnext(&rtc->timerqueue)) {
++	if (!next) {
+ 		struct rtc_wkalrm alarm;
+ 		int err;
+ 		alarm.time = rtc_ktime_to_tm(timer->node.expires);
