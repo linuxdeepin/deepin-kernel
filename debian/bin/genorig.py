@@ -73,6 +73,7 @@ class Main(object):
     def __call__(self):
         import tempfile
         self.dir = tempfile.mkdtemp(prefix='genorig', dir='debian')
+        old_umask = os.umask(0o022)
         try:
             if os.path.isdir(self.input_files[0]):
                 self.upstream_export(self.input_files[0])
@@ -92,8 +93,10 @@ class Main(object):
                     .st_mtime))
 
             self.generate()
+            os.umask(old_umask)
             self.tar(orig_date)
         finally:
+            os.umask(old_umask)
             shutil.rmtree(self.dir)
 
     def upstream_export(self, input_repo):
@@ -222,7 +225,7 @@ class Main(object):
         self.log("Generate tarball %s\n" % out)
         cmdline = '''(cd '%s' && find '%s' -print0) |
                      LC_ALL=C sort -z |
-                     tar -C '%s' --no-recursion --null -T - --mtime '%s' -caf '%s'
+                     tar -C '%s' --no-recursion --null -T - --mtime '%s' --owner root --group root -caf '%s'
                   ''' % (self.dir, self.orig, self.dir, orig_date, out)
         try:
             if os.spawnv(os.P_WAIT, '/bin/sh', ['sh', '-c', cmdline]):
