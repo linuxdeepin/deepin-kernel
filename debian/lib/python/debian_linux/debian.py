@@ -424,7 +424,7 @@ class Package(dict):
             if i in self:
                 keys.remove(i)
                 yield i
-        for i in keys:
+        for i in sorted(list(keys)):
             yield i
 
     def iteritems(self):
