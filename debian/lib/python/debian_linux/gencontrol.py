@@ -253,6 +253,7 @@ class Gencontrol(object):
         return desc
 
     def process_package(self, in_entry, vars={}):
+        vars['distributor'] = 'deepin'
         entry = in_entry.__class__()
         for key, value in in_entry.items():
             if isinstance(value, PackageRelation):
