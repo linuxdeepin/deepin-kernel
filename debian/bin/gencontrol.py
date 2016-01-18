@@ -191,7 +191,7 @@ class Gencontrol(Base):
                 kw_env['KW_DEFCONFIG_DIR'] = installer_def_dir
                 kw_env['KW_CONFIG_DIR'] = installer_arch_dir
                 kw_proc = subprocess.Popen(
-                    ['kernel-wedge', 'gen-control', vars['distributor'] + '-' + vars['abiname']],
+                    ['kernel-wedge', 'gen-control', vars['abiname'] + '-' + vars['distributor']],
                     stdout=subprocess.PIPE,
                     env=kw_env)
                 if not isinstance(kw_proc.stdout, io.IOBase):
@@ -460,11 +460,11 @@ class Gencontrol(Base):
         if config_entry_image['type'] == 'plain':
             substitute_file('headers.plain.postinst',
                             'debian/linux-headers-%s-%s%s.postinst' %
-                            (vars['distributor'], vars['abiname'], vars['localversion']))
+                            (vars['abiname'], vars['distributor'], vars['localversion']))
             for name in ['postinst', 'postrm', 'preinst', 'prerm', 'templates']:
                 substitute_file('image.plain.%s' % name,
                                 'debian/linux-image-%s-%s%s.%s' %
-                                (vars['distributor'], vars['abiname'], vars['localversion'], name))
+                                (vars['abiname'], vars['distributor'], vars['localversion'], name))
             for path in glob.glob('debian/templates/po/*.po'):
                 substitute_file('po/' + os.path.basename(path),
                                 'debian/po/' + os.path.basename(path),
@@ -472,7 +472,7 @@ class Gencontrol(Base):
         if build_debug:
             substitute_file('image-dbg.lintian-override',
                             'debian/linux-image-%s-%s%s-dbg.lintian-overrides' %
-                            (vars['distributor'], vars['abiname'], vars['localversion']))
+                            (vars['abiname'], vars['distributor'], vars['localversion']))
 
     def merge_packages(self, packages, new, arch):
         for new_package in new:
