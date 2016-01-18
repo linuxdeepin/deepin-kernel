@@ -105,19 +105,19 @@ class Main(object):
                            self.config['abi', arch]['abiname'])
         except KeyError:
             version_abi = self.version_abi
-        filename = "linux-headers-%s-%s-%s_%s_%s.deb" % (version_abi, self.distributor, prefix, self.version_source, arch)
+        filename = "linux-headers-%s-%s-%s_%s_%s.deb" % (self.distributor, version_abi, prefix, self.version_source, arch)
         f = self.retrieve_package(self.url, filename, arch)
-        d = self.extract_package(f, "linux-headers-%s-%s_%s" % (prefix, self.distributor, arch))
-        f1 = d + "/usr/src/linux-headers-%s-%s-%s/Module.symvers" % (version_abi, self.distributor, prefix)
+        d = self.extract_package(f, "linux-headers-%s-%s_%s" % (self.distributor, prefix, arch))
+        f1 = d + "/usr/src/linux-headers-%s-%s-%s/Module.symvers" % (self.distributor, version_abi, prefix)
         s = Symbols(open(f1))
         shutil.rmtree(d)
         return version_abi, s
 
     def get_config(self):
-        filename = "linux-support-%s-%s_%s_all.deb" % (self.version_abi, self.distributor, self.version_source)
+        filename = "linux-support-%s-%s_%s_all.deb" % (self.distributor, self.version_abi, self.version_source)
         f = self.retrieve_package(self.url_config, filename, 'all')
         d = self.extract_package(f, "linux-support")
-        c = d + "/usr/src/linux-support-" + self.version_abi +"-" + self.distributor + "/config.defines.dump"
+        c = d + "/usr/src/linux-support-" + self.distributor +"-" + self.version_abi + "/config.defines.dump"
         config = ConfigCoreDump(fp=open(c, "rb"))
         shutil.rmtree(d)
         return config
