@@ -396,7 +396,35 @@ class PackageRelationEntry(object):
             self.restrictions = []
 
 
-class Package(dict):
+class _ControlFileDict(dict):
+    def __setitem__(self, key, value):
+        try:
+            cls = self._fields[key]
+            if not isinstance(value, cls):
+                value = cls(value)
+        except KeyError:
+            pass
+        super(_ControlFileDict, self).__setitem__(key, value)
+
+    def keys(self):
+        keys = set(super(_ControlFileDict, self).keys())
+        for i in self._fields.keys():
+            if i in self:
+                keys.remove(i)
+                yield i
+        for i in sorted(list(keys)):
+            yield i
+
+    def items(self):
+        for i in self.keys():
+            yield (i, self[i])
+
+    def values(self):
+        for i in self.keys():
+            yield self[i]
+
+
+class Package(_ControlFileDict):
     _fields = collections.OrderedDict((
         ('Package', str),
         ('Source', str),
@@ -419,49 +447,14 @@ class Package(dict):
         ('Description', PackageDescription),
     ))
 
-    def __setitem__(self, key, value):
-        try:
-            cls = self._fields[key]
-            if not isinstance(value, cls):
-                value = cls(value)
-        except KeyError:
-            pass
-        super(Package, self).__setitem__(key, value)
 
-    def keys(self):
-        keys = set(super(Package, self).keys())
-        for i in self._fields.keys():
-            if i in self:
-                keys.remove(i)
-                yield i
-        for i in keys:
-            yield i
-
-    def items(self):
-        for i in self.keys():
-            yield (i, self[i])
-
-    def values(self):
-        for i in self.keys():
-            yield self[i]
-
-
-class TestsControl(dict):
-    _fields = {
-        'Tests': str,
-        'Test-Command': str,
-        'Restrictions': str,
-        'Features': str,
-        'Depends': PackageRelation,
-        'Tests-Directory': str,
-        'Classes': str,
-    }
-
-    def __setitem__(self, key, value):
-        try:
-            cls = self._fields[key]
-            if not isinstance(value, cls):
-                value = cls(value)
-        except KeyError:
-            pass
-        super(TestsControl, self).__setitem__(key, value)
+class TestsControl(_ControlFileDict):
+    _fields = collections.OrderedDict((
+        ('Tests', str),
+        ('Test-Command', str),
+        ('Restrictions', str),
+        ('Features', str),
+        ('Depends', PackageRelation),
+        ('Tests-Directory', str),
+        ('Classes', str),
+    ))
