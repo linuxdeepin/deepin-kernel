@@ -25,6 +25,7 @@ class Gencontrol(Base):
         'build': {
             'debug-info': config.SchemaItemBoolean(),
             'modules': config.SchemaItemBoolean(),
+            'vdso': config.SchemaItemBoolean(),
         },
         'description': {
             'parts': config.SchemaItemList(),
@@ -368,6 +369,9 @@ class Gencontrol(Base):
             packages_own.append(package_headers)
             if extra.get('headers_arch_depends'):
                 extra['headers_arch_depends'].append('%s (= ${binary:Version})' % packages_own[-1]['Package'])
+
+        if config_entry_build.get('vdso', False):
+            makeflags['VDSO'] = True
 
         build_debug = config_entry_build.get('debug-info')
 
