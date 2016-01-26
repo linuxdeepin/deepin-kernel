@@ -24,7 +24,6 @@ class Gencontrol(Base):
         },
         'build': {
             'debug-info': config.SchemaItemBoolean(),
-            'modules': config.SchemaItemBoolean(),
             'vdso': config.SchemaItemBoolean(),
         },
         'description': {
@@ -362,13 +361,11 @@ class Gencontrol(Base):
         packages_own.append(image_main)
         packages_own.extend(self.process_packages(image[1:], vars))
 
-        if config_entry_build.get('modules', True):
-            makeflags['MODULES'] = True
-            package_headers = self.process_package(headers[0], vars)
-            package_headers['Depends'].extend(relations_compiler_headers)
-            packages_own.append(package_headers)
-            if extra.get('headers_arch_depends'):
-                extra['headers_arch_depends'].append('%s (= ${binary:Version})' % packages_own[-1]['Package'])
+        package_headers = self.process_package(headers[0], vars)
+        package_headers['Depends'].extend(relations_compiler_headers)
+        packages_own.append(package_headers)
+        if extra.get('headers_arch_depends'):
+            extra['headers_arch_depends'].append('%s (= ${binary:Version})' % packages_own[-1]['Package'])
 
         if config_entry_build.get('vdso', False):
             makeflags['VDSO'] = True
