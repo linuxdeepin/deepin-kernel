@@ -1,7 +1,7 @@
 Subject: Intrduce migrate_disable() + cpu_light()
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Fri, 17 Jun 2011 15:42:38 +0200
-Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.4/patches-4.4-rt2.tar.xz
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.4/patches-4.4-rt3.tar.xz
 
 Introduce migrate_disable(). The task can't be pushed to another CPU but can
 be preempted.
@@ -31,14 +31,14 @@ invoked again from another caller on the same CPU.
 
 Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 ---
- include/linux/cpu.h     |    3 +
- include/linux/preempt.h |    9 +++
- include/linux/sched.h   |   29 +++++++++-
- include/linux/smp.h     |    3 +
- kernel/sched/core.c     |  132 +++++++++++++++++++++++++++++++++++++++++++++++-
- kernel/sched/debug.c    |    7 ++
- lib/smp_processor_id.c  |    5 +
- 7 files changed, 182 insertions(+), 6 deletions(-)
+ include/linux/cpu.h     |    3 ++
+ include/linux/preempt.h |    9 ++++++
+ include/linux/sched.h   |   39 ++++++++++++++++++++------
+ include/linux/smp.h     |    3 ++
+ kernel/sched/core.c     |   71 +++++++++++++++++++++++++++++++++++++++++++++++-
+ kernel/sched/debug.c    |    7 ++++
+ lib/smp_processor_id.c  |    5 ++-
+ 7 files changed, 126 insertions(+), 11 deletions(-)
 
 --- a/include/linux/cpu.h
 +++ b/include/linux/cpu.h
@@ -90,17 +90,22 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	int nr_cpus_allowed;
  	cpumask_t cpus_allowed;
  
-@@ -1837,9 +1843,6 @@ extern int arch_task_struct_size __read_
+@@ -1837,14 +1843,6 @@ extern int arch_task_struct_size __read_
  # define arch_task_struct_size (sizeof(struct task_struct))
  #endif
  
 -/* Future-safe accessor for struct task_struct's cpus_allowed. */
 -#define tsk_cpus_allowed(tsk) (&(tsk)->cpus_allowed)
 -
+-static inline int tsk_nr_cpus_allowed(struct task_struct *p)
+-{
+-	return p->nr_cpus_allowed;
+-}
+-
  #define TNF_MIGRATED	0x01
  #define TNF_NO_GROUP	0x02
  #define TNF_SHARED	0x04
-@@ -3116,6 +3119,26 @@ static inline void set_task_cpu(struct t
+@@ -3121,6 +3119,31 @@ static inline void set_task_cpu(struct t
  
  #endif /* CONFIG_SMP */
  
@@ -116,12 +121,17 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +/* Future-safe accessor for struct task_struct's cpus_allowed. */
 +static inline const struct cpumask *tsk_cpus_allowed(struct task_struct *p)
 +{
-+#ifdef CONFIG_PREEMPT_RT_FULL
-+	if (p->migrate_disable)
++	if (__migrate_disabled(p))
 +		return cpumask_of(task_cpu(p));
-+#endif
 +
 +	return &p->cpus_allowed;
++}
++
++static inline int tsk_nr_cpus_allowed(struct task_struct *p)
++{
++	if (__migrate_disabled(p))
++		return 1;
++	return p->nr_cpus_allowed;
 +}
 +
  extern long sched_setaffinity(pid_t pid, const struct cpumask *new_mask);
@@ -141,27 +151,11 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
   * boot command line:
 --- a/kernel/sched/core.c
 +++ b/kernel/sched/core.c
-@@ -1164,6 +1164,15 @@ void set_cpus_allowed_common(struct task
- 	p->nr_cpus_allowed = cpumask_weight(new_mask);
- }
- 
-+#if defined(CONFIG_PREEMPT_RT_FULL) && defined(CONFIG_SMP)
-+#define MIGRATE_DISABLE_SET_AFFIN	(1<<30) /* Can't make a negative */
-+#define migrate_disabled_updated(p)	((p)->migrate_disable & MIGRATE_DISABLE_SET_AFFIN)
-+#define migrate_disable_count(p)	((p)->migrate_disable & ~MIGRATE_DISABLE_SET_AFFIN)
-+#else
-+static inline void update_migrate_disable(struct task_struct *p) { }
-+#define migrate_disabled_updated(p)		0
-+#endif
-+
- void do_set_cpus_allowed(struct task_struct *p, const struct cpumask *new_mask)
- {
- 	struct rq *rq = task_rq(p);
-@@ -1171,6 +1180,11 @@ void do_set_cpus_allowed(struct task_str
+@@ -1171,6 +1171,11 @@ void do_set_cpus_allowed(struct task_str
  
  	lockdep_assert_held(&p->pi_lock);
  
-+	if (migrate_disabled_updated(p)) {
++	if (__migrate_disabled(p)) {
 +		cpumask_copy(&p->cpus_allowed, new_mask);
 +		return;
 +	}
@@ -169,7 +163,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	queued = task_on_rq_queued(p);
  	running = task_current(rq, p);
  
-@@ -1232,7 +1246,7 @@ static int __set_cpus_allowed_ptr(struct
+@@ -1232,7 +1237,7 @@ static int __set_cpus_allowed_ptr(struct
  	do_set_cpus_allowed(p, new_mask);
  
  	/* Can the task run on the task's current CPU? If so, we're done */
@@ -178,43 +172,11 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  		goto out;
  
  	dest_cpu = cpumask_any_and(cpu_active_mask, new_mask);
-@@ -3022,6 +3036,120 @@ static inline void schedule_debug(struct
+@@ -3022,6 +3027,70 @@ static inline void schedule_debug(struct
  	schedstat_inc(this_rq(), sched_count);
  }
  
 +#if defined(CONFIG_PREEMPT_RT_FULL) && defined(CONFIG_SMP)
-+
-+static inline void update_migrate_disable(struct task_struct *p)
-+{
-+	const struct cpumask *mask;
-+
-+	if (likely(!p->migrate_disable))
-+		return;
-+
-+	/* Did we already update affinity? */
-+	if (unlikely(migrate_disabled_updated(p)))
-+		return;
-+
-+	/*
-+	 * Since this is always current we can get away with only locking
-+	 * rq->lock, the ->cpus_allowed value can normally only be changed
-+	 * while holding both p->pi_lock and rq->lock, but seeing that this
-+	 * is current, we cannot actually be waking up, so all code that
-+	 * relies on serialization against p->pi_lock is out of scope.
-+	 *
-+	 * Having rq->lock serializes us against things like
-+	 * set_cpus_allowed_ptr() that can still happen concurrently.
-+	 */
-+	mask = tsk_cpus_allowed(p);
-+
-+	if (p->sched_class->set_cpus_allowed)
-+		p->sched_class->set_cpus_allowed(p, mask);
-+	/* mask==cpumask_of(task_cpu(p)) which has a cpumask_weight==1 */
-+	p->nr_cpus_allowed = 1;
-+
-+	/* Let migrate_enable know to fix things back up */
-+	p->migrate_disable |= MIGRATE_DISABLE_SET_AFFIN;
-+}
 +
 +void migrate_disable(void)
 +{
@@ -239,6 +201,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +	preempt_disable();
 +	pin_current_cpu();
 +	p->migrate_disable = 1;
++	p->nr_cpus_allowed = 1;
 +	preempt_enable();
 +}
 +EXPORT_SYMBOL(migrate_disable);
@@ -246,9 +209,6 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +void migrate_enable(void)
 +{
 +	struct task_struct *p = current;
-+	const struct cpumask *mask;
-+	unsigned long flags;
-+	struct rq *rq;
 +
 +	if (in_atomic() || p->flags & PF_NO_SETAFFINITY) {
 +#ifdef CONFIG_SCHED_DEBUG
@@ -262,33 +222,17 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +#endif
 +	WARN_ON_ONCE(p->migrate_disable <= 0);
 +
-+	if (migrate_disable_count(p) > 1) {
++	if (p->migrate_disable > 1) {
 +		p->migrate_disable--;
 +		return;
 +	}
 +
 +	preempt_disable();
-+	if (unlikely(migrate_disabled_updated(p))) {
-+		/*
-+		 * Undo whatever update_migrate_disable() did, also see there
-+		 * about locking.
-+		 */
-+		rq = this_rq();
-+		raw_spin_lock_irqsave(&current->pi_lock, flags);
-+		raw_spin_lock(&rq->lock);
-+
-+		/*
-+		 * Clearing migrate_disable causes tsk_cpus_allowed to
-+		 * show the tasks original cpu affinity.
-+		 */
-+		p->migrate_disable = 0;
-+		mask = tsk_cpus_allowed(p);
-+		do_set_cpus_allowed(p, mask);
-+
-+		raw_spin_unlock(&rq->lock);
-+		raw_spin_unlock_irqrestore(&current->pi_lock, flags);
-+	} else
-+		p->migrate_disable = 0;
++	/*
++	 * Clearing migrate_disable causes tsk_cpus_allowed to
++	 * show the tasks original cpu affinity.
++	 */
++	p->migrate_disable = 0;
 +
 +	unpin_current_cpu();
 +	preempt_enable();
@@ -299,15 +243,6 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  /*
   * Pick up the highest-prio task:
   */
-@@ -3137,6 +3265,8 @@ static void __sched notrace __schedule(b
- 	raw_spin_lock_irq(&rq->lock);
- 	lockdep_pin_lock(&rq->lock);
- 
-+	update_migrate_disable(prev);
-+
- 	rq->clock_skip_update <<= 1; /* promote REQ to ACT */
- 
- 	switch_count = &prev->nivcsw;
 --- a/kernel/sched/debug.c
 +++ b/kernel/sched/debug.c
 @@ -251,6 +251,9 @@ void print_rt_rq(struct seq_file *m, int
