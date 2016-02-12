@@ -24,7 +24,6 @@ class Gencontrol(Base):
         },
         'build': {
             'debug-info': config.SchemaItemBoolean(),
-            'modules': config.SchemaItemBoolean(),
             'vdso': config.SchemaItemBoolean(),
         },
         'description': {
@@ -246,7 +245,6 @@ class Gencontrol(Base):
     )
 
     flavour_makeflags_image = (
-        ('type', 'TYPE', False),
         ('install-stem', 'IMAGE_INSTALL_STEM', True),
     )
 
@@ -345,7 +343,7 @@ class Gencontrol(Base):
         packages_dummy = []
         packages_own = []
 
-        image = self.templates["control.image.type-%s" % config_entry_image['type']]
+        image = self.templates["control.image"]
 
         config_entry_xen = self.config.merge('xen', arch, featureset, flavour)
         if config_entry_xen:
@@ -362,13 +360,11 @@ class Gencontrol(Base):
         packages_own.append(image_main)
         packages_own.extend(self.process_packages(image[1:], vars))
 
-        if config_entry_build.get('modules', True):
-            makeflags['MODULES'] = True
-            package_headers = self.process_package(headers[0], vars)
-            package_headers['Depends'].extend(relations_compiler_headers)
-            packages_own.append(package_headers)
-            if extra.get('headers_arch_depends'):
-                extra['headers_arch_depends'].append('%s (= ${binary:Version})' % packages_own[-1]['Package'])
+        package_headers = self.process_package(headers[0], vars)
+        package_headers['Depends'].extend(relations_compiler_headers)
+        packages_own.append(package_headers)
+        if extra.get('headers_arch_depends'):
+            extra['headers_arch_depends'].append('%s (= ${binary:Version})' % packages_own[-1]['Package'])
 
         if config_entry_build.get('vdso', False):
             makeflags['VDSO'] = True
@@ -461,18 +457,17 @@ class Gencontrol(Base):
             with codecs.open(target, 'a' if append else 'w',
                              'utf-8') as f:
                 f.write(self.substitute(self.templates[template], vars))
-        if config_entry_image['type'] == 'plain':
-            substitute_file('headers.plain.postinst',
-                            'debian/linux-headers-%s%s.postinst' %
-                            (vars['abiname'], vars['localversion']))
-            for name in ['postinst', 'postrm', 'preinst', 'prerm', 'templates']:
-                substitute_file('image.plain.%s' % name,
-                                'debian/linux-image-%s%s.%s' %
-                                (vars['abiname'], vars['localversion'], name))
-            for path in glob.glob('debian/templates/po/*.po'):
-                substitute_file('po/' + os.path.basename(path),
-                                'debian/po/' + os.path.basename(path),
-                                append=True)
+        substitute_file('headers.postinst',
+                        'debian/linux-headers-%s%s.postinst' %
+                        (vars['abiname'], vars['localversion']))
+        for name in ['postinst', 'postrm', 'preinst', 'prerm', 'templates']:
+            substitute_file('image.%s' % name,
+                            'debian/linux-image-%s%s.%s' %
+                            (vars['abiname'], vars['localversion'], name))
+        for path in glob.glob('debian/templates/po/*.po'):
+            substitute_file('po/' + os.path.basename(path),
+                            'debian/po/' + os.path.basename(path),
+                            append=True)
         if build_debug:
             substitute_file('image-dbg.lintian-override',
                             'debian/linux-image-%s%s-dbg.lintian-overrides' %
