@@ -1,0 +1,70 @@
+From: Tejun Heo <tj@kernel.org>
+Date: Tue,  9 Feb 2016 18:14:48 -0500
+Subject: Revert "workqueue: make sure delayed work run in local cpu"
+Origin: http://mid.gmane.org/1455059690-18765-2-git-send-email-tj@kernel.org
+
+This reverts commit 874bbfe600a660cba9c776b3957b1ce393151b76.
+
+Workqueue used to implicity guarantee that work items queued without
+explicit CPU specified are put on the local CPU.  Recent changes in
+timer broke the guarantee and led to vmstat breakage which was fixed
+by 176bed1de5bf ("vmstat: explicitly schedule per-cpu work on the CPU
+we need it to run on").
+
+vmstat is the most likely to expose the issue and it's quite possible
+that there are other similar problems which are a lot more difficult
+to trigger.  As a preventive measure, 874bbfe600a6 ("workqueue: make
+sure delayed work run in local cpu") was applied to restore the local
+CPU guarnatee.  Unfortunately, the change exposed a bug in timer code
+which got fixed by 22b886dd1018 ("timers: Use proper base migration in
+add_timer_on()").  Due to code restructuring, the commit couldn't be
+backported beyond certain point and stable kernels which only had
+874bbfe600a6 started crashing.
+
+The local CPU guarantee was accidental more than anything else and we
+want to get rid of it anyway.  As, with the vmstat case fixed,
+874bbfe600a6 is causing more problems than it's fixing, it has been
+decided to take the chance and officially break the guarantee by
+reverting the commit.  A debug feature will be added to force foreign
+CPU assignment to expose cases relying on the guarantee and fixes for
+the individual cases will be backported to stable as necessary.
+
+Signed-off-by: Tejun Heo <tj@kernel.org>
+Fixes: 874bbfe600a6 ("workqueue: make sure delayed work run in local cpu")
+Link: http://lkml.kernel.org/g/20160120211926.GJ10810@quack.suse.cz
+Cc: stable@vger.kernel.org
+Cc: Mike Galbraith <umgwanakikbuti@gmail.com>
+Cc: Henrique de Moraes Holschuh <hmh@hmh.eng.br>
+Cc: Daniel Bilik <daniel.bilik@neosystem.cz>
+Cc: Jan Kara <jack@suse.cz>
+Cc: Shaohua Li <shli@fb.com>
+Cc: Sasha Levin <sasha.levin@oracle.com>
+Cc: Ben Hutchings <ben@decadent.org.uk>
+Cc: Thomas Gleixner <tglx@linutronix.de>
+Cc: Daniel Bilik <daniel.bilik@neosystem.cz>
+Cc: Jiri Slaby <jslaby@suse.cz>
+Cc: Michal Hocko <mhocko@kernel.org>
+---
+ kernel/workqueue.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+--- a/kernel/workqueue.c
++++ b/kernel/workqueue.c
+@@ -1458,13 +1458,13 @@ static void __queue_delayed_work(int cpu
+ 	timer_stats_timer_set_start_info(&dwork->timer);
+ 
+ 	dwork->wq = wq;
+-	/* timer isn't guaranteed to run in this cpu, record earlier */
+-	if (cpu == WORK_CPU_UNBOUND)
+-		cpu = raw_smp_processor_id();
+ 	dwork->cpu = cpu;
+ 	timer->expires = jiffies + delay;
+ 
+-	add_timer_on(timer, cpu);
++	if (unlikely(cpu != WORK_CPU_UNBOUND))
++		add_timer_on(timer, cpu);
++	else
++		add_timer(timer);
+ }
+ 
+ /**
