@@ -1,0 +1,40 @@
+From: Rainer Weikusat <rweikusat@mobileactivedefense.com>
+Date: Thu, 11 Feb 2016 19:37:27 +0000
+Subject: af_unix: Guard against other == sk in unix_dgram_sendmsg
+Origin: http://mid.gmane.org/87r3gj11jc.fsf_-_@doppelsaurus.mobileactivedefense.com
+
+The unix_dgram_sendmsg routine use the following test
+
+if (unlikely(unix_peer(other) != sk && unix_recvq_full(other))) {
+
+to determine if sk and other are in an n:1 association (either
+established via connect or by using sendto to send messages to an
+unrelated socket identified by address). This isn't correct as the
+specified address could have been bound to the sending socket itself or
+because this socket could have been connected to itself by the time of
+the unix_peer_get but disconnected before the unix_state_lock(other). In
+both cases, the if-block would be entered despite other == sk which
+might either block the sender unintentionally or lead to trying to unlock
+the same spin lock twice for a non-blocking send. Add a other != sk
+check to guard against this.
+
+Fixes: 7d267278a9ec ("unix: avoid use-after-free in ep_remove_wait_queue")
+Reported-By: Philipp Hahn <pmhahn@pmhahn.de>
+Signed-off-by: Rainer Weikusat <rweikusat@mobileactivedefense.com>
+---
+--- a/net/unix/af_unix.c
++++ b/net/unix/af_unix.c
+@@ -1781,7 +1781,12 @@ restart_locked:
+ 			goto out_unlock;
+ 	}
+ 
+-	if (unlikely(unix_peer(other) != sk && unix_recvq_full(other))) {
++	/* other == sk && unix_peer(other) != sk if
++	 * - unix_peer(sk) == NULL, destination address bound to sk
++	 * - unix_peer(sk) == sk by time of get but disconnected before lock
++	 */
++	if (other != sk &&
++	    unlikely(unix_peer(other) != sk && unix_recvq_full(other))) {
+ 		if (timeo) {
+ 			timeo = unix_wait_for_peer(other, timeo);
+ 
