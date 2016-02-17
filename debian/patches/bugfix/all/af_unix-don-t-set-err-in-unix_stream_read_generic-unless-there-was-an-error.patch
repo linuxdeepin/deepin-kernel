@@ -1,0 +1,65 @@
+From: Rainer Weikusat <rweikusat@mobileactivedefense.com>
+Date: Mon, 08 Feb 2016 18:47:19 +0000
+Subject: af_unix: Don't set err in unix_stream_read_generic unless there was an error
+Origin: http://mid.gmane.org/87bn7rrqdk.fsf@doppelsaurus.mobileactivedefense.com
+
+The present unix_stream_read_generic contains various code sequences of
+the form
+
+err = -EDISASTER;
+if (<test>)
+	goto out;
+
+This has the unfortunate side effect of possibly causing the error code
+to bleed through to the final
+
+out:
+	return copied ? : err;
+
+and then to be wrongly returned if no data was copied because the caller
+didn't supply a data buffer, as demonstrated by the program available at
+
+http://pad.lv/1540731
+
+Change it such that err is only set if an error condition was detected.
+
+Fixes: 3822b5c2fc62 ("af_unix: Revert 'lock_interruptible' in stream receive code")
+Reported-by: Joseph Salisbury <joseph.salisbury@canonical.com>
+Signed-off-by: Rainer Weikusat <rweikusat@mobileactivedefense.com>
+---
+--- a/net/unix/af_unix.c
++++ b/net/unix/af_unix.c
+@@ -2275,13 +2275,15 @@ static int unix_stream_read_generic(stru
+ 	size_t size = state->size;
+ 	unsigned int last_len;
+ 
+-	err = -EINVAL;
+-	if (sk->sk_state != TCP_ESTABLISHED)
++	if (unlikely(sk->sk_state != TCP_ESTABLISHED)) {
++		err = -EINVAL;
+ 		goto out;
++	}
+ 
+-	err = -EOPNOTSUPP;
+-	if (flags & MSG_OOB)
++	if (unlikely(flags & MSG_OOB)) {
++		err = -EOPNOTSUPP;
+ 		goto out;
++	}
+ 
+ 	target = sock_rcvlowat(sk, flags & MSG_WAITALL, size);
+ 	timeo = sock_rcvtimeo(sk, noblock);
+@@ -2327,9 +2329,11 @@ again:
+ 				goto unlock;
+ 
+ 			unix_state_unlock(sk);
+-			err = -EAGAIN;
+-			if (!timeo)
++			if (!timeo) {
++				err = -EAGAIN;
+ 				break;
++			}
++
+ 			mutex_unlock(&u->readlock);
+ 
+ 			timeo = unix_stream_data_wait(sk, timeo, last,
