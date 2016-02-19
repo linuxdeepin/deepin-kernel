@@ -19,3 +19,6 @@ all-recursive: all-local
 
 clean-local::
 	rm -rf generated include out
+# fixdep may be built in several places since we don't set the output directory
+# consistently (XXX)
+	find -name fixdep -delete
