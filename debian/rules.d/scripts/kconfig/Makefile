@@ -1,6 +1,6 @@
 PROGS = conf
 
-include ../../Makefile.inc
+include $(top_rulesdir)/Makefile.inc
 
 conf: conf.o zconf.tab.o
 
@@ -11,6 +11,3 @@ zconf.tab.c: zconf.hash.c zconf.lex.c
 
 %.h: %.h_shipped
 	ln -sf $< $@
-
-clean:
-	rm -f zconf.tab.c zconf.hash.c zconf.lex.c

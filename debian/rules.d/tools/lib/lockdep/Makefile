@@ -1,8 +1,8 @@
-include ../../../Makefile.inc
+include $(top_rulesdir)/Makefile.inc
 
 DEB_HOST_MULTIARCH := $(shell dpkg-architecture -qDEB_HOST_MULTIARCH)
 
-MAKE_LOCKDEP := $(MAKE) -C $(top_srcdir)/$(OUTDIR) O=$(CURDIR)/out V=1 \
+MAKE_LOCKDEP := $(MAKE) -C $(top_srcdir)/$(OUTDIR) O=$(CURDIR) V=1 \
 	prefix=/usr libdir_relative=lib/$(DEB_HOST_MULTIARCH) \
 	LIBLOCKDEP_VERSION=$(VERSION) \
 	CONFIG_FLAGS='$(CFLAGS) $(filter -D%,$(CPPFLAGS))' LDFLAGS='$(LDFLAGS)'
@@ -10,7 +10,6 @@ MAKE_LOCKDEP := $(MAKE) -C $(top_srcdir)/$(OUTDIR) O=$(CURDIR)/out V=1 \
 unexport CFLAGS
 
 all:
-	mkdir -p out
 	$(MAKE_LOCKDEP)
 
 install:
@@ -19,6 +18,3 @@ install:
 	cp -R $(top_srcdir)/$(OUTDIR)/include/liblockdep $(DESTDIR)/usr/include/
 	ln -s liblockdep.so.$(VERSION) \
 		$(DESTDIR)/usr/lib/$(DEB_HOST_MULTIARCH)/liblockdep.so
-
-clean:
-	rm -rf out

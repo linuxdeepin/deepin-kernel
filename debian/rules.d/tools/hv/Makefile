@@ -5,7 +5,7 @@ PROGS = \
 
 prefix = /usr/sbin
 
-include ../../Makefile.inc
+include $(top_rulesdir)/Makefile.inc
 
 install-local-progs: $(PROGS)
 	@for p in $^; do \

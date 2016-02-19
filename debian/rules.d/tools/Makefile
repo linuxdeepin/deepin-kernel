@@ -4,4 +4,4 @@ SUBDIRS = \
 	perf \
 	usb/usbip
 
-include ../Makefile.inc
+include $(top_rulesdir)/Makefile.inc

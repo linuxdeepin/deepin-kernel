@@ -1,4 +1,4 @@
-include ../../Makefile.inc
+include $(top_rulesdir)/Makefile.inc
 
 DEB_HOST_ARCH_CPU := $(shell dpkg-architecture -qDEB_HOST_ARCH_CPU)
 
@@ -27,7 +27,7 @@ else ifneq ($(filter amd64 i386,$(DEB_HOST_ARCH_CPU)),)
   endif
 endif
 
-MAKE_PERF := $(MAKE) prefix=/usr V=1 ARCH=$(KERNEL_ARCH_PERF) EXTRA_WARNINGS=-Wno-error EXTRA_CFLAGS='$(CFLAGS) $(CPPFLAGS)' LDFLAGS='$(LDFLAGS)'
+MAKE_PERF := $(MAKE) O=$(CURDIR) prefix=/usr V=1 ARCH=$(KERNEL_ARCH_PERF) EXTRA_WARNINGS=-Wno-error EXTRA_CFLAGS='$(CFLAGS) $(CPPFLAGS)' LDFLAGS='$(LDFLAGS)'
 
 # Disable Gtk UI until it's more usable
 MAKE_PERF += NO_GTK2=1
@@ -43,22 +43,21 @@ MAKE_PERF += feature-libbfd=0 HAVE_CPLUS_DEMANGLE_SUPPORT=1
 
 all:
 ifdef KERNEL_ARCH_PERF
-	-mkdir out
 # perf changes some default directories depending on whether DESTDIR is
 # set.  We must define it even when building to avoid a rebuild when we
 # run 'make install'.
-	+$(MAKE_PERF) -C $(top_srcdir)/tools/perf -f Makefile.perf O=$(CURDIR)/out all VERSION=$(VERSION) DESTDIR=dummy
-	+$(MAKE_PERF) -C $(top_srcdir)/tools/perf/Documentation O=$(CURDIR)/out man VERSION=$(VERSION)
+	+$(MAKE_PERF) -C $(top_srcdir)/tools/perf -f Makefile.perf all VERSION=$(VERSION) DESTDIR=dummy
+	+$(MAKE_PERF) -C $(top_srcdir)/tools/perf/Documentation man VERSION=$(VERSION)
 # Check that perf didn't get linked against libbfd
 	type ldd
-	! ldd $(CURDIR)/out/perf | grep '\blibbfd'
+	! ldd $(CURDIR)/perf | grep '\blibbfd'
 # Check that it includes cplus_demangle from libiberty
-	grep cplus_demangle $(CURDIR)/out/perf
+	grep cplus_demangle $(CURDIR)/perf
 endif
 
 install:
 ifdef KERNEL_ARCH_PERF
-	+$(MAKE_PERF) -C $(top_srcdir)/tools/perf -f Makefile.perf O=$(CURDIR)/out install VERSION=$(VERSION)
+	+$(MAKE_PERF) -C $(top_srcdir)/tools/perf -f Makefile.perf install VERSION=$(VERSION)
 # Don't install a 'trace' alias yet:
 # - We need a wrapper for it anyway, so there's little point adding a
 #   versioned link
@@ -71,10 +70,3 @@ endif
 	mv $(DESTDIR)/etc/bash_completion.d \
 		$(DESTDIR)/usr/share/bash-completion/completions
 	rmdir --ignore-fail-on-non-empty $(DESTDIR)/etc
-
-clean:
-ifdef KERNEL_ARCH_PERF
-	mkdir -p out
-	+$(MAKE_PERF) -C $(top_srcdir)/tools/perf -f Makefile.perf O=$(CURDIR)/out clean
-	rm -rf out
-endif

@@ -6,7 +6,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "modpost.h"
+#include "modpost-opts.h"
 
 int main (int argc, char *argv[])
 {

@@ -1,5 +1,3 @@
-top_srcdir = $(dir $(lastword $(MAKEFILE_LIST)))/../..
-
 # Normalise OUTDIR to avoid triggering rebuilds
 override OUTDIR := $(patsubst ./%,%,$(OUTDIR))
 
@@ -17,21 +15,18 @@ CXXFLAGS := $(shell dpkg-buildflags --get CXXFLAGS) -Wall
 LDFLAGS := $(shell dpkg-buildflags --get LDFLAGS)
 
 all: all-local all-recursive
-clean: clean-local clean-recursive
+clean: clean-recursive
 install: install-local install-recursive
 
 %-recursive:
 	+@list='$(SUBDIRS)'; \
 	for subdir in $$list; do \
 	  echo "Making $* in $$subdir"; \
-	  $(MAKE) -C $$subdir OUTDIR=$(OUTDIR)/$$subdir $* \
-	  || exit 1; \
+	  mkdir -p $$subdir; \
+	  $(MAKE) -C $$subdir -f $(top_rulesdir)/$(OUTDIR)/$$subdir/Makefile OUTDIR=$(OUTDIR)/$$subdir $*; \
 	done
 
 all-local: $(PROGS)
-
-clean-local::
-	rm -f $(PROGS) *.o
 
 install-local: install-local-progs install-local-scripts install-local-data
 

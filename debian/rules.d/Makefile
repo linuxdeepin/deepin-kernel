@@ -6,14 +6,11 @@ SUBDIRS = \
 	scripts \
 	tools
 
-include Makefile.inc
+include $(top_rulesdir)/Makefile.inc
 
 # Build userland headers first
 unexport VERSION
 all-local:
-	$(MAKE) -C $(top_srcdir) O=$(CURDIR)/out \
+	$(MAKE) -C $(top_srcdir) O=$(CURDIR) \
 		INSTALL_HDR_PATH=$(CURDIR) headers_install
 all-recursive: all-local
-
-clean-local::
-	rm -rf generated include out
