@@ -1,5 +1,8 @@
 top_srcdir = $(dir $(lastword $(MAKEFILE_LIST)))/../..
 
+# Normalise OUTDIR to avoid triggering rebuilds
+override OUTDIR := $(patsubst ./%,%,$(OUTDIR))
+
 VPATH = $(top_srcdir)/$(OUTDIR)
 
 SHELL = /bin/sh -e
@@ -21,7 +24,7 @@ install: install-local install-recursive
 	+@list='$(SUBDIRS)'; \
 	for subdir in $$list; do \
 	  echo "Making $* in $$subdir"; \
-	  $(MAKE) -C $$subdir $* \
+	  $(MAKE) -C $$subdir OUTDIR=$(OUTDIR)/$$subdir $* \
 	  || exit 1; \
 	done
 

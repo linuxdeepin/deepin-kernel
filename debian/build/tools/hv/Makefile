@@ -3,7 +3,6 @@ PROGS = \
 	hv_kvp_daemon \
 	hv_vss_daemon
 
-OUTDIR = tools/hv
 prefix = /usr/sbin
 
 include ../../Makefile.inc

@@ -6,8 +6,6 @@ SUBDIRS = \
 	scripts \
 	tools
 
-OUTDIR = .
-
 include Makefile.inc
 
 # Build userland headers first

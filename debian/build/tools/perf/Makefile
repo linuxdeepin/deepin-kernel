@@ -1,5 +1,3 @@
-OUTDIR = tools/perf
-
 include ../../Makefile.inc
 
 DEB_HOST_ARCH_CPU := $(shell dpkg-architecture -qDEB_HOST_ARCH_CPU)

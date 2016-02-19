@@ -1,7 +1,5 @@
 PROGS = conf
 
-OUTDIR = scripts/kconfig
-
 include ../../Makefile.inc
 
 conf: conf.o zconf.tab.o

@@ -1,5 +1,3 @@
-OUTDIR = tools/lib/lockdep
-
 include ../../../Makefile.inc
 
 DEB_HOST_MULTIARCH := $(shell dpkg-architecture -qDEB_HOST_MULTIARCH)

@@ -1,7 +1,5 @@
 PROGS = genksyms
 
-OUTDIR = scripts/genksyms
-
 include ../../Makefile.inc
 
 genksyms: genksyms.o parse.tab.o lex.lex.o

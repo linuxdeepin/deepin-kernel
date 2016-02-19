@@ -5,8 +5,6 @@ PROGS = \
 	modpost.real-msb-32 \
 	modpost.real-msb-64
 
-OUTDIR = scripts/mod
-
 include ../../Makefile.inc
 
 modpost.real-%:
