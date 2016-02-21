@@ -18,5 +18,5 @@ modpost.real-%:
 modpost-opts.h: $(top_srcdir)/scripts/mod/modpost.c
 	python $(wrapperdir)/gendef.py $< > $@
 
-modpost.o: $(wrapperdir)/modpost.c modpost-opts.h
+modpost.o: modpost.c modpost-opts.h
 	$(CC) $(CFLAGS) -I $(CURDIR) -c -o $@ $<

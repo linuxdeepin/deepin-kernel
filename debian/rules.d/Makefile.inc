@@ -1,7 +1,7 @@
 # Normalise OUTDIR to avoid triggering rebuilds
 override OUTDIR := $(patsubst ./%,%,$(OUTDIR))
 
-VPATH = $(top_srcdir)/$(OUTDIR)
+VPATH = $(top_rulesdir)/$(OUTDIR) $(top_srcdir)/$(OUTDIR)
 
 SHELL = /bin/sh -e
 
