@@ -36,7 +36,7 @@ install-local-progs: $(PROGS)
 	  install -D -m755 "$$p" "$(prefix)/$(OUTDIR)/$$(basename $$p)"; \
 	done
 
-SCRIPTS_REAL = $(addprefix $(top_srcdir)/$(OUTDIR)/,$(SCRIPTS))
+SCRIPTS_REAL = $(wildcard $(addprefix $(top_srcdir)/$(OUTDIR)/,$(SCRIPTS)))
 
 install-local-scripts: $(SCRIPTS_REAL)
 	@for p in $^; do \
@@ -44,7 +44,7 @@ install-local-scripts: $(SCRIPTS_REAL)
 	  install -D -m755 "$$p" "$(prefix)/$(OUTDIR)/$$(basename $$p)"; \
 	done
 
-DATA_REAL = $(addprefix $(top_srcdir)/$(OUTDIR)/,$(DATA))
+DATA_REAL = $(wildcard $(addprefix $(top_srcdir)/$(OUTDIR)/,$(DATA)))
 
 install-local-data: $(DATA_REAL)
 	@for p in $^; do \
