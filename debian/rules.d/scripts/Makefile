@@ -15,10 +15,7 @@ SCRIPTS =  \
 	checkstack.pl \
 	checkversion.pl \
 	depmod.sh \
-	gcc-goto.sh \
-	gcc-version.sh \
-	gcc-x86_32-has-stack-protector.sh \
-	gcc-x86_64-has-stack-protector.sh \
+	gcc-*.sh \
 	gen_initramfs_list.sh \
 	kernel-doc \
 	Lindent \
