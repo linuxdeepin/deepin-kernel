@@ -1,7 +1,7 @@
 ifeq ($(filter i386 amd64 x32,$(DEB_BUILD_ARCH)),)
 
 # Build nothing
-include ../../Makefile.inc
+include $(top_rulesdir)/Makefile.inc
 
 else
 
