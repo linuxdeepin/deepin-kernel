@@ -6,14 +6,7 @@ PROGS = \
 
 DATA = \
 	Kbuild.include \
-	Makefile.build \
-	Makefile.clean \
-	Makefile.extrawarn \
-	Makefile.host \
-	Makefile.kasan \
-	Makefile.lib \
-	Makefile.modinst \
-	Makefile.modpost \
+	Makefile.* \
 	mkversion \
 	module-common.lds
 
