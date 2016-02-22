@@ -8,18 +8,15 @@ else
 PROGS = \
 	hv_fcopy_daemon \
 	hv_kvp_daemon \
-	hv_vss_daemon \
-	check-hyperv
+	hv_vss_daemon
 
 prefix = /usr/sbin
 
 include $(top_rulesdir)/Makefile.inc
 
-install-local-progs: $(PROGS)
-	@for p in $(filter-out check-hyperv,$^); do \
-	  echo " install -m755 '$$p' '$(DESTDIR)/$(prefix)'"; \
-	  install -D -m755 "$$p" "$(DESTDIR)/$(prefix)/$$(basename $$p)"; \
-	done
+# Handle check-hyperv separately since it's installed in a different directory
+all-local: check-hyperv
+install-local:
 	install -D -m755 check-hyperv '$(DESTDIR)/lib/hyperv-daemons/check-hyperv'
 
 endif
