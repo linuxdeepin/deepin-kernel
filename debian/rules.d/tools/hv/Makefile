@@ -10,7 +10,7 @@ PROGS = \
 	hv_kvp_daemon \
 	hv_vss_daemon
 
-prefix = /usr/sbin
+installdir = /usr/sbin
 
 include $(top_rulesdir)/Makefile.inc
 

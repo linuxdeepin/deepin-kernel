@@ -14,6 +14,8 @@ CPPFLAGS := $(shell dpkg-buildflags --get CPPFLAGS) \
 CXXFLAGS := $(shell dpkg-buildflags --get CXXFLAGS) -Wall
 LDFLAGS := $(shell dpkg-buildflags --get LDFLAGS)
 
+installdir ?= $(prefix)/$(OUTDIR)
+
 all: all-local all-recursive
 clean: clean-recursive
 install: install-local install-recursive
@@ -32,23 +34,23 @@ install-local: install-local-progs install-local-scripts install-local-data
 
 install-local-progs: $(PROGS)
 	@for p in $^; do \
-	  echo " install -m755 '$$p' '$(DESTDIR)/$(prefix)/$(OUTDIR)'"; \
-	  install -D -m755 "$$p" "$(DESTDIR)/$(prefix)/$(OUTDIR)/$$(basename $$p)"; \
+	  echo " install -m755 '$$p' '$(DESTDIR)/$(installdir)'"; \
+	  install -D -m755 "$$p" "$(DESTDIR)/$(installdir)/$$(basename $$p)"; \
 	done
 
 SCRIPTS_REAL = $(wildcard $(addprefix $(top_srcdir)/$(OUTDIR)/,$(SCRIPTS)))
 
 install-local-scripts: $(SCRIPTS_REAL)
 	@for p in $^; do \
-	  echo " install -m755 '$$p' '$(DESTDIR)/$(prefix)/$(OUTDIR)'"; \
-	  install -D -m755 "$$p" "$(DESTDIR)/$(prefix)/$(OUTDIR)/$$(basename $$p)"; \
+	  echo " install -m755 '$$p' '$(DESTDIR)/$(installdir)'"; \
+	  install -D -m755 "$$p" "$(DESTDIR)/$(installdir)/$$(basename $$p)"; \
 	done
 
 DATA_REAL = $(wildcard $(addprefix $(top_srcdir)/$(OUTDIR)/,$(DATA)))
 
 install-local-data: $(DATA_REAL)
 	@for p in $^; do \
-	  echo " install -m644 '$$p' '$(DESTDIR)/$(prefix)/$(OUTDIR)'"; \
-	  install -D -m644 "$$p" "$(DESTDIR)/$(prefix)/$(OUTDIR)/$$(basename $$p)"; \
+	  echo " install -m644 '$$p' '$(DESTDIR)/$(installdir)'"; \
+	  install -D -m644 "$$p" "$(DESTDIR)/$(installdir)/$$(basename $$p)"; \
 	done
 
