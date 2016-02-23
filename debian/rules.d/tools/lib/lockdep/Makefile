@@ -2,7 +2,7 @@ include $(top_rulesdir)/Makefile.inc
 
 DEB_HOST_MULTIARCH := $(shell dpkg-architecture -qDEB_HOST_MULTIARCH)
 
-MAKE_LOCKDEP := $(MAKE) -C $(top_srcdir)/$(OUTDIR) O=$(CURDIR) V=1 \
+MAKE_LOCKDEP := +$(MAKE) -C $(top_srcdir)/$(OUTDIR) O=$(CURDIR) V=1 \
 	prefix=/usr libdir_relative=lib/$(DEB_HOST_MULTIARCH) \
 	LIBLOCKDEP_VERSION=$(VERSION) \
 	CONFIG_FLAGS='$(CFLAGS) $(filter -D%,$(CPPFLAGS))' LDFLAGS='$(LDFLAGS)'
