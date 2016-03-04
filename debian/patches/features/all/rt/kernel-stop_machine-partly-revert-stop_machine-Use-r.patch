@@ -1,0 +1,153 @@
+From: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+Date: Wed, 10 Feb 2016 18:25:16 +0100
+Subject: kernel/stop_machine: partly revert "stop_machine: Use raw
+ spinlocks"
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.4/patches-4.4.3-rt9.tar.xz
+
+With completion using swait and so rawlocks we don't need this anymore.
+Further, bisect thinks this patch is responsible for:
+
+|BUG: unable to handle kernel NULL pointer dereference at           (null)
+|IP: [<ffffffff81082123>] sched_cpu_active+0x53/0x70
+|PGD 0
+|Oops: 0000 [#1] PREEMPT SMP DEBUG_PAGEALLOC
+|Dumping ftrace buffer:
+|   (ftrace buffer empty)
+|Modules linked in:
+|CPU: 1 PID: 0 Comm: swapper/1 Not tainted 4.4.1+ #330
+|Hardware name: QEMU Standard PC (Q35 + ICH9, 2009), BIOS Debian-1.8.2-1 04/01/2014
+|task: ffff88013ae64b00 ti: ffff88013ae74000 task.ti: ffff88013ae74000
+|RIP: 0010:[<ffffffff81082123>]  [<ffffffff81082123>] sched_cpu_active+0x53/0x70
+|RSP: 0000:ffff88013ae77eb8  EFLAGS: 00010082
+|RAX: 0000000000000001 RBX: ffffffff81c2cf20 RCX: 0000001050fb52fb
+|RDX: 0000001050fb52fb RSI: 000000105117ca1e RDI: 00000000001c7723
+|RBP: 0000000000000000 R08: 0000000000000000 R09: 0000000000000001
+|R10: 0000000000000000 R11: 0000000000000001 R12: 00000000ffffffff
+|R13: ffffffff81c2cee0 R14: 0000000000000000 R15: 0000000000000001
+|FS:  0000000000000000(0000) GS:ffff88013b200000(0000) knlGS:0000000000000000
+|CS:  0010 DS: 0000 ES: 0000 CR0: 000000008005003b
+|CR2: 0000000000000000 CR3: 0000000001c09000 CR4: 00000000000006e0
+|Stack:
+| ffffffff810c446d ffff88013ae77f00 ffffffff8107d8dd 000000000000000a
+| 0000000000000001 0000000000000000 0000000000000000 0000000000000000
+| 0000000000000000 ffff88013ae77f10 ffffffff8107d90e ffff88013ae77f20
+|Call Trace:
+| [<ffffffff810c446d>] ? debug_lockdep_rcu_enabled+0x1d/0x20
+| [<ffffffff8107d8dd>] ? notifier_call_chain+0x5d/0x80
+| [<ffffffff8107d90e>] ? __raw_notifier_call_chain+0xe/0x10
+| [<ffffffff810598a3>] ? cpu_notify+0x23/0x40
+| [<ffffffff8105a7b8>] ? notify_cpu_starting+0x28/0x30
+
+during hotplug. The rawlocks need to remain however.
+
+Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+---
+ kernel/stop_machine.c |   40 ++++++++--------------------------------
+ 1 file changed, 8 insertions(+), 32 deletions(-)
+
+--- a/kernel/stop_machine.c
++++ b/kernel/stop_machine.c
+@@ -30,7 +30,7 @@ struct cpu_stop_done {
+ 	atomic_t		nr_todo;	/* nr left to execute */
+ 	bool			executed;	/* actually executed? */
+ 	int			ret;		/* collected return value */
+-	struct task_struct	*waiter;	/* woken when nr_todo reaches 0 */
++	struct completion	completion;	/* fired if nr_todo reaches 0 */
+ };
+ 
+ /* the actual stopper, one per every possible cpu, enabled on online cpus */
+@@ -59,7 +59,7 @@ static void cpu_stop_init_done(struct cp
+ {
+ 	memset(done, 0, sizeof(*done));
+ 	atomic_set(&done->nr_todo, nr_todo);
+-	done->waiter = current;
++	init_completion(&done->completion);
+ }
+ 
+ /* signal completion unless @done is NULL */
+@@ -68,10 +68,8 @@ static void cpu_stop_signal_done(struct
+ 	if (done) {
+ 		if (executed)
+ 			done->executed = true;
+-		if (atomic_dec_and_test(&done->nr_todo)) {
+-			wake_up_process(done->waiter);
+-			done->waiter = NULL;
+-		}
++		if (atomic_dec_and_test(&done->nr_todo))
++			complete(&done->completion);
+ 	}
+ }
+ 
+@@ -96,22 +94,6 @@ static void cpu_stop_queue_work(unsigned
+ 	raw_spin_unlock_irqrestore(&stopper->lock, flags);
+ }
+ 
+-static void wait_for_stop_done(struct cpu_stop_done *done)
+-{
+-	set_current_state(TASK_UNINTERRUPTIBLE);
+-	while (atomic_read(&done->nr_todo)) {
+-		schedule();
+-		set_current_state(TASK_UNINTERRUPTIBLE);
+-	}
+-	/*
+-	 * We need to wait until cpu_stop_signal_done() has cleared
+-	 * done->waiter.
+-	 */
+-	while (done->waiter)
+-		cpu_relax();
+-	set_current_state(TASK_RUNNING);
+-}
+-
+ /**
+  * stop_one_cpu - stop a cpu
+  * @cpu: cpu to stop
+@@ -143,7 +125,7 @@ int stop_one_cpu(unsigned int cpu, cpu_s
+ 
+ 	cpu_stop_init_done(&done, 1);
+ 	cpu_stop_queue_work(cpu, &work);
+-	wait_for_stop_done(&done);
++	wait_for_completion(&done.completion);
+ 	return done.executed ? done.ret : -ENOENT;
+ }
+ 
+@@ -302,7 +284,7 @@ int stop_two_cpus(unsigned int cpu1, uns
+ 
+ 	preempt_enable_nort();
+ 
+-	wait_for_stop_done(&done);
++	wait_for_completion(&done.completion);
+ 
+ 	return done.executed ? done.ret : -ENOENT;
+ }
+@@ -364,7 +346,7 @@ static int __stop_cpus(const struct cpum
+ 
+ 	cpu_stop_init_done(&done, cpumask_weight(cpumask));
+ 	queue_stop_cpus_work(cpumask, fn, arg, &done, false);
+-	wait_for_stop_done(&done);
++	wait_for_completion(&done.completion);
+ 	return done.executed ? done.ret : -ENOENT;
+ }
+ 
+@@ -495,13 +477,7 @@ static void cpu_stopper_thread(unsigned
+ 			  kallsyms_lookup((unsigned long)fn, NULL, NULL, NULL,
+ 					  ksym_buf), arg);
+ 
+-		/*
+-		 * Make sure that the wakeup and setting done->waiter
+-		 * to NULL is atomic.
+-		 */
+-		local_irq_disable();
+ 		cpu_stop_signal_done(done, true);
+-		local_irq_enable();
+ 		goto repeat;
+ 	}
+ }
+@@ -663,7 +639,7 @@ int stop_machine_from_inactive_cpu(cpu_s
+ 	ret = multi_cpu_stop(&msdata);
+ 
+ 	/* Busy wait for completion. */
+-	while (atomic_read(&done.nr_todo))
++	while (!completion_done(&done.completion))
+ 		cpu_relax();
+ 
+ 	mutex_unlock(&stop_cpus_mutex);
