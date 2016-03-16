@@ -1,0 +1,111 @@
+From: Lukas Wunner <lukas@wunner.de>
+Date: Wed, 18 Nov 2015 13:43:20 +0100
+Subject: drm/i915: Fix oops caused by fbdev initialization failure
+Origin: https://git.kernel.org/linus/54632abe8ca3db8621673b186c7cc0e869c0032f
+
+intelfb_create() is called once on driver initialization. If it fails,
+ifbdev->helper.fbdev, ifbdev->fb or ifbdev->fb->obj may be NULL.
+
+Further up in the call stack, intel_fbdev_initial_config() calls
+intel_fbdev_fini() to tear down the ifbdev on failure. This calls
+intel_fbdev_destroy() which dereferences ifbdev->fb. Fix the ensuing
+oops.
+
+Also check in these functions if ifbdev is not NULL to avoid oops:
+
+i915_gem_framebuffer_info() is called on access to debugfs file
+"i915_gem_framebuffer" and dereferences ifbdev, ifbdev->helper.fb
+and ifbdev->helper.fb->obj.
+
+intel_connector_add_to_fbdev() / intel_connector_remove_from_fbdev()
+are called when registering / unregistering an mst connector and
+dereference ifbdev.
+
+v3: Drop additional null pointer checks in intel_fbdev_set_suspend(),
+    intel_fbdev_output_poll_changed() and intel_fbdev_restore_mode()
+    since they already check if ifbdev is not NULL, which is sufficient
+    now that intel_fbdev_fini() is called on initialization failure.
+    (Requested by Daniel Vetter <daniel.vetter@ffwll.ch>)
+
+Signed-off-by: Lukas Wunner <lukas@wunner.de>
+Link: http://patchwork.freedesktop.org/patch/msgid/d05f0edf121264a9d0adb8ca713fd8cc4ae068bf.1447938059.git.lukas@wunner.de
+Signed-off-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+---
+ drivers/gpu/drm/i915/i915_debugfs.c | 24 +++++++++++++-----------
+ drivers/gpu/drm/i915/intel_dp_mst.c | 10 ++++++++--
+ drivers/gpu/drm/i915/intel_fbdev.c  |  6 ++++--
+ 3 files changed, 25 insertions(+), 15 deletions(-)
+
+--- a/drivers/gpu/drm/i915/i915_debugfs.c
++++ b/drivers/gpu/drm/i915/i915_debugfs.c
+@@ -1873,17 +1873,19 @@ static int i915_gem_framebuffer_info(str
+ 	struct drm_i915_private *dev_priv = dev->dev_private;
+ 
+ 	ifbdev = dev_priv->fbdev;
+-	fb = to_intel_framebuffer(ifbdev->helper.fb);
++	if (ifbdev) {
++		fb = to_intel_framebuffer(ifbdev->helper.fb);
+ 
+-	seq_printf(m, "fbcon size: %d x %d, depth %d, %d bpp, modifier 0x%llx, refcount %d, obj ",
+-		   fb->base.width,
+-		   fb->base.height,
+-		   fb->base.depth,
+-		   fb->base.bits_per_pixel,
+-		   fb->base.modifier[0],
+-		   atomic_read(&fb->base.refcount.refcount));
+-	describe_obj(m, fb->obj);
+-	seq_putc(m, '\n');
++		seq_printf(m, "fbcon size: %d x %d, depth %d, %d bpp, modifier 0x%llx, refcount %d, obj ",
++			   fb->base.width,
++			   fb->base.height,
++			   fb->base.depth,
++			   fb->base.bits_per_pixel,
++			   fb->base.modifier[0],
++			   atomic_read(&fb->base.refcount.refcount));
++		describe_obj(m, fb->obj);
++		seq_putc(m, '\n');
++	}
+ #endif
+ 
+ 	mutex_lock(&dev->mode_config.fb_lock);
+--- a/drivers/gpu/drm/i915/intel_dp_mst.c
++++ b/drivers/gpu/drm/i915/intel_dp_mst.c
+@@ -414,7 +414,10 @@ static void intel_connector_add_to_fbdev
+ {
+ #ifdef CONFIG_DRM_FBDEV_EMULATION
+ 	struct drm_i915_private *dev_priv = to_i915(connector->base.dev);
+-	drm_fb_helper_add_one_connector(&dev_priv->fbdev->helper, &connector->base);
++
++	if (dev_priv->fbdev)
++		drm_fb_helper_add_one_connector(&dev_priv->fbdev->helper,
++						&connector->base);
+ #endif
+ }
+ 
+@@ -422,7 +425,10 @@ static void intel_connector_remove_from_
+ {
+ #ifdef CONFIG_DRM_FBDEV_EMULATION
+ 	struct drm_i915_private *dev_priv = to_i915(connector->base.dev);
+-	drm_fb_helper_remove_one_connector(&dev_priv->fbdev->helper, &connector->base);
++
++	if (dev_priv->fbdev)
++		drm_fb_helper_remove_one_connector(&dev_priv->fbdev->helper,
++						   &connector->base);
+ #endif
+ }
+ 
+--- a/drivers/gpu/drm/i915/intel_fbdev.c
++++ b/drivers/gpu/drm/i915/intel_fbdev.c
+@@ -526,8 +526,10 @@ static void intel_fbdev_destroy(struct d
+ 
+ 	drm_fb_helper_fini(&ifbdev->helper);
+ 
+-	drm_framebuffer_unregister_private(&ifbdev->fb->base);
+-	drm_framebuffer_remove(&ifbdev->fb->base);
++	if (ifbdev->fb) {
++		drm_framebuffer_unregister_private(&ifbdev->fb->base);
++		drm_framebuffer_remove(&ifbdev->fb->base);
++	}
+ }
+ 
+ /*
