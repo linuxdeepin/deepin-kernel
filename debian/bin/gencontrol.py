@@ -520,7 +520,7 @@ class Gencontrol(Base):
             'source_upstream': self.version.upstream,
             'source_package': self.changelog[0].source,
             'abiname': self.abiname_version + self.abiname_part,
-	    'distributor': 'deepin',
+            'distributor': 'deepin',
         }
         self.config['version', ] = {'source': self.version.complete,
                                     'upstream': self.version.linux_upstream,
