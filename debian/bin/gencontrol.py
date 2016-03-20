@@ -16,7 +16,6 @@ from debian_linux.debian import *
 from debian_linux.gencontrol import Gencontrol as Base
 from debian_linux.utils import Templates, read_control
 
-
 class Gencontrol(Base):
     config_schema = {
         'abi': {
@@ -63,6 +62,10 @@ class Gencontrol(Base):
         for src, dst, optional in names:
             if src in data or not optional:
                 makeflags[dst] = data[src]
+
+    def _substitute_file(self, template, vars, target, append=False):
+        with codecs.open(target, 'a' if append else 'w', 'utf-8') as f:
+            f.write(self.substitute(self.templates[template], vars))
 
     def do_main_setup(self, vars, makeflags, extra):
         super(Gencontrol, self).do_main_setup(vars, makeflags, extra)
@@ -453,25 +456,21 @@ class Gencontrol(Base):
 
         # Substitute kernel version etc. into maintainer scripts,
         # translations and lintian overrides
-        def substitute_file(template, target, append=False):
-            with codecs.open(target, 'a' if append else 'w',
-                             'utf-8') as f:
-                f.write(self.substitute(self.templates[template], vars))
-        substitute_file('headers.postinst',
-                        'debian/linux-headers-%s%s.postinst' %
-                        (vars['abiname'], vars['localversion']))
+        self._substitute_file('headers.postinst', vars,
+                              'debian/linux-headers-%s%s.postinst' %
+                              (vars['abiname'], vars['localversion']))
         for name in ['postinst', 'postrm', 'preinst', 'prerm', 'templates']:
-            substitute_file('image.%s' % name,
-                            'debian/linux-image-%s%s.%s' %
-                            (vars['abiname'], vars['localversion'], name))
+            self._substitute_file('image.%s' % name, vars,
+                                  'debian/linux-image-%s%s.%s' %
+                                  (vars['abiname'], vars['localversion'], name))
         for path in glob.glob('debian/templates/po/*.po'):
-            substitute_file('po/' + os.path.basename(path),
-                            'debian/po/' + os.path.basename(path),
-                            append=True)
+            self._substitute_file('po/' + os.path.basename(path), vars,
+                                  'debian/po/' + os.path.basename(path),
+                                  append=True)
         if build_debug:
-            substitute_file('image-dbg.lintian-override',
-                            'debian/linux-image-%s%s-dbg.lintian-overrides' %
-                            (vars['abiname'], vars['localversion']))
+            self._substitute_file('image-dbg.lintian-override', vars,
+                                  'debian/linux-image-%s%s-dbg.lintian-overrides' %
+                                  (vars['abiname'], vars['localversion']))
 
     def merge_packages(self, packages, new, arch):
         for new_package in new:
