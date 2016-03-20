@@ -71,6 +71,18 @@ endif
 binary-indep: install-source
 binary-indep: install-support
 
+ifneq ($(DO_TOOLS),False)
+  build-arch-arch: $(STAMPS_DIR)/build-tools
+  binary-arch-arch: install-kbuild install-usbip install-liblockdep install-cpupower
+  ifneq ($(filter alpha amd64 arm64 armel armhf hppa i386 mips mips64 mips64el mipsel powerpc powerpcspe ppc64 ppc64el s390 s390x sh4 sparc sparc64,$(DEB_BUILD_ARCH)),)
+    binary-arch-arch: install-perf
+  endif
+  ifneq ($(filter i386 amd64 x32,$(DEB_BUILD_ARCH)),)
+    binary-arch-arch: install-hyperv-daemons
+  endif
+  binary-indep: install-lockdep
+endif
+
 build-arch-flavour: $(STAMPS_DIR)/build_$(ARCH)_$(FEATURESET)_$(FLAVOUR)
 
 setup-arch-flavour: $(STAMPS_DIR)/setup_$(ARCH)_$(FEATURESET)_$(FLAVOUR)
@@ -466,5 +478,175 @@ install-source: $(BUILD_DIR)/$(SOURCE_PACKAGE_NAME)-source-$(UPSTREAMVERSION).ta
 # data.tar.gz!) makes dpkg and dak happy, but is incomaptible with
 # other things (#725492).  So use the fastest real gzip mode.
 	+$(MAKE_SELF) install-base BUILDDEB_ARGS='-Zgzip -z1'
+
+define submake
++mkdir -p $(BUILD_DIR)/$(1) && $(MAKE_CLEAN) -C $(BUILD_DIR)/$(1) -f $(CURDIR)/debian/rules.d/$(1)/Makefile top_srcdir=$(CURDIR) top_rulesdir=$(CURDIR)/debian/rules.d OUTDIR=$(1)
+endef
+
+$(STAMPS_DIR)/build-tools:
+	$(call submake,.)
+	@$(stamp)
+
+install-kbuild: PACKAGE_NAME = linux-kbuild-$(VERSION)
+install-kbuild: DH_OPTIONS = -p$(PACKAGE_NAME)
+install-kbuild: PREFIX_DIR = /usr/lib/$(PACKAGE_NAME)
+install-kbuild: DIR = $(CURDIR)/debian/$(PACKAGE_NAME)
+install-kbuild: $(STAMPS_DIR)/build
+	dh_testdir
+	dh_testroot
+	dh_prep
+	$(call submake,scripts) install DESTDIR=$(DIR) prefix=$(PREFIX_DIR)
+	dh_link $(PREFIX_DIR) /usr/src/$(PACKAGE_NAME)
+	dh_installchangelogs
+	dh_installdocs
+	dh_strip
+	dh_compress
+	dh_fixperms
+	dh_installdeb
+	dh_shlibdeps
+	dh_gencontrol
+	dh_md5sums
+	dh_builddeb
+
+install-cpupower: DH_OPTIONS = -plinux-cpupower -plibcpupower0 -plibcpupower-dev
+install-cpupower: DIR = $(CURDIR)/debian/cpupower-tmp
+install-cpupower: $(STAMPS_DIR)/build
+	dh_testdir
+	dh_testroot
+	dh_prep
+	$(call submake,tools/power/cpupower) install DESTDIR=$(DIR)
+	dh_install --sourcedir=$(DIR)
+	dh_installchangelogs
+	dh_installdocs
+	dh_strip
+	dh_compress
+	dh_fixperms
+	dh_makeshlibs
+	dh_installdeb
+	dh_shlibdeps
+	dh_gencontrol
+	dh_md5sums
+	dh_builddeb
+
+install-perf: PACKAGE_NAME = linux-perf-$(VERSION)
+install-perf: DH_OPTIONS = -p$(PACKAGE_NAME)
+install-perf: DIR = $(CURDIR)/debian/$(PACKAGE_NAME)
+install-perf: $(STAMPS_DIR)/build
+	dh_testdir
+	dh_testroot
+	dh_prep
+	$(call submake,tools/perf) install DESTDIR=$(DIR)
+	dh_perl /usr/share/perf_$(VERSION)-core/scripts/perl/Perf-Trace-Util/lib/
+	dh_python2 /usr/share/perf_$(VERSION)-core/scripts/python/Perf-Trace-Util/lib/
+	dh_installchangelogs
+	dh_installdocs
+	dh_lintian
+	dh_strip
+	dh_compress
+	dh_fixperms
+	dh_installdeb
+	dh_shlibdeps
+	dh_gencontrol
+	dh_md5sums
+	dh_builddeb
+
+install-usbip: DH_OPTIONS = -plibusbip-dev -pusbip
+install-usbip: DIR = $(CURDIR)/debian/usbip-tmp
+install-usbip: override VERSION := $(shell sed -ne 's,^#define PACKAGE_VERSION "\(.*\)"$$,\1,p' $(BUILD_DIR)/tools/usb/usbip/config.h)
+install-usbip: $(STAMPS_DIR)/build
+	dh_testdir
+	dh_testroot
+	dh_prep
+	$(call submake,tools/usb/usbip) install DESTDIR=$(DIR)
+	dh_install --sourcedir=$(DIR)
+	dh_installchangelogs
+	dh_installdocs
+	dh_lintian
+	dh_strip
+	dh_compress
+	dh_fixperms
+	dh_installdeb
+	dh_shlibdeps
+	test -n "$(VERSION)" -a -n "$(DEB_VERSION)"
+	dh_gencontrol -- -v$(VERSION)+$(DEB_VERSION)
+	dh_md5sums
+	dh_builddeb
+
+install-hyperv-daemons: PACKAGE_NAME = hyperv-daemons
+install-hyperv-daemons: DH_OPTIONS = -p$(PACKAGE_NAME)
+install-hyperv-daemons: DIR = $(CURDIR)/debian/$(PACKAGE_NAME)
+install-hyperv-daemons: $(STAMPS_DIR)/build
+	dh_testdir
+	dh_testroot
+	dh_prep
+	$(call submake,tools/hv) install DESTDIR=$(DIR)
+	dh_install
+	for service in fcopy kvp vss; do \
+		install -D -m755 debian/hyperv-daemons.hv-$$service-daemon.init \
+			$(DIR)/etc/init.d/hyperv-daemons.hv-$$service-daemon \
+			|| break; \
+	done
+	dh_installchangelogs
+	dh_installdocs
+	dh_systemd_enable
+	for service in fcopy kvp vss; do \
+		dh_installinit --name hyperv-daemons.hv-$$service-daemon \
+			--onlyscripts \
+			|| break; \
+	done
+	dh_systemd_start
+	dh_lintian
+	dh_strip
+	dh_compress
+	dh_fixperms
+	dh_installdeb
+	dh_shlibdeps
+	dh_gencontrol
+	dh_md5sums
+	dh_builddeb
+
+install-liblockdep: DH_OPTIONS = -pliblockdep$(VERSION) -pliblockdep-dev
+install-liblockdep: DIR = $(CURDIR)/debian/liblockdep-tmp
+install-liblockdep: $(STAMPS_DIR)/build
+	dh_testdir
+	dh_testroot
+	dh_prep
+	$(call submake,tools/lib/lockdep) install DESTDIR=$(DIR)
+	env -u DH_OPTIONS dh_install -pliblockdep$(VERSION) --sourcedir=$(DIR) \
+		'usr/lib/*/liblockdep.so.*'
+	dh_install --sourcedir=$(DIR)
+	dh_installchangelogs
+	dh_installdocs
+	dh_strip
+	dh_compress
+	dh_fixperms
+	env -u DH_OPTIONS dh_makeshlibs -pliblockdep$(VERSION) \
+		liblockdep$(VERSION)
+	dh_installdeb
+	dh_shlibdeps
+	dh_gencontrol
+	dh_md5sums
+	dh_builddeb
+
+install-lockdep: PACKAGE_NAME = lockdep
+install-lockdep: DH_OPTIONS = -p$(PACKAGE_NAME)
+install-lockdep: DIR = $(CURDIR)/debian/$(PACKAGE_NAME)
+install-lockdep:
+	dh_testdir
+	dh_testroot
+	dh_prep
+	dh_installdirs
+# Upstream lockdep preload script is not suitable for installation
+	sed 's/@VERSION@/$(VERSION)/' debian/rules.d/tools/lib/lockdep/lockdep.in \
+		> $(DIR)/usr/bin/lockdep
+	chmod 755 $(DIR)/usr/bin/lockdep
+	dh_installchangelogs
+	dh_installdocs
+	dh_compress
+	dh_fixperms
+	dh_installdeb
+	dh_gencontrol
+	dh_md5sums
+	dh_builddeb
 
 # vim: filetype=make

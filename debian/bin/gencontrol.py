@@ -46,7 +46,7 @@ class Gencontrol(Base):
             'headers-all': config.SchemaItemBoolean(),
             'installer': config.SchemaItemBoolean(),
             'libc-dev': config.SchemaItemBoolean(),
-
+            'tools': config.SchemaItemBoolean(),
         }
     }
 
@@ -118,6 +118,8 @@ class Gencontrol(Base):
         makeflags['ALL_TRIPLETS'] = ' '.join(triplet_enabled)
         if not self.config.merge('packages').get('docs', True):
             makeflags['DO_DOCS'] = False
+        if not self.config.merge('packages').get('tools', True):
+            makeflags['DO_TOOLS'] = False
         super(Gencontrol, self).do_main_makefile(makefile, makeflags, extra)
 
         # linux-source-$UPSTREAMVERSION will contain all kconfig files
@@ -127,6 +129,12 @@ class Gencontrol(Base):
         packages.extend(self.process_packages(self.templates["control.main"], self.vars))
         if self.config.merge('packages').get('docs', True):
             packages.extend(self.process_packages(self.templates["control.docs"], self.vars))
+        if self.config.merge('packages').get('tools', True):
+            packages.extend(self.process_packages(self.templates["control.tools"], self.vars))
+
+        self._substitute_file('lintian-overrides.perf', self.vars,
+                              'debian/linux-perf-%s.lintian-overrides' %
+                              self.vars['version'])
 
     arch_makeflags = (
         ('kernel-arch', 'KERNEL_ARCH', False),
@@ -169,6 +177,9 @@ class Gencontrol(Base):
 
 
         self.merge_packages(packages, packages_headers_arch, arch)
+
+        cmds_build_arch = ["$(MAKE) -f debian/rules.real build-arch-arch %s" % makeflags]
+        makefile.add('build-arch_%s_real' % arch, cmds=cmds_build_arch)
 
         cmds_binary_arch = ["$(MAKE) -f debian/rules.real binary-arch-arch %s" % makeflags]
         makefile.add('binary-arch_%s_real' % arch, cmds=cmds_binary_arch)
