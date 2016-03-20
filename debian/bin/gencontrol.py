@@ -448,8 +448,8 @@ class Gencontrol(Base):
             cmds_binary_arch.append(
                 "$(MAKE) -f debian/rules.real install-dummy DH_OPTIONS='%s' %s"
                 % (' '.join("-p%s" % i['Package'] for i in packages_dummy), makeflags))
-        cmds_build = ["$(MAKE) -f debian/rules.real build-arch %s" % makeflags]
-        cmds_setup = ["$(MAKE) -f debian/rules.real setup-flavour %s" % makeflags]
+        cmds_build = ["$(MAKE) -f debian/rules.real build-arch-flavour %s" % makeflags]
+        cmds_setup = ["$(MAKE) -f debian/rules.real setup-arch-flavour %s" % makeflags]
         makefile.add('binary-arch_%s_%s_%s_real' % (arch, featureset, flavour), cmds=cmds_binary_arch)
         makefile.add('build-arch_%s_%s_%s_real' % (arch, featureset, flavour), cmds=cmds_build)
         makefile.add('setup_%s_%s_%s_real' % (arch, featureset, flavour), cmds=cmds_setup)
