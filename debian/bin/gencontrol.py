@@ -51,6 +51,13 @@ class gencontrol(Gencontrol):
         main = self.templates["control.main"]
         packages.extend(self.process_packages(main, self.vars))
 
+        def substitute_file(template, target):
+            with codecs.open(target, 'w', 'utf-8') as f:
+                f.write(self.substitute(self.templates[template], self.vars))
+        substitute_file('lintian-overrides.perf',
+                        'debian/linux-perf-%s.lintian-overrides' %
+                        self.vars['version'])
+
     def process_changelog(self):
         changelog = Changelog(version = VersionLinux)
         self.version = version = changelog[0].version
