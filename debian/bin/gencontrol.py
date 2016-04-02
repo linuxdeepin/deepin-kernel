@@ -16,7 +16,6 @@ from debian_linux.debian import *
 from debian_linux.gencontrol import Gencontrol as Base
 from debian_linux.utils import Templates, read_control
 
-
 class Gencontrol(Base):
     config_schema = {
         'abi': {
@@ -47,7 +46,7 @@ class Gencontrol(Base):
             'headers-all': config.SchemaItemBoolean(),
             'installer': config.SchemaItemBoolean(),
             'libc-dev': config.SchemaItemBoolean(),
-
+            'tools': config.SchemaItemBoolean(),
         }
     }
 
@@ -63,6 +62,10 @@ class Gencontrol(Base):
         for src, dst, optional in names:
             if src in data or not optional:
                 makeflags[dst] = data[src]
+
+    def _substitute_file(self, template, vars, target, append=False):
+        with codecs.open(target, 'a' if append else 'w', 'utf-8') as f:
+            f.write(self.substitute(self.templates[template], vars))
 
     def do_main_setup(self, vars, makeflags, extra):
         super(Gencontrol, self).do_main_setup(vars, makeflags, extra)
@@ -115,6 +118,8 @@ class Gencontrol(Base):
         makeflags['ALL_TRIPLETS'] = ' '.join(triplet_enabled)
         if not self.config.merge('packages').get('docs', True):
             makeflags['DO_DOCS'] = False
+        if not self.config.merge('packages').get('tools', True):
+            makeflags['DO_TOOLS'] = False
         super(Gencontrol, self).do_main_makefile(makefile, makeflags, extra)
 
         # linux-source-$UPSTREAMVERSION will contain all kconfig files
@@ -124,6 +129,12 @@ class Gencontrol(Base):
         packages.extend(self.process_packages(self.templates["control.main"], self.vars))
         if self.config.merge('packages').get('docs', True):
             packages.extend(self.process_packages(self.templates["control.docs"], self.vars))
+        if self.config.merge('packages').get('tools', True):
+            packages.extend(self.process_packages(self.templates["control.tools"], self.vars))
+
+        self._substitute_file('lintian-overrides.perf', self.vars,
+                              'debian/linux-perf-%s.lintian-overrides' %
+                              self.vars['version'])
 
     arch_makeflags = (
         ('kernel-arch', 'KERNEL_ARCH', False),
@@ -166,6 +177,9 @@ class Gencontrol(Base):
 
 
         self.merge_packages(packages, packages_headers_arch, arch)
+
+        cmds_build_arch = ["$(MAKE) -f debian/rules.real build-arch-arch %s" % makeflags]
+        makefile.add('build-arch_%s_real' % arch, cmds=cmds_build_arch)
 
         cmds_binary_arch = ["$(MAKE) -f debian/rules.real binary-arch-arch %s" % makeflags]
         makefile.add('binary-arch_%s_real' % arch, cmds=cmds_binary_arch)
@@ -445,33 +459,29 @@ class Gencontrol(Base):
             cmds_binary_arch.append(
                 "$(MAKE) -f debian/rules.real install-dummy DH_OPTIONS='%s' %s"
                 % (' '.join("-p%s" % i['Package'] for i in packages_dummy), makeflags))
-        cmds_build = ["$(MAKE) -f debian/rules.real build-arch %s" % makeflags]
-        cmds_setup = ["$(MAKE) -f debian/rules.real setup-flavour %s" % makeflags]
+        cmds_build = ["$(MAKE) -f debian/rules.real build-arch-flavour %s" % makeflags]
+        cmds_setup = ["$(MAKE) -f debian/rules.real setup-arch-flavour %s" % makeflags]
         makefile.add('binary-arch_%s_%s_%s_real' % (arch, featureset, flavour), cmds=cmds_binary_arch)
         makefile.add('build-arch_%s_%s_%s_real' % (arch, featureset, flavour), cmds=cmds_build)
         makefile.add('setup_%s_%s_%s_real' % (arch, featureset, flavour), cmds=cmds_setup)
 
         # Substitute kernel version etc. into maintainer scripts,
         # translations and lintian overrides
-        def substitute_file(template, target, append=False):
-            with codecs.open(target, 'a' if append else 'w',
-                             'utf-8') as f:
-                f.write(self.substitute(self.templates[template], vars))
-        substitute_file('headers.postinst',
-                        'debian/linux-headers-%s%s.postinst' %
-                        (vars['abiname'], vars['localversion']))
+        self._substitute_file('headers.postinst', vars,
+                              'debian/linux-headers-%s%s.postinst' %
+                              (vars['abiname'], vars['localversion']))
         for name in ['postinst', 'postrm', 'preinst', 'prerm', 'templates']:
-            substitute_file('image.%s' % name,
-                            'debian/linux-image-%s%s.%s' %
-                            (vars['abiname'], vars['localversion'], name))
+            self._substitute_file('image.%s' % name, vars,
+                                  'debian/linux-image-%s%s.%s' %
+                                  (vars['abiname'], vars['localversion'], name))
         for path in glob.glob('debian/templates/po/*.po'):
-            substitute_file('po/' + os.path.basename(path),
-                            'debian/po/' + os.path.basename(path),
-                            append=True)
+            self._substitute_file('po/' + os.path.basename(path), vars,
+                                  'debian/po/' + os.path.basename(path),
+                                  append=True)
         if build_debug:
-            substitute_file('image-dbg.lintian-override',
-                            'debian/linux-image-%s%s-dbg.lintian-overrides' %
-                            (vars['abiname'], vars['localversion']))
+            self._substitute_file('image-dbg.lintian-override', vars,
+                                  'debian/linux-image-%s%s-dbg.lintian-overrides' %
+                                  (vars['abiname'], vars['localversion']))
 
     def merge_packages(self, packages, new, arch):
         for new_package in new:
