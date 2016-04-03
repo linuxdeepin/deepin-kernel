@@ -80,6 +80,7 @@ class Gencontrol(object):
     def __init__(self, config, templates, version=Version):
         self.config, self.templates = config, templates
         self.changelog = Changelog(version=version)
+        self.vars = {}
 
     def __call__(self):
         packages = PackagesList()
@@ -94,7 +95,7 @@ class Gencontrol(object):
     def do_source(self, packages):
         source = self.templates["control.source"][0]
         source['Source'] = self.changelog[0].source
-        packages['source'] = self.process_package(source)
+        packages['source'] = self.process_package(source, self.vars)
 
     def do_main(self, packages, makefile):
         config_entry = self.config['base', ]
