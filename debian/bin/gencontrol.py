@@ -23,6 +23,7 @@ class Gencontrol(Base):
         },
         'build': {
             'debug-info': config.SchemaItemBoolean(),
+            'signed-modules': config.SchemaItemBoolean(),
             'vdso': config.SchemaItemBoolean(),
         },
         'description': {

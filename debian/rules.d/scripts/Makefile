@@ -1,8 +1,10 @@
 PROGS = \
 	conmakehash \
+	extract-cert \
 	kallsyms \
 	pnmtologo \
-	recordmcount
+	recordmcount \
+	sign-file
 
 DATA = \
 	Kbuild.include \
@@ -37,3 +39,4 @@ SUBDIRS = \
 include $(top_rulesdir)/Makefile.inc
 
 CPPFLAGS += -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64
+extract-cert sign-file: LDLIBS += -lcrypto
