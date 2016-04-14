@@ -28,7 +28,7 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
 
 --- a/Documentation/kernel-parameters.txt
 +++ b/Documentation/kernel-parameters.txt
-@@ -3580,6 +3580,10 @@ bytes respectively. Such letter suffixes
+@@ -3793,6 +3793,10 @@ bytes respectively. Such letter suffixes
  
  	switches=	[HW,M68k]
  
@@ -41,7 +41,7 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  			on older distributions. When this option is enabled
 --- a/arch/x86/Kconfig
 +++ b/arch/x86/Kconfig
-@@ -2547,6 +2547,14 @@ config X86_X32
+@@ -2690,6 +2690,14 @@ config X86_X32
  	  elf32_x86_64 support enabled to compile a kernel with this
  	  option set.
  
@@ -82,7 +82,7 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  # error "The following code assumes __USER32_DS == __USER_DS"
 --- a/arch/x86/entry/entry_64.S
 +++ b/arch/x86/entry/entry_64.S
-@@ -178,8 +178,12 @@ entry_SYSCALL_64_fastpath:
+@@ -193,8 +193,12 @@ entry_SYSCALL_64_fastpath:
  #if __SYSCALL_MASK == ~0
  	cmpq	$__NR_syscall_max, %rax
  #else
@@ -97,24 +97,9 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  #endif
  	ja	1f				/* return -ENOSYS (already in pt_regs->ax) */
  	movq	%r10, %rcx
-@@ -257,8 +261,12 @@ tracesys_phase2:
- #if __SYSCALL_MASK == ~0
- 	cmpq	$__NR_syscall_max, %rax
- #else
--	andl	$__SYSCALL_MASK, %eax
--	cmpl	$__NR_syscall_max, %eax
-+.global system_call_trace_compare
-+.global system_call_trace_compare_end
-+system_call_trace_compare:
-+	cmpq	$511, %rax			/* x32 syscalls start at 512 */
-+	.byte	P6_NOP4
-+system_call_trace_compare_end:
- #endif
- 	ja	1f				/* return -ENOSYS (already in pt_regs->ax) */
- 	movq	%r10, %rcx			/* fixup for C */
-@@ -410,6 +418,16 @@ opportunistic_sysret_failed:
+@@ -324,6 +328,16 @@ opportunistic_sysret_failed:
+ 	jmp	restore_c_regs_and_iret
  END(entry_SYSCALL_64)
- 
  
 +#if __SYSCALL_MASK != ~0
 +	/* This replaces the usual comparisons if syscall.x32 is set */
@@ -126,9 +111,9 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
 +system_call_mask_compare_end:
 +#endif
 +
- 	.macro FORK_LIKE func
- ENTRY(stub_\func)
- 	SAVE_EXTRA_REGS 8
+ ENTRY(stub_ptregs_64)
+ 	/*
+ 	 * Syscalls marked as needing ptregs land here.
 --- a/arch/x86/entry/syscall_64.c
 +++ b/arch/x86/entry/syscall_64.c
 @@ -3,8 +3,14 @@
@@ -144,9 +129,9 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  #include <asm/syscall.h>
 +#include <asm/alternative.h>
  
- #define __SYSCALL_COMMON(nr, sym, compat) __SYSCALL_64(nr, sym, compat)
- 
-@@ -30,3 +36,40 @@ asmlinkage const sys_call_ptr_t sys_call
+ #define __SYSCALL_64_QUAL_(sym) sym
+ #define __SYSCALL_64_QUAL_ptregs(sym) ptregs_##sym
+@@ -25,3 +31,36 @@ asmlinkage const sys_call_ptr_t sys_call
  	[0 ... __NR_syscall_max] = &sys_ni_syscall,
  #include <asm/syscalls_64.h>
  };
@@ -159,19 +144,15 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
 +module_param_named(x32, x32_enabled, bool, 0444);
 +
 +extern char system_call_fast_compare_end[], system_call_fast_compare[],
-+	system_call_trace_compare_end[], system_call_trace_compare[],
 +	system_call_mask_compare_end[], system_call_mask_compare[];
 +
 +static int __init x32_enable(void)
 +{
 +	BUG_ON(system_call_fast_compare_end - system_call_fast_compare != 10);
-+	BUG_ON(system_call_trace_compare_end - system_call_trace_compare != 10);
 +	BUG_ON(system_call_mask_compare_end - system_call_mask_compare != 10);
 +
 +	if (x32_enabled) {
 +		text_poke_early(system_call_fast_compare,
-+				system_call_mask_compare, 10);
-+		text_poke_early(system_call_trace_compare,
 +				system_call_mask_compare, 10);
 +#ifdef CONFIG_X86_X32_DISABLED
 +		pr_info("Enabled x32 syscalls\n");
@@ -187,3 +168,35 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
 +late_initcall(x32_enable);
 +
 +#endif
+--- a/arch/x86/entry/common.c
++++ b/arch/x86/entry/common.c
+@@ -334,6 +334,7 @@ __visible void do_syscall_64(struct pt_r
+ {
+ 	struct thread_info *ti = pt_regs_to_thread_info(regs);
+ 	unsigned long nr = regs->orig_ax;
++	unsigned int syscall_mask, nr_syscalls_enabled;
+ 
+ 	enter_from_user_mode();
+ 	local_irq_enable();
+@@ -346,8 +347,19 @@ __visible void do_syscall_64(struct pt_r
+ 	 * table.  The only functional difference is the x32 bit in
+ 	 * regs->orig_ax, which changes the behavior of some syscalls.
+ 	 */
+-	if (likely((nr & __SYSCALL_MASK) < NR_syscalls)) {
+-		regs->ax = sys_call_table[nr & __SYSCALL_MASK](
++	if (__SYSCALL_MASK == ~0U || x32_enabled) {
++		syscall_mask = __SYSCALL_MASK;
++		nr_syscalls_enabled = NR_syscalls;
++	} else {
++		/*
++		 * x32 syscalls present but not enabled.  Don't mask out
++		 * the x32 flag and don't enable any x32-specific calls.
++		 */
++		syscall_mask = ~0U;
++		nr_syscalls_enabled = 512;
++	}
++	if (likely((nr & syscall_mask) < nr_syscalls_enabled)) {
++		regs->ax = sys_call_table[nr & syscall_mask](
+ 			regs->di, regs->si, regs->dx,
+ 			regs->r10, regs->r8, regs->r9);
+ 	}
