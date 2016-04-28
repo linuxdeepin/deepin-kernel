@@ -70,3 +70,5 @@ endif
 	mv $(DESTDIR)/etc/bash_completion.d \
 		$(DESTDIR)/usr/share/bash-completion/completions
 	rmdir --ignore-fail-on-non-empty $(DESTDIR)/etc
+# Check for unversioned files that are likely to result in file conflicts
+	! find $(DESTDIR) -name '*perf*' \! -path '*[_-]$(VERSION)*' | grep .
