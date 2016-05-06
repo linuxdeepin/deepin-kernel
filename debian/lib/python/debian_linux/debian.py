@@ -21,15 +21,19 @@ class Changelog(list):
 (?P<distribution>
     [-+0-9a-zA-Z.]+
 )
-\;
+\;\s+urgency=
+(?P<urgency>
+    \w+
+)
 """
     _re = re.compile(_rules, re.X)
 
     class Entry(object):
-        __slot__ = 'distribution', 'source', 'version'
+        __slot__ = 'distribution', 'source', 'version', 'urgency'
 
-        def __init__(self, distribution, source, version):
-            self.distribution, self.source, self.version = distribution, source, version
+        def __init__(self, distribution, source, version, urgency):
+            self.distribution, self.source, self.version, self.urgency = \
+                distribution, source, version, urgency
 
     def __init__(self, dir='', version=None):
         if version is None:
@@ -48,7 +52,9 @@ class Changelog(list):
                 if not len(self):
                     raise
                 v = Version(match.group('version'))
-            self.append(self.Entry(match.group('distribution'), match.group('source'), v))
+            self.append(self.Entry(match.group('distribution'),
+                                   match.group('source'), v,
+                                   match.group('urgency')))
 
 
 class Version(object):
