@@ -47,7 +47,9 @@ ifdef KERNEL_ARCH_PERF
 # set.  We must define it even when building to avoid a rebuild when we
 # run 'make install'.
 	+$(MAKE_PERF) -C $(top_srcdir)/tools/perf -f Makefile.perf all VERSION=$(VERSION) DESTDIR=dummy
+ifeq (,$(filter nodoc,$(DEB_BUILD_PROFILES)))
 	+$(MAKE_PERF) -C $(top_srcdir)/tools/perf/Documentation man VERSION=$(VERSION)
+endif
 # Check that perf didn't get linked against libbfd
 	type ldd
 	! ldd $(CURDIR)/perf | grep '\blibbfd'

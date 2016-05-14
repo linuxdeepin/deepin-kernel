@@ -16,6 +16,9 @@ all:
 
 install:
 	$(MAKE) install
+ifneq (,$(filter nodoc,$(DEB_BUILD_PROFILES)))
+	rm -rf $(DESTDIR)/usr/share/man
+endif
 
 clean:
 	rm -rf $(addprefix $(srcdir)/,autom4te.cache aclocal.m4 compile config.guess config.h.in config.sub configure depcomp install-sh ltmain.sh missing)
