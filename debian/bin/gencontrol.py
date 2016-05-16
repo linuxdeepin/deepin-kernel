@@ -175,6 +175,8 @@ class Gencontrol(Base):
         else:
             makeflags['DO_LIBC'] = False
 
+        if not self.config.merge('packages').get('tools', True):
+            makeflags['DO_TOOLS'] = False
 
 
         self.merge_packages(packages, packages_headers_arch, arch)
