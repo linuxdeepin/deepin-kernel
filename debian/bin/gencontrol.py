@@ -192,6 +192,11 @@ class Gencontrol(Base):
             installer_def_dir = 'debian/installer'
             installer_arch_dir = os.path.join(installer_def_dir, arch)
             if os.path.isdir(installer_arch_dir):
+                # If we're going to build signed udebs later, don't actually
+                # generate udebs.  Just test that we *can* build, so we find
+                # configuration errors before building linux-signed.
+                test_build = self.config.merge('build', arch).get('signed-modules', False)
+
                 kw_env = os.environ.copy()
                 kw_env['KW_DEFCONFIG_DIR'] = installer_def_dir
                 kw_env['KW_CONFIG_DIR'] = installer_arch_dir
@@ -212,7 +217,8 @@ class Gencontrol(Base):
                 for package in udeb_packages:
                     package['Build-Profiles'] = '<!stage1>'
 
-                merge_packages(packages, udeb_packages, arch)
+                if not test_build:
+                    merge_packages(packages, udeb_packages, arch)
 
                 # These packages must be built after the per-flavour/
                 # per-featureset packages.  Also, this won't work
@@ -221,9 +227,10 @@ class Gencontrol(Base):
                     makefile.add(
                         'binary-arch_%s' % arch,
                         cmds=["$(MAKE) -f debian/rules.real install-udeb_%s %s "
-                              "PACKAGE_NAMES='%s'" %
+                              "PACKAGE_NAMES='%s' UDEB_UNSIGNED_TEST_BUILD=%s" %
                               (arch, makeflags,
-                               ' '.join(p['Package'] for p in udeb_packages))])
+                               ' '.join(p['Package'] for p in udeb_packages),
+                               test_build)])
 
     def do_featureset_setup(self, vars, makeflags, arch, featureset, extra):
         config_base = self.config.merge('base', arch, featureset)
