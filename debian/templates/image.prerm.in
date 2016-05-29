@@ -1,149 +1,44 @@
-#! /usr/bin/perl
-# 
-use strict;
-use warnings;
-use POSIX ();
-use Debconf::Client::ConfModule qw(:all);
-use FileHandle;
-version('2.0');
-my $capb=capb("backup");
+#!/bin/sh -e
 
-$|=1;
-# Predefined values:
-my $version         = "@abiname@@localversion@";
-my $kimage          = "@image-stem@";
-my $prerm_hook      = '';       #Normally we do not
-my $package_name    = "linux-image-$version";
+version=@abiname@@localversion@
+image_path=/boot/@image-stem@-$version
+package_name=linux-image-$version
 
-#known variables
-my $realimageloc    = "/boot/";
-my $CONF_LOC        = '/etc/kernel-img.conf';
+if [ "$1" != remove ]; then
+    exit 0
+fi
 
-# Variables used
-my $ret=0;
-my $seen='';
-my $answer='';
-my $running = '';
-
-# Ignore all invocations uxcept when called on to remove
-exit 0 unless ($ARGV[0] && $ARGV[0] =~ /remove/) ;
-
-if (-r "$CONF_LOC" && -f "$CONF_LOC"  ) {
-  if (open(CONF, "$CONF_LOC")) {
-    while (<CONF>) {
-      chomp;
-      s/\#.*$//g;
-      next if /^\s*$/;
-
-      $prerm_hook      = "$1"  if /prerm_hook\s*=\s*(\S+)/i;
-    }
-    close CONF;
-  }
-}
-
+. /usr/share/debconf/confmodule
 
 # Are we in a container?  Check for $container in pid 1's environment.
-sub in_container {
-  my $res = 0;
-  if (my $fh = new FileHandle('/proc/1/environ', 'r')) {
-    local $/ = "\0";
-    $res = grep(/^container=/, <$fh>);
-    close($fh);
-  }
-  return $res;
+in_container() {
+    grep -qz '^container=' /proc/1/environ
 }
-
-
-# Are we in in a chroot?  Compare root device and inode numbers with pid 1.
-sub in_chroot {
-  my @my_root_st = stat('/');
-  my @pid1_root_st = stat('/proc/1/root');
-
-  return @my_root_st && @pid1_root_st &&
-      ($my_root_st[0] != $pid1_root_st[0] || $my_root_st[1] != $pid1_root_st[1]);
-}
-
 
 # Check to see if we are trying to remove a running kernel.
-chop($running=`uname -r`);
-if (!in_container() && !in_chroot() && $running eq $version) {
-  # If we can ask debconf questions, ask whether that's intended
-  # and abort if not.
-  if (exists($ENV{'DEBIAN_FRONTEND'}) &&
-      $ENV{'DEBIAN_FRONTEND'} eq 'noninteractive') {
-    print STDERR "W: removing running kernel image.\n";
-  } else {
-    my $question = "${package_name}/prerm/removing-running-kernel-$version";
+if ! in_container && ! ischroot && [ "$(uname -r)" = $version ]; then
+    # If we can ask debconf questions, ask whether that's intended
+    # and abort if not.
+    if [ "$DEBIAN_FRONTEND" = noninteractive ]; then
+	echo >&2 "W: removing running kernel image."
+    else
+	question=${package_name}/prerm/removing-running-kernel-$version
+	db_fset $question seen false
+	db_subst $question running $version
+	db_input critical $question
+	db_go
+	db_get $question
+	if [ $RET = true ]; then
+	    echo >&2 "Aborting removal of running kernel image."
+	    exit 1
+	fi
+	echo >&2 "Ok, proceeding with removing running kernel image."
+    fi
+fi
 
-    ($ret,$seen) = fset ("$question", 'seen', 'false');
-    die "Error setting debconf flags in $question: $seen" if $ret;
+if [ -d /etc/kernel/prerm.d ]; then
+    DEB_MAINT_PARAMS="$*" run-parts --report --exit-on-error --arg=$version \
+	      --arg=$image_path /etc/kernel/prerm.d
+fi
 
-    $ret = subst("$question", 'running', "$running");
-    die "Error setting debconf substitutions in $question: $seen" if $ret;
-
-    ($ret,$seen) = input('critical', "$question");
-    if ($ret && $ret != 30 ) {
-      die "Error setting debconf question $question: $seen";
-    }
-
-    ($ret,$seen) = go ();
-    if ($ret && $ret != 30 ) {
-      die "Error asking debconf question $question: $seen";
-    }
-
-    ($ret,$answer) = get("$question");
-    die "Error retreiving answer for $question: $answer" if $ret;
-
-    if ($answer =~ /^(y|t)/i) {
-      print STDERR "Aborting removal of running kernel image.\n";
-      exit 1; #Operation not permitted
-    }
-    else {
-       print STDERR "Ok, proceeding with removing running kernel image.\n";
-    }
-  }
-}
-
-#Now, they have an alternate kernel which they are currently running
-
-chdir("/") or die "could not chdir to /:$!\n";
-
-sub system_failure_message {
-  if ($? < 0) {
-    return "$!";
-  } elsif (POSIX::WIFSIGNALED($?)) {
-    return sprintf('signal %d', POSIX::WTERMSIG($?));
-  } else {
-    return sprintf('exit code %d', POSIX::WEXITSTATUS($?));
-  }
-}
-
-sub run_hook {
-  my $type   = shift;
-  my $script = shift;
-
-  print STDERR "Running $script.\n";
-  if (system ("$script $version $realimageloc$kimage-$version")) {
-    die ("$script failed: " . system_failure_message());
-  }
-}
-
-my $options;
-for (@ARGV) {
-	s,','\\'',g;
-	$options .= " '$_'";
-}
-$ENV{'DEB_MAINT_PARAMS'}="$options";
-
-## Run user hook script here, if any
-if (-x "$prerm_hook") {
-  &run_hook("prerm", $prerm_hook);
-}
-if (-d "/etc/kernel/prerm.d") {
-  system ("run-parts --report --exit-on-error --arg=$version " . 
-          "--arg=$realimageloc$kimage-$version /etc/kernel/prerm.d") &&
-            die "Failed to process /etc/kernel/prerm.d";
-}
-
-exit 0;
-__END__
+exit 0
