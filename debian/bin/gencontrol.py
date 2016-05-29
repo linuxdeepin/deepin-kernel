@@ -13,7 +13,7 @@ import subprocess
 
 from debian_linux import config
 from debian_linux.debian import *
-from debian_linux.gencontrol import Gencontrol as Base
+from debian_linux.gencontrol import Gencontrol as Base, merge_packages
 from debian_linux.utils import Templates, read_control
 
 class Gencontrol(Base):
@@ -167,7 +167,7 @@ class Gencontrol(Base):
             makeflags['DO_TOOLS'] = False
 
 
-        self.merge_packages(packages, packages_headers_arch, arch)
+        merge_packages(packages, packages_headers_arch, arch)
 
         cmds_build_arch = ["$(MAKE) -f debian/rules.real build-arch-arch %s" % makeflags]
         makefile.add('build-arch_%s_real' % arch, cmds=cmds_build_arch)
@@ -212,7 +212,7 @@ class Gencontrol(Base):
                 for package in udeb_packages:
                     package['Build-Profiles'] = '<!stage1>'
 
-                self.merge_packages(packages, udeb_packages, arch)
+                merge_packages(packages, udeb_packages, arch)
 
                 # These packages must be built after the per-flavour/
                 # per-featureset packages.  Also, this won't work
@@ -233,7 +233,7 @@ class Gencontrol(Base):
         headers_featureset = self.templates["control.headers.featureset"]
         package_headers = self.process_package(headers_featureset[0], vars)
 
-        self.merge_packages(packages, (package_headers,), arch)
+        merge_packages(packages, (package_headers,), arch)
 
         cmds_binary_arch = ["$(MAKE) -f debian/rules.real binary-arch-featureset %s" % makeflags]
         makefile.add('binary-arch_%s_%s_real' % (arch, featureset), cmds=cmds_binary_arch)
@@ -388,7 +388,7 @@ class Gencontrol(Base):
             makeflags['DEBUG'] = True
             packages_own.extend(self.process_packages(self.templates['control.image-dbg'], vars))
 
-        self.merge_packages(packages, packages_own + packages_dummy, arch)
+        merge_packages(packages, packages_own + packages_dummy, arch)
 
         tests_control = self.process_package(
             self.templates['tests-control.main'][0], vars)
@@ -472,25 +472,6 @@ class Gencontrol(Base):
             self._substitute_file('image-dbg.lintian-override', vars,
                                   'debian/linux-image-%s%s-dbg.lintian-overrides' %
                                   (vars['abiname'], vars['localversion']))
-
-    def merge_packages(self, packages, new, arch):
-        for new_package in new:
-            name = new_package['Package']
-            if name in packages:
-                package = packages.get(name)
-                package['Architecture'].add(arch)
-
-                for field in 'Depends', 'Provides', 'Suggests', 'Recommends', 'Conflicts':
-                    if field in new_package:
-                        if field in package:
-                            v = package[field]
-                            v.extend(new_package[field])
-                        else:
-                            package[field] = new_package[field]
-
-            else:
-                new_package['Architecture'] = arch
-                packages.append(new_package)
 
     def process_changelog(self):
         act_upstream = self.changelog[0].version.upstream

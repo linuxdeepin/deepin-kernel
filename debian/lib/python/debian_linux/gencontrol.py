@@ -299,3 +299,22 @@ class Gencontrol(object):
             for key, value in entry.items():
                 f.write(u"%s: %s\n" % (key, value))
             f.write('\n')
+
+def merge_packages(packages, new, arch):
+    for new_package in new:
+        name = new_package['Package']
+        if name in packages:
+            package = packages.get(name)
+            package['Architecture'].add(arch)
+
+            for field in 'Depends', 'Provides', 'Suggests', 'Recommends', 'Conflicts':
+                if field in new_package:
+                    if field in package:
+                        v = package[field]
+                        v.extend(new_package[field])
+                    else:
+                        package[field] = new_package[field]
+
+        else:
+            new_package['Architecture'] = arch
+            packages.append(new_package)
