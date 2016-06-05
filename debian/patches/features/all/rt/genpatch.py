@@ -80,7 +80,7 @@ def main(source, version=None):
                 assert os.path.isdir(source_dir), 'tarball does not contain patches directory'
 
                 # Copy patch series
-                origin = 'https://www.kernel.org/pub/linux/kernel/projects/rt/%s/patches-%s.tar.xz' % (up_ver, version)
+                origin = 'https://www.kernel.org/pub/linux/kernel/projects/rt/%s/older/patches-%s.tar.xz' % (up_ver, version)
                 with open(os.path.join(source_dir, 'series'), 'r') as \
                         source_series_fh:
                     for line in source_series_fh:
