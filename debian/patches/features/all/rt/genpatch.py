@@ -63,8 +63,11 @@ def main(source_dir, version):
                         origin = 'https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=%s' % match.group(1)
                         add_patch(name, source_patch, origin)
         else:
+            match = re.match(r'^(\d+\.\d+)(?:\.\d+|-rc\d+)?-rt\d+$', version)
+            assert match, 'could not parse version string'
+            up_ver = match.group(1)
+
             # Copy patch series
-            up_ver = re.sub(r'(\d+\.\d+)(?:\.\d+)?-rt\d+$', r'\1', version)
             origin = 'https://www.kernel.org/pub/linux/kernel/projects/rt/%s/patches-%s.tar.xz' % (up_ver, version)
             with open(os.path.join(source_dir, 'series'), 'r') as \
                     source_series_fh:
