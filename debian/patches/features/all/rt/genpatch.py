@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 
 import errno, os, os.path, re, shutil, subprocess, sys
 
@@ -15,7 +15,7 @@ def main(source_dir, version):
                 name = line.strip()
                 if name != '' and name[0] != '#':
                     old_series.add(name)
-    except IOError, e:
+    except IOError as e:
         if e.errno != errno.ENOENT:
             raise
 
@@ -27,7 +27,7 @@ def main(source_dir, version):
             path = os.path.join(patch_dir, name)
             try:
                 os.unlink(path)
-            except OSError, e:
+            except OSError as e:
                 if e.errno != errno.ENOENT:
                     raise
             with open(path, 'w') as patch:
@@ -81,14 +81,14 @@ def main(source_dir, version):
         if name in old_series:
             old_series.remove(name)
         else:
-            print 'Added patch', os.path.join(patch_dir, name)
+            print('Added patch', os.path.join(patch_dir, name))
 
     for name in old_series:
-        print 'Obsoleted patch', os.path.join(patch_dir, name)
+        print('Obsoleted patch', os.path.join(patch_dir, name))
 
 if __name__ == '__main__':
     if len(sys.argv) != 3:
-        print >>sys.stderr, 'Usage: %s DIR RT-VERSION' % sys.argv[0]
-        print >>sys.stderr, 'DIR is either a git repo or quilt directory containing the given RT-VERSION.'
+        print('Usage: %s DIR RT-VERSION' % sys.argv[0], file=sys.stderr)
+        print('DIR is either a git repo or quilt directory containing the given RT-VERSION.', file=sys.stderr)
         sys.exit(2)
     main(sys.argv[1], sys.argv[2])
