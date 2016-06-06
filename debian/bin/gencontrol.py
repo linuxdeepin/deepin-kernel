@@ -442,8 +442,11 @@ class Gencontrol(Base):
         kconfig.extend(check_config("%s/%s/config" % (arch, featureset), False, arch, featureset))
         kconfig.extend(check_config("%s/%s/config.%s" % (arch, featureset, flavour), False, arch, featureset, flavour))
         makeflags['KCONFIG'] = ' '.join(kconfig)
+        makeflags['KCONFIG_OPTIONS'] = ''
         if build_debug:
-            makeflags['KCONFIG_OPTIONS'] = '-o DEBUG_INFO=y'
+            makeflags['KCONFIG_OPTIONS'] += ' -o DEBUG_INFO=y'
+        if config_entry_build.get('signed-modules'):
+            makeflags['KCONFIG_OPTIONS'] += ' -o MODULE_SIG=y'
 
         cmds_binary_arch = ["$(MAKE) -f debian/rules.real binary-arch-flavour %s" % makeflags]
         if packages_dummy:
