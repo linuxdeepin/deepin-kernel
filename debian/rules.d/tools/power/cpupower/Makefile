@@ -1,17 +1,17 @@
 include $(top_rulesdir)/Makefile.inc
 
-ifneq (,$(findstring nostrip,$(DEB_BUILD_OPTIONS)))
-	DEBUG = true
-endif
+MAKE_CPUPOWER := $(shell dpkg-buildflags --export=cmdline) $(MAKE) O=$(CURDIR) CPUFREQ_BENCH=false V=true mandir=/usr/share/man
+
+MAKE_CPUPOWER += DEBUG=$(if $(findstring nostrip,$(DEB_BUILD_OPTIONS)),true,)
 
 all:
-	$(shell dpkg-buildflags --export=cmdline) $(MAKE) -C $(top_srcdir)/tools/power/cpupower O=$(CURDIR) DEBUG=$(DEBUG) CPUFREQ_BENCH=false V=true
+	$(MAKE_CPUPOWER) -C $(top_srcdir)/tools/power/cpupower
 
 install:
-	$(MAKE) -C $(top_srcdir)/tools/power/cpupower O=$(CURDIR) install mandir=/usr/share/man DESTDIR=$(DESTDIR) CPUFREQ_BENCH=false
+	$(MAKE_CPUPOWER) -C $(top_srcdir)/tools/power/cpupower install DESTDIR=$(DESTDIR)
 ifneq (,$(filter nodoc,$(DEB_BUILD_PROFILES)))
 	rm -rf $(DESTDIR)/usr/share/man
 endif
 
 clean:
-	$(MAKE) -C $(top_srcdir)/tools/power/cpupower O=$(CURDIR) clean
+	$(MAKE_CPUPOWER) -C $(top_srcdir)/tools/power/cpupower clean
