@@ -1,5 +1,7 @@
 include $(top_rulesdir)/Makefile.inc
 
+ifeq ($(filter nopython,$(DEB_BUILD_PROFILES)),)
+
 DEB_HOST_ARCH_CPU := $(shell dpkg-architecture -qDEB_HOST_ARCH_CPU)
 
 ifeq ($(DEB_HOST_ARCH_CPU),alpha)
@@ -74,3 +76,5 @@ endif
 	rmdir --ignore-fail-on-non-empty $(DESTDIR)/etc
 # Check for unversioned files that are likely to result in file conflicts
 	! find $(DESTDIR) -name '*perf*' \! -path '*[_-]$(VERSION)*' | grep .
+
+endif # !nopython
