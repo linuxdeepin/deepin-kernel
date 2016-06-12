@@ -134,6 +134,17 @@ class Gencontrol(Base):
 
         self._setup_makeflags(self.arch_makeflags, makeflags, config_base)
 
+        try:
+            gnu_type_bytes = subprocess.check_output(['dpkg-architecture',
+                                                      '-a', arch,
+                                                      '-q', 'DEB_HOST_GNU_TYPE'],
+                                                     stderr=subprocess.DEVNULL)
+        except subprocess.CalledProcessError:
+            # This sometimes happens for the newest ports :-/
+            print('W: Unable to get GNU type for %s' % arch, file=sys.stderr)
+        else:
+            vars['gnu-type-package'] = gnu_type_bytes.decode('utf-8').strip().replace('_', '-')
+
     def do_arch_packages(self, packages, makefile, arch, vars, makeflags, extra):
         if self.version.linux_modifier is None:
             try:
@@ -296,16 +307,22 @@ class Gencontrol(Base):
 
         compiler = config_entry_base.get('compiler', 'gcc')
 
-        # Work out dependency from linux-headers to compiler.  Strip
+        # Work out dependency from linux-headers to compiler.  Drop
+        # dependencies for cross-builds.  Strip any remaining
         # restrictions, as they don't apply to binary Depends.
         relations_compiler_headers = PackageRelation(
-            config_entry_relations.get('headers%' + compiler) or
-            config_entry_relations.get(compiler))
+            self.substitute(config_entry_relations.get('headers%' + compiler) or
+                            config_entry_relations.get(compiler), vars))
+        relations_compiler_headers = PackageRelation(
+            PackageRelationGroup(entry for entry in group
+                                 if 'cross' not in entry.restrictions)
+            for group in relations_compiler_headers)
         for group in relations_compiler_headers:
             for entry in group:
                 entry.restrictions = []
 
-        relations_compiler_build_dep = PackageRelation(config_entry_relations[compiler])
+        relations_compiler_build_dep = PackageRelation(
+            self.substitute(config_entry_relations[compiler], vars))
         for group in relations_compiler_build_dep:
             for item in group:
                 item.arches = [arch]
