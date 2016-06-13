@@ -5,8 +5,8 @@ VPATH = $(top_rulesdir)/$(OUTDIR) $(top_srcdir)/$(OUTDIR)
 
 SHELL = /bin/sh -e
 
-CC = gcc
-CXX = g++
+CC = $(CROSS_COMPILE)gcc
+CXX = $(CROSS_COMPILE)g++
 CFLAGS := $(shell dpkg-buildflags --get CFLAGS) -Wall
 CPPFLAGS := $(shell dpkg-buildflags --get CPPFLAGS) \
 	-I$(top_srcdir)/$(OUTDIR) \

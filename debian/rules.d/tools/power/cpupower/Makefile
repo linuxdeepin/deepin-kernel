@@ -4,6 +4,8 @@ MAKE_CPUPOWER := $(shell dpkg-buildflags --export=cmdline) $(MAKE) O=$(CURDIR) C
 
 MAKE_CPUPOWER += DEBUG=$(if $(findstring nostrip,$(DEB_BUILD_OPTIONS)),true,)
 
+MAKE_CPUPOWER += CROSS='$(CROSS_COMPILE)'
+
 MAKE_CPUPOWER += PACKAGE_BUGREPORT='Debian\ \(reportbug\ linux-cpupower\)'
 
 all:

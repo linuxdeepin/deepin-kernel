@@ -11,7 +11,8 @@ all:
 		--prefix=/usr \
 		--with-tcp-wrappers \
 		--with-usbids-dir=/usr/share/misc \
-		--disable-shared
+		--disable-shared \
+		--host=$(shell dpkg-architecture -qDEB_HOST_GNU_TYPE)
 	$(MAKE)
 
 install:
