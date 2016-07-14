@@ -216,9 +216,10 @@ class PackageDescription(object):
         self.short = []
         self.long = []
         if value is not None:
-            short, long = value.split(u"\n", 1)
-            self.append(long)
-            self.append_short(short)
+            desc_split = value.split("\n", 1)
+            self.append_short(desc_split[0])
+            if len(desc_split) == 2:
+                self.append(desc_split[1])
 
     def __str__(self):
         wrap = utils.TextWrapper(width=74, fix_sentence_endings=True).wrap
@@ -227,7 +228,7 @@ class PackageDescription(object):
         for i in self.long:
             long_pars.append(wrap(i))
         long = '\n .\n '.join(['\n '.join(i) for i in long_pars])
-        return short + '\n ' + long
+        return short + '\n ' + long if long else short
 
     def append(self, str):
         str = str.strip()
