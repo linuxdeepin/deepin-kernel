@@ -4,7 +4,8 @@ PROGS = \
 	kallsyms \
 	pnmtologo \
 	recordmcount \
-	sign-file
+	sign-file \
+	unifdef
 
 DATA = \
 	Kbuild.include \
@@ -19,6 +20,7 @@ SCRIPTS =  \
 	depmod.sh \
 	gcc-*.sh \
 	gen_initramfs_list.sh \
+	headers_install.sh \
 	kernel-doc \
 	Lindent \
 	makelst \
