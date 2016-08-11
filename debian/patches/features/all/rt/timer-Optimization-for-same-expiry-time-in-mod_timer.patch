@@ -1,0 +1,131 @@
+From: Anna-Maria Gleixner <anna-maria@linutronix.de>
+Date: Mon, 4 Jul 2016 09:50:40 +0000
+Subject: [PATCH 22/22] timer: Optimization for same expiry time in mod_timer()
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.6/older/patches-4.6.5-rt10.tar.xz
+
+The existing optimization for same expiry time in mod_timer() checks whether
+the timer expiry time is the same as the new requested expiry time. In the old
+timer wheel implementation this does not take the slack batching into account,
+neither does the new implementation evaluate whether the new expiry time will
+requeue the timer to the same bucket.
+
+To optimize that, we can calculate the resulting bucket and check if the new
+expiry time is different from the current expiry time. This calculation
+happens outside the base lock held region. If the resulting bucket is the same
+we can avoid taking the base lock and requeueing the timer.
+
+If the timer needs to be requeued then we have to check under the base lock
+whether the base time has changed between the lockless calculation and taking
+the lock. If it has changed we need to recalculate under the lock.
+
+This optimization takes effect for timers which are enqueued into the less
+granular wheel levels (1 and above). With a simple test case the functionality
+has been verified:
+
+    	    Before	After
+Match:	     5.5%	86.6%
+Requeue:    94.5%	13.4%
+Recalc:  		<0.01%
+
+In the non optimized case the timer is requeued in 94.5% of the cases. With
+the index optimization in place the requeue rate drops to 13.4%. The case
+where the lockless index calculation has to be redone is less than 0.01%.
+
+With a real world test case (networking) we observed the following changes:
+
+    	    Before	After
+Match:	    97.8%	99.7%
+Requeue:     2.2%	 0.3%
+Recalc:  		<0.001%
+
+That means two percent less lock/requeue/unlock operations in one of the hot
+path use cases of timers.
+
+Signed-off-by: Anna-Maria Gleixner <anna-maria@linutronix.de>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Frederic Weisbecker <fweisbec@gmail.com>
+Cc: Chris Mason <clm@fb.com>
+Cc: Eric Dumazet <edumazet@google.com>
+Cc: rt@linutronix.de
+Cc: "Paul E. McKenney" <paulmck@linux.vnet.ibm.com>
+Cc: Arjan van de Ven <arjan@infradead.org>
+Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+---
+ kernel/time/timer.c |   51 +++++++++++++++++++++++++++++++++++----------------
+ 1 file changed, 35 insertions(+), 16 deletions(-)
+
+--- a/kernel/time/timer.c
++++ b/kernel/time/timer.c
+@@ -975,28 +975,36 @@ static inline int
+ __mod_timer(struct timer_list *timer, unsigned long expires, bool pending_only)
+ {
+ 	struct timer_base *base, *new_base;
+-	unsigned long flags;
++	unsigned int idx = UINT_MAX;
++	unsigned long clk = 0, flags;
+ 	int ret = 0;
+ 
+ 	/*
+-	 * TODO: Calculate the array bucket of the timer right here w/o
+-	 * holding the base lock. This allows to check not only
+-	 * timer->expires == expires below, but also whether the timer
+-	 * ends up in the same bucket. If we really need to requeue
+-	 * the timer then we check whether base->clk have
+-	 * advanced between here and locking the timer base. If
+-	 * jiffies advanced we have to recalc the array bucket with the
+-	 * lock held.
+-	 */
+-
+-	/*
+-	 * This is a common optimization triggered by the
+-	 * networking code - if the timer is re-modified
+-	 * to be the same thing then just return:
++	 * This is a common optimization triggered by the networking code - if
++	 * the timer is re-modified to be the same thing or ends up in the
++	 * same array bucket then just return:
+ 	 */
+ 	if (timer_pending(timer)) {
+ 		if (timer->expires == expires)
+ 			return 1;
++		/*
++		 * Take the current timer_jiffies of base, but without holding
++		 * the lock!
++		 */
++		base = get_timer_base(timer->flags);
++		clk = base->clk;
++
++		idx = calc_wheel_index(expires, clk);
++
++		/*
++		 * Retrieve and compare the array index of the pending
++		 * timer. If it matches set the expiry to the new value so a
++		 * subsequent call will exit in the expires check above.
++		 */
++		if (idx == timer_get_idx(timer)) {
++			timer->expires = expires;
++			return 1;
++		}
+ 	}
+ 
+ 	timer_stats_timer_set_start_info(timer);
+@@ -1033,7 +1041,18 @@ static inline int
+ 	}
+ 
+ 	timer->expires = expires;
+-	internal_add_timer(base, timer);
++	/*
++	 * If idx was calculated above and the base time did not advance
++	 * between calculating idx and taking the lock, only enqueue_timer()
++	 * and trigger_dyntick_cpu() is required. Otherwise we need to
++	 * (re)calculate the wheel index via internal_add_timer().
++	 */
++	if (idx != UINT_MAX && clk == base->clk) {
++		enqueue_timer(base, timer, idx);
++		trigger_dyntick_cpu(base, timer);
++	} else {
++		internal_add_timer(base, timer);
++	}
+ 
+ out_unlock:
+ 	spin_unlock_irqrestore(&base->lock, flags);

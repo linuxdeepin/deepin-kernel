@@ -1,7 +1,7 @@
 From: Ingo Molnar <mingo@elte.hu>
 Date: Fri, 3 Jul 2009 08:29:34 -0500
 Subject: timers: Prepare for full preemption
-Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.6/older/patches-4.6.4-rt6.tar.xz
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.6/older/patches-4.6.5-rt10.tar.xz
 
 When softirqs can be preempted we need to make sure that cancelling
 the timer from the active thread can not deadlock vs. a running timer
@@ -13,12 +13,12 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 ---
  include/linux/timer.h |    2 +-
  kernel/sched/core.c   |    9 +++++++--
- kernel/time/timer.c   |   41 ++++++++++++++++++++++++++++++++++++++---
- 3 files changed, 46 insertions(+), 6 deletions(-)
+ kernel/time/timer.c   |   44 ++++++++++++++++++++++++++++++++++++++++----
+ 3 files changed, 48 insertions(+), 7 deletions(-)
 
 --- a/include/linux/timer.h
 +++ b/include/linux/timer.h
-@@ -225,7 +225,7 @@ extern void add_timer(struct timer_list
+@@ -241,7 +241,7 @@ extern void add_timer(struct timer_list
  
  extern int try_to_del_timer_sync(struct timer_list *timer);
  
@@ -57,17 +57,17 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  /*
 --- a/kernel/time/timer.c
 +++ b/kernel/time/timer.c
-@@ -80,6 +80,9 @@ struct tvec_root {
- struct tvec_base {
- 	spinlock_t lock;
- 	struct timer_list *running_timer;
+@@ -195,6 +195,9 @@ EXPORT_SYMBOL(jiffies_64);
+ struct timer_base {
+ 	raw_spinlock_t		lock;
+ 	struct timer_list	*running_timer;
 +#ifdef CONFIG_PREEMPT_RT_FULL
-+	wait_queue_head_t wait_for_running_timer;
++	struct swait_queue_head	wait_for_running_timer;
 +#endif
- 	unsigned long timer_jiffies;
- 	unsigned long next_timer;
- 	unsigned long active_timers;
-@@ -1006,6 +1009,33 @@ void add_timer_on(struct timer_list *tim
+ 	unsigned long		clk;
+ 	unsigned long		next_expiry;
+ 	unsigned int		cpu;
+@@ -1162,6 +1165,33 @@ void add_timer_on(struct timer_list *tim
  }
  EXPORT_SYMBOL_GPL(add_timer_on);
  
@@ -77,18 +77,18 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 + */
 +static void wait_for_running_timer(struct timer_list *timer)
 +{
-+	struct tvec_base *base;
++	struct timer_base *base;
 +	u32 tf = timer->flags;
 +
 +	if (tf & TIMER_MIGRATING)
 +		return;
 +
-+	base = per_cpu_ptr(&tvec_bases, tf & TIMER_CPUMASK);
-+	wait_event(base->wait_for_running_timer,
++	base = get_timer_base(tf);
++	swait_event(base->wait_for_running_timer,
 +		   base->running_timer != timer);
 +}
 +
-+# define wakeup_timer_waiters(b)	wake_up(&(b)->wait_for_running_timer)
++# define wakeup_timer_waiters(b)	swake_up_all(&(b)->wait_for_running_timer)
 +#else
 +static inline void wait_for_running_timer(struct timer_list *timer)
 +{
@@ -101,7 +101,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  /**
   * del_timer - deactive a timer.
   * @timer: the timer to be deactivated
-@@ -1063,7 +1093,7 @@ int try_to_del_timer_sync(struct timer_l
+@@ -1219,7 +1249,7 @@ int try_to_del_timer_sync(struct timer_l
  }
  EXPORT_SYMBOL(try_to_del_timer_sync);
  
@@ -110,7 +110,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  /**
   * del_timer_sync - deactivate a timer and wait for the handler to finish.
   * @timer: the timer to be deactivated
-@@ -1123,7 +1153,7 @@ int del_timer_sync(struct timer_list *ti
+@@ -1279,7 +1309,7 @@ int del_timer_sync(struct timer_list *ti
  		int ret = try_to_del_timer_sync(timer);
  		if (ret >= 0)
  			return ret;
@@ -119,32 +119,41 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	}
  }
  EXPORT_SYMBOL(del_timer_sync);
-@@ -1248,15 +1278,17 @@ static inline void __run_timers(struct t
- 			if (irqsafe) {
- 				spin_unlock(&base->lock);
- 				call_timer_fn(timer, fn, data);
-+				base->running_timer = NULL;
- 				spin_lock(&base->lock);
- 			} else {
- 				spin_unlock_irq(&base->lock);
- 				call_timer_fn(timer, fn, data);
-+				base->running_timer = NULL;
- 				spin_lock_irq(&base->lock);
- 			}
+@@ -1344,13 +1374,16 @@ static void expire_timers(struct timer_b
+ 		fn = timer->function;
+ 		data = timer->data;
+ 
+-		if (timer->flags & TIMER_IRQSAFE) {
++		if (!IS_ENABLED(CONFIG_PREEMPT_RT_FULL) &&
++		    timer->flags & TIMER_IRQSAFE) {
+ 			raw_spin_unlock(&base->lock);
+ 			call_timer_fn(timer, fn, data);
++			base->running_timer = NULL;
+ 			raw_spin_lock(&base->lock);
+ 		} else {
+ 			raw_spin_unlock_irq(&base->lock);
+ 			call_timer_fn(timer, fn, data);
++			base->running_timer = NULL;
+ 			raw_spin_lock_irq(&base->lock);
  		}
  	}
+@@ -1638,8 +1671,8 @@ static inline void __run_timers(struct t
+ 		while (levels--)
+ 			expire_timers(base, heads + levels);
+ 	}
 -	base->running_timer = NULL;
+ 	raw_spin_unlock_irq(&base->lock);
 +	wakeup_timer_waiters(base);
- 	spin_unlock_irq(&base->lock);
  }
  
-@@ -1656,6 +1688,9 @@ static void __init init_timer_cpu(int cp
- 
- 	base->cpu = cpu;
- 	spin_lock_init(&base->lock);
+ /*
+@@ -1881,6 +1914,9 @@ static void __init init_timer_cpu(int cp
+ 		base->cpu = cpu;
+ 		raw_spin_lock_init(&base->lock);
+ 		base->clk = jiffies;
 +#ifdef CONFIG_PREEMPT_RT_FULL
-+	init_waitqueue_head(&base->wait_for_running_timer);
++		init_swait_queue_head(&base->wait_for_running_timer);
 +#endif
+ 	}
+ }
  
- 	base->timer_jiffies = jiffies;
- 	base->next_timer = base->timer_jiffies;

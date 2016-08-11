@@ -1,0 +1,162 @@
+From: Thomas Gleixner <tglx@linutronix.de>
+Date: Mon, 4 Jul 2016 09:50:31 +0000
+Subject: [PATCH 15/22] timer: Remove slack leftovers
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.6/older/patches-4.6.5-rt10.tar.xz
+
+We now have implicit batching in the timer wheel. The slack is not longer
+used. Remove it.
+
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Frederic Weisbecker <fweisbec@gmail.com>
+Cc: Chris Mason <clm@fb.com>
+Cc: Eric Dumazet <edumazet@google.com>
+Cc: rt@linutronix.de
+Cc: "Paul E. McKenney" <paulmck@linux.vnet.ibm.com>
+Cc: Arjan van de Ven <arjan@infradead.org>
+Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+---
+ block/genhd.c                   |    5 -----
+ drivers/mmc/host/jz4740_mmc.c   |    2 --
+ drivers/power/bq27xxx_battery.c |    5 +----
+ drivers/usb/host/ohci-hcd.c     |    1 -
+ drivers/usb/host/xhci.c         |    2 --
+ include/linux/timer.h           |    4 ----
+ kernel/time/timer.c             |   19 -------------------
+ lib/random32.c                  |    1 -
+ 8 files changed, 1 insertion(+), 38 deletions(-)
+
+--- a/block/genhd.c
++++ b/block/genhd.c
+@@ -1523,12 +1523,7 @@ static void __disk_unblock_events(struct
+ 	if (--ev->block)
+ 		goto out_unlock;
+ 
+-	/*
+-	 * Not exactly a latency critical operation, set poll timer
+-	 * slack to 25% and kick event check.
+-	 */
+ 	intv = disk_events_poll_jiffies(disk);
+-	set_timer_slack(&ev->dwork.timer, intv / 4);
+ 	if (check_now)
+ 		queue_delayed_work(system_freezable_power_efficient_wq,
+ 				&ev->dwork, 0);
+--- a/drivers/mmc/host/jz4740_mmc.c
++++ b/drivers/mmc/host/jz4740_mmc.c
+@@ -1068,8 +1068,6 @@ static int jz4740_mmc_probe(struct platf
+ 	jz4740_mmc_clock_disable(host);
+ 	setup_timer(&host->timeout_timer, jz4740_mmc_timeout,
+ 			(unsigned long)host);
+-	/* It is not important when it times out, it just needs to timeout. */
+-	set_timer_slack(&host->timeout_timer, HZ);
+ 
+ 	host->use_dma = true;
+ 	if (host->use_dma && jz4740_mmc_acquire_dma_channels(host) != 0)
+--- a/drivers/power/bq27xxx_battery.c
++++ b/drivers/power/bq27xxx_battery.c
+@@ -735,11 +735,8 @@ static void bq27xxx_battery_poll(struct
+ 
+ 	bq27xxx_battery_update(di);
+ 
+-	if (poll_interval > 0) {
+-		/* The timer does not have to be accurate. */
+-		set_timer_slack(&di->work.timer, poll_interval * HZ / 4);
++	if (poll_interval > 0)
+ 		schedule_delayed_work(&di->work, poll_interval * HZ);
+-	}
+ }
+ 
+ /*
+--- a/drivers/usb/host/ohci-hcd.c
++++ b/drivers/usb/host/ohci-hcd.c
+@@ -500,7 +500,6 @@ static int ohci_init (struct ohci_hcd *o
+ 
+ 	setup_timer(&ohci->io_watchdog, io_watchdog_func,
+ 			(unsigned long) ohci);
+-	set_timer_slack(&ohci->io_watchdog, msecs_to_jiffies(20));
+ 
+ 	ohci->hcca = dma_alloc_coherent (hcd->self.controller,
+ 			sizeof(*ohci->hcca), &ohci->hcca_dma, GFP_KERNEL);
+--- a/drivers/usb/host/xhci.c
++++ b/drivers/usb/host/xhci.c
+@@ -490,8 +490,6 @@ static void compliance_mode_recovery_tim
+ 	xhci->comp_mode_recovery_timer.expires = jiffies +
+ 			msecs_to_jiffies(COMP_MODE_RCVRY_MSECS);
+ 
+-	set_timer_slack(&xhci->comp_mode_recovery_timer,
+-			msecs_to_jiffies(COMP_MODE_RCVRY_MSECS));
+ 	add_timer(&xhci->comp_mode_recovery_timer);
+ 	xhci_dbg_trace(xhci, trace_xhci_dbg_quirks,
+ 			"Compliance mode recovery timer initialized");
+--- a/include/linux/timer.h
++++ b/include/linux/timer.h
+@@ -19,7 +19,6 @@ struct timer_list {
+ 	void			(*function)(unsigned long);
+ 	unsigned long		data;
+ 	u32			flags;
+-	int			slack;
+ 
+ #ifdef CONFIG_TIMER_STATS
+ 	int			start_pid;
+@@ -73,7 +72,6 @@ struct timer_list {
+ 		.expires = (_expires),				\
+ 		.data = (_data),				\
+ 		.flags = (_flags),				\
+-		.slack = -1,					\
+ 		__TIMER_LOCKDEP_MAP_INITIALIZER(		\
+ 			__FILE__ ":" __stringify(__LINE__))	\
+ 	}
+@@ -193,8 +191,6 @@ extern int del_timer(struct timer_list *
+ extern int mod_timer(struct timer_list *timer, unsigned long expires);
+ extern int mod_timer_pending(struct timer_list *timer, unsigned long expires);
+ 
+-extern void set_timer_slack(struct timer_list *time, int slack_hz);
+-
+ /*
+  * The jiffies value which is added to now, when there is no timer
+  * in the timer wheel:
+--- a/kernel/time/timer.c
++++ b/kernel/time/timer.c
+@@ -447,24 +447,6 @@ unsigned long round_jiffies_up_relative(
+ }
+ EXPORT_SYMBOL_GPL(round_jiffies_up_relative);
+ 
+-/**
+- * set_timer_slack - set the allowed slack for a timer
+- * @timer: the timer to be modified
+- * @slack_hz: the amount of time (in jiffies) allowed for rounding
+- *
+- * Set the amount of time, in jiffies, that a certain timer has
+- * in terms of slack. By setting this value, the timer subsystem
+- * will schedule the actual timer somewhere between
+- * the time mod_timer() asks for, and that time plus the slack.
+- *
+- * By setting the slack to -1, a percentage of the delay is used
+- * instead.
+- */
+-void set_timer_slack(struct timer_list *timer, int slack_hz)
+-{
+-	timer->slack = slack_hz;
+-}
+-EXPORT_SYMBOL_GPL(set_timer_slack);
+ 
+ static inline unsigned int timer_get_idx(struct timer_list *timer)
+ {
+@@ -790,7 +772,6 @@ static void do_init_timer(struct timer_l
+ {
+ 	timer->entry.pprev = NULL;
+ 	timer->flags = flags | raw_smp_processor_id();
+-	timer->slack = -1;
+ #ifdef CONFIG_TIMER_STATS
+ 	timer->start_site = NULL;
+ 	timer->start_pid = -1;
+--- a/lib/random32.c
++++ b/lib/random32.c
+@@ -233,7 +233,6 @@ static void __prandom_timer(unsigned lon
+ 
+ static void __init __prandom_start_seed_timer(void)
+ {
+-	set_timer_slack(&seed_timer, HZ);
+ 	seed_timer.expires = jiffies + msecs_to_jiffies(40 * MSEC_PER_SEC);
+ 	add_timer(&seed_timer);
+ }

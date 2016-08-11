@@ -1,0 +1,145 @@
+From: Thomas Gleixner <tglx@linutronix.de>
+Date: Mon, 4 Jul 2016 09:50:15 +0000
+Subject: [PATCH 01/22] timer: Make pinned a timer property
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.6/older/patches-4.6.5-rt10.tar.xz
+
+We want to move the timer migration from a push to a pull model. This requires
+to store the pinned attribute of a timer in the timer itself. This must happen
+at initialization time.
+
+Add the helper macros for this.
+
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Reviewed-by: Frederic Weisbecker <fweisbec@gmail.com>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Chris Mason <clm@fb.com>
+Cc: Eric Dumazet <edumazet@google.com>
+Cc: rt@linutronix.de
+Cc: "Paul E. McKenney" <paulmck@linux.vnet.ibm.com>
+Cc: Arjan van de Ven <arjan@infradead.org>
+Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+---
+ include/linux/timer.h |   25 ++++++++++++++++++++++---
+ kernel/time/timer.c   |   10 +++++-----
+ 2 files changed, 27 insertions(+), 8 deletions(-)
+
+--- a/include/linux/timer.h
++++ b/include/linux/timer.h
+@@ -62,7 +62,8 @@ struct timer_list {
+ #define TIMER_MIGRATING		0x00080000
+ #define TIMER_BASEMASK		(TIMER_CPUMASK | TIMER_MIGRATING)
+ #define TIMER_DEFERRABLE	0x00100000
+-#define TIMER_IRQSAFE		0x00200000
++#define TIMER_PINNED		0x00200000
++#define TIMER_IRQSAFE		0x00400000
+ 
+ #define __TIMER_INITIALIZER(_function, _expires, _data, _flags) { \
+ 		.entry = { .next = TIMER_ENTRY_STATIC },	\
+@@ -78,9 +79,15 @@ struct timer_list {
+ #define TIMER_INITIALIZER(_function, _expires, _data)		\
+ 	__TIMER_INITIALIZER((_function), (_expires), (_data), 0)
+ 
++#define TIMER_PINNED_INITIALIZER(_function, _expires, _data)	\
++	__TIMER_INITIALIZER((_function), (_expires), (_data), TIMER_PINNED)
++
+ #define TIMER_DEFERRED_INITIALIZER(_function, _expires, _data)	\
+ 	__TIMER_INITIALIZER((_function), (_expires), (_data), TIMER_DEFERRABLE)
+ 
++#define TIMER_PINNED_DEFERRED_INITIALIZER(_function, _expires, _data)	\
++	__TIMER_INITIALIZER((_function), (_expires), (_data), TIMER_DEFERRABLE | TIMER_PINNED)
++
+ #define DEFINE_TIMER(_name, _function, _expires, _data)		\
+ 	struct timer_list _name =				\
+ 		TIMER_INITIALIZER(_function, _expires, _data)
+@@ -124,8 +131,12 @@ static inline void init_timer_on_stack_k
+ 
+ #define init_timer(timer)						\
+ 	__init_timer((timer), 0)
++#define init_timer_pinned(timer)					\
++	__init_timer((timer), TIMER_PINNED)
+ #define init_timer_deferrable(timer)					\
+ 	__init_timer((timer), TIMER_DEFERRABLE)
++#define init_timer_pinned_deferrable(timer)				\
++	__init_timer((timer), TIMER_DEFERRABLE | TIMER_PINNED)
+ #define init_timer_on_stack(timer)					\
+ 	__init_timer_on_stack((timer), 0)
+ 
+@@ -145,12 +156,20 @@ static inline void init_timer_on_stack_k
+ 
+ #define setup_timer(timer, fn, data)					\
+ 	__setup_timer((timer), (fn), (data), 0)
++#define setup_pinned_timer(timer, fn, data)				\
++	__setup_timer((timer), (fn), (data), TIMER_PINNED)
+ #define setup_deferrable_timer(timer, fn, data)				\
+ 	__setup_timer((timer), (fn), (data), TIMER_DEFERRABLE)
++#define setup_pinned_deferrable_timer(timer, fn, data)			\
++	__setup_timer((timer), (fn), (data), TIMER_DEFERRABLE | TIMER_PINNED)
+ #define setup_timer_on_stack(timer, fn, data)				\
+ 	__setup_timer_on_stack((timer), (fn), (data), 0)
++#define setup_pinned_timer_on_stack(timer, fn, data)			\
++	__setup_timer_on_stack((timer), (fn), (data), TIMER_PINNED)
+ #define setup_deferrable_timer_on_stack(timer, fn, data)		\
+ 	__setup_timer_on_stack((timer), (fn), (data), TIMER_DEFERRABLE)
++#define setup_pinned_deferrable_timer_on_stack(timer, fn, data)		\
++	__setup_timer_on_stack((timer), (fn), (data), TIMER_DEFERRABLE | TIMER_PINNED)
+ 
+ /**
+  * timer_pending - is a timer pending?
+@@ -175,8 +194,8 @@ extern int mod_timer_pinned(struct timer
+ 
+ extern void set_timer_slack(struct timer_list *time, int slack_hz);
+ 
+-#define TIMER_NOT_PINNED	0
+-#define TIMER_PINNED		1
++#define MOD_TIMER_NOT_PINNED	0
++#define MOD_TIMER_PINNED	1
+ /*
+  * The jiffies value which is added to now, when there is no timer
+  * in the timer wheel:
+--- a/kernel/time/timer.c
++++ b/kernel/time/timer.c
+@@ -797,7 +797,7 @@ static inline int
+ 
+ 	debug_activate(timer, expires);
+ 
+-	new_base = get_target_base(base, pinned);
++	new_base = get_target_base(base, pinned || timer->flags & TIMER_PINNED);
+ 
+ 	if (base != new_base) {
+ 		/*
+@@ -840,7 +840,7 @@ static inline int
+  */
+ int mod_timer_pending(struct timer_list *timer, unsigned long expires)
+ {
+-	return __mod_timer(timer, expires, true, TIMER_NOT_PINNED);
++	return __mod_timer(timer, expires, true, MOD_TIMER_NOT_PINNED);
+ }
+ EXPORT_SYMBOL(mod_timer_pending);
+ 
+@@ -915,7 +915,7 @@ int mod_timer(struct timer_list *timer,
+ 	if (timer_pending(timer) && timer->expires == expires)
+ 		return 1;
+ 
+-	return __mod_timer(timer, expires, false, TIMER_NOT_PINNED);
++	return __mod_timer(timer, expires, false, MOD_TIMER_NOT_PINNED);
+ }
+ EXPORT_SYMBOL(mod_timer);
+ 
+@@ -943,7 +943,7 @@ int mod_timer_pinned(struct timer_list *
+ 	if (timer->expires == expires && timer_pending(timer))
+ 		return 1;
+ 
+-	return __mod_timer(timer, expires, false, TIMER_PINNED);
++	return __mod_timer(timer, expires, false, MOD_TIMER_PINNED);
+ }
+ EXPORT_SYMBOL(mod_timer_pinned);
+ 
+@@ -1527,7 +1527,7 @@ signed long __sched schedule_timeout(sig
+ 	expire = timeout + jiffies;
+ 
+ 	setup_timer_on_stack(&timer, process_timeout, (unsigned long)current);
+-	__mod_timer(&timer, expire, false, TIMER_NOT_PINNED);
++	__mod_timer(&timer, expire, false, MOD_TIMER_NOT_PINNED);
+ 	schedule();
+ 	del_singleshot_timer_sync(&timer);
+ 

@@ -1,0 +1,78 @@
+From: Thomas Gleixner <tglx@linutronix.de>
+Date: Mon, 4 Jul 2016 09:50:25 +0000
+Subject: [PATCH 10/22] signal: Use hrtimer for sigtimedwait
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.6/older/patches-4.6.5-rt10.tar.xz
+
+We've converted most timeout related syscalls to hrtimers. sigtimedwait() did
+not get this treatment. Convert it so we get a reasonable accuracy and remove
+the user space exposure to the timer wheel properties.
+
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Reviewed-by: Frederic Weisbecker <fweisbec@gmail.com>
+Cc: Cyril Hrubis <chrubis@suse.cz>
+Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+---
+ kernel/signal.c |   24 ++++++++++--------------
+ 1 file changed, 10 insertions(+), 14 deletions(-)
+
+--- a/kernel/signal.c
++++ b/kernel/signal.c
+@@ -2751,23 +2751,18 @@ int copy_siginfo_to_user(siginfo_t __use
+  *  @ts: upper bound on process time suspension
+  */
+ int do_sigtimedwait(const sigset_t *which, siginfo_t *info,
+-			const struct timespec *ts)
++		    const struct timespec *ts)
+ {
++	ktime_t *to = NULL, timeout = { .tv64 = KTIME_MAX };
+ 	struct task_struct *tsk = current;
+-	long timeout = MAX_SCHEDULE_TIMEOUT;
+ 	sigset_t mask = *which;
+-	int sig;
++	int sig, ret = 0;
+ 
+ 	if (ts) {
+ 		if (!timespec_valid(ts))
+ 			return -EINVAL;
+-		timeout = timespec_to_jiffies(ts);
+-		/*
+-		 * We can be close to the next tick, add another one
+-		 * to ensure we will wait at least the time asked for.
+-		 */
+-		if (ts->tv_sec || ts->tv_nsec)
+-			timeout++;
++		timeout = timespec_to_ktime(*ts);
++		to = &timeout;
+ 	}
+ 
+ 	/*
+@@ -2778,7 +2773,7 @@ int do_sigtimedwait(const sigset_t *whic
+ 
+ 	spin_lock_irq(&tsk->sighand->siglock);
+ 	sig = dequeue_signal(tsk, &mask, info);
+-	if (!sig && timeout) {
++	if (!sig && timeout.tv64) {
+ 		/*
+ 		 * None ready, temporarily unblock those we're interested
+ 		 * while we are sleeping in so that we'll be awakened when
+@@ -2790,8 +2785,9 @@ int do_sigtimedwait(const sigset_t *whic
+ 		recalc_sigpending();
+ 		spin_unlock_irq(&tsk->sighand->siglock);
+ 
+-		timeout = freezable_schedule_timeout_interruptible(timeout);
+-
++		__set_current_state(TASK_INTERRUPTIBLE);
++		ret = freezable_schedule_hrtimeout_range(to, tsk->timer_slack_ns,
++							 HRTIMER_MODE_REL);
+ 		spin_lock_irq(&tsk->sighand->siglock);
+ 		__set_task_blocked(tsk, &tsk->real_blocked);
+ 		sigemptyset(&tsk->real_blocked);
+@@ -2801,7 +2797,7 @@ int do_sigtimedwait(const sigset_t *whic
+ 
+ 	if (sig)
+ 		return sig;
+-	return timeout ? -EINTR : -EAGAIN;
++	return ret ? -EINTR : -EAGAIN;
+ }
+ 
+ /**

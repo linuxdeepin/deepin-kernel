@@ -1,0 +1,152 @@
+From: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Date: Thu, 7 Apr 2016 17:04:32 +0100
+Subject: [PATCH] drm/i915: Use consistent forcewake auto-release timeout
+ across kernel configs
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.6/older/patches-4.6.5-rt10.tar.xz
+
+Upstream commit fde61b596b994195b9dd83feb325df95d99702ce
+
+Because it is based on jiffies, current implementation releases the
+forcewake at any time between straight away and between 1ms and 10ms,
+depending on the kernel configuration (CONFIG_HZ).
+
+This is probably not what has been desired, since the dynamics of keeping
+parts of the GPU awake should not be correlated with this kernel
+configuration parameter.
+
+Change the auto-release mechanism to use hrtimers and set the timeout to
+1ms with a 1ms of slack. This should make the GPU power consistent
+across kernel configs, and timer slack should enable some timer coalescing
+where multiple force-wake domains exist, or with unrelated timers.
+
+For GlBench/T-Rex this decreases the number of forcewake releases from
+~480 to ~300 per second, and for a heavy combined OGL/OCL test from
+~670 to ~360 (HZ=1000 kernel).
+
+Even though this reduction can be attributed to the average release period
+extending from 0-1ms to 1-2ms, as discussed above, it will make the
+forcewake timeout consistent for different CONFIG_HZ values.
+
+Real life measurements with the above workload has shown that, with this
+patch, both manage to auto-release the forcewake between 2-4 times per
+10ms, even though the number of forcewake gets is dramatically different.
+
+T-Rex requests between 5-10 explicit gets and 5-10 implict gets in each
+10ms period, while the OGL/OCL test requests 250 and 380 times in the same
+period.
+
+The two data points together suggest that the nature of the forwake
+accesses is bursty and that further changes and potential timeout
+extensions, or moving the start of timeout from the first to the last
+automatic forcewake grab, should be carefully measured for power and
+performance effects.
+
+v2:
+  * Commit spelling. (Dave Gordon)
+  * More discussion on numbers in the commit. (Chris Wilson)
+
+Signed-off-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Reviewed-by: Dave Gordon <david.s.gordon@intel.com>
+Cc: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Chris Wilson <chris@chris-wilson.co.uk>
+Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+---
+ drivers/gpu/drm/i915/i915_drv.h     |    2 +-
+ drivers/gpu/drm/i915/intel_uncore.c |   25 ++++++++++++++++---------
+ 2 files changed, 17 insertions(+), 10 deletions(-)
+
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -714,7 +714,7 @@ struct intel_uncore {
+ 		struct drm_i915_private *i915;
+ 		enum forcewake_domain_id id;
+ 		unsigned wake_count;
+-		struct timer_list timer;
++		struct hrtimer timer;
+ 		i915_reg_t reg_set;
+ 		u32 val_set;
+ 		u32 val_clear;
+--- a/drivers/gpu/drm/i915/intel_uncore.c
++++ b/drivers/gpu/drm/i915/intel_uncore.c
+@@ -60,7 +60,11 @@ fw_domain_reset(const struct intel_uncor
+ static inline void
+ fw_domain_arm_timer(struct intel_uncore_forcewake_domain *d)
+ {
+-	mod_timer_pinned(&d->timer, jiffies + 1);
++	d->wake_count++;
++	hrtimer_start_range_ns(&d->timer,
++			       ktime_set(0, NSEC_PER_MSEC),
++			       NSEC_PER_MSEC,
++			       HRTIMER_MODE_REL);
+ }
+ 
+ static inline void
+@@ -224,9 +228,11 @@ static int __gen6_gt_wait_for_fifo(struc
+ 	return ret;
+ }
+ 
+-static void intel_uncore_fw_release_timer(unsigned long arg)
++static enum hrtimer_restart
++intel_uncore_fw_release_timer(struct hrtimer *timer)
+ {
+-	struct intel_uncore_forcewake_domain *domain = (void *)arg;
++	struct intel_uncore_forcewake_domain *domain =
++	       container_of(timer, struct intel_uncore_forcewake_domain, timer);
+ 	unsigned long irqflags;
+ 
+ 	assert_rpm_device_not_suspended(domain->i915);
+@@ -240,6 +246,8 @@ static void intel_uncore_fw_release_time
+ 							  1 << domain->id);
+ 
+ 	spin_unlock_irqrestore(&domain->i915->uncore.lock, irqflags);
++
++	return HRTIMER_NORESTART;
+ }
+ 
+ void intel_uncore_forcewake_reset(struct drm_device *dev, bool restore)
+@@ -259,16 +267,16 @@ void intel_uncore_forcewake_reset(struct
+ 		active_domains = 0;
+ 
+ 		for_each_fw_domain(domain, dev_priv, id) {
+-			if (del_timer_sync(&domain->timer) == 0)
++			if (hrtimer_cancel(&domain->timer) == 0)
+ 				continue;
+ 
+-			intel_uncore_fw_release_timer((unsigned long)domain);
++			intel_uncore_fw_release_timer(&domain->timer);
+ 		}
+ 
+ 		spin_lock_irqsave(&dev_priv->uncore.lock, irqflags);
+ 
+ 		for_each_fw_domain(domain, dev_priv, id) {
+-			if (timer_pending(&domain->timer))
++			if (hrtimer_active(&domain->timer))
+ 				active_domains |= (1 << id);
+ 		}
+ 
+@@ -491,7 +499,6 @@ static void __intel_uncore_forcewake_put
+ 		if (--domain->wake_count)
+ 			continue;
+ 
+-		domain->wake_count++;
+ 		fw_domain_arm_timer(domain);
+ 	}
+ }
+@@ -732,7 +739,6 @@ static inline void __force_wake_get(stru
+ 			continue;
+ 		}
+ 
+-		domain->wake_count++;
+ 		fw_domain_arm_timer(domain);
+ 	}
+ 
+@@ -1150,7 +1156,8 @@ static void fw_domain_init(struct drm_i9
+ 	d->i915 = dev_priv;
+ 	d->id = domain_id;
+ 
+-	setup_timer(&d->timer, intel_uncore_fw_release_timer, (unsigned long)d);
++	hrtimer_init(&d->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
++	d->timer.function = intel_uncore_fw_release_timer;
+ 
+ 	dev_priv->uncore.fw_domains |= (1 << domain_id);
+ 
