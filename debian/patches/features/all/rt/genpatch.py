@@ -54,7 +54,7 @@ def main(source, version=None):
                                      env=env, stdout=subprocess.PIPE)
             with child.stdout as pipe:
                 for line in pipe:
-                    name = line.strip('\n')
+                    name = line.decode('utf-8').strip('\n')
                     with open(os.path.join(patch_dir, rt_patch_dir, name)) as \
                             source_patch:
                         patch_from = source_patch.readline()
@@ -104,7 +104,7 @@ def main(source, version=None):
         print('Obsoleted patch', os.path.join(patch_dir, name))
 
 if __name__ == '__main__':
-    if not (1 <= len(sys.argv) <= 2):
+    if not (2 <= len(sys.argv) <= 3):
         print('Usage: %s {TAR [RT-VERSION] | REPO RT-VERSION}' % sys.argv[0], file=sys.stderr)
         print('TAR is a tarball of patches.', file=sys.stderr)
         print('REPO is a git repo containing the given RT-VERSION.', file=sys.stderr)
