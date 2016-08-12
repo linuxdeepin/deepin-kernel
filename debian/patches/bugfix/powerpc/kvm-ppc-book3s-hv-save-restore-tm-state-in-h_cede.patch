@@ -1,0 +1,64 @@
+From: Paul Mackerras <paulus@ozlabs.org>
+Date: Wed, 22 Jun 2016 15:52:55 +1000
+Subject: [2/2] KVM: PPC: Book3S HV: Save/restore TM state in H_CEDE
+Origin: https://git.kernel.org/linus/93d17397e4e2182fdaad503e2f9da46202c0f1c3
+
+It turns out that if the guest does a H_CEDE while the CPU is in
+a transactional state, and the H_CEDE does a nap, and the nap
+loses the architected state of the CPU (which is is allowed to do),
+then we lose the checkpointed state of the virtual CPU.  In addition,
+the transactional-memory state recorded in the MSR gets reset back
+to non-transactional, and when we try to return to the guest, we take
+a TM bad thing type of program interrupt because we are trying to
+transition from non-transactional to transactional with a hrfid
+instruction, which is not permitted.
+
+The result of the program interrupt occurring at that point is that
+the host CPU will hang in an infinite loop with interrupts disabled.
+Thus this is a denial of service vulnerability in the host which can
+be triggered by any guest (and depending on the guest kernel, it can
+potentially triggered by unprivileged userspace in the guest).
+
+This vulnerability has been assigned the ID CVE-2016-5412.
+
+To fix this, we save the TM state before napping and restore it
+on exit from the nap, when handling a H_CEDE in real mode.  The
+case where H_CEDE exits to host virtual mode is already OK (as are
+other hcalls which exit to host virtual mode) because the exit
+path saves the TM state.
+
+Cc: stable@vger.kernel.org # v3.15+
+Signed-off-by: Paul Mackerras <paulus@ozlabs.org>
+---
+ arch/powerpc/kvm/book3s_hv_rmhandlers.S | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+--- a/arch/powerpc/kvm/book3s_hv_rmhandlers.S
++++ b/arch/powerpc/kvm/book3s_hv_rmhandlers.S
+@@ -2037,6 +2037,13 @@ _GLOBAL(kvmppc_h_cede)		/* r3 = vcpu poi
+ 	/* save FP state */
+ 	bl	kvmppc_save_fp
+ 
++#ifdef CONFIG_PPC_TRANSACTIONAL_MEM
++BEGIN_FTR_SECTION
++	ld	r9, HSTATE_KVM_VCPU(r13)
++	bl	kvmppc_save_tm
++END_FTR_SECTION_IFSET(CPU_FTR_TM)
++#endif
++
+ 	/*
+ 	 * Set DEC to the smaller of DEC and HDEC, so that we wake
+ 	 * no later than the end of our timeslice (HDEC interrupts
+@@ -2113,6 +2120,12 @@ kvm_end_cede:
+ 	bl	kvmhv_accumulate_time
+ #endif
+ 
++#ifdef CONFIG_PPC_TRANSACTIONAL_MEM
++BEGIN_FTR_SECTION
++	bl	kvmppc_restore_tm
++END_FTR_SECTION_IFSET(CPU_FTR_TM)
++#endif
++
+ 	/* load up FP state */
+ 	bl	kvmppc_load_fp
+ 
