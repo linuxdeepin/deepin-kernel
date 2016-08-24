@@ -1,0 +1,94 @@
+From: Uwe Kleine-König <uwe@kleine-koenig.org>
+Date: Sat, 2 Jul 2016 17:28:08 +0200
+Subject: [PATCH] rtc: s35390a: fix reading out alarm
+Origin: https://git.kernel.org/cgit/linux/kernel/git/next/linux-next.git/commit/?id=ee82c046c1031af95e8c24dda072e04c565d4247
+
+There are several issues fixed in this patch:
+
+ - When alarm isn't enabled, set .enabled to zero instead of returning
+   -EINVAL.
+ - Ignore how IRQ1 is configured when determining if IRQ2 is on.
+ - The three alarm registers have an enable flag which must be
+   evaluated.
+ - The chip always triggers when the seconds register gets 0.
+
+Note that the rtc framework however doesn't handle the result correctly
+because it doesn't check wday being initialized and so interprets an
+alarm being set for 10:00 AM in three days as 10:00 AM tomorrow (or
+today if that's not over yet).
+
+Signed-off-by: Uwe Kleine-König <uwe@kleine-koenig.org>
+Signed-off-by: Alexandre Belloni <alexandre.belloni@free-electrons.com>
+---
+ drivers/rtc/rtc-s35390a.c | 40 +++++++++++++++++++++++++++++++---------
+ 1 file changed, 31 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/rtc/rtc-s35390a.c b/drivers/rtc/rtc-s35390a.c
+index f40afdd0e5f5..6507a01cf9ad 100644
+--- a/drivers/rtc/rtc-s35390a.c
++++ b/drivers/rtc/rtc-s35390a.c
+@@ -242,6 +242,8 @@ static int s35390a_set_alarm(struct i2c_client *client, struct rtc_wkalrm *alm)
+ 
+ 	if (alm->time.tm_wday != -1)
+ 		buf[S35390A_ALRM_BYTE_WDAY] = bin2bcd(alm->time.tm_wday) | 0x80;
++	else
++		buf[S35390A_ALRM_BYTE_WDAY] = 0;
+ 
+ 	buf[S35390A_ALRM_BYTE_HOURS] = s35390a_hr2reg(s35390a,
+ 			alm->time.tm_hour) | 0x80;
+@@ -269,23 +271,43 @@ static int s35390a_read_alarm(struct i2c_client *client, struct rtc_wkalrm *alm)
+ 	if (err < 0)
+ 		return err;
+ 
+-	if (bitrev8(sts) != S35390A_INT2_MODE_ALARM)
+-		return -EINVAL;
++	if ((bitrev8(sts) & S35390A_INT2_MODE_MASK) != S35390A_INT2_MODE_ALARM) {
++		/*
++		 * When the alarm isn't enabled, the register to configure
++		 * the alarm time isn't accessible.
++		 */
++		alm->enabled = 0;
++		return 0;
++	} else {
++		alm->enabled = 1;
++	}
+ 
+ 	err = s35390a_get_reg(s35390a, S35390A_CMD_INT2_REG1, buf, sizeof(buf));
+ 	if (err < 0)
+ 		return err;
+ 
+ 	/* This chip returns the bits of each byte in reverse order */
+-	for (i = 0; i < 3; ++i) {
++	for (i = 0; i < 3; ++i)
+ 		buf[i] = bitrev8(buf[i]);
+-		buf[i] &= ~0x80;
+-	}
+ 
+-	alm->time.tm_wday = bcd2bin(buf[S35390A_ALRM_BYTE_WDAY]);
+-	alm->time.tm_hour = s35390a_reg2hr(s35390a,
+-						buf[S35390A_ALRM_BYTE_HOURS]);
+-	alm->time.tm_min = bcd2bin(buf[S35390A_ALRM_BYTE_MINS]);
++	/*
++	 * B0 of the three matching registers is an enable flag. Iff it is set
++	 * the configured value is used for matching.
++	 */
++	if (buf[S35390A_ALRM_BYTE_WDAY] & 0x80)
++		alm->time.tm_wday =
++			bcd2bin(buf[S35390A_ALRM_BYTE_WDAY] & ~0x80);
++
++	if (buf[S35390A_ALRM_BYTE_HOURS] & 0x80)
++		alm->time.tm_hour =
++			s35390a_reg2hr(s35390a,
++				       buf[S35390A_ALRM_BYTE_HOURS] & ~0x80);
++
++	if (buf[S35390A_ALRM_BYTE_MINS] & 0x80)
++		alm->time.tm_min = bcd2bin(buf[S35390A_ALRM_BYTE_MINS] & ~0x80);
++
++	/* alarm triggers always at s=0 */
++	alm->time.tm_sec = 0;
+ 
+ 	dev_dbg(&client->dev, "%s: alm is mins=%d, hours=%d, wday=%d\n",
+ 			__func__, alm->time.tm_min, alm->time.tm_hour,
+-- 
+2.8.1
+
