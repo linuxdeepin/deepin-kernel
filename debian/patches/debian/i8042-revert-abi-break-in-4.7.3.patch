@@ -1,0 +1,155 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Fri, 09 Sep 2016 02:13:06 +0100
+Subject: i8042: Revert ABI break in 4.7.3
+Forwarded: not-needed
+
+Revert "Input: i8042 - set up shared ps2_cmd_mutex for AUX ports" and
+"Input: i8042 - break load dependency between atkbd/psmouse and i8042"
+to avoid an ABI break.
+
+CONFIG_SERIO_I8042=m is absurd on x86 so this didn't really deserve a
+stable update.
+
+---
+diff --git a/drivers/input/serio/i8042.c b/drivers/input/serio/i8042.c
+index 405252a884dd..454195709a82 100644
+--- a/drivers/input/serio/i8042.c
++++ b/drivers/input/serio/i8042.c
+@@ -1277,7 +1277,6 @@ static int __init i8042_create_kbd_port(void)
+ 	serio->start		= i8042_start;
+ 	serio->stop		= i8042_stop;
+ 	serio->close		= i8042_port_close;
+-	serio->ps2_cmd_mutex	= &i8042_mutex;
+ 	serio->port_data	= port;
+ 	serio->dev.parent	= &i8042_platform_device->dev;
+ 	strlcpy(serio->name, "i8042 KBD port", sizeof(serio->name));
+@@ -1305,7 +1304,6 @@ static int __init i8042_create_aux_port(int idx)
+ 	serio->write		= i8042_aux_write;
+ 	serio->start		= i8042_start;
+ 	serio->stop		= i8042_stop;
+-	serio->ps2_cmd_mutex	= &i8042_mutex;
+ 	serio->port_data	= port;
+ 	serio->dev.parent	= &i8042_platform_device->dev;
+ 	if (idx < 0) {
+@@ -1375,6 +1373,21 @@ static void i8042_unregister_ports(void)
+ 	}
+ }
+ 
++/*
++ * Checks whether port belongs to i8042 controller.
++ */
++bool i8042_check_port_owner(const struct serio *port)
++{
++	int i;
++
++	for (i = 0; i < I8042_NUM_PORTS; i++)
++		if (i8042_ports[i].serio == port)
++			return true;
++
++	return false;
++}
++EXPORT_SYMBOL(i8042_check_port_owner);
++
+ static void i8042_free_irqs(void)
+ {
+ 	if (i8042_aux_irq_registered)
+diff --git a/drivers/input/serio/libps2.c b/drivers/input/serio/libps2.c
+index 83e9c663aa67..316f2c897101 100644
+--- a/drivers/input/serio/libps2.c
++++ b/drivers/input/serio/libps2.c
+@@ -56,17 +56,19 @@ EXPORT_SYMBOL(ps2_sendbyte);
+ 
+ void ps2_begin_command(struct ps2dev *ps2dev)
+ {
+-	struct mutex *m = ps2dev->serio->ps2_cmd_mutex ?: &ps2dev->cmd_mutex;
++	mutex_lock(&ps2dev->cmd_mutex);
+ 
+-	mutex_lock(m);
++	if (i8042_check_port_owner(ps2dev->serio))
++		i8042_lock_chip();
+ }
+ EXPORT_SYMBOL(ps2_begin_command);
+ 
+ void ps2_end_command(struct ps2dev *ps2dev)
+ {
+-	struct mutex *m = ps2dev->serio->ps2_cmd_mutex ?: &ps2dev->cmd_mutex;
++	if (i8042_check_port_owner(ps2dev->serio))
++		i8042_unlock_chip();
+ 
+-	mutex_unlock(m);
++	mutex_unlock(&ps2dev->cmd_mutex);
+ }
+ EXPORT_SYMBOL(ps2_end_command);
+ 
+diff --git a/include/linux/i8042.h b/include/linux/i8042.h
+index d98780ca9604..0f9bafa17a02 100644
+--- a/include/linux/i8042.h
++++ b/include/linux/i8042.h
+@@ -62,6 +62,7 @@ struct serio;
+ void i8042_lock_chip(void);
+ void i8042_unlock_chip(void);
+ int i8042_command(unsigned char *param, int command);
++bool i8042_check_port_owner(const struct serio *);
+ int i8042_install_filter(bool (*filter)(unsigned char data, unsigned char str,
+ 					struct serio *serio));
+ int i8042_remove_filter(bool (*filter)(unsigned char data, unsigned char str,
+@@ -82,6 +83,11 @@ static inline int i8042_command(unsigned char *param, int command)
+ 	return -ENODEV;
+ }
+ 
++static inline bool i8042_check_port_owner(const struct serio *serio)
++{
++	return false;
++}
++
+ static inline int i8042_install_filter(bool (*filter)(unsigned char data, unsigned char str,
+ 					struct serio *serio))
+ {
+diff --git a/include/linux/serio.h b/include/linux/serio.h
+index c733cff44e18..df4ab5de1586 100644
+--- a/include/linux/serio.h
++++ b/include/linux/serio.h
+@@ -31,8 +31,7 @@ struct serio {
+ 
+ 	struct serio_device_id id;
+ 
+-	/* Protects critical sections from port's interrupt handler */
+-	spinlock_t lock;
++	spinlock_t lock;		/* protects critical sections from port's interrupt handler */
+ 
+ 	int (*write)(struct serio *, unsigned char);
+ 	int (*open)(struct serio *);
+@@ -41,29 +40,16 @@ struct serio {
+ 	void (*stop)(struct serio *);
+ 
+ 	struct serio *parent;
+-	/* Entry in parent->children list */
+-	struct list_head child_node;
++	struct list_head child_node;	/* Entry in parent->children list */
+ 	struct list_head children;
+-	/* Level of nesting in serio hierarchy */
+-	unsigned int depth;
++	unsigned int depth;		/* level of nesting in serio hierarchy */
+ 
+-	/*
+-	 * serio->drv is accessed from interrupt handlers; when modifying
+-	 * caller should acquire serio->drv_mutex and serio->lock.
+-	 */
+-	struct serio_driver *drv;
+-	/* Protects serio->drv so attributes can pin current driver */
+-	struct mutex drv_mutex;
++	struct serio_driver *drv;	/* accessed from interrupt, must be protected by serio->lock and serio->sem */
++	struct mutex drv_mutex;		/* protects serio->drv so attributes can pin driver */
+ 
+ 	struct device dev;
+ 
+ 	struct list_head node;
+-
+-	/*
+-	 * For use by PS/2 layer when several ports share hardware and
+-	 * may get indigestion when exposed to concurrent access (i8042).
+-	 */
+-	struct mutex *ps2_cmd_mutex;
+ };
+ #define to_serio_port(d)	container_of(d, struct serio, dev)
+ 
