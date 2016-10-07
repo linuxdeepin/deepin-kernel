@@ -135,7 +135,7 @@ class Gencontrol(Base):
         self._setup_makeflags(self.arch_makeflags, makeflags, config_base)
 
         try:
-            gnu_type_bytes = subprocess.check_output(['dpkg-architecture',
+            gnu_type_bytes = subprocess.check_output(['dpkg-architecture', '-f',
                                                       '-a', arch,
                                                       '-q', 'DEB_HOST_GNU_TYPE'],
                                                      stderr=subprocess.DEVNULL)
