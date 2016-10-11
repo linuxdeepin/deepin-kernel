@@ -2,7 +2,7 @@ From: Mike Galbraith <umgwanakikbuti@gmail.com>
 Date: Thu, 31 Mar 2016 04:08:28 +0200
 Subject: [PATCH] drivers/block/zram: Replace bit spinlocks with rtmutex
  for -rt
-Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.6/older/patches-4.6.2-rt5.tar.xz
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.8/older/patches-4.8-rt1.tar.xz
 
 They're nondeterministic, and lead to ___might_sleep() splats in -rt.
 OTOH, they're a lot less wasteful than an rtmutex per page.
@@ -16,7 +16,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
 
 --- a/drivers/block/zram/zram_drv.c
 +++ b/drivers/block/zram/zram_drv.c
-@@ -520,6 +520,8 @@ static struct zram_meta *zram_meta_alloc
+@@ -519,6 +519,8 @@ static struct zram_meta *zram_meta_alloc
  		goto out_error;
  	}
  
@@ -25,9 +25,9 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  	return meta;
  
  out_error:
-@@ -568,12 +570,12 @@ static int zram_decompress_page(struct z
+@@ -567,12 +569,12 @@ static int zram_decompress_page(struct z
  	unsigned long handle;
- 	size_t size;
+ 	unsigned int size;
  
 -	bit_spin_lock(ZRAM_ACCESS, &meta->table[index].value);
 +	zram_lock_table(&meta->table[index]);
@@ -40,16 +40,16 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  		clear_page(mem);
  		return 0;
  	}
-@@ -584,7 +586,7 @@ static int zram_decompress_page(struct z
- 	else
- 		ret = zcomp_decompress(zram->comp, cmem, size, mem);
+@@ -587,7 +589,7 @@ static int zram_decompress_page(struct z
+ 		zcomp_stream_put(zram->comp);
+ 	}
  	zs_unmap_object(meta->mem_pool, handle);
 -	bit_spin_unlock(ZRAM_ACCESS, &meta->table[index].value);
 +	zram_unlock_table(&meta->table[index]);
  
  	/* Should NEVER happen. Return bio error if it does. */
  	if (unlikely(ret)) {
-@@ -604,14 +606,14 @@ static int zram_bvec_read(struct zram *z
+@@ -607,14 +609,14 @@ static int zram_bvec_read(struct zram *z
  	struct zram_meta *meta = zram->meta;
  	page = bvec->bv_page;
  
@@ -67,7 +67,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  
  	if (is_partial_io(bvec))
  		/* Use  a temporary buffer to decompress the page */
-@@ -689,10 +691,10 @@ static int zram_bvec_write(struct zram *
+@@ -691,10 +693,10 @@ static int zram_bvec_write(struct zram *
  		if (user_mem)
  			kunmap_atomic(user_mem);
  		/* Free memory associated with this sector now. */
@@ -80,7 +80,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  
  		atomic64_inc(&zram->stats.zero_pages);
  		ret = 0;
-@@ -752,12 +754,12 @@ static int zram_bvec_write(struct zram *
+@@ -785,12 +787,12 @@ static int zram_bvec_write(struct zram *
  	 * Free memory associated with this sector
  	 * before overwriting unused sectors.
  	 */
@@ -95,7 +95,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  
  	/* Update stats */
  	atomic64_add(clen, &zram->stats.compr_data_size);
-@@ -800,9 +802,9 @@ static void zram_bio_discard(struct zram
+@@ -833,9 +835,9 @@ static void zram_bio_discard(struct zram
  	}
  
  	while (n >= PAGE_SIZE) {
@@ -107,7 +107,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  		atomic64_inc(&zram->stats.notify_free);
  		index++;
  		n -= PAGE_SIZE;
-@@ -928,9 +930,9 @@ static void zram_slot_free_notify(struct
+@@ -964,9 +966,9 @@ static void zram_slot_free_notify(struct
  	zram = bdev->bd_disk->private_data;
  	meta = zram->meta;
  
@@ -121,7 +121,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  
 --- a/drivers/block/zram/zram_drv.h
 +++ b/drivers/block/zram/zram_drv.h
-@@ -72,6 +72,9 @@ enum zram_pageflags {
+@@ -73,6 +73,9 @@ enum zram_pageflags {
  struct zram_table_entry {
  	unsigned long handle;
  	unsigned long value;
@@ -131,7 +131,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  };
  
  struct zram_stats {
-@@ -119,4 +122,42 @@ struct zram {
+@@ -120,4 +123,42 @@ struct zram {
  	 */
  	bool claim; /* Protected by bdev->bd_mutex */
  };

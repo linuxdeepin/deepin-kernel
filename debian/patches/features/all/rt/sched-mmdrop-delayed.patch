@@ -1,7 +1,7 @@
 Subject: sched: Move mmdrop to RCU on RT
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Mon, 06 Jun 2011 12:20:33 +0200
-Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.6/older/patches-4.6.2-rt5.tar.xz
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.8/older/patches-4.8-rt1.tar.xz
 
 Takes sleeping locks and calls into the memory allocator, so nothing
 we want to do in task switch and oder atomic contexts.
@@ -9,9 +9,9 @@ we want to do in task switch and oder atomic contexts.
 Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 ---
  include/linux/mm_types.h |    4 ++++
- include/linux/sched.h    |   12 ++++++++++++
+ include/linux/sched.h    |   11 +++++++++++
  kernel/fork.c            |   13 +++++++++++++
- kernel/sched/core.c      |   18 ++++++++++++++++--
+ kernel/sched/core.c      |   19 +++++++++++++++++--
  4 files changed, 45 insertions(+), 2 deletions(-)
 
 --- a/include/linux/mm_types.h
@@ -22,9 +22,9 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  #include <linux/uprobes.h>
 +#include <linux/rcupdate.h>
  #include <linux/page-flags-layout.h>
+ #include <linux/workqueue.h>
  #include <asm/page.h>
- #include <asm/mmu.h>
-@@ -502,6 +503,9 @@ struct mm_struct {
+@@ -508,6 +509,9 @@ struct mm_struct {
  	bool tlb_flush_pending;
  #endif
  	struct uprobes_state uprobes_state;
@@ -36,14 +36,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	void __user *bd_addr;
 --- a/include/linux/sched.h
 +++ b/include/linux/sched.h
-@@ -2640,12 +2640,24 @@ extern struct mm_struct * mm_alloc(void)
- 
- /* mmdrop drops the mm and the page tables */
- extern void __mmdrop(struct mm_struct *);
-+
- static inline void mmdrop(struct mm_struct * mm)
- {
- 	if (unlikely(atomic_dec_and_test(&mm->mm_count)))
+@@ -2857,6 +2857,17 @@ static inline void mmdrop(struct mm_stru
  		__mmdrop(mm);
  }
  
@@ -58,12 +51,12 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +# define mmdrop_delayed(mm)	mmdrop(mm)
 +#endif
 +
- /* mmput gets rid of the mappings and all user-space */
- extern void mmput(struct mm_struct *);
- /* Grab a reference to a task's mm, if it is not already going away */
+ static inline bool mmget_not_zero(struct mm_struct *mm)
+ {
+ 	return atomic_inc_not_zero(&mm->mm_users);
 --- a/kernel/fork.c
 +++ b/kernel/fork.c
-@@ -712,6 +712,19 @@ void __mmdrop(struct mm_struct *mm)
+@@ -715,6 +715,19 @@ void __mmdrop(struct mm_struct *mm)
  }
  EXPORT_SYMBOL_GPL(__mmdrop);
  
@@ -80,12 +73,12 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +}
 +#endif
 +
- /*
-  * Decrement the use count and release all resources for an mm.
-  */
+ static inline void __mmput(struct mm_struct *mm)
+ {
+ 	VM_BUG_ON(atomic_read(&mm->mm_users));
 --- a/kernel/sched/core.c
 +++ b/kernel/sched/core.c
-@@ -2642,8 +2642,12 @@ static struct rq *finish_task_switch(str
+@@ -2776,8 +2776,12 @@ static struct rq *finish_task_switch(str
  	finish_arch_post_lock_switch();
  
  	fire_sched_in_preempt_notifiers(current);
@@ -99,7 +92,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	if (unlikely(prev_state == TASK_DEAD)) {
  		if (prev->sched_class->task_dead)
  			prev->sched_class->task_dead(prev);
-@@ -5299,6 +5303,8 @@ void sched_setnuma(struct task_struct *p
+@@ -5513,6 +5517,8 @@ void sched_setnuma(struct task_struct *p
  #endif /* CONFIG_NUMA_BALANCING */
  
  #ifdef CONFIG_HOTPLUG_CPU
@@ -108,8 +101,8 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  /*
   * Ensures that the idle task is using init_mm right before its cpu goes
   * offline.
-@@ -5313,7 +5319,11 @@ void idle_task_exit(void)
- 		switch_mm(mm, &init_mm, current);
+@@ -5527,7 +5533,12 @@ void idle_task_exit(void)
+ 		switch_mm_irqs_off(mm, &init_mm, current);
  		finish_arch_post_lock_switch();
  	}
 -	mmdrop(mm);
@@ -118,17 +111,18 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +	 * call mmdrop() nor mmdrop_delayed() from here.
 +	 */
 +	per_cpu(idle_last_mm, smp_processor_id()) = mm;
++
  }
  
  /*
-@@ -5509,6 +5519,10 @@ migration_call(struct notifier_block *nf
- 
- 	case CPU_DEAD:
- 		calc_load_migrate(rq);
-+		if (per_cpu(idle_last_mm, cpu)) {
-+			mmdrop(per_cpu(idle_last_mm, cpu));
-+			per_cpu(idle_last_mm, cpu) = NULL;
-+		}
- 		break;
+@@ -7402,6 +7413,10 @@ int sched_cpu_dying(unsigned int cpu)
+ 	update_max_interval();
+ 	nohz_balance_exit_idle(cpu);
+ 	hrtick_clear(rq);
++	if (per_cpu(idle_last_mm, cpu)) {
++		mmdrop(per_cpu(idle_last_mm, cpu));
++		per_cpu(idle_last_mm, cpu) = NULL;
++	}
+ 	return 0;
+ }
  #endif
- 	}

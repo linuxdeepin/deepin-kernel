@@ -1,22 +1,23 @@
 Subject: arm: Add support for lazy preemption
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Wed, 31 Oct 2012 12:04:11 +0100
-Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.6/older/patches-4.6.2-rt5.tar.xz
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.8/older/patches-4.8-rt1.tar.xz
 
 Implement the arm pieces for lazy preempt.
 
 Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 ---
  arch/arm/Kconfig                   |    1 +
- arch/arm/include/asm/thread_info.h |    3 +++
+ arch/arm/include/asm/thread_info.h |    8 ++++++--
  arch/arm/kernel/asm-offsets.c      |    1 +
- arch/arm/kernel/entry-armv.S       |   13 +++++++++++--
+ arch/arm/kernel/entry-armv.S       |   19 ++++++++++++++++---
+ arch/arm/kernel/entry-common.S     |    9 +++++++--
  arch/arm/kernel/signal.c           |    3 ++-
- 5 files changed, 18 insertions(+), 3 deletions(-)
+ 6 files changed, 33 insertions(+), 8 deletions(-)
 
 --- a/arch/arm/Kconfig
 +++ b/arch/arm/Kconfig
-@@ -71,6 +71,7 @@ config ARM
+@@ -75,6 +75,7 @@ config ARM
  	select HAVE_PERF_EVENTS
  	select HAVE_PERF_REGS
  	select HAVE_PERF_USER_STACK_DUMP
@@ -34,11 +35,13 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	mm_segment_t		addr_limit;	/* address limit */
  	struct task_struct	*task;		/* main task structure */
  	__u32			cpu;		/* cpu */
-@@ -143,6 +144,7 @@ extern int vfp_restore_user_hwstate(stru
+@@ -142,7 +143,8 @@ extern int vfp_restore_user_hwstate(stru
+ #define TIF_SYSCALL_TRACE	4	/* syscall trace active */
  #define TIF_SYSCALL_AUDIT	5	/* syscall auditing active */
  #define TIF_SYSCALL_TRACEPOINT	6	/* syscall tracepoint instrumentation */
- #define TIF_SECCOMP		7	/* seccomp syscall filtering active */
-+#define TIF_NEED_RESCHED_LAZY	8
+-#define TIF_SECCOMP		7	/* seccomp syscall filtering active */
++#define TIF_SECCOMP		8	/* seccomp syscall filtering active */
++#define TIF_NEED_RESCHED_LAZY	7
  
  #define TIF_NOHZ		12	/* in adaptive nohz mode */
  #define TIF_USING_IWMMXT	17
@@ -50,6 +53,16 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  #define _TIF_UPROBE		(1 << TIF_UPROBE)
  #define _TIF_SYSCALL_TRACE	(1 << TIF_SYSCALL_TRACE)
  #define _TIF_SYSCALL_AUDIT	(1 << TIF_SYSCALL_AUDIT)
+@@ -167,7 +170,8 @@ extern int vfp_restore_user_hwstate(stru
+  * Change these and you break ASM code in entry-common.S
+  */
+ #define _TIF_WORK_MASK		(_TIF_NEED_RESCHED | _TIF_SIGPENDING | \
+-				 _TIF_NOTIFY_RESUME | _TIF_UPROBE)
++				 _TIF_NOTIFY_RESUME | _TIF_UPROBE | \
++				 _TIF_NEED_RESCHED_LAZY)
+ 
+ #endif /* __KERNEL__ */
+ #endif /* __ASM_ARM_THREAD_INFO_H */
 --- a/arch/arm/kernel/asm-offsets.c
 +++ b/arch/arm/kernel/asm-offsets.c
 @@ -65,6 +65,7 @@ int main(void)
@@ -62,9 +75,9 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
    DEFINE(TI_CPU,		offsetof(struct thread_info, cpu));
 --- a/arch/arm/kernel/entry-armv.S
 +++ b/arch/arm/kernel/entry-armv.S
-@@ -215,11 +215,18 @@ ENDPROC(__dabt_svc)
+@@ -220,11 +220,18 @@ ENDPROC(__dabt_svc)
+ 
  #ifdef CONFIG_PREEMPT
- 	get_thread_info tsk
  	ldr	r8, [tsk, #TI_PREEMPT]		@ get preempt count
 -	ldr	r0, [tsk, #TI_FLAGS]		@ get flags
  	teq	r8, #0				@ if preempt count != 0
@@ -83,15 +96,48 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  #endif
  
  	svc_exit r5, irq = 1			@ return from exception
-@@ -234,6 +241,8 @@ ENDPROC(__irq_svc)
+@@ -239,8 +246,14 @@ ENDPROC(__irq_svc)
  1:	bl	preempt_schedule_irq		@ irq en/disable is done inside
  	ldr	r0, [tsk, #TI_FLAGS]		@ get new tasks TI_FLAGS
  	tst	r0, #_TIF_NEED_RESCHED
 +	bne	1b
 +	tst	r0, #_TIF_NEED_RESCHED_LAZY
  	reteq	r8				@ go again
- 	b	1b
+-	b	1b
++	ldr	r0, [tsk, #TI_PREEMPT_LAZY]	@ get preempt lazy count
++	teq	r0, #0				@ if preempt lazy count != 0
++	beq	1b
++	ret	r8				@ go again
++
  #endif
+ 
+ __und_fault:
+--- a/arch/arm/kernel/entry-common.S
++++ b/arch/arm/kernel/entry-common.S
+@@ -36,7 +36,9 @@
+  UNWIND(.cantunwind	)
+ 	disable_irq_notrace			@ disable interrupts
+ 	ldr	r1, [tsk, #TI_FLAGS]		@ re-check for syscall tracing
+-	tst	r1, #_TIF_SYSCALL_WORK | _TIF_WORK_MASK
++	tst	r1, #((_TIF_SYSCALL_WORK | _TIF_WORK_MASK) & ~_TIF_SECCOMP)
++	bne	fast_work_pending
++	tst	r1, #_TIF_SECCOMP
+ 	bne	fast_work_pending
+ 
+ 	/* perform architecture specific actions before user return */
+@@ -62,8 +64,11 @@ ENDPROC(ret_fast_syscall)
+ 	str	r0, [sp, #S_R0 + S_OFF]!	@ save returned r0
+ 	disable_irq_notrace			@ disable interrupts
+ 	ldr	r1, [tsk, #TI_FLAGS]		@ re-check for syscall tracing
+-	tst	r1, #_TIF_SYSCALL_WORK | _TIF_WORK_MASK
++	tst	r1, #((_TIF_SYSCALL_WORK | _TIF_WORK_MASK) & ~_TIF_SECCOMP)
++	bne 	do_slower_path
++	tst	r1, #_TIF_SECCOMP
+ 	beq	no_work_pending
++do_slower_path:
+  UNWIND(.fnend		)
+ ENDPROC(ret_fast_syscall)
+ 
 --- a/arch/arm/kernel/signal.c
 +++ b/arch/arm/kernel/signal.c
 @@ -572,7 +572,8 @@ do_work_pending(struct pt_regs *regs, un

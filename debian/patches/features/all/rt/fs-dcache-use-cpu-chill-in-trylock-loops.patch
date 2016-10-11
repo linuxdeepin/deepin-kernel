@@ -1,7 +1,7 @@
 Subject: fs: dcache: Use cpu_chill() in trylock loops
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Wed, 07 Mar 2012 21:00:34 +0100
-Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.6/older/patches-4.6.2-rt5.tar.xz
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.8/older/patches-4.8-rt1.tar.xz
 
 Retry loops on RT might loop forever when the modifying side was
 preempted. Use cpu_chill() instead of cpu_relax() to let the system
@@ -12,9 +12,9 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 ---
  fs/autofs4/autofs_i.h |    1 +
  fs/autofs4/expire.c   |    2 +-
- fs/dcache.c           |    5 +++--
+ fs/dcache.c           |   20 ++++++++++++++++----
  fs/namespace.c        |    3 ++-
- 4 files changed, 7 insertions(+), 4 deletions(-)
+ 4 files changed, 20 insertions(+), 6 deletions(-)
 
 --- a/fs/autofs4/autofs_i.h
 +++ b/fs/autofs4/autofs_i.h
@@ -47,16 +47,38 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  #include <linux/slab.h>
  #include <linux/init.h>
  #include <linux/hash.h>
-@@ -578,7 +579,7 @@ static struct dentry *dentry_kill(struct
+@@ -750,6 +751,8 @@ static inline bool fast_dput(struct dent
+  */
+ void dput(struct dentry *dentry)
+ {
++	struct dentry *parent;
++
+ 	if (unlikely(!dentry))
+ 		return;
  
- failed:
- 	spin_unlock(&dentry->d_lock);
--	cpu_relax();
-+	cpu_chill();
- 	return dentry; /* try again with same dentry */
+@@ -788,9 +791,18 @@ void dput(struct dentry *dentry)
+ 	return;
+ 
+ kill_it:
+-	dentry = dentry_kill(dentry);
+-	if (dentry) {
+-		cond_resched();
++	parent = dentry_kill(dentry);
++	if (parent) {
++		int r;
++
++		if (parent == dentry) {
++			/* the task with the highest priority won't schedule */
++			r = cond_resched();
++			if (!r)
++				cpu_chill();
++		} else {
++			dentry = parent;
++		}
+ 		goto repeat;
+ 	}
  }
- 
-@@ -2316,7 +2317,7 @@ void d_delete(struct dentry * dentry)
+@@ -2321,7 +2333,7 @@ void d_delete(struct dentry * dentry)
  	if (dentry->d_lockref.count == 1) {
  		if (!spin_trylock(&inode->i_lock)) {
  			spin_unlock(&dentry->d_lock);

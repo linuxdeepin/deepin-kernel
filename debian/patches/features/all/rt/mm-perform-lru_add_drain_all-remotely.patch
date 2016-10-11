@@ -1,7 +1,7 @@
 From: Luiz Capitulino <lcapitulino@redhat.com>
 Date: Fri, 27 May 2016 15:03:28 +0200
 Subject: [PATCH] mm: perform lru_add_drain_all() remotely
-Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.6/older/patches-4.6.2-rt5.tar.xz
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.8/older/patches-4.8-rt1.tar.xz
 
 lru_add_drain_all() works by scheduling lru_add_drain_cpu() to run
 on all CPUs that have non-empty LRU pagevecs and then waiting for
@@ -20,12 +20,12 @@ Signed-off-by: Rik van Riel <riel@redhat.com>
 Signed-off-by: Luiz Capitulino <lcapitulino@redhat.com>
 Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
 ---
- mm/swap.c |   37 ++++++++++++++++++++++++++++++-------
- 1 file changed, 30 insertions(+), 7 deletions(-)
+ mm/swap.c |   42 ++++++++++++++++++++++++++++++++----------
+ 1 file changed, 32 insertions(+), 10 deletions(-)
 
 --- a/mm/swap.c
 +++ b/mm/swap.c
-@@ -596,9 +596,15 @@ void lru_add_drain_cpu(int cpu)
+@@ -597,9 +597,15 @@ void lru_add_drain_cpu(int cpu)
  		unsigned long flags;
  
  		/* No harm done if a racing interrupt already did this */
@@ -41,40 +41,49 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  	}
  
  	pvec = &per_cpu(lru_deactivate_file_pvecs, cpu);
-@@ -666,12 +672,32 @@ void lru_add_drain(void)
+@@ -667,12 +673,15 @@ void lru_add_drain(void)
  	local_unlock_cpu(swapvec_lock);
  }
  
-+
+-static void lru_add_drain_per_cpu(struct work_struct *dummy)
 +#ifdef CONFIG_PREEMPT_RT_BASE
 +static inline void remote_lru_add_drain(int cpu, struct cpumask *has_work)
-+{
+ {
+-	lru_add_drain();
 +	local_lock_on(swapvec_lock, cpu);
 +	lru_add_drain_cpu(cpu);
 +	local_unlock_on(swapvec_lock, cpu);
-+}
-+
-+#else
-+
- static void lru_add_drain_per_cpu(struct work_struct *dummy)
- {
- 	lru_add_drain();
  }
  
- static DEFINE_PER_CPU(struct work_struct, lru_add_drain_work);
+-static DEFINE_PER_CPU(struct work_struct, lru_add_drain_work);
++#else
+ 
+ /*
+  * lru_add_drain_wq is used to do lru_add_drain_all() from a WQ_MEM_RECLAIM
+@@ -692,6 +701,22 @@ static int __init lru_init(void)
+ }
+ early_initcall(lru_init);
+ 
++static void lru_add_drain_per_cpu(struct work_struct *dummy)
++{
++	lru_add_drain();
++}
++
++static DEFINE_PER_CPU(struct work_struct, lru_add_drain_work);
 +static inline void remote_lru_add_drain(int cpu, struct cpumask *has_work)
 +{
 +	struct work_struct *work = &per_cpu(lru_add_drain_work, cpu);
 +
 +	INIT_WORK(work, lru_add_drain_per_cpu);
-+	schedule_work_on(cpu, work);
++	queue_work_on(cpu, lru_add_drain_wq, work);
 +	cpumask_set_cpu(cpu, has_work);
 +}
 +#endif
- 
++
  void lru_add_drain_all(void)
  {
-@@ -684,21 +710,18 @@ void lru_add_drain_all(void)
+ 	static DEFINE_MUTEX(lock);
+@@ -703,21 +728,18 @@ void lru_add_drain_all(void)
  	cpumask_clear(&has_work);
  
  	for_each_online_cpu(cpu) {
@@ -86,7 +95,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  		    pagevec_count(&per_cpu(lru_deactivate_pvecs, cpu)) ||
 -		    need_activate_page_drain(cpu)) {
 -			INIT_WORK(work, lru_add_drain_per_cpu);
--			schedule_work_on(cpu, work);
+-			queue_work_on(cpu, lru_add_drain_wq, work);
 -			cpumask_set_cpu(cpu, &has_work);
 -		}
 +		    need_activate_page_drain(cpu))
