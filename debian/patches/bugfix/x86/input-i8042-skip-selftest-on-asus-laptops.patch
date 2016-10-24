@@ -1,0 +1,354 @@
+From: Marcos Paulo de Souza <marcos.souza.org@gmail.com>
+Date: Sat, 1 Oct 2016 12:07:35 -0700
+Subject: Input: i8042 - skip selftest on ASUS laptops
+Origin: https://git.kernel.org/linus/930e19248e9b61da36c967687ca79c4d5f977919
+
+On suspend/resume cycle, selftest is executed to reset i8042 controller.
+But when this is done in Asus devices, subsequent calls to detect/init
+functions to elantech driver fails. Skipping selftest fixes this problem.
+
+An easier step to reproduce this problem is adding i8042.reset=1 as a
+kernel parameter. On Asus laptops, it'll make the system to start with the
+touchpad already stuck, since psmouse_probe forcibly calls the selftest
+function.
+
+This patch was inspired by John Hiesey's change[1], but, since this problem
+affects a lot of models of Asus, let's avoid running selftests on them.
+
+All models affected by this problem:
+A455LD
+K401LB
+K501LB
+K501LX
+R409L
+V502LX
+X302LA
+X450LCP
+X450LD
+X455LAB
+X455LDB
+X455LF
+Z450LA
+
+[1]: https://marc.info/?l=linux-input&m=144312209020616&w=2
+
+Fixes: "ETPS/2 Elantech Touchpad dies after resume from suspend"
+(https://bugzilla.kernel.org/show_bug.cgi?id=107971)
+
+Signed-off-by: Marcos Paulo de Souza <marcos.souza.org@gmail.com>
+Cc: stable@vger.kernel.org
+Signed-off-by: Dmitry Torokhov <dmitry.torokhov@gmail.com>
+---
+ Documentation/kernel-parameters.txt     |  9 +++-
+ drivers/input/serio/i8042-io.h          |  2 +-
+ drivers/input/serio/i8042-ip22io.h      |  2 +-
+ drivers/input/serio/i8042-ppcio.h       |  2 +-
+ drivers/input/serio/i8042-sparcio.h     |  2 +-
+ drivers/input/serio/i8042-unicore32io.h |  2 +-
+ drivers/input/serio/i8042-x86ia64io.h   | 96 +++++++++++++++++++++++++++++++--
+ drivers/input/serio/i8042.c             | 55 +++++++++++++++----
+ 8 files changed, 150 insertions(+), 20 deletions(-)
+
+--- a/Documentation/kernel-parameters.txt
++++ b/Documentation/kernel-parameters.txt
+@@ -1457,7 +1457,14 @@ bytes respectively. Such letter suffixes
+ 	i8042.nopnp	[HW] Don't use ACPIPnP / PnPBIOS to discover KBD/AUX
+ 			     controllers
+ 	i8042.notimeout	[HW] Ignore timeout condition signalled by controller
+-	i8042.reset	[HW] Reset the controller during init and cleanup
++	i8042.reset	[HW] Reset the controller during init, cleanup and
++			     suspend-to-ram transitions, only during s2r
++			     transitions, or never reset
++			Format: { 1 | Y | y | 0 | N | n }
++			1, Y, y: always reset controller
++			0, N, n: don't ever reset controller
++			Default: only on s2r transitions on x86; most other
++			architectures force reset to be always executed
+ 	i8042.unlock	[HW] Unlock (ignore) the keylock
+ 	i8042.kbdreset  [HW] Reset device connected to KBD port
+ 
+--- a/drivers/input/serio/i8042-io.h
++++ b/drivers/input/serio/i8042-io.h
+@@ -81,7 +81,7 @@ static inline int i8042_platform_init(vo
+ 		return -EBUSY;
+ #endif
+ 
+-	i8042_reset = 1;
++	i8042_reset = I8042_RESET_ALWAYS;
+ 	return 0;
+ }
+ 
+--- a/drivers/input/serio/i8042-ip22io.h
++++ b/drivers/input/serio/i8042-ip22io.h
+@@ -61,7 +61,7 @@ static inline int i8042_platform_init(vo
+ 		return -EBUSY;
+ #endif
+ 
+-	i8042_reset = 1;
++	i8042_reset = I8042_RESET_ALWAYS;
+ 
+ 	return 0;
+ }
+--- a/drivers/input/serio/i8042-ppcio.h
++++ b/drivers/input/serio/i8042-ppcio.h
+@@ -44,7 +44,7 @@ static inline void i8042_write_command(i
+ 
+ static inline int i8042_platform_init(void)
+ {
+-	i8042_reset = 1;
++	i8042_reset = I8042_RESET_ALWAYS;
+ 	return 0;
+ }
+ 
+--- a/drivers/input/serio/i8042-sparcio.h
++++ b/drivers/input/serio/i8042-sparcio.h
+@@ -130,7 +130,7 @@ static int __init i8042_platform_init(vo
+ 		}
+ 	}
+ 
+-	i8042_reset = 1;
++	i8042_reset = I8042_RESET_ALWAYS;
+ 
+ 	return 0;
+ }
+--- a/drivers/input/serio/i8042-unicore32io.h
++++ b/drivers/input/serio/i8042-unicore32io.h
+@@ -61,7 +61,7 @@ static inline int i8042_platform_init(vo
+ 	if (!request_mem_region(I8042_REGION_START, I8042_REGION_SIZE, "i8042"))
+ 		return -EBUSY;
+ 
+-	i8042_reset = 1;
++	i8042_reset = I8042_RESET_ALWAYS;
+ 	return 0;
+ }
+ 
+--- a/drivers/input/serio/i8042-x86ia64io.h
++++ b/drivers/input/serio/i8042-x86ia64io.h
+@@ -510,6 +510,90 @@ static const struct dmi_system_id __init
+ 	{ }
+ };
+ 
++/*
++ * On some Asus laptops, just running self tests cause problems.
++ */
++static const struct dmi_system_id i8042_dmi_noselftest_table[] = {
++	{
++		.matches = {
++			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
++			DMI_MATCH(DMI_PRODUCT_NAME, "A455LD"),
++		},
++	},
++	{
++		.matches = {
++			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
++			DMI_MATCH(DMI_PRODUCT_NAME, "K401LB"),
++		},
++	},
++	{
++		.matches = {
++			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
++			DMI_MATCH(DMI_PRODUCT_NAME, "K501LB"),
++		},
++	},
++	{
++		.matches = {
++			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
++			DMI_MATCH(DMI_PRODUCT_NAME, "K501LX"),
++		},
++	},
++	{
++		.matches = {
++			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
++			DMI_MATCH(DMI_PRODUCT_NAME, "R409L"),
++		},
++	},
++	{
++		.matches = {
++			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
++			DMI_MATCH(DMI_PRODUCT_NAME, "V502LX"),
++		},
++	},
++	{
++		.matches = {
++			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
++			DMI_MATCH(DMI_PRODUCT_NAME, "X302LA"),
++		},
++	},
++	{
++		.matches = {
++			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
++			DMI_MATCH(DMI_PRODUCT_NAME, "X450LCP"),
++		},
++	},
++	{
++		.matches = {
++			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
++			DMI_MATCH(DMI_PRODUCT_NAME, "X450LD"),
++		},
++	},
++	{
++		.matches = {
++			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
++			DMI_MATCH(DMI_PRODUCT_NAME, "X455LAB"),
++		},
++	},
++	{
++		.matches = {
++			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
++			DMI_MATCH(DMI_PRODUCT_NAME, "X455LDB"),
++		},
++	},
++	{
++		.matches = {
++			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
++			DMI_MATCH(DMI_PRODUCT_NAME, "X455LF"),
++		},
++	},
++	{
++		.matches = {
++			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
++			DMI_MATCH(DMI_PRODUCT_NAME, "Z450LA"),
++		},
++	},
++	{ }
++};
+ static const struct dmi_system_id __initconst i8042_dmi_reset_table[] = {
+ 	{
+ 		/* MSI Wind U-100 */
+@@ -1072,12 +1156,18 @@ static int __init i8042_platform_init(vo
+ 		return retval;
+ 
+ #if defined(__ia64__)
+-        i8042_reset = true;
++        i8042_reset = I8042_RESET_ALWAYS;
+ #endif
+ 
+ #ifdef CONFIG_X86
+-	if (dmi_check_system(i8042_dmi_reset_table))
+-		i8042_reset = true;
++	/* Honor module parameter when value is not default */
++	if (i8042_reset == I8042_RESET_DEFAULT) {
++		if (dmi_check_system(i8042_dmi_reset_table))
++			i8042_reset = I8042_RESET_ALWAYS;
++
++		if (dmi_check_system(i8042_dmi_noselftest_table))
++			i8042_reset = I8042_RESET_NEVER;
++	}
+ 
+ 	if (dmi_check_system(i8042_dmi_noloop_table))
+ 		i8042_noloop = true;
+--- a/drivers/input/serio/i8042.c
++++ b/drivers/input/serio/i8042.c
+@@ -48,9 +48,39 @@ static bool i8042_unlock;
+ module_param_named(unlock, i8042_unlock, bool, 0);
+ MODULE_PARM_DESC(unlock, "Ignore keyboard lock.");
+ 
+-static bool i8042_reset;
+-module_param_named(reset, i8042_reset, bool, 0);
+-MODULE_PARM_DESC(reset, "Reset controller during init and cleanup.");
++enum i8042_controller_reset_mode {
++	I8042_RESET_NEVER,
++	I8042_RESET_ALWAYS,
++	I8042_RESET_ON_S2RAM,
++#define I8042_RESET_DEFAULT	I8042_RESET_ON_S2RAM
++};
++static enum i8042_controller_reset_mode i8042_reset = I8042_RESET_DEFAULT;
++static int i8042_set_reset(const char *val, const struct kernel_param *kp)
++{
++	enum i8042_controller_reset_mode *arg = kp->arg;
++	int error;
++	bool reset;
++
++	if (val) {
++		error = kstrtobool(val, &reset);
++		if (error)
++			return error;
++	} else {
++		reset = true;
++	}
++
++	*arg = reset ? I8042_RESET_ALWAYS : I8042_RESET_NEVER;
++	return 0;
++}
++
++static const struct kernel_param_ops param_ops_reset_param = {
++	.flags = KERNEL_PARAM_OPS_FL_NOARG,
++	.set = i8042_set_reset,
++};
++#define param_check_reset_param(name, p)	\
++	__param_check(name, p, enum i8042_controller_reset_mode)
++module_param_named(reset, i8042_reset, reset_param, 0);
++MODULE_PARM_DESC(reset, "Reset controller on resume, cleanup or both");
+ 
+ static bool i8042_direct;
+ module_param_named(direct, i8042_direct, bool, 0);
+@@ -1019,7 +1049,7 @@ static int i8042_controller_init(void)
+  * Reset the controller and reset CRT to the original value set by BIOS.
+  */
+ 
+-static void i8042_controller_reset(bool force_reset)
++static void i8042_controller_reset(bool s2r_wants_reset)
+ {
+ 	i8042_flush();
+ 
+@@ -1044,8 +1074,10 @@ static void i8042_controller_reset(bool
+  * Reset the controller if requested.
+  */
+ 
+-	if (i8042_reset || force_reset)
++	if (i8042_reset == I8042_RESET_ALWAYS ||
++	    (i8042_reset == I8042_RESET_ON_S2RAM && s2r_wants_reset)) {
+ 		i8042_controller_selftest();
++	}
+ 
+ /*
+  * Restore the original control register setting.
+@@ -1110,7 +1142,7 @@ static void i8042_dritek_enable(void)
+  * before suspending.
+  */
+ 
+-static int i8042_controller_resume(bool force_reset)
++static int i8042_controller_resume(bool s2r_wants_reset)
+ {
+ 	int error;
+ 
+@@ -1118,7 +1150,8 @@ static int i8042_controller_resume(bool
+ 	if (error)
+ 		return error;
+ 
+-	if (i8042_reset || force_reset) {
++	if (i8042_reset == I8042_RESET_ALWAYS ||
++	    (i8042_reset == I8042_RESET_ON_S2RAM && s2r_wants_reset)) {
+ 		error = i8042_controller_selftest();
+ 		if (error)
+ 			return error;
+@@ -1195,7 +1228,7 @@ static int i8042_pm_resume_noirq(struct
+ 
+ static int i8042_pm_resume(struct device *dev)
+ {
+-	bool force_reset;
++	bool want_reset;
+ 	int i;
+ 
+ 	for (i = 0; i < I8042_NUM_PORTS; i++) {
+@@ -1218,9 +1251,9 @@ static int i8042_pm_resume(struct device
+ 	 * off control to the platform firmware, otherwise we can simply restore
+ 	 * the mode.
+ 	 */
+-	force_reset = pm_resume_via_firmware();
++	want_reset = pm_resume_via_firmware();
+ 
+-	return i8042_controller_resume(force_reset);
++	return i8042_controller_resume(want_reset);
+ }
+ 
+ static int i8042_pm_thaw(struct device *dev)
+@@ -1482,7 +1515,7 @@ static int __init i8042_probe(struct pla
+ 
+ 	i8042_platform_device = dev;
+ 
+-	if (i8042_reset) {
++	if (i8042_reset == I8042_RESET_ALWAYS) {
+ 		error = i8042_controller_selftest();
+ 		if (error)
+ 			return error;
