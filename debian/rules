@@ -7,11 +7,21 @@ VERSION := $(shell dpkg-parsechangelog | sed -ne 's,^Version: *\(.*\)$$,\1,p')
 VERSION_UPSTREAM := $(shell echo "$(VERSION)" | sed -e 's,-[^-]*$$,,')
 VERSION_BINNMU := $(shell echo "$(VERSION)" | sed -ne 's,.*+b\(.*\)$$,\1,p')
 
+MAJOR_VERSION := $(shell echo "$(VERSION_UPSTREAM)" | sed -ne 's,\([0-9]*\).*$$,\1,p')
+MINOR_VERSION := $(shell echo "$(VERSION_UPSTREAM)" | sed -ne 's,[0-9]*\.\([0-9]*\).*$$,\1,p')
+TESTING := $(shell echo "$(VERSION_UPSTREAM)" | sed -ne 's,.*~\(.*\)$$,\1,p')
+ORIG_UPSTREAM_VERSION := $(shell echo "$(VERSION_UPSTREAM)" | sed -e 's,~,-,')
+
 include debian/rules.defs
 
 ifneq (,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
   DEBIAN_KERNEL_JOBS := $(subst parallel=,,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
+else
+  DEBIAN_KERNEL_JOBS := 1
 endif
+
+export DEBIAN_KERNEL_JOBS
+
 ifdef DEBIAN_KERNEL_JOBS
   MAKEFLAGS += -j$(DEBIAN_KERNEL_JOBS)
 endif
@@ -69,17 +79,55 @@ DIR_ORIG = ../orig/$(SOURCE)-$(VERSION_UPSTREAM)
 TAR_ORIG_NAME = $(SOURCE)_$(VERSION_UPSTREAM).orig.tar.xz
 TAR_ORIG = $(firstword $(wildcard ../$(TAR_ORIG_NAME)) $(wildcard ../orig/$(TAR_ORIG_NAME)))
 
-orig: $(DIR_ORIG)
+TAR_UPSTREAM = ../orig/$(SOURCE)-$(ORIG_UPSTREAM_VERSION).tar.xz
+URL := https://www.kernel.org/pub/linux/kernel
+
+ifeq ($(MAJOR_VERSION),1)
+    URL := $(URL)/v$(MAJOR_VERSION).$(MINOR_VERSION)
+endif
+
+ifeq ($(MAJOR_VERSION),2)
+    URL := $(URL)/v$(MAJOR_VERSION).$(MINOR_VERSION)
+endif
+
+ifeq ($(MAJOR_VERSION),3)
+ifeq ($(MINOR_VERSION),0)
+    URL := $(URL)/v$(MAJOR_VERSION).$(MINOR_VERSION)
+else
+    URL := $(URL)/v$(MAJOR_VERSION).x
+endif
+endif
+
+ifeq ($(MAJOR_VERSION),4)
+    URL := $(URL)/v$(MAJOR_VERSION).x
+endif
+
+ifneq ($(TESTING),)
+    URL := $(URL)/testing
+endif
+
+orig: $(DIR_ORIG) ../$(TAR_ORIG_NAME)
 	rsync --delete --exclude /debian --exclude .svk --exclude .svn --exclude .git --link-dest=$(DIR_ORIG)/ -a $(DIR_ORIG)/ .
 	QUILT_PATCHES='$(CURDIR)/debian/patches' QUILT_PC=.pc quilt push --quiltrc - -a -q --fuzz=0
 
-$(DIR_ORIG):
-ifeq ($(TAR_ORIG),)
-	$(error Cannot find orig tarball $(TAR_ORIG_NAME))
-else
+../$(TAR_ORIG_NAME): ../orig/$(TAR_ORIG_NAME)
+	ln -svfr $< $@
+
+$(DIR_ORIG): genorig
+	@mkdir -p ../orig
+	@rm -fr $@
+	tar -C ../orig -xaf ../orig/$(TAR_ORIG_NAME)
+
+genorig: ../orig/$(TAR_ORIG_NAME)
+
+../orig/$(TAR_ORIG_NAME): debian/bin/genorig.py $(TAR_UPSTREAM)
+	@echo $^
+	@rm -fr $@
+	$^
+
+$(TAR_UPSTREAM):
 	mkdir -p ../orig
-	tar -C ../orig -xaf $(TAR_ORIG)
-endif
+	wget -c $(URL)/$(notdir $@) -O $@ || (echo "removing $@"; rm -fr $@; exit 1)
 
 maintainerclean:
 	rm -f debian/config.defines.dump debian/control debian/control.md5sum debian/linux-headers-* debian/linux-image-* debian/rules.gen
