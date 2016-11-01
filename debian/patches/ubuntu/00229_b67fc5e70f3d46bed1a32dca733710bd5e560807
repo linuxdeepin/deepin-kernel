@@ -1,0 +1,133 @@
+commit b67fc5e70f3d46bed1a32dca733710bd5e560807
+Author: Seth Forshee <seth.forshee@canonical.com>
+Date:   Tue Jan 19 10:20:43 2016 -0600
+
+    UBUNTU: SAUCE: cred: Add clone_cred() interface
+    
+    This interface returns a new set of credentials which is an exact
+    copy of another set. Also update prepare_kernel_cred() to use
+    this function instead of duplicating code.
+    
+    BugLink: http://bugs.launchpad.net/bugs/1531747
+    BugLink: http://bugs.launchpad.net/bugs/1534961
+    BugLink: http://bugs.launchpad.net/bugs/1535150
+    Signed-off-by: Seth Forshee <seth.forshee@canonical.com>
+    Signed-off-by: Andy Whitcroft <apw@canonical.com>
+
+diff --git a/include/linux/cred.h b/include/linux/cred.h
+index 257db64..44d5f75 100644
+--- a/include/linux/cred.h
++++ b/include/linux/cred.h
+@@ -166,6 +166,7 @@ extern int commit_creds(struct cred *);
+ extern void abort_creds(struct cred *);
+ extern const struct cred *override_creds(const struct cred *);
+ extern void revert_creds(const struct cred *);
++extern struct cred *clone_cred(const struct cred *old);
+ extern struct cred *prepare_kernel_cred(struct task_struct *);
+ extern int change_create_files_as(struct cred *, struct inode *);
+ extern int set_security_override(struct cred *, u32);
+diff --git a/kernel/cred.c b/kernel/cred.c
+index 5f264fb..15b8e8a 100644
+--- a/kernel/cred.c
++++ b/kernel/cred.c
+@@ -574,38 +574,30 @@ void __init cred_init(void)
+ }
+ 
+ /**
+- * prepare_kernel_cred - Prepare a set of credentials for a kernel service
+- * @daemon: A userspace daemon to be used as a reference
+- *
+- * Prepare a set of credentials for a kernel service.  This can then be used to
+- * override a task's own credentials so that work can be done on behalf of that
+- * task that requires a different subjective context.
+- *
+- * @daemon is used to provide a base for the security record, but can be NULL.
+- * If @daemon is supplied, then the security data will be derived from that;
+- * otherwise they'll be set to 0 and no groups, full capabilities and no keys.
++ * clone_cred - Create a new copy of a set of credentials
++ * @old: Credentials to be copied
+  *
+- * The caller may change these controls afterwards if desired.
++ * Prepare a new set of credentials that is an exact copy of @old. This can
++ * optionally be modified and used to override a task's own credentials so
++ * that work can be done on behalf of that task that requires a different
++ * subjective context.
+  *
+- * Returns the new credentials or NULL if out of memory.
++ * Returns the new credentials or NULL if @old is NULL or if out of memory.
+  *
+  * Does not take, and does not return holding current->cred_replace_mutex.
+  */
+-struct cred *prepare_kernel_cred(struct task_struct *daemon)
++struct cred *clone_cred(const struct cred *old)
+ {
+-	const struct cred *old;
+ 	struct cred *new;
+ 
++	if (!old)
++		return NULL;
++
+ 	new = kmem_cache_alloc(cred_jar, GFP_KERNEL);
+ 	if (!new)
+ 		return NULL;
+ 
+-	kdebug("prepare_kernel_cred() alloc %p", new);
+-
+-	if (daemon)
+-		old = get_task_cred(daemon);
+-	else
+-		old = get_cred(&init_cred);
++	kdebug("clone_cred() alloc %p", new);
+ 
+ 	validate_creds(old);
+ 
+@@ -630,15 +622,47 @@ struct cred *prepare_kernel_cred(struct task_struct *daemon)
+ 	if (security_prepare_creds(new, old, GFP_KERNEL) < 0)
+ 		goto error;
+ 
+-	put_cred(old);
+ 	validate_creds(new);
+ 	return new;
+ 
+ error:
+ 	put_cred(new);
+-	put_cred(old);
+ 	return NULL;
+ }
++EXPORT_SYMBOL(clone_cred);
++
++/**
++ * prepare_kernel_cred - Prepare a set of credentials for a kernel service
++ * @daemon: A userspace daemon to be used as a reference
++ *
++ * Prepare a set of credentials for a kernel service.  This can then be used to
++ * override a task's own credentials so that work can be done on behalf of that
++ * task that requires a different subjective context.
++ *
++ * @daemon is used to provide a base for the security record, but can be NULL.
++ * If @daemon is supplied, then the security data will be derived from that;
++ * otherwise they'll be set to 0 and no groups, full capabilities and no keys.
++ *
++ * The caller may change these controls afterwards if desired.
++ *
++ * Returns the new credentials or NULL if out of memory.
++ *
++ * Does not take, and does not return holding current->cred_replace_mutex.
++ */
++struct cred *prepare_kernel_cred(struct task_struct *daemon)
++{
++	const struct cred *old;
++	struct cred *new;
++
++	if (daemon)
++		old = get_task_cred(daemon);
++	else
++		old = get_cred(&init_cred);
++
++	new = clone_cred(old);
++	put_cred(old);
++	return new;
++}
+ EXPORT_SYMBOL(prepare_kernel_cred);
+ 
+ /**

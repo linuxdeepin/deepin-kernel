@@ -1,0 +1,67 @@
+commit 2c6c207572b776c52ce09587b05a67ae626c2194
+Author: Seth Forshee <seth.forshee@canonical.com>
+Date:   Thu Jan 21 11:52:04 2016 -0600
+
+    UBUNTU: SAUCE: overlayfs: Be more careful about copying up sxid files
+    
+    When an overlayfs filesystem's lowerdir is on a nosuid filesystem
+    but the upperdir is not, it's possible to copy up an sxid file or
+    stick directory into upperdir without changing the mode by
+    opening the file rw in the overlayfs mount without writing to it.
+    This makes it possible to bypass the nosuid restriction on the
+    lowerdir mount.
+    
+    It's a bad idea in general to let the mounter copy up a sxid file
+    if the mounter wouldn't have had permission to create the sxid
+    file in the first place. Therefore change ovl_set_xattr to
+    exclude these bits when initially setting the mode, then set the
+    full mode after setting the user for the inode. This allows copy
+    up for non-sxid files to work as before but causes copy up to
+    fail for the cases where the user could not have created the sxid
+    inode in upperdir.
+    
+    BugLink: http://bugs.launchpad.net/bugs/1534961
+    BugLink: http://bugs.launchpad.net/bugs/1535150
+    Signed-off-by: Seth Forshee <seth.forshee@canonical.com>
+    Signed-off-by: Leann Ogasawara <leann.ogasawara@canonical.com>
+
+diff --git a/fs/overlayfs/copy_up.c b/fs/overlayfs/copy_up.c
+index abadbc3..db47041 100644
+--- a/fs/overlayfs/copy_up.c
++++ b/fs/overlayfs/copy_up.c
+@@ -227,10 +227,19 @@ int ovl_set_attr(struct dentry *upperdentry, struct kstat *stat)
+ {
+ 	int err = 0;
+ 
++	/*
++	 * For the most part we want to set the mode bits before setting
++	 * the user, otherwise the current context might lack permission
++	 * for setting the mode. However for sxid/sticky bits we want
++	 * the operation to fail if the current user isn't privileged
++	 * towards the resulting inode. So we first set the mode but
++	 * exclude the sxid/sticky bits, then set the user, then set the
++	 * mode again if any of the sxid/sticky bits are set.
++	 */
+ 	if (!S_ISLNK(stat->mode)) {
+ 		struct iattr attr = {
+ 			.ia_valid = ATTR_MODE,
+-			.ia_mode = stat->mode,
++			.ia_mode = stat->mode & ~(S_ISUID|S_ISGID|S_ISVTX),
+ 		};
+ 		err = notify_change(upperdentry, &attr, NULL);
+ 	}
+@@ -242,6 +251,14 @@ int ovl_set_attr(struct dentry *upperdentry, struct kstat *stat)
+ 		};
+ 		err = notify_change(upperdentry, &attr, NULL);
+ 	}
++	if (!err && !S_ISLNK(stat->mode) &&
++	    (stat->mode & (S_ISUID|S_ISGID|S_ISVTX))) {
++		struct iattr attr = {
++			.ia_valid = ATTR_MODE,
++			.ia_mode = stat->mode,
++		};
++		err = notify_change(upperdentry, &attr, NULL);
++	}
+ 	if (!err)
+ 		ovl_set_timestamps(upperdentry, stat);
+ 

@@ -1,0 +1,159 @@
+commit fafe0dae8a88d8a27271b8f12e2dc1280fe1a206
+Author: Eric W. Biederman <ebiederm@xmission.com>
+Date:   Sat Jul 2 09:54:25 2016 -0500
+
+    UBUNTU: SAUCE: (namespace) fs: Allow superblock owner to change ownership of inodes
+    
+    Allow users with CAP_SYS_CHOWN over the superblock of a filesystem to
+    chown files.  Ordinarily the capable_wrt_inode_uidgid check is
+    sufficient to allow access to files but when the underlying filesystem
+    has uids or gids that don't map to the current user namespace it is
+    not enough, so the chown permission checks need to be extended to
+    allow this case.
+    
+    Calling chown on filesystem nodes whose uid or gid don't map is
+    necessary if those nodes are going to be modified as writing back
+    inodes which contain uids or gids that don't map is likely to cause
+    filesystem corruption of the uid or gid fields.
+    
+    Once chown has been called the existing capable_wrt_inode_uidgid
+    checks are sufficient, to allow the owner of a superblock to do anything
+    the global root user can do with an appropriate set of capabilities.
+    
+    For the proc filesystem this relaxation of permissions is not safe, as
+    some files are owned by users (particularly GLOBAL_ROOT_UID) outside
+    of the control of the mounter of the proc and that would be unsafe to
+    grant chown access to.  So update setattr on proc to disallow changing
+    files whose uids or gids are outside of proc's s_user_ns.
+    
+    The original version of this patch was written by: Seth Forshee.  I
+    have rewritten and rethought this patch enough so it's really not the
+    same thing (certainly it needs a different description), but he
+    deserves credit for getting out there and getting the conversation
+    started, and finding the potential gotcha's and putting up with my
+    semi-paranoid feedback.
+    
+    Inspired-by: Seth Forshee <seth.forshee@canonical.com>
+    Signed-off-by: Eric W. Biederman <ebiederm@xmission.com>
+    Signed-off-by: Tim Gardner <tim.gardner@canonical.com>
+
+diff --git a/fs/attr.c b/fs/attr.c
+index 3c42cab..7861340 100644
+--- a/fs/attr.c
++++ b/fs/attr.c
+@@ -16,6 +16,30 @@
+ #include <linux/evm.h>
+ #include <linux/ima.h>
+ 
++static bool chown_ok(const struct inode *inode, kuid_t uid)
++{
++	if (uid_eq(current_fsuid(), inode->i_uid) &&
++	    uid_eq(uid, inode->i_uid))
++		return true;
++	if (capable_wrt_inode_uidgid(inode, CAP_CHOWN))
++		return true;
++	if (ns_capable(inode->i_sb->s_user_ns, CAP_CHOWN))
++		return true;
++	return false;
++}
++
++static bool chgrp_ok(const struct inode *inode, kgid_t gid)
++{
++	if (uid_eq(current_fsuid(), inode->i_uid) &&
++	    (in_group_p(gid) || gid_eq(gid, inode->i_gid)))
++		return true;
++	if (capable_wrt_inode_uidgid(inode, CAP_CHOWN))
++		return true;
++	if (ns_capable(inode->i_sb->s_user_ns, CAP_CHOWN))
++		return true;
++	return false;
++}
++
+ /**
+  * inode_change_ok - check if attribute changes to an inode are allowed
+  * @inode:	inode to check
+@@ -47,17 +71,11 @@ int inode_change_ok(const struct inode *inode, struct iattr *attr)
+ 		return 0;
+ 
+ 	/* Make sure a caller can chown. */
+-	if ((ia_valid & ATTR_UID) &&
+-	    (!uid_eq(current_fsuid(), inode->i_uid) ||
+-	     !uid_eq(attr->ia_uid, inode->i_uid)) &&
+-	    !capable_wrt_inode_uidgid(inode, CAP_CHOWN))
++	if ((ia_valid & ATTR_UID) && !chown_ok(inode, attr->ia_uid))
+ 		return -EPERM;
+ 
+ 	/* Make sure caller can chgrp. */
+-	if ((ia_valid & ATTR_GID) &&
+-	    (!uid_eq(current_fsuid(), inode->i_uid) ||
+-	    (!in_group_p(attr->ia_gid) && !gid_eq(attr->ia_gid, inode->i_gid))) &&
+-	    !capable_wrt_inode_uidgid(inode, CAP_CHOWN))
++	if ((ia_valid & ATTR_GID) && !chgrp_ok(inode, attr->ia_gid))
+ 		return -EPERM;
+ 
+ 	/* Make sure a caller can chmod. */
+diff --git a/fs/proc/base.c b/fs/proc/base.c
+index ac0df4d..d76339e 100644
+--- a/fs/proc/base.c
++++ b/fs/proc/base.c
+@@ -705,10 +705,17 @@ int proc_setattr(struct dentry *dentry, struct iattr *attr)
+ {
+ 	int error;
+ 	struct inode *inode = d_inode(dentry);
++	struct user_namespace *s_user_ns;
+ 
+ 	if (attr->ia_valid & ATTR_MODE)
+ 		return -EPERM;
+ 
++	/* Don't let anyone mess with weird proc files */
++	s_user_ns = inode->i_sb->s_user_ns;
++	if (!kuid_has_mapping(s_user_ns, inode->i_uid) ||
++	    !kgid_has_mapping(s_user_ns, inode->i_gid))
++		return -EPERM;
++
+ 	error = inode_change_ok(inode, attr);
+ 	if (error)
+ 		return error;
+diff --git a/fs/proc/generic.c b/fs/proc/generic.c
+index be014c5..6d2a361 100644
+--- a/fs/proc/generic.c
++++ b/fs/proc/generic.c
+@@ -103,8 +103,15 @@ static int proc_notify_change(struct dentry *dentry, struct iattr *iattr)
+ {
+ 	struct inode *inode = d_inode(dentry);
+ 	struct proc_dir_entry *de = PDE(inode);
++	struct user_namespace *s_user_ns;
+ 	int error;
+ 
++	/* Don't let anyone mess with weird proc files */
++	s_user_ns = inode->i_sb->s_user_ns;
++	if (!kuid_has_mapping(s_user_ns, inode->i_uid) ||
++	    !kgid_has_mapping(s_user_ns, inode->i_gid))
++		return -EPERM;
++
+ 	error = inode_change_ok(inode, iattr);
+ 	if (error)
+ 		return error;
+diff --git a/fs/proc/proc_sysctl.c b/fs/proc/proc_sysctl.c
+index 1b93650..ebcefa9 100644
+--- a/fs/proc/proc_sysctl.c
++++ b/fs/proc/proc_sysctl.c
+@@ -749,11 +749,18 @@ static int proc_sys_permission(struct inode *inode, int mask)
+ static int proc_sys_setattr(struct dentry *dentry, struct iattr *attr)
+ {
+ 	struct inode *inode = d_inode(dentry);
++	struct user_namespace *s_user_ns;
+ 	int error;
+ 
+ 	if (attr->ia_valid & (ATTR_MODE | ATTR_UID | ATTR_GID))
+ 		return -EPERM;
+ 
++	/* Don't let anyone mess with weird proc files */
++	s_user_ns = inode->i_sb->s_user_ns;
++	if (!kuid_has_mapping(s_user_ns, inode->i_uid) ||
++	    !kgid_has_mapping(s_user_ns, inode->i_gid))
++		return -EPERM;
++
+ 	error = inode_change_ok(inode, attr);
+ 	if (error)
+ 		return error;
