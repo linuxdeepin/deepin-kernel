@@ -1,0 +1,65 @@
+commit e62b73c3d0bec90a9a6de86716eb44ce539cddfd
+Author: Tetsuo Handa <penguin-kernel@I-love.SAKURA.ne.jp>
+Date:   Sat Mar 29 15:39:24 2014 +0900
+
+    UBUNTU: SAUCE: kthread: Do not leave kthread_create() immediately upon SIGKILL.
+    
+    Commit 786235ee "kthread: make kthread_create() killable" changed to
+    leave kthread_create() as soon as receiving SIGKILL. But this change
+    caused boot failures if systemd-udevd worker process received SIGKILL
+    due to systemd's hardcoded 30 seconds timeout while loading fusion
+    driver using finit_module() [1].
+    
+    Linux kernel people think that the systemd's hardcoded timeout is a
+    systemd bug. But systemd people think that loading of kernel module
+    needs more than 30 seconds is a kernel module's bug.
+    
+    Although Linux kernel people are expecting fusion driver module not
+    to take more than 30 seconds, it will definitely not in time for
+    trusty kernel. Also, nobody can prove that fusion driver module is
+    the only case which is affected by commit 786235ee.
+    
+    Therefore, this patch changes kthread_create() to wait for up to 10
+    seconds after receiving SIGKILL, unless chosen by the OOM killer,
+    in order to give the kthreadd a chance to complete the request.
+    The side effect of this patch is that current thread's response to
+    SIGKILL is delayed for a bit (likely less than a second, unlikely
+    10 seconds).
+    
+      [1] https://bugs.launchpad.net/ubuntu/+source/linux/+bug/1276705
+    
+    Reported-by: Pierre Fersing <pierref@pierref.org>
+    Reported-by: Faidon Liambotis <paravoid@debian.org>
+    Signed-off-by: Tetsuo Handa <penguin-kernel@I-love.SAKURA.ne.jp>
+    Signed-off-by: Tim Gardner <tim.gardner@canonical.com>
+
+diff --git a/kernel/kthread.c b/kernel/kthread.c
+index 9ff173d..47ecb95 100644
+--- a/kernel/kthread.c
++++ b/kernel/kthread.c
+@@ -295,6 +295,17 @@ struct task_struct *kthread_create_on_node(int (*threadfn)(void *data),
+ 	 * new kernel thread.
+ 	 */
+ 	if (unlikely(wait_for_completion_killable(&done))) {
++		int i = 0;
++
++		/*
++		 * I got SIGKILL, but wait for 10 more seconds for completion
++		 * unless chosen by the OOM killer. This delay is there as a
++		 * workaround for boot failure caused by SIGKILL upon device
++		 * driver initialization timeout.
++		 */
++		while (i++ < 10 && !test_tsk_thread_flag(current, TIF_MEMDIE))
++			if (wait_for_completion_timeout(&done, HZ))
++				goto ready;
+ 		/*
+ 		 * If I was SIGKILLed before kthreadd (or new kernel thread)
+ 		 * calls complete(), leave the cleanup of this structure to
+@@ -308,6 +319,7 @@ struct task_struct *kthread_create_on_node(int (*threadfn)(void *data),
+ 		 */
+ 		wait_for_completion(&done);
+ 	}
++ready:
+ 	task = create->result;
+ 	if (!IS_ERR(task)) {
+ 		static const struct sched_param param = { .sched_priority = 0 };

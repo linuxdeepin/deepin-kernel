@@ -1,0 +1,191 @@
+commit d3e4a42089fac8fab1bef17ab614cb825a22aca1
+Author: Andy Whitcroft <apw@canonical.com>
+Date:   Wed Apr 16 19:40:57 2014 +0100
+
+    UBUNTU: SAUCE: vt -- maintain bootloader screen mode and content until vt switch
+    
+    Introduce a new VT mode KD_TRANSPARENT which endevours to leave the current
+    content of the framebuffer untouched.  This allows the bootloader to insert
+    a graphical splash and have the kernel maintain it until the OS splash
+    can take over.  When we finally switch away (either through programs like
+    plymouth or manually) the content is lost and the VT reverts to text mode.
+    
+    BugLink: http://bugs.launchpad.net/bugs/1308685
+    Signed-off-by: Andy Whitcroft <apw@canonical.com>
+
+diff --git a/drivers/tty/vt/vt.c b/drivers/tty/vt/vt.c
+index 2705ca9..b9d208f 100644
+--- a/drivers/tty/vt/vt.c
++++ b/drivers/tty/vt/vt.c
+@@ -102,6 +102,7 @@
+ #include <linux/uaccess.h>
+ #include <linux/kdb.h>
+ #include <linux/ctype.h>
++#include <linux/screen_info.h>
+ 
+ #define MAX_NR_CON_DRIVER 16
+ 
+@@ -146,7 +147,7 @@ static const struct consw *con_driver_map[MAX_NR_CONSOLES];
+ 
+ static int con_open(struct tty_struct *, struct file *);
+ static void vc_init(struct vc_data *vc, unsigned int rows,
+-		    unsigned int cols, int do_clear);
++		    unsigned int cols, int do_clear, int mode);
+ static void gotoxy(struct vc_data *vc, int new_x, int new_y);
+ static void save_cur(struct vc_data *vc);
+ static void reset_terminal(struct vc_data *vc, int do_clear);
+@@ -170,6 +171,9 @@ module_param(global_cursor_default, int, S_IRUGO | S_IWUSR);
+ static int cur_default = CUR_DEFAULT;
+ module_param(cur_default, int, S_IRUGO | S_IWUSR);
+ 
++int vt_handoff = 0;
++module_param_named(handoff, vt_handoff, int, S_IRUGO | S_IWUSR);
++
+ /*
+  * ignore_poke: don't unblank the screen when things are typed.  This is
+  * mainly for the privacy of braille terminal users.
+@@ -678,6 +682,13 @@ void redraw_screen(struct vc_data *vc, int is_switch)
+ 		}
+ 		if (tty0dev)
+ 			sysfs_notify(&tty0dev->kobj, NULL, "active");
++		/*
++		 * If we are switching away from a transparent VT the contents
++		 * will be lost, convert it into a blank text console then
++		 * it will be repainted blank if we ever switch back.
++		 */
++		if (old_vc->vc_mode == KD_TRANSPARENT)
++			old_vc->vc_mode = KD_TEXT;
+ 	} else {
+ 		hide_cursor(vc);
+ 		redraw = 1;
+@@ -794,7 +805,7 @@ int vc_allocate(unsigned int currcons)	/* return 0 on success */
+ 	if (global_cursor_default == -1)
+ 		global_cursor_default = 1;
+ 
+-	vc_init(vc, vc->vc_rows, vc->vc_cols, 1);
++	vc_init(vc, vc->vc_rows, vc->vc_cols, 1, KD_TEXT);
+ 	vcs_make_sysfs(currcons);
+ 	atomic_notifier_call_chain(&vt_notifier_list, VT_ALLOCATE, &param);
+ 
+@@ -2926,7 +2937,7 @@ module_param_named(italic, default_italic_color, int, S_IRUGO | S_IWUSR);
+ module_param_named(underline, default_underline_color, int, S_IRUGO | S_IWUSR);
+ 
+ static void vc_init(struct vc_data *vc, unsigned int rows,
+-		    unsigned int cols, int do_clear)
++		    unsigned int cols, int do_clear, int mode)
+ {
+ 	int j, k ;
+ 
+@@ -2937,7 +2948,7 @@ static void vc_init(struct vc_data *vc, unsigned int rows,
+ 
+ 	set_origin(vc);
+ 	vc->vc_pos = vc->vc_origin;
+-	reset_vc(vc);
++	reset_vc(vc, mode);
+ 	for (j=k=0; j<16; j++) {
+ 		vc->vc_palette[k++] = default_red[j] ;
+ 		vc->vc_palette[k++] = default_grn[j] ;
+@@ -2994,16 +3005,32 @@ static int __init con_init(void)
+ 		mod_timer(&console_timer, jiffies + (blankinterval * HZ));
+ 	}
+ 
++	if (vt_handoff > 0 && vt_handoff <= MAX_NR_CONSOLES) {
++		currcons = vt_handoff - 1;
++		vc_cons[currcons].d = vc = kzalloc(sizeof(struct vc_data), GFP_NOWAIT);
++		INIT_WORK(&vc_cons[currcons].SAK_work, vc_SAK);
++		tty_port_init(&vc->port);
++		visual_init(vc, currcons, 1);
++		vc->vc_screenbuf = kzalloc(vc->vc_screenbuf_size, GFP_NOWAIT);
++		vc_init(vc, vc->vc_rows, vc->vc_cols, 0, KD_TRANSPARENT);
++	}
+ 	for (currcons = 0; currcons < MIN_NR_CONSOLES; currcons++) {
++		if (currcons == vt_handoff - 1)
++			continue;
+ 		vc_cons[currcons].d = vc = kzalloc(sizeof(struct vc_data), GFP_NOWAIT);
+ 		INIT_WORK(&vc_cons[currcons].SAK_work, vc_SAK);
+ 		tty_port_init(&vc->port);
+ 		visual_init(vc, currcons, 1);
+ 		vc->vc_screenbuf = kzalloc(vc->vc_screenbuf_size, GFP_NOWAIT);
+ 		vc_init(vc, vc->vc_rows, vc->vc_cols,
+-			currcons || !vc->vc_sw->con_save_screen);
++			currcons || !vc->vc_sw->con_save_screen, KD_TEXT);
+ 	}
+ 	currcons = fg_console = 0;
++	if (vt_handoff > 0) {
++		printk(KERN_INFO "vt handoff: transparent VT on vt#%d\n",
++								vt_handoff);
++		currcons = fg_console = vt_handoff - 1;
++	}
+ 	master_display_fg = vc = vc_cons[currcons].d;
+ 	set_origin(vc);
+ 	save_screen(vc);
+diff --git a/drivers/tty/vt/vt_ioctl.c b/drivers/tty/vt/vt_ioctl.c
+index f62c598..73613dc 100644
+--- a/drivers/tty/vt/vt_ioctl.c
++++ b/drivers/tty/vt/vt_ioctl.c
+@@ -1040,9 +1040,9 @@ out:
+ 	return ret;
+ }
+ 
+-void reset_vc(struct vc_data *vc)
++void reset_vc(struct vc_data *vc, int mode)
+ {
+-	vc->vc_mode = KD_TEXT;
++	vc->vc_mode = mode;
+ 	vt_reset_unicode(vc->vc_num);
+ 	vc->vt_mode.mode = VT_AUTO;
+ 	vc->vt_mode.waitv = 0;
+@@ -1074,7 +1074,7 @@ void vc_SAK(struct work_struct *work)
+ 		 */
+ 		if (tty)
+ 			__do_SAK(tty);
+-		reset_vc(vc);
++		reset_vc(vc, KD_TEXT);
+ 	}
+ 	console_unlock();
+ }
+@@ -1331,7 +1331,7 @@ static void complete_change_console(struct vc_data *vc)
+ 		 * this outside of VT_PROCESS but there is no single process
+ 		 * to account for and tracking tty count may be undesirable.
+ 		 */
+-			reset_vc(vc);
++			reset_vc(vc, KD_TEXT);
+ 
+ 			if (old_vc_mode != vc->vc_mode) {
+ 				if (vc->vc_mode == KD_TEXT)
+@@ -1403,7 +1403,7 @@ void change_console(struct vc_data *new_vc)
+ 		 * this outside of VT_PROCESS but there is no single process
+ 		 * to account for and tracking tty count may be undesirable.
+ 		 */
+-		reset_vc(vc);
++		reset_vc(vc, KD_TEXT);
+ 
+ 		/*
+ 		 * Fall through to normal (VT_AUTO) handling of the switch...
+diff --git a/include/linux/vt_kern.h b/include/linux/vt_kern.h
+index 6abd24f..a1f63dc 100644
+--- a/include/linux/vt_kern.h
++++ b/include/linux/vt_kern.h
+@@ -129,7 +129,8 @@ int con_copy_unimap(struct vc_data *dst_vc, struct vc_data *src_vc)
+ void vt_event_post(unsigned int event, unsigned int old, unsigned int new);
+ int vt_waitactive(int n);
+ void change_console(struct vc_data *new_vc);
+-void reset_vc(struct vc_data *vc);
++void reset_vc(struct vc_data *vc, int mode);
++
+ extern int do_unbind_con_driver(const struct consw *csw, int first, int last,
+ 			     int deflt);
+ int vty_init(const struct file_operations *console_fops);
+diff --git a/include/uapi/linux/kd.h b/include/uapi/linux/kd.h
+index 87b7cc4..6dc8d3f 100644
+--- a/include/uapi/linux/kd.h
++++ b/include/uapi/linux/kd.h
+@@ -45,6 +45,8 @@ struct consolefontdesc {
+ #define		KD_GRAPHICS	0x01
+ #define		KD_TEXT0	0x02	/* obsolete */
+ #define		KD_TEXT1	0x03	/* obsolete */
++#define		KD_TRANSPARENT	0x04
++
+ #define KDGETMODE	0x4B3B	/* get current mode */
+ 
+ #define KDMAPDISP	0x4B3C	/* map display into address space */

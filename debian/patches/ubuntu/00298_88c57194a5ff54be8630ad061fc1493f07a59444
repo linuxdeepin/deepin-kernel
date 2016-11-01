@@ -1,0 +1,102 @@
+commit 88c57194a5ff54be8630ad061fc1493f07a59444
+Author: Tim Gardner <tim.gardner@canonical.com>
+Date:   Tue May 3 11:40:39 2016 -0600
+
+    Revert "powerpc: Simplify module TOC handling"
+    
+    This reverts commit c153693d7eb9eeb28478aa2deaaf0b4e7b5ff5e9.
+    
+    FTBS
+    https://lists.ozlabs.org/pipermail/linuxppc-dev/2016-February/139103.html
+    
+    Signed-off-by: Tim Gardner <tim.gardner@canonical.com>
+
+diff --git a/arch/powerpc/kernel/misc_64.S b/arch/powerpc/kernel/misc_64.S
+index cb19515..d6d1b8b 100644
+--- a/arch/powerpc/kernel/misc_64.S
++++ b/arch/powerpc/kernel/misc_64.S
+@@ -701,3 +701,31 @@ _GLOBAL(kexec_sequence)
+ 	li	r5,0
+ 	blr	/* image->start(physid, image->start, 0); */
+ #endif /* CONFIG_KEXEC */
++
++#ifdef CONFIG_MODULES
++#if defined(_CALL_ELF) && _CALL_ELF == 2
++
++#ifdef CONFIG_MODVERSIONS
++.weak __crc_TOC.
++.section "___kcrctab+TOC.","a"
++.globl __kcrctab_TOC.
++__kcrctab_TOC.:
++	.llong	__crc_TOC.
++#endif
++
++/*
++ * Export a fake .TOC. since both modpost and depmod will complain otherwise.
++ * Both modpost and depmod strip the leading . so we do the same here.
++ */
++.section "__ksymtab_strings","a"
++__kstrtab_TOC.:
++	.asciz "TOC."
++
++.section "___ksymtab+TOC.","a"
++/* This symbol name is important: it's used by modpost to find exported syms */
++.globl __ksymtab_TOC.
++__ksymtab_TOC.:
++	.llong 0 /* .value */
++	.llong __kstrtab_TOC.
++#endif /* ELFv2 */
++#endif /* MODULES */
+diff --git a/arch/powerpc/kernel/module_64.c b/arch/powerpc/kernel/module_64.c
+index 183368e..e02ab6f 100644
+--- a/arch/powerpc/kernel/module_64.c
++++ b/arch/powerpc/kernel/module_64.c
+@@ -297,10 +297,7 @@ static void dedotify_versions(struct modversion_info *vers,
+ 		}
+ }
+ 
+-/*
+- * Undefined symbols which refer to .funcname, hack to funcname. Make .TOC.
+- * seem to be defined (value set later).
+- */
++/* Undefined symbols which refer to .funcname, hack to funcname (or .TOC.) */
+ static void dedotify(Elf64_Sym *syms, unsigned int numsyms, char *strtab)
+ {
+ 	unsigned int i;
+@@ -308,11 +305,8 @@ static void dedotify(Elf64_Sym *syms, unsigned int numsyms, char *strtab)
+ 	for (i = 1; i < numsyms; i++) {
+ 		if (syms[i].st_shndx == SHN_UNDEF) {
+ 			char *name = strtab + syms[i].st_name;
+-			if (name[0] == '.') {
+-				if (strcmp(name+1, "TOC.") == 0)
+-					syms[i].st_shndx = SHN_ABS;
+-				syms[i].st_name++;
+-			}
++			if (name[0] == '.')
++				memmove(name, name+1, strlen(name));
+ 		}
+ 	}
+ }
+@@ -328,7 +322,7 @@ static Elf64_Sym *find_dot_toc(Elf64_Shdr *sechdrs,
+ 	numsyms = sechdrs[symindex].sh_size / sizeof(Elf64_Sym);
+ 
+ 	for (i = 1; i < numsyms; i++) {
+-		if (syms[i].st_shndx == SHN_ABS
++		if (syms[i].st_shndx == SHN_UNDEF
+ 		    && strcmp(strtab + syms[i].st_name, "TOC.") == 0)
+ 			return &syms[i];
+ 	}
+diff --git a/scripts/mod/modpost.c b/scripts/mod/modpost.c
+index 48958d3..e080746 100644
+--- a/scripts/mod/modpost.c
++++ b/scripts/mod/modpost.c
+@@ -594,8 +594,7 @@ static int ignore_undef_symbol(struct elf_info *info, const char *symname)
+ 		if (strncmp(symname, "_restgpr0_", sizeof("_restgpr0_") - 1) == 0 ||
+ 		    strncmp(symname, "_savegpr0_", sizeof("_savegpr0_") - 1) == 0 ||
+ 		    strncmp(symname, "_restvr_", sizeof("_restvr_") - 1) == 0 ||
+-		    strncmp(symname, "_savevr_", sizeof("_savevr_") - 1) == 0 ||
+-		    strcmp(symname, ".TOC.") == 0)
++		    strncmp(symname, "_savevr_", sizeof("_savevr_") - 1) == 0)
+ 			return 1;
+ 	/* Do not ignore this symbol */
+ 	return 0;

@@ -1,0 +1,117 @@
+commit 8362072f3c497fabae71689c1814b5c49d29d4b7
+Author: Seth Forshee <seth.forshee@canonical.com>
+Date:   Thu Jan 21 15:37:53 2016 -0600
+
+    UBUNTU: SAUCE: overlayfs: Propogate nosuid from lower and upper mounts
+    
+    An overlayfs mount using an upper or lower directory from a
+    nosuid filesystem bypasses this restriction. Change this so
+    that if any lower or upper directory is nosuid at mount time the
+    overlayfs superblock is marked nosuid. This requires some
+    additions at the vfs level since nosuid currently only applies to
+    mounts, so a SB_I_NOSUID flag is added along with a helper
+    function to check a path for nosuid in both the mount and the
+    superblock.
+    
+    BugLink: http://bugs.launchpad.net/bugs/1534961
+    BugLink: http://bugs.launchpad.net/bugs/1535150
+    Signed-off-by: Seth Forshee <seth.forshee@canonical.com>
+    Signed-off-by: Leann Ogasawara <leann.ogasawara@canonical.com>
+
+diff --git a/fs/exec.c b/fs/exec.c
+index 682762a..3b6be64 100644
+--- a/fs/exec.c
++++ b/fs/exec.c
+@@ -108,6 +108,13 @@ bool path_noexec(const struct path *path)
+ }
+ EXPORT_SYMBOL_GPL(path_noexec);
+ 
++bool path_nosuid(const struct path *path)
++{
++	return !mnt_may_suid(path->mnt) ||
++	       (path->mnt->mnt_sb->s_iflags & SB_I_NOSUID);
++}
++EXPORT_SYMBOL(path_nosuid);
++
+ #ifdef CONFIG_USELIB
+ /*
+  * Note that a shared library must be both readable and executable due to
+@@ -1452,7 +1459,7 @@ static void bprm_fill_uid(struct linux_binprm *bprm)
+ 	bprm->cred->euid = current_euid();
+ 	bprm->cred->egid = current_egid();
+ 
+-	if (!mnt_may_suid(bprm->file->f_path.mnt))
++	if (path_nosuid(&bprm->file->f_path))
+ 		return;
+ 
+ 	if (task_no_new_privs(current))
+diff --git a/fs/overlayfs/super.c b/fs/overlayfs/super.c
+index e2a94a2..5598974 100644
+--- a/fs/overlayfs/super.c
++++ b/fs/overlayfs/super.c
+@@ -1222,6 +1222,9 @@ static int ovl_fill_super(struct super_block *sb, void *data, int silent)
+ 
+ 		sb->s_time_gran = ufs->upper_mnt->mnt_sb->s_time_gran;
+ 
++		if (ufs->upper_mnt->mnt_flags & MNT_NOSUID)
++			sb->s_iflags |= SB_I_NOSUID;
++
+ 		ufs->workdir = ovl_workdir_create(ufs->upper_mnt, workpath.dentry);
+ 		err = PTR_ERR(ufs->workdir);
+ 		if (IS_ERR(ufs->workdir)) {
+@@ -1270,6 +1273,9 @@ static int ovl_fill_super(struct super_block *sb, void *data, int silent)
+ 		 */
+ 		mnt->mnt_flags |= MNT_READONLY | MNT_NOATIME;
+ 
++		if (mnt->mnt_flags & MNT_NOSUID)
++			sb->s_iflags |= SB_I_NOSUID;
++
+ 		ufs->lower_mnt[ufs->numlower] = mnt;
+ 		ufs->numlower++;
+ 	}
+diff --git a/include/linux/fs.h b/include/linux/fs.h
+index 2611554..f561664 100644
+--- a/include/linux/fs.h
++++ b/include/linux/fs.h
+@@ -1299,6 +1299,7 @@ struct mm_struct;
+ #define SB_I_CGROUPWB	0x00000001	/* cgroup-aware writeback enabled */
+ #define SB_I_NOEXEC	0x00000002	/* Ignore executables on this fs */
+ #define SB_I_NODEV	0x00000004	/* Ignore devices on this fs */
++#define SB_I_NOSUID	0x00000008	/* Ignore suid on this fs */
+ 
+ /* sb->s_iflags to limit user namespace mounts */
+ #define SB_I_USERNS_VISIBLE		0x00000010 /* fstype already mounted */
+@@ -3204,6 +3205,7 @@ static inline bool dir_relax_shared(struct inode *inode)
+ }
+ 
+ extern bool path_noexec(const struct path *path);
++extern bool path_nosuid(const struct path *path);
+ extern void inode_nohighmem(struct inode *inode);
+ 
+ #endif /* _LINUX_FS_H */
+diff --git a/security/commoncap.c b/security/commoncap.c
+index 8c5ec42..5920a66 100644
+--- a/security/commoncap.c
++++ b/security/commoncap.c
+@@ -453,7 +453,7 @@ static int get_file_caps(struct linux_binprm *bprm, bool *effective, bool *has_c
+ 	if (!file_caps_enabled)
+ 		return 0;
+ 
+-	if (!mnt_may_suid(bprm->file->f_path.mnt))
++	if (path_nosuid(&bprm->file->f_path))
+ 		return 0;
+ 
+ 	/*
+diff --git a/security/selinux/hooks.c b/security/selinux/hooks.c
+index 13185a6..88d6af3 100644
+--- a/security/selinux/hooks.c
++++ b/security/selinux/hooks.c
+@@ -2282,7 +2282,7 @@ static int check_nnp_nosuid(const struct linux_binprm *bprm,
+ 			    const struct task_security_struct *new_tsec)
+ {
+ 	int nnp = (bprm->unsafe & LSM_UNSAFE_NO_NEW_PRIVS);
+-	int nosuid = !mnt_may_suid(bprm->file->f_path.mnt);
++	int nosuid = path_nosuid(&bprm->file->f_path);
+ 	int rc;
+ 
+ 	if (!nnp && !nosuid)
