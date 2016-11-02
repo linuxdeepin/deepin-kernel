@@ -1,0 +1,217 @@
+commit 20843fb8a71fe5e02077677208b4268bd59c0cf1
+Author: Yang Bo <yangbo@deepin.com>
+Date:   Wed Nov 2 12:06:14 2016 +0800
+
+    usb: core: hub: hub_port_init lock controller instead of bus
+    
+    commit feb26ac31a2a5cb88d86680d9a94916a6343e9e6 upstream
+    
+    The XHCI controller presents two USB buses to the system - one for USB2
+    and one for USB3. The hub init code (hub_port_init) is reentrant but
+    only locks one bus per thread, leading to a race condition failure when
+    two threads attempt to simultaneously initialise a USB2 and USB3 device:
+    
+    [    8.034843] xhci_hcd 0000:00:14.0: Timeout while waiting for setup device command
+    [   13.183701] usb 3-3: device descriptor read/all, error -110
+    
+    On a test system this failure occurred on 6% of all boots.
+    
+    The call traces at the point of failure are:
+    
+    Call Trace:
+     [<ffffffff81b9bab7>] schedule+0x37/0x90
+     [<ffffffff817da7cd>] usb_kill_urb+0x8d/0xd0
+     [<ffffffff8111e5e0>] ? wake_up_atomic_t+0x30/0x30
+     [<ffffffff817dafbe>] usb_start_wait_urb+0xbe/0x150
+     [<ffffffff817db10c>] usb_control_msg+0xbc/0xf0
+     [<ffffffff817d07de>] hub_port_init+0x51e/0xb70
+     [<ffffffff817d4697>] hub_event+0x817/0x1570
+     [<ffffffff810f3e6f>] process_one_work+0x1ff/0x620
+     [<ffffffff810f3dcf>] ? process_one_work+0x15f/0x620
+     [<ffffffff810f4684>] worker_thread+0x64/0x4b0
+     [<ffffffff810f4620>] ? rescuer_thread+0x390/0x390
+     [<ffffffff810fa7f5>] kthread+0x105/0x120
+     [<ffffffff810fa6f0>] ? kthread_create_on_node+0x200/0x200
+     [<ffffffff81ba183f>] ret_from_fork+0x3f/0x70
+     [<ffffffff810fa6f0>] ? kthread_create_on_node+0x200/0x200
+    
+    Call Trace:
+     [<ffffffff817fd36d>] xhci_setup_device+0x53d/0xa40
+     [<ffffffff817fd87e>] xhci_address_device+0xe/0x10
+     [<ffffffff817d047f>] hub_port_init+0x1bf/0xb70
+     [<ffffffff811247ed>] ? trace_hardirqs_on+0xd/0x10
+     [<ffffffff817d4697>] hub_event+0x817/0x1570
+     [<ffffffff810f3e6f>] process_one_work+0x1ff/0x620
+     [<ffffffff810f3dcf>] ? process_one_work+0x15f/0x620
+     [<ffffffff810f4684>] worker_thread+0x64/0x4b0
+     [<ffffffff810f4620>] ? rescuer_thread+0x390/0x390
+     [<ffffffff810fa7f5>] kthread+0x105/0x120
+     [<ffffffff810fa6f0>] ? kthread_create_on_node+0x200/0x200
+     [<ffffffff81ba183f>] ret_from_fork+0x3f/0x70
+     [<ffffffff810fa6f0>] ? kthread_create_on_node+0x200/0x200
+    
+    Which results from the two call chains:
+    
+    hub_port_init
+     usb_get_device_descriptor
+      usb_get_descriptor
+       usb_control_msg
+        usb_internal_control_msg
+         usb_start_wait_urb
+          usb_submit_urb / wait_for_completion_timeout / usb_kill_urb
+    
+    hub_port_init
+     hub_set_address
+      xhci_address_device
+       xhci_setup_device
+    
+    Mathias Nyman explains the current behaviour violates the XHCI spec:
+    
+     hub_port_reset() will end up moving the corresponding xhci device slot
+     to default state.
+    
+     As hub_port_reset() is called several times in hub_port_init() it
+     sounds reasonable that we could end up with two threads having their
+     xhci device slots in default state at the same time, which according to
+     xhci 4.5.3 specs still is a big no no:
+    
+     "Note: Software shall not transition more than one Device Slot to the
+      Default State at a time"
+    
+     So both threads fail at their next task after this.
+     One fails to read the descriptor, and the other fails addressing the
+     device.
+    
+    Fix this in hub_port_init by locking the USB controller (instead of an
+    individual bus) to prevent simultaneous initialisation of both buses.
+    
+    Fixes: 638139eb95d2 ("usb: hub: allow to process more usb hub events in parallel")
+    Link: https://lkml.org/lkml/2016/2/8/312
+    Link: https://lkml.org/lkml/2016/2/4/748
+    Signed-off-by: Chris Bainbridge <chris.bainbridge@gmail.com>
+    Cc: stable <stable@vger.kernel.org>
+    Acked-by: Mathias Nyman <mathias.nyman@linux.intel.com>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+    
+    Signed-off-by: Yang Bo <yangbo@deepin.com>
+
+diff --git a/drivers/usb/core/hcd.c b/drivers/usb/core/hcd.c
+index f44ce09..9a5303c 100644
+--- a/drivers/usb/core/hcd.c
++++ b/drivers/usb/core/hcd.c
+@@ -966,7 +966,7 @@ static void usb_bus_init (struct usb_bus *bus)
+ 	bus->bandwidth_allocated = 0;
+ 	bus->bandwidth_int_reqs  = 0;
+ 	bus->bandwidth_isoc_reqs = 0;
+-	mutex_init(&bus->usb_address0_mutex);
++	mutex_init(&bus->devnum_next_mutex);
+ 
+ 	INIT_LIST_HEAD (&bus->bus_list);
+ }
+@@ -2497,6 +2497,14 @@ struct usb_hcd *usb_create_shared_hcd(const struct hc_driver *driver,
+ 		return NULL;
+ 	}
+ 	if (primary_hcd == NULL) {
++		hcd->address0_mutex = kmalloc(sizeof(*hcd->address0_mutex),
++				GFP_KERNEL);
++		if (!hcd->address0_mutex) {
++			kfree(hcd);
++			dev_dbg(dev, "hcd address0 mutex alloc failed\n");
++			return NULL;
++		}
++		mutex_init(hcd->address0_mutex);
+ 		hcd->bandwidth_mutex = kmalloc(sizeof(*hcd->bandwidth_mutex),
+ 				GFP_KERNEL);
+ 		if (!hcd->bandwidth_mutex) {
+@@ -2508,6 +2516,7 @@ struct usb_hcd *usb_create_shared_hcd(const struct hc_driver *driver,
+ 		dev_set_drvdata(dev, hcd);
+ 	} else {
+ 		mutex_lock(&usb_port_peer_mutex);
++		hcd->address0_mutex = primary_hcd->address0_mutex;
+ 		hcd->bandwidth_mutex = primary_hcd->bandwidth_mutex;
+ 		hcd->primary_hcd = primary_hcd;
+ 		primary_hcd->primary_hcd = primary_hcd;
+@@ -2574,8 +2583,10 @@ static void hcd_release(struct kref *kref)
+ 	struct usb_hcd *hcd = container_of (kref, struct usb_hcd, kref);
+ 
+ 	mutex_lock(&usb_port_peer_mutex);
+-	if (usb_hcd_is_primary_hcd(hcd))
++	if (usb_hcd_is_primary_hcd(hcd)) {
++		kfree(hcd->address0_mutex);
+ 		kfree(hcd->bandwidth_mutex);
++	}
+ 	if (hcd->shared_hcd) {
+ 		struct usb_hcd *peer = hcd->shared_hcd;
+ 
+diff --git a/drivers/usb/core/hub.c b/drivers/usb/core/hub.c
+index bcc1e1b..78c57c2 100644
+--- a/drivers/usb/core/hub.c
++++ b/drivers/usb/core/hub.c
+@@ -2061,7 +2061,7 @@ static void choose_devnum(struct usb_device *udev)
+ 	struct usb_bus	*bus = udev->bus;
+ 
+ 	/* be safe when more hub events are proceed in parallel */
+-	mutex_lock(&bus->usb_address0_mutex);
++	mutex_lock(&bus->devnum_next_mutex);
+ 	if (udev->wusb) {
+ 		devnum = udev->portnum + 1;
+ 		BUG_ON(test_bit(devnum, bus->devmap.devicemap));
+@@ -2079,7 +2079,7 @@ static void choose_devnum(struct usb_device *udev)
+ 		set_bit(devnum, bus->devmap.devicemap);
+ 		udev->devnum = devnum;
+ 	}
+-	mutex_unlock(&bus->usb_address0_mutex);
++	mutex_unlock(&bus->devnum_next_mutex);
+ }
+ 
+ static void release_devnum(struct usb_device *udev)
+@@ -4292,7 +4292,7 @@ hub_port_init(struct usb_hub *hub, struct usb_device *udev, int port1,
+ 	if (oldspeed == USB_SPEED_LOW)
+ 		delay = HUB_LONG_RESET_TIME;
+ 
+-	mutex_lock(&hdev->bus->usb_address0_mutex);
++	mutex_lock(hcd->address0_mutex);
+ 
+ 	/* Reset the device; full speed may morph to high speed */
+ 	/* FIXME a USB 2.0 device may morph into SuperSpeed on reset. */
+@@ -4578,7 +4578,7 @@ fail:
+ 		hub_port_disable(hub, port1, 0);
+ 		update_devnum(udev, devnum);	/* for disconnect processing */
+ 	}
+-	mutex_unlock(&hdev->bus->usb_address0_mutex);
++	mutex_unlock(hcd->address0_mutex);
+ 	return retval;
+ }
+ 
+diff --git a/include/linux/usb.h b/include/linux/usb.h
+index 12891ff..8c75af6 100644
+--- a/include/linux/usb.h
++++ b/include/linux/usb.h
+@@ -371,14 +371,13 @@ struct usb_bus {
+ 
+ 	int devnum_next;		/* Next open device number in
+ 					 * round-robin allocation */
++	struct mutex devnum_next_mutex; /* devnum_next mutex */
+ 
+ 	struct usb_devmap devmap;	/* device address allocation map */
+ 	struct usb_device *root_hub;	/* Root hub */
+ 	struct usb_bus *hs_companion;	/* Companion EHCI bus, if any */
+ 	struct list_head bus_list;	/* list of busses */
+ 
+-	struct mutex usb_address0_mutex; /* unaddressed device mutex */
+-
+ 	int bandwidth_allocated;	/* on this bus: how much of the time
+ 					 * reserved for periodic (intr/iso)
+ 					 * requests is used, on average?
+diff --git a/include/linux/usb/hcd.h b/include/linux/usb/hcd.h
+index f89c24b..3993b21 100644
+--- a/include/linux/usb/hcd.h
++++ b/include/linux/usb/hcd.h
+@@ -180,6 +180,7 @@ struct usb_hcd {
+ 	 * bandwidth_mutex should be dropped after a successful control message
+ 	 * to the device, or resetting the bandwidth after a failed attempt.
+ 	 */
++	struct mutex		*address0_mutex;
+ 	struct mutex		*bandwidth_mutex;
+ 	struct usb_hcd		*shared_hcd;
+ 	struct usb_hcd		*primary_hcd;
