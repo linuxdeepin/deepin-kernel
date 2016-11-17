@@ -125,6 +125,30 @@ class Gencontrol(Base):
                               'debian/linux-perf-%s.lintian-overrides' %
                               self.vars['version'])
 
+    def do_indep_featureset_setup(self, vars, makeflags, featureset, extra):
+        makeflags['LOCALVERSION'] = vars['localversion']
+        kernel_arches = set()
+        for arch in iter(self.config['base', ]['arches']):
+            if self.config.get_merge('base', arch, featureset, None, 'flavours'):
+                kernel_arches.add(self.config['base', arch]['kernel-arch'])
+        makeflags['ALL_KERNEL_ARCHES'] = ' '.join(sorted(list(kernel_arches)))
+
+        vars['featureset_desc'] = ''
+        if featureset != 'none':
+            desc = self.config[('description', None, featureset)]
+            desc_parts = desc['parts']
+            vars['featureset_desc'] = (' with the %s featureset' %
+                                       desc['part-short-%s' % desc_parts[0]])
+
+    def do_indep_featureset_packages(self, packages, makefile, featureset,
+                                     vars, makeflags, extra):
+        headers_featureset = self.templates["control.headers.featureset"]
+        packages.extend(self.process_packages(headers_featureset, vars))
+
+        cmds_binary_arch = ["$(MAKE) -f debian/rules.real binary-indep-featureset %s" %
+                            makeflags]
+        makefile.add('binary-indep_%s_real' % featureset, cmds=cmds_binary_arch)
+
     arch_makeflags = (
         ('kernel-arch', 'KERNEL_ARCH', False),
     )
@@ -246,15 +270,6 @@ class Gencontrol(Base):
     def do_featureset_setup(self, vars, makeflags, arch, featureset, extra):
         config_base = self.config.merge('base', arch, featureset)
         makeflags['LOCALVERSION_HEADERS'] = vars['localversion_headers'] = vars['localversion']
-
-    def do_featureset_packages(self, packages, makefile, arch, featureset, vars, makeflags, extra):
-        headers_featureset = self.templates["control.headers.featureset"]
-        package_headers = self.process_package(headers_featureset[0], vars)
-
-        merge_packages(packages, (package_headers,), arch)
-
-        cmds_binary_arch = ["$(MAKE) -f debian/rules.real binary-arch-featureset %s" % makeflags]
-        makefile.add('binary-arch_%s_%s_real' % (arch, featureset), cmds=cmds_binary_arch)
 
     flavour_makeflags_base = (
         ('compiler', 'COMPILER', False),
