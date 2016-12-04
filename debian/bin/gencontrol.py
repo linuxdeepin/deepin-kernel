@@ -38,10 +38,6 @@ class Gencontrol(Base):
         },
         'relations': {
         },
-        'xen': {
-            'flavours': config.SchemaItemList(),
-            'versions': config.SchemaItemList(),
-        },
         'packages': {
             'docs': config.SchemaItemBoolean(),
             'headers-all': config.SchemaItemBoolean(),
@@ -391,15 +387,6 @@ class Gencontrol(Base):
 
         image = self.templates[build_signed and "control.image-unsigned"
                                or "control.image"]
-
-        config_entry_xen = self.config.merge('xen', arch, featureset, flavour)
-        if config_entry_xen:
-            p = self.process_packages(self.templates['control.xen-linux-system'], vars)
-            l = PackageRelationGroup()
-            for xen_flavour in config_entry_xen['flavours']:
-                l.append("xen-system-%s" % xen_flavour)
-            p[0]['Depends'].append(l)
-            packages_dummy.extend(p)
 
         vars.setdefault('desc', None)
 
