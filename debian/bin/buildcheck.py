@@ -56,11 +56,19 @@ class CheckAbi(object):
         ret = 0
 
         new = Symbols(open(self.filename_new))
+        unversioned = [name for name in new if new[name].version == '0x00000000']
+        if unversioned:
+            out.write("ABI is not completely versioned!  Refusing to continue.\n")
+            out.write("\nUnversioned symbols:\n")
+            for name in sorted(unversioned):
+                self.SymbolInfo(new[name]).write(out, False)
+            ret = 1
+
         try:
             ref = Symbols(open(self.filename_ref))
         except IOError:
-            out.write("Can't read ABI reference.  ABI not checked!  Continuing.\n")
-            return 0
+            out.write("Can't read ABI reference.  ABI not checked!\n")
+            return ret
 
         symbols, add, change, remove = self._cmp(ref, new)
 
