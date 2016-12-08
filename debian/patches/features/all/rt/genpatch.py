@@ -15,9 +15,8 @@ def main(source, version=None):
                 name = line.strip()
                 if name != '' and name[0] != '#':
                     old_series.add(name)
-    except IOError as e:
-        if e.errno != errno.ENOENT:
-            raise
+    except FileNotFoundError:
+        pass
 
     with open(os.path.join(patch_dir, series_name), 'w') as series_fh:
         # Add directory prefix to all filenames.
@@ -27,9 +26,8 @@ def main(source, version=None):
             path = os.path.join(patch_dir, name)
             try:
                 os.unlink(path)
-            except OSError as e:
-                if e.errno != errno.ENOENT:
-                    raise
+            except FileNotFoundError:
+                pass
             with open(path, 'w') as patch:
                 in_header = True
                 for line in source_patch:
