@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 
-import errno, os, os.path, re, shutil, subprocess, sys, tempfile
+import errno, io, os, os.path, re, shutil, subprocess, sys, tempfile
 
 def main(source, version=None):
     patch_dir = 'debian/patches'
@@ -52,7 +52,7 @@ def main(source, version=None):
             child = subprocess.Popen(args,
                                      cwd=os.path.join(patch_dir, rt_patch_dir),
                                      env=env, stdout=subprocess.PIPE)
-            with child.stdout as pipe:
+            with io.open(child.stdout.fileno(), encoding='utf-8') as pipe:
                 for line in pipe:
                     name = line.strip('\n')
                     with open(os.path.join(patch_dir, rt_patch_dir, name)) as \
@@ -104,7 +104,7 @@ def main(source, version=None):
         print('Obsoleted patch', os.path.join(patch_dir, name))
 
 if __name__ == '__main__':
-    if not (1 <= len(sys.argv) <= 2):
+    if not (1 <= len(sys.argv) <= 3):
         print('Usage: %s {TAR [RT-VERSION] | REPO RT-VERSION}' % sys.argv[0], file=sys.stderr)
         print('TAR is a tarball of patches.', file=sys.stderr)
         print('REPO is a git repo containing the given RT-VERSION.', file=sys.stderr)
