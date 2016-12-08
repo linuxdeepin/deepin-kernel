@@ -1,0 +1,116 @@
+commit 6da58284ff6997493c7633269d862aee1f493e67
+Author: Yang Bo <yangbo@deepin.com>
+Date:   Thu Dec 8 11:45:43 2016 +0800
+
+    tipc: check minimum bearer MTU
+    
+    Qian Zhang (张谦) reported a potential socket buffer overflow in
+    tipc_msg_build() which is also known as CVE-2016-8632: due to
+    insufficient checks, a buffer overflow can occur if MTU is too short for
+    even tipc headers. As anyone can set device MTU in a user/net namespace,
+    this issue can be abused by a regular user.
+    
+    As agreed in the discussion on Ben Hutchings' original patch, we should
+    check the MTU at the moment a bearer is attached rather than for each
+    processed packet. We also need to repeat the check when bearer MTU is
+    adjusted to new device MTU. UDP case also needs a check to avoid
+    overflow when calculating bearer MTU.
+    
+    Fixes: b97bf3fd8f6a ("[TIPC] Initial merge")
+    Signed-off-by: Michal Kubecek <mkubecek@suse.cz>
+    Reported-by: Qian Zhang (张谦) <zhangqian-c@360.cn>
+    Acked-by: Ying Xue <ying.xue@windriver.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+    
+    Signed-off-by: Yang Bo <yangbo@deepin.com>
+
+diff --git a/net/tipc/bearer.c b/net/tipc/bearer.c
+index 648f2a6..c96bc81 100644
+--- a/net/tipc/bearer.c
++++ b/net/tipc/bearer.c
+@@ -381,6 +381,10 @@ int tipc_enable_l2_media(struct net *net, struct tipc_bearer *b,
+ 	dev = dev_get_by_name(net, driver_name);
+ 	if (!dev)
+ 		return -ENODEV;
++	if (tipc_mtu_bad(dev, 0)) {
++		dev_put(dev);
++		return -EINVAL;
++	}
+ 
+ 	/* Associate TIPC bearer with L2 bearer */
+ 	rcu_assign_pointer(b->media_ptr, dev);
+@@ -570,14 +574,20 @@ static int tipc_l2_device_event(struct notifier_block *nb, unsigned long evt,
+ 	if (!b_ptr)
+ 		return NOTIFY_DONE;
+ 
+-	b_ptr->mtu = dev->mtu;
+-
+ 	switch (evt) {
+ 	case NETDEV_CHANGE:
+ 		if (netif_carrier_ok(dev))
+ 			break;
+ 	case NETDEV_GOING_DOWN:
++		tipc_reset_bearer(net, b_ptr);
++		break;
+ 	case NETDEV_CHANGEMTU:
++		if (tipc_mtu_bad(dev, 0)) {
++			bearer_disable(net, b_ptr);
++			break;
++		}
++
++		b_ptr->mtu = dev->mtu;
+ 		tipc_reset_bearer(net, b_ptr);
+ 		break;
+ 	case NETDEV_CHANGEADDR:
+diff --git a/net/tipc/bearer.h b/net/tipc/bearer.h
+index 552185b..5f11e18 100644
+--- a/net/tipc/bearer.h
++++ b/net/tipc/bearer.h
+@@ -39,6 +39,7 @@
+ 
+ #include "netlink.h"
+ #include "core.h"
++#include "msg.h"
+ #include <net/genetlink.h>
+ 
+ #define MAX_MEDIA	3
+@@ -61,6 +62,9 @@
+ #define TIPC_MEDIA_TYPE_IB	2
+ #define TIPC_MEDIA_TYPE_UDP	3
+ 
++/* minimum bearer MTU */
++#define TIPC_MIN_BEARER_MTU	(MAX_H_SIZE + INT_H_SIZE)
++
+ /**
+  * struct tipc_node_map - set of node identifiers
+  * @count: # of nodes in set
+@@ -226,4 +230,13 @@ void tipc_bearer_xmit(struct net *net, u32 bearer_id,
+ void tipc_bearer_bc_xmit(struct net *net, u32 bearer_id,
+ 			 struct sk_buff_head *xmitq);
+ 
++/* check if device MTU is too low for tipc headers */
++static inline bool tipc_mtu_bad(struct net_device *dev, unsigned int reserve)
++{
++	if (dev->mtu >= TIPC_MIN_BEARER_MTU + reserve)
++		return false;
++	netdev_warn(dev, "MTU too low for tipc bearer\n");
++	return true;
++}
++
+ #endif	/* _TIPC_BEARER_H */
+diff --git a/net/tipc/udp_media.c b/net/tipc/udp_media.c
+index 6af78c6..39497a4 100644
+--- a/net/tipc/udp_media.c
++++ b/net/tipc/udp_media.c
+@@ -376,6 +376,11 @@ static int tipc_udp_enable(struct net *net, struct tipc_bearer *b,
+ 		udp_conf.local_ip.s_addr = htonl(INADDR_ANY);
+ 		udp_conf.use_udp_checksums = false;
+ 		ub->ifindex = dev->ifindex;
++		if (tipc_mtu_bad(dev, sizeof(struct iphdr) +
++				      sizeof(struct udphdr))) {
++			err = -EINVAL;
++			goto err;
++		}
+ 		b->mtu = dev->mtu - sizeof(struct iphdr)
+ 			- sizeof(struct udphdr);
+ #if IS_ENABLED(CONFIG_IPV6)
