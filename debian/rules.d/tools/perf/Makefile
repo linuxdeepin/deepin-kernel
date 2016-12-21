@@ -48,6 +48,9 @@ MAKE_PERF += feature-libbfd=0 HAVE_CPLUS_DEMANGLE_SUPPORT=1
 # an explicit exception.  Override detection of libcrypto.
 MAKE_PERF += NO_LIBCRYPTO=1
 
+# Currently babeltrace support for `perf data' is not automatically detected.
+MAKE_PERF += LIBBABELTRACE=1
+
 all:
 ifdef KERNEL_ARCH_PERF
 # perf changes some default directories depending on whether DESTDIR is
