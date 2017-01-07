@@ -8,11 +8,8 @@ import os
 import shutil
 import tempfile
 
-try:
-    from urllib.request import urlopen
-    from urllib.error import HTTPError
-except ImportError:
-    from urllib2 import urlopen, HTTPError
+from urllib.request import urlopen
+from urllib.error import HTTPError
 
 from debian_linux.abi import Symbols
 from debian_linux.config import *
