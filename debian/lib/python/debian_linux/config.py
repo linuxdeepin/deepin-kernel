@@ -1,3 +1,4 @@
+import collections
 import os
 import os.path
 import pickle
@@ -43,7 +44,8 @@ class SchemaItemList(object):
         return [j.strip() for j in re.split(self.type, i)]
 
 
-class ConfigCore(dict):
+# Using OrderedDict instead of dict makes the pickled config reproducible
+class ConfigCore(collections.OrderedDict):
     def get_merge(self, section, arch, featureset, flavour, key, default=None):
         temp = []
 
