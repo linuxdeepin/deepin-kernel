@@ -110,13 +110,10 @@ class Main(object):
         return version_abi, s
 
     def get_config(self):
-        filename = "linux-support-%s_%s_all.deb" % (self.version_abi, self.version_source)
-        f = self.retrieve_package(self.url_config, filename, 'all')
-        d = self.extract_package(f, "linux-support")
-        c = d + "/usr/src/linux-support-" + self.version_abi + "/config.defines.dump"
-        config = ConfigCoreDump(fp=open(c, "rb"))
-        shutil.rmtree(d)
-        return config
+        # XXX We used to fetch the previous version of linux-support here,
+        # but until we authenticate downloads we should not do that as
+        # pickle.load allows running arbitrary code.
+        return self.config
 
     def retrieve_package(self, url, filename, arch):
         u = url(self.source, filename, arch)
