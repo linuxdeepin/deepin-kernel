@@ -5,10 +5,7 @@ import re
 import sys
 import textwrap
 
-try:
-    from configparser import RawConfigParser
-except ImportError:
-    from ConfigParser import RawConfigParser
+from configparser import RawConfigParser
 
 __all__ = [
     'ConfigCoreDump',
