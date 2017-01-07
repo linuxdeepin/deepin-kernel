@@ -18,6 +18,7 @@ from debian_linux.debian import *
 default_url_base = "http://deb.debian.org/debian/"
 default_url_base_incoming = "http://incoming.debian.org/debian-buildd/"
 default_url_base_ports = "http://ftp.ports.debian.org/debian-ports/"
+default_url_base_ports_incoming = "http://incoming.ports.debian.org/"
 
 
 class url_debian_flat(object):
@@ -184,6 +185,7 @@ if __name__ == '__main__':
     options.add_option("-u", "--url-base", dest="url_base", default=default_url_base)
     options.add_option("--url-base-incoming", dest="url_base_incoming", default=default_url_base_incoming)
     options.add_option("--url-base-ports", dest="url_base_ports", default=default_url_base_ports)
+    options.add_option("--url-base-ports-incoming", dest="url_base_ports_incoming", default=default_url_base_ports_incoming)
 
     opts, args = options.parse_args()
 
@@ -198,15 +200,14 @@ if __name__ == '__main__':
     url_base = url_debian_pool(opts.url_base)
     url_base_incoming = url_debian_pool(opts.url_base_incoming)
     url_base_ports = url_debian_ports_pool(opts.url_base_ports)
+    url_base_ports_incoming = url_debian_flat(opts.url_base_ports_incoming)
     if opts.incoming_config:
         url = url_config = url_base_incoming
     else:
         url_config = url_base
-        if opts.incoming:
-            url = url_base_incoming
-        elif opts.ports:
-            url = url_base_ports
+        if opts.ports:
+            url = url_base_ports_incoming if opts.incoming else url_base_ports
         else:
-            url = url_base
+            url = url_base_incoming if opts.incoming else url_base
 
     Main(url, url_config, **kw)()
