@@ -15,9 +15,9 @@ from debian_linux.abi import Symbols
 from debian_linux.config import *
 from debian_linux.debian import *
 
-default_url_base = "http://ftp.de.debian.org/debian/"
-default_url_base_incoming = "http://incoming.debian.org/"
-default_url_base_ports = "http://ftp.debian-ports.org/debian/"
+default_url_base = "http://deb.debian.org/debian/"
+default_url_base_incoming = "http://incoming.debian.org/debian-buildd/"
+default_url_base_ports = "http://ftp.ports.debian.org/debian-ports/"
 
 
 class url_debian_flat(object):
@@ -196,7 +196,7 @@ if __name__ == '__main__':
         kw['flavour'] = args[2]
 
     url_base = url_debian_pool(opts.url_base)
-    url_base_incoming = url_debian_flat(opts.url_base_incoming)
+    url_base_incoming = url_debian_pool(opts.url_base_incoming)
     url_base_ports = url_debian_ports_pool(opts.url_base_ports)
     if opts.incoming_config:
         url = url_config = url_base_incoming
