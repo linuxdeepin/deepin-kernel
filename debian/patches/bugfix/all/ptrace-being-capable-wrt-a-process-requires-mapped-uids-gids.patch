@@ -1,39 +1,40 @@
-From: Jann Horn <jann@thejh.net>
-Subject: ptrace: being capable wrt a process requires mapped uids/gids
-Date: Sat, 26 Dec 2015 03:52:31 +0100
-Origin: https://lkml.org/lkml/2015/12/25/71
+commit e8444dff0e8008666abbaf691b5c8f552b40d371
+Author: Yang Bo <yangbo@deepin.com>
+Date:   Mon Jan 9 10:16:34 2017 +0800
 
-ptrace_has_cap() checks whether the current process should be
-treated as having a certain capability for ptrace checks
-against another process. Until now, this was equivalent to
-has_ns_capability(current, target_ns, CAP_SYS_PTRACE).
+    ptrace: being capable wrt a process requires mapped uids/gids
+    
+    ptrace_has_cap() checks whether the current process should be
+    treated as having a certain capability for ptrace checks
+    against another process. Until now, this was equivalent to
+    has_ns_capability(current, target_ns, CAP_SYS_PTRACE).
+    
+    However, if a root-owned process wants to enter a user
+    namespace for some reason without knowing who owns it and
+    therefore can't change to the namespace owner's uid and gid
+    before entering, as soon as it has entered the namespace,
+    the namespace owner can attach to it via ptrace and thereby
+    gain access to its uid and gid.
+    
+    While it is possible for the entering process to switch to
+    the uid of a claimed namespace owner before entering,
+    causing the attempt to enter to fail if the claimed uid is
+    wrong, this doesn't solve the problem of determining an
+    appropriate gid.
+    
+    With this change, the entering process can first enter the
+    namespace and then safely inspect the namespace's
+    properties, e.g. through /proc/self/{uid_map,gid_map},
+    assuming that the namespace owner doesn't have access to
+    uid 0.
+    Changed in v2: The caller needs to be capable in the
+    namespace into which tcred's uids/gids can be mapped.
+    
+    Signed-off-by: Jann Horn <jann@thejh.net>
+    Signed-off-by: Yang Bo <yangbo@deepin.com>
 
-However, if a root-owned process wants to enter a user
-namespace for some reason without knowing who owns it and
-therefore can't change to the namespace owner's uid and gid
-before entering, as soon as it has entered the namespace,
-the namespace owner can attach to it via ptrace and thereby
-gain access to its uid and gid.
-
-While it is possible for the entering process to switch to
-the uid of a claimed namespace owner before entering,
-causing the attempt to enter to fail if the claimed uid is
-wrong, this doesn't solve the problem of determining an
-appropriate gid.
-
-With this change, the entering process can first enter the
-namespace and then safely inspect the namespace's
-properties, e.g. through /proc/self/{uid_map,gid_map},
-assuming that the namespace owner doesn't have access to
-uid 0.
-Changed in v2: The caller needs to be capable in the
-namespace into which tcred's uids/gids can be mapped.
-
-Signed-off-by: Jann Horn <jann@thejh.net>
----
- kernel/ptrace.c | 33 ++++++++++++++++++++++++++++-----
- 1 file changed, 28 insertions(+), 5 deletions(-)
-
+diff --git a/kernel/ptrace.c b/kernel/ptrace.c
+index a46c40bfb..2c75b17a6 100644
 --- a/kernel/ptrace.c
 +++ b/kernel/ptrace.c
 @@ -20,6 +20,7 @@
@@ -44,7 +45,7 @@ Signed-off-by: Jann Horn <jann@thejh.net>
  #include <linux/syscalls.h>
  #include <linux/uaccess.h>
  #include <linux/regset.h>
-@@ -207,12 +208,34 @@ static int ptrace_check_attach(struct ta
+@@ -214,12 +215,34 @@ static int ptrace_check_attach(struct task_struct *child, bool ignore_state)
  	return ret;
  }
  
@@ -82,7 +83,7 @@ Signed-off-by: Jann Horn <jann@thejh.net>
  }
  
  /* Returns 0 on success, -errno on denial. */
-@@ -264,7 +287,7 @@ static int __ptrace_may_access(struct ta
+@@ -271,7 +294,7 @@ static int __ptrace_may_access(struct task_struct *task, unsigned int mode)
  	    gid_eq(caller_gid, tcred->sgid) &&
  	    gid_eq(caller_gid, tcred->gid))
  		goto ok;
@@ -91,12 +92,12 @@ Signed-off-by: Jann Horn <jann@thejh.net>
  		goto ok;
  	rcu_read_unlock();
  	return -EPERM;
-@@ -275,7 +298,7 @@ ok:
- 		dumpable = get_dumpable(task->mm);
- 	rcu_read_lock();
- 	if (dumpable != SUID_DUMP_USER &&
--	    !ptrace_has_cap(__task_cred(task)->user_ns, mode)) {
-+	    !ptrace_has_cap(__task_cred(task), mode)) {
- 		rcu_read_unlock();
- 		return -EPERM;
- 	}
+@@ -280,7 +303,7 @@ ok:
+ 	mm = task->mm;
+ 	if (mm &&
+ 	    ((get_dumpable(mm) != SUID_DUMP_USER) &&
+-	     !ptrace_has_cap(mm->user_ns, mode)))
++	     !ptrace_has_cap(__task_cred(task), mode)))
+ 	    return -EPERM;
+ 
+ 	return security_ptrace_access_check(task, mode);
