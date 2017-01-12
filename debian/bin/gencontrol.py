@@ -416,6 +416,7 @@ class Gencontrol(Base):
 
         if build_debug:
             makeflags['DEBUG'] = True
+            packages_own.extend(self.process_packages(self.templates['control.image-dbg'], vars))
 
         merge_packages(packages, packages_own + packages_dummy, arch)
 
