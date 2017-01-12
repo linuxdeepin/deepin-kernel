@@ -76,6 +76,7 @@ class MakeFlags(dict):
 
 class Gencontrol(object):
     makefile_targets = ('binary-arch', 'build-arch', 'setup')
+    makefile_targets_indep = ('binary-indep', 'build-indep', 'setup')
 
     def __init__(self, config, templates, version=Version):
         self.config, self.templates = config, templates
@@ -120,6 +121,10 @@ class Gencontrol(object):
         pass
 
     def do_main_recurse(self, packages, makefile, vars, makeflags, extra):
+        for featureset in self.config['base', ]['featuresets']:
+            if self.config.merge('base', None, featureset).get('enabled', True):
+                self.do_indep_featureset(packages, makefile, featureset,
+                                         vars.copy(), makeflags.copy(), extra)
         for arch in iter(self.config['base', ]['arches']):
             self.do_arch(packages, makefile, arch, vars.copy(), makeflags.copy(), extra)
 
@@ -143,6 +148,36 @@ class Gencontrol(object):
                 cmds.append("$(MAKE) -f debian/rules.real install-dummy ARCH='%s' DH_OPTIONS='-p%s'" % (arch, i['Package']))
             makefile.add('binary-arch_%s' % arch, ['binary-arch_%s_extra' % arch])
             makefile.add("binary-arch_%s_extra" % arch, cmds = cmds)
+
+    def do_indep_featureset(self, packages, makefile, featureset, vars,
+                             makeflags, extra):
+        vars['localversion'] = ''
+        if featureset != 'none':
+            vars['localversion'] = '-' + featureset
+
+        self.do_indep_featureset_setup(vars, makeflags, featureset, extra)
+        self.do_indep_featureset_makefile(makefile, featureset, makeflags,
+                                          extra)
+        self.do_indep_featureset_packages(packages, makefile, featureset,
+                                          vars, makeflags, extra)
+
+    def do_indep_featureset_setup(self, vars, makeflags, featureset, extra):
+        pass
+
+    def do_indep_featureset_makefile(self, makefile, featureset, makeflags,
+                                     extra):
+        makeflags['FEATURESET'] = featureset
+
+        for i in self.makefile_targets_indep:
+            target1 = i
+            target2 = '_'.join((target1, featureset))
+            target3 = '_'.join((target2, 'real'))
+            makefile.add(target1, [target2])
+            makefile.add(target2, [target3])
+
+    def do_indep_featureset_packages(self, packages, makefile, featureset,
+                                     vars, makeflags, extra):
+        pass
 
     def do_arch(self, packages, makefile, arch, vars, makeflags, extra):
         vars['arch'] = arch

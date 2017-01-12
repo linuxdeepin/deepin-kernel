@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 
-import errno, os, os.path, re, shutil, subprocess, sys, tempfile
+import errno, io, os, os.path, re, shutil, subprocess, sys, tempfile
 
 def main(source, version=None):
     patch_dir = 'debian/patches'
@@ -15,9 +15,8 @@ def main(source, version=None):
                 name = line.strip()
                 if name != '' and name[0] != '#':
                     old_series.add(name)
-    except IOError as e:
-        if e.errno != errno.ENOENT:
-            raise
+    except FileNotFoundError:
+        pass
 
     with open(os.path.join(patch_dir, series_name), 'w') as series_fh:
         # Add directory prefix to all filenames.
@@ -27,9 +26,8 @@ def main(source, version=None):
             path = os.path.join(patch_dir, name)
             try:
                 os.unlink(path)
-            except OSError as e:
-                if e.errno != errno.ENOENT:
-                    raise
+            except FileNotFoundError:
+                pass
             with open(path, 'w') as patch:
                 in_header = True
                 for line in source_patch:
@@ -52,7 +50,7 @@ def main(source, version=None):
             child = subprocess.Popen(args,
                                      cwd=os.path.join(patch_dir, rt_patch_dir),
                                      env=env, stdout=subprocess.PIPE)
-            with child.stdout as pipe:
+            with io.open(child.stdout.fileno(), encoding='utf-8') as pipe:
                 for line in pipe:
                     name = line.strip('\n')
                     with open(os.path.join(patch_dir, rt_patch_dir, name)) as \
@@ -104,7 +102,7 @@ def main(source, version=None):
         print('Obsoleted patch', os.path.join(patch_dir, name))
 
 if __name__ == '__main__':
-    if not (1 <= len(sys.argv) <= 2):
+    if not (1 <= len(sys.argv) <= 3):
         print('Usage: %s {TAR [RT-VERSION] | REPO RT-VERSION}' % sys.argv[0], file=sys.stderr)
         print('TAR is a tarball of patches.', file=sys.stderr)
         print('REPO is a git repo containing the given RT-VERSION.', file=sys.stderr)

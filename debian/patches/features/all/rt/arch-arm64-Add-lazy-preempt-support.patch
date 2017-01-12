@@ -1,7 +1,7 @@
 From: Anders Roxell <anders.roxell@linaro.org>
 Date: Thu, 14 May 2015 17:52:17 +0200
 Subject: arch/arm64: Add lazy preempt support
-Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.8/older/patches-4.8.15-rt10.tar.xz
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.9/older/patches-4.9-rt1.tar.xz
 
 arm64 is missing support for PREEMPT_RT. The main feature which is
 lacking is support for lazy preemption. The arch-specific entry code,
@@ -13,14 +13,15 @@ indicate that support for full RT preemption is now available.
 Signed-off-by: Anders Roxell <anders.roxell@linaro.org>
 ---
  arch/arm64/Kconfig                   |    1 +
- arch/arm64/include/asm/thread_info.h |    6 +++++-
+ arch/arm64/include/asm/thread_info.h |    7 ++++++-
  arch/arm64/kernel/asm-offsets.c      |    1 +
- arch/arm64/kernel/entry.S            |   13 ++++++++++---
- 4 files changed, 17 insertions(+), 4 deletions(-)
+ arch/arm64/kernel/entry.S            |   12 +++++++++---
+ arch/arm64/kernel/signal.c           |    2 +-
+ 5 files changed, 18 insertions(+), 5 deletions(-)
 
 --- a/arch/arm64/Kconfig
 +++ b/arch/arm64/Kconfig
-@@ -90,6 +90,7 @@ config ARM64
+@@ -91,6 +91,7 @@ config ARM64
  	select HAVE_PERF_EVENTS
  	select HAVE_PERF_REGS
  	select HAVE_PERF_USER_STACK_DUMP
@@ -38,7 +39,7 @@ Signed-off-by: Anders Roxell <anders.roxell@linaro.org>
  	int			cpu;		/* cpu */
  };
  
-@@ -109,6 +110,7 @@ static inline struct thread_info *curren
+@@ -112,6 +113,7 @@ static inline struct thread_info *curren
  #define TIF_NEED_RESCHED	1
  #define TIF_NOTIFY_RESUME	2	/* callback before returning to user */
  #define TIF_FOREIGN_FPSTATE	3	/* CPU's FP state is not current's */
@@ -46,7 +47,7 @@ Signed-off-by: Anders Roxell <anders.roxell@linaro.org>
  #define TIF_NOHZ		7
  #define TIF_SYSCALL_TRACE	8
  #define TIF_SYSCALL_AUDIT	9
-@@ -124,6 +126,7 @@ static inline struct thread_info *curren
+@@ -127,6 +129,7 @@ static inline struct thread_info *curren
  #define _TIF_NEED_RESCHED	(1 << TIF_NEED_RESCHED)
  #define _TIF_NOTIFY_RESUME	(1 << TIF_NOTIFY_RESUME)
  #define _TIF_FOREIGN_FPSTATE	(1 << TIF_FOREIGN_FPSTATE)
@@ -54,19 +55,20 @@ Signed-off-by: Anders Roxell <anders.roxell@linaro.org>
  #define _TIF_NOHZ		(1 << TIF_NOHZ)
  #define _TIF_SYSCALL_TRACE	(1 << TIF_SYSCALL_TRACE)
  #define _TIF_SYSCALL_AUDIT	(1 << TIF_SYSCALL_AUDIT)
-@@ -132,7 +135,8 @@ static inline struct thread_info *curren
+@@ -135,7 +138,9 @@ static inline struct thread_info *curren
  #define _TIF_32BIT		(1 << TIF_32BIT)
  
  #define _TIF_WORK_MASK		(_TIF_NEED_RESCHED | _TIF_SIGPENDING | \
 -				 _TIF_NOTIFY_RESUME | _TIF_FOREIGN_FPSTATE)
 +				 _TIF_NOTIFY_RESUME | _TIF_FOREIGN_FPSTATE | \
 +				 _TIF_NEED_RESCHED_LAZY)
++#define _TIF_NEED_RESCHED_MASK	(_TIF_NEED_RESCHED | _TIF_NEED_RESCHED_LAZY)
  
  #define _TIF_SYSCALL_WORK	(_TIF_SYSCALL_TRACE | _TIF_SYSCALL_AUDIT | \
  				 _TIF_SYSCALL_TRACEPOINT | _TIF_SECCOMP | \
 --- a/arch/arm64/kernel/asm-offsets.c
 +++ b/arch/arm64/kernel/asm-offsets.c
-@@ -37,6 +37,7 @@ int main(void)
+@@ -38,6 +38,7 @@ int main(void)
    BLANK();
    DEFINE(TI_FLAGS,		offsetof(struct thread_info, flags));
    DEFINE(TI_PREEMPT,		offsetof(struct thread_info, preempt_count));
@@ -76,7 +78,7 @@ Signed-off-by: Anders Roxell <anders.roxell@linaro.org>
    DEFINE(TI_CPU,		offsetof(struct thread_info, cpu));
 --- a/arch/arm64/kernel/entry.S
 +++ b/arch/arm64/kernel/entry.S
-@@ -434,11 +434,16 @@ ENDPROC(el1_sync)
+@@ -428,11 +428,16 @@ ENDPROC(el1_sync)
  
  #ifdef CONFIG_PREEMPT
  	ldr	w24, [tsk, #TI_PREEMPT]		// get preempt count
@@ -96,7 +98,7 @@ Signed-off-by: Anders Roxell <anders.roxell@linaro.org>
  #endif
  #ifdef CONFIG_TRACE_IRQFLAGS
  	bl	trace_hardirqs_on
-@@ -452,6 +457,7 @@ ENDPROC(el1_irq)
+@@ -446,6 +451,7 @@ ENDPROC(el1_irq)
  1:	bl	preempt_schedule_irq		// irq en/disable is done inside
  	ldr	x0, [tsk, #TI_FLAGS]		// get new tasks TI_FLAGS
  	tbnz	x0, #TIF_NEED_RESCHED, 1b	// needs rescheduling?
@@ -104,11 +106,14 @@ Signed-off-by: Anders Roxell <anders.roxell@linaro.org>
  	ret	x24
  #endif
  
-@@ -708,6 +714,7 @@ ENDPROC(cpu_switch_to)
-  */
- work_pending:
- 	tbnz	x1, #TIF_NEED_RESCHED, work_resched
-+	tbnz	x1, #TIF_NEED_RESCHED_LAZY, work_resched
- 	/* TIF_SIGPENDING, TIF_NOTIFY_RESUME or TIF_FOREIGN_FPSTATE case */
- 	mov	x0, sp				// 'regs'
- 	enable_irq				// enable interrupts for do_notify_resume()
+--- a/arch/arm64/kernel/signal.c
++++ b/arch/arm64/kernel/signal.c
+@@ -409,7 +409,7 @@ asmlinkage void do_notify_resume(struct
+ 	 */
+ 	trace_hardirqs_off();
+ 	do {
+-		if (thread_flags & _TIF_NEED_RESCHED) {
++		if (thread_flags & _TIF_NEED_RESCHED_MASK) {
+ 			schedule();
+ 		} else {
+ 			local_irq_enable();

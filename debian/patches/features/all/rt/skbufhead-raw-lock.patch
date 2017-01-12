@@ -1,7 +1,7 @@
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Tue, 12 Jul 2011 15:38:34 +0200
 Subject: net: Use skbufhead with raw lock
-Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.8/older/patches-4.8.15-rt10.tar.xz
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.9/older/patches-4.9-rt1.tar.xz
 
 Use the rps lock as rawlock so we can keep irq-off regions. It looks low
 latency. However we can't kfree() from this context therefore we defer this
@@ -11,12 +11,12 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 ---
  include/linux/netdevice.h |    1 +
  include/linux/skbuff.h    |    7 +++++++
- net/core/dev.c            |   19 +++++++++++++------
- 3 files changed, 21 insertions(+), 6 deletions(-)
+ net/core/dev.c            |   31 ++++++++++++++++++++++++-------
+ 3 files changed, 32 insertions(+), 7 deletions(-)
 
 --- a/include/linux/netdevice.h
 +++ b/include/linux/netdevice.h
-@@ -2831,6 +2831,7 @@ struct softnet_data {
+@@ -2846,6 +2846,7 @@ struct softnet_data {
  	unsigned int		dropped;
  	struct sk_buff_head	input_pkt_queue;
  	struct napi_struct	backlog;
@@ -34,7 +34,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  };
  
  struct sk_buff;
-@@ -1565,6 +1566,12 @@ static inline void skb_queue_head_init(s
+@@ -1573,6 +1574,12 @@ static inline void skb_queue_head_init(s
  	__skb_queue_head_init(list);
  }
  
@@ -66,31 +66,75 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  #endif
  }
  
-@@ -4323,7 +4323,7 @@ static void flush_backlog(void *arg)
+@@ -4315,7 +4315,7 @@ static void flush_backlog(struct work_st
  	skb_queue_walk_safe(&sd->input_pkt_queue, skb, tmp) {
- 		if (skb->dev == dev) {
+ 		if (skb->dev->reg_state == NETREG_UNREGISTERING) {
  			__skb_unlink(skb, &sd->input_pkt_queue);
 -			kfree_skb(skb);
 +			__skb_queue_tail(&sd->tofree_queue, skb);
  			input_queue_head_incr(sd);
  		}
  	}
-@@ -4332,10 +4332,13 @@ static void flush_backlog(void *arg)
+@@ -4325,11 +4325,14 @@ static void flush_backlog(struct work_st
  	skb_queue_walk_safe(&sd->process_queue, skb, tmp) {
- 		if (skb->dev == dev) {
+ 		if (skb->dev->reg_state == NETREG_UNREGISTERING) {
  			__skb_unlink(skb, &sd->process_queue);
 -			kfree_skb(skb);
 +			__skb_queue_tail(&sd->tofree_queue, skb);
  			input_queue_head_incr(sd);
  		}
  	}
-+
 +	if (!skb_queue_empty(&sd->tofree_queue))
 +		raise_softirq_irqoff(NET_RX_SOFTIRQ);
+ 	local_bh_enable();
++
  }
  
- static int napi_gro_complete(struct sk_buff *skb)
-@@ -8004,6 +8007,9 @@ static int dev_cpu_callback(struct notif
+ static void flush_all_backlogs(void)
+@@ -4852,7 +4855,9 @@ static int process_backlog(struct napi_s
+ 	while (again) {
+ 		struct sk_buff *skb;
+ 
++		local_irq_disable();
+ 		while ((skb = __skb_dequeue(&sd->process_queue))) {
++			local_irq_enable();
+ 			rcu_read_lock();
+ 			__netif_receive_skb(skb);
+ 			rcu_read_unlock();
+@@ -4860,9 +4865,9 @@ static int process_backlog(struct napi_s
+ 			if (++work >= quota)
+ 				return work;
+ 
++			local_irq_disable();
+ 		}
+ 
+-		local_irq_disable();
+ 		rps_lock(sd);
+ 		if (skb_queue_empty(&sd->input_pkt_queue)) {
+ 			/*
+@@ -5204,13 +5209,21 @@ static __latent_entropy void net_rx_acti
+ 	struct softnet_data *sd = this_cpu_ptr(&softnet_data);
+ 	unsigned long time_limit = jiffies + 2;
+ 	int budget = netdev_budget;
++	struct sk_buff_head tofree_q;
++	struct sk_buff *skb;
+ 	LIST_HEAD(list);
+ 	LIST_HEAD(repoll);
+ 
++	__skb_queue_head_init(&tofree_q);
++
+ 	local_irq_disable();
++	skb_queue_splice_init(&sd->tofree_queue, &tofree_q);
+ 	list_splice_init(&sd->poll_list, &list);
+ 	local_irq_enable();
+ 
++	while ((skb = __skb_dequeue(&tofree_q)))
++		kfree_skb(skb);
++
+ 	for (;;) {
+ 		struct napi_struct *n;
+ 
+@@ -8013,6 +8026,9 @@ static int dev_cpu_callback(struct notif
  		netif_rx_ni(skb);
  		input_queue_head_incr(oldsd);
  	}
@@ -100,9 +144,9 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	return NOTIFY_OK;
  }
-@@ -8305,8 +8311,9 @@ static int __init net_dev_init(void)
- 	for_each_possible_cpu(i) {
- 		struct softnet_data *sd = &per_cpu(softnet_data, i);
+@@ -8317,8 +8333,9 @@ static int __init net_dev_init(void)
+ 
+ 		INIT_WORK(flush, flush_backlog);
  
 -		skb_queue_head_init(&sd->input_pkt_queue);
 -		skb_queue_head_init(&sd->process_queue);
