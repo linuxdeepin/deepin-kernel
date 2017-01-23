@@ -69,6 +69,15 @@ class Main(object):
     def upstream_export(self, input_repo):
         self.log("Exporting %s from %s\n" % (self.tag, input_repo))
 
+        gpg_wrapper = os.path.join(os.getcwd(),
+                                   "debian/bin/git-tag-gpg-wrapper")
+        verify_proc = subprocess.Popen(['git',
+                                        '-c', 'gpg.program=%s' % gpg_wrapper,
+                                        'tag', '-v', self.tag],
+                                        cwd=input_repo)
+        if verify_proc.wait():
+            raise RuntimeError("GPG tag verification failed")
+
         archive_proc = subprocess.Popen(['git', 'archive', '--format=tar',
                                          '--prefix=%s/' % self.orig, self.tag],
                                         cwd=input_repo,
