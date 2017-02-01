@@ -1,7 +1,7 @@
 SUBDIRS = \
 	hv \
 	perf \
-	power/cpupower \
+	power \
 	usb/usbip
 #SUBDIRS += lib/lockdep
 
