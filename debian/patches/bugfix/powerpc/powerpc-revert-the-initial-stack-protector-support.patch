@@ -1,0 +1,149 @@
+From: Michael Ellerman <mpe@ellerman.id.au>
+Date: Tue, 24 Jan 2017 21:37:20 +1100
+Subject: powerpc: Revert the initial stack protector support
+Origin: https://git.kernel.org/cgit/linux/kernel/git/powerpc/linux.git/commit?id=f2574030b0e33263b8a1c28fa3c4fa9292283799
+
+Unfortunately the stack protector support we merged recently only works
+on some toolchains. If the toolchain is built without glibc support
+everything works fine, but if glibc is built then it leads to a panic
+at boot.
+
+The solution is not rc5 material, so revert the support for now. This
+reverts commits:
+
+6533b7c16ee5 ("powerpc: Initial stack protector (-fstack-protector) support")
+902e06eb86cd ("powerpc/32: Change the stack protector canary value per task")
+
+Fixes: 6533b7c16ee5 ("powerpc: Initial stack protector (-fstack-protector) support")
+Signed-off-by: Michael Ellerman <mpe@ellerman.id.au>
+---
+ arch/powerpc/Kconfig                      |  1 -
+ arch/powerpc/include/asm/stackprotector.h | 40 -------------------------------
+ arch/powerpc/kernel/Makefile              |  4 ----
+ arch/powerpc/kernel/asm-offsets.c         |  3 ---
+ arch/powerpc/kernel/entry_32.S            |  6 +----
+ arch/powerpc/kernel/process.c             |  6 -----
+ 6 files changed, 1 insertion(+), 59 deletions(-)
+ delete mode 100644 arch/powerpc/include/asm/stackprotector.h
+
+diff --git a/arch/powerpc/Kconfig b/arch/powerpc/Kconfig
+index a8ee573fe610..a46d1c0d14d3 100644
+--- a/arch/powerpc/Kconfig
++++ b/arch/powerpc/Kconfig
+@@ -164,7 +164,6 @@ config PPC
+ 	select ARCH_HAS_SCALED_CPUTIME if VIRT_CPU_ACCOUNTING_NATIVE
+ 	select HAVE_ARCH_HARDENED_USERCOPY
+ 	select HAVE_KERNEL_GZIP
+-	select HAVE_CC_STACKPROTECTOR
+ 
+ config GENERIC_CSUM
+ 	def_bool CPU_LITTLE_ENDIAN
+diff --git a/arch/powerpc/include/asm/stackprotector.h b/arch/powerpc/include/asm/stackprotector.h
+deleted file mode 100644
+index 6720190eabec..000000000000
+--- a/arch/powerpc/include/asm/stackprotector.h
++++ /dev/null
+@@ -1,40 +0,0 @@
+-/*
+- * GCC stack protector support.
+- *
+- * Stack protector works by putting predefined pattern at the start of
+- * the stack frame and verifying that it hasn't been overwritten when
+- * returning from the function.  The pattern is called stack canary
+- * and gcc expects it to be defined by a global variable called
+- * "__stack_chk_guard" on PPC.  This unfortunately means that on SMP
+- * we cannot have a different canary value per task.
+- */
+-
+-#ifndef _ASM_STACKPROTECTOR_H
+-#define _ASM_STACKPROTECTOR_H
+-
+-#include <linux/random.h>
+-#include <linux/version.h>
+-#include <asm/reg.h>
+-
+-extern unsigned long __stack_chk_guard;
+-
+-/*
+- * Initialize the stackprotector canary value.
+- *
+- * NOTE: this must only be called from functions that never return,
+- * and it must always be inlined.
+- */
+-static __always_inline void boot_init_stack_canary(void)
+-{
+-	unsigned long canary;
+-
+-	/* Try to get a semi random initial value. */
+-	get_random_bytes(&canary, sizeof(canary));
+-	canary ^= mftb();
+-	canary ^= LINUX_VERSION_CODE;
+-
+-	current->stack_canary = canary;
+-	__stack_chk_guard = current->stack_canary;
+-}
+-
+-#endif	/* _ASM_STACKPROTECTOR_H */
+diff --git a/arch/powerpc/kernel/Makefile b/arch/powerpc/kernel/Makefile
+index 23f8082d7bfa..f4c2b52e58b3 100644
+--- a/arch/powerpc/kernel/Makefile
++++ b/arch/powerpc/kernel/Makefile
+@@ -19,10 +19,6 @@ CFLAGS_init.o += $(DISABLE_LATENT_ENTROPY_PLUGIN)
+ CFLAGS_btext.o += $(DISABLE_LATENT_ENTROPY_PLUGIN)
+ CFLAGS_prom.o += $(DISABLE_LATENT_ENTROPY_PLUGIN)
+ 
+-# -fstack-protector triggers protection checks in this code,
+-# but it is being used too early to link to meaningful stack_chk logic.
+-CFLAGS_prom_init.o += $(call cc-option, -fno-stack-protector)
+-
+ ifdef CONFIG_FUNCTION_TRACER
+ # Do not trace early boot code
+ CFLAGS_REMOVE_cputable.o = -mno-sched-epilog $(CC_FLAGS_FTRACE)
+diff --git a/arch/powerpc/kernel/asm-offsets.c b/arch/powerpc/kernel/asm-offsets.c
+index 0601e6a7297c..195a9fc8f81c 100644
+--- a/arch/powerpc/kernel/asm-offsets.c
++++ b/arch/powerpc/kernel/asm-offsets.c
+@@ -91,9 +91,6 @@ int main(void)
+ 	DEFINE(TI_livepatch_sp, offsetof(struct thread_info, livepatch_sp));
+ #endif
+ 
+-#ifdef CONFIG_CC_STACKPROTECTOR
+-	DEFINE(TSK_STACK_CANARY, offsetof(struct task_struct, stack_canary));
+-#endif
+ 	DEFINE(KSP, offsetof(struct thread_struct, ksp));
+ 	DEFINE(PT_REGS, offsetof(struct thread_struct, regs));
+ #ifdef CONFIG_BOOKE
+diff --git a/arch/powerpc/kernel/entry_32.S b/arch/powerpc/kernel/entry_32.S
+index 5742dbdbee46..3841d749a430 100644
+--- a/arch/powerpc/kernel/entry_32.S
++++ b/arch/powerpc/kernel/entry_32.S
+@@ -674,11 +674,7 @@ BEGIN_FTR_SECTION
+ 	mtspr	SPRN_SPEFSCR,r0		/* restore SPEFSCR reg */
+ END_FTR_SECTION_IFSET(CPU_FTR_SPE)
+ #endif /* CONFIG_SPE */
+-#if defined(CONFIG_CC_STACKPROTECTOR) && !defined(CONFIG_SMP)
+-	lwz	r0,TSK_STACK_CANARY(r2)
+-	lis	r4,__stack_chk_guard@ha
+-	stw	r0,__stack_chk_guard@l(r4)
+-#endif
++
+ 	lwz	r0,_CCR(r1)
+ 	mtcrf	0xFF,r0
+ 	/* r3-r12 are destroyed -- Cort */
+diff --git a/arch/powerpc/kernel/process.c b/arch/powerpc/kernel/process.c
+index 04885cec24df..5dd056df0baa 100644
+--- a/arch/powerpc/kernel/process.c
++++ b/arch/powerpc/kernel/process.c
+@@ -64,12 +64,6 @@
+ #include <linux/kprobes.h>
+ #include <linux/kdebug.h>
+ 
+-#ifdef CONFIG_CC_STACKPROTECTOR
+-#include <linux/stackprotector.h>
+-unsigned long __stack_chk_guard __read_mostly;
+-EXPORT_SYMBOL(__stack_chk_guard);
+-#endif
+-
+ /* Transactional Memory debug */
+ #ifdef TM_DEBUG_SW
+ #define TM_DEBUG(x...) printk(KERN_INFO x)
