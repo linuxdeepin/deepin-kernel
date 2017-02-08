@@ -44,6 +44,7 @@ class Gencontrol(Base):
             'installer': config.SchemaItemBoolean(),
             'libc-dev': config.SchemaItemBoolean(),
             'tools': config.SchemaItemBoolean(),
+            'virtual': config.SchemaItemBoolean(),
         }
     }
 
@@ -116,6 +117,9 @@ class Gencontrol(Base):
             packages.extend(self.process_packages(self.templates["control.docs"], self.vars))
         if self.config.merge('packages').get('tools', True):
             packages.extend(self.process_packages(self.templates["control.tools"], self.vars))
+
+        if self.config.merge('packages').get('virtual', True):
+            packages.extend(self.process_packages(self.templates["control.virtual"], self.vars))
 
         self._substitute_file('lintian-overrides.perf', self.vars,
                               'debian/linux-perf-%s.lintian-overrides' %
