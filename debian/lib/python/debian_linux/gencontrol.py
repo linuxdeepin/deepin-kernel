@@ -90,6 +90,7 @@ class Gencontrol(object):
         self.do_source(packages)
         self.do_main(packages, makefile)
         self.do_extra(packages, makefile)
+        self.do_virtual(packages, makefile)
 
         self.write(packages, makefile)
 
