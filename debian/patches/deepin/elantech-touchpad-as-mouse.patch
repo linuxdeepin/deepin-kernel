@@ -1,0 +1,190 @@
+commit 01e2e6cfeb57d05cae8ea2d0d068f29be009d307
+Author: Yang Bo <yangbo@deepin.com>
+Date:   Mon Feb 13 19:58:45 2017 +0800
+
+    elantech: Use synaptics style sliced command for specific firmware
+    
+    some firmware, such as 0x5e1f00, don't support fast command
+    even if the hw_version > 1. So use synaptics style sliced
+    command. Tested on LENOVO 80UN.
+    
+    Signed-off-by: Yang Bo <yangbo@deepin.com>
+
+diff --git a/drivers/input/mouse/elantech.c b/drivers/input/mouse/elantech.c
+index db7d1d666..ba5f416fc 100644
+--- a/drivers/input/mouse/elantech.c
++++ b/drivers/input/mouse/elantech.c
+@@ -29,6 +29,40 @@
+ 					fmt, ##__VA_ARGS__);		\
+ 	} while (0)
+ 
++static int elantech_buggy_firmware(const struct dmi_system_id *d)
++{
++	return 1;
++}
++
++static const struct dmi_system_id elantech_buggy_fw[] = {
++	{
++#if defined(CONFIG_DMI) && defined(CONFIG_X86)
++		.callback = elantech_buggy_firmware,
++		.ident = "LENOVO 80UN",
++		.matches = {
++			DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
++			DMI_MATCH(DMI_PRODUCT_NAME, "80UN"),
++		},
++	},
++#endif
++	{ }
++};
++
++static const unsigned int sliced_firmware[] = {
++	0x5e1f00
++};
++
++static int support_fast_command(struct elantech_data *etd)
++{
++	int i;
++	for (i = 0; i < ARRAY_SIZE(sliced_firmware); i++) {
++		if (sliced_firmware[i] == etd->fw_version) {
++			return 0;
++		}
++	}
++	return 1;
++}
++
+ /*
+  * Send a Synaptics style sliced query command
+  */
+@@ -105,6 +139,16 @@ static int elantech_read_reg(struct psmouse *psmouse, unsigned char reg,
+ 	if (reg > 0x11 && reg < 0x20)
+ 		return -1;
+ 
++	/* fw_version 0x5e1f00 don't support fast command */
++	if (!support_fast_command(etd)) {
++		if (psmouse_sliced_command(psmouse, ETP_REGISTER_READ) ||
++		    psmouse_sliced_command(psmouse, reg) ||
++		    ps2_command(&psmouse->ps2dev, param, PSMOUSE_CMD_GETINFO)) {
++			rc = -1;
++		}
++		goto skip_hw_version;
++	}
++
+ 	switch (etd->hw_version) {
+ 	case 1:
+ 		if (psmouse_sliced_command(psmouse, ETP_REGISTER_READ) ||
+@@ -135,6 +179,7 @@ static int elantech_read_reg(struct psmouse *psmouse, unsigned char reg,
+ 		break;
+ 	}
+ 
++skip_hw_version:
+ 	if (rc)
+ 		psmouse_err(psmouse, "failed to read register 0x%02x.\n", reg);
+ 	else if (etd->hw_version != 4)
+@@ -160,6 +205,17 @@ static int elantech_write_reg(struct psmouse *psmouse, unsigned char reg,
+ 	if (reg > 0x11 && reg < 0x20)
+ 		return -1;
+ 
++	/* fw_version 0x5e1f00 don't support fast command. */
++	if (!support_fast_command(etd)) {
++		if (psmouse_sliced_command(psmouse, ETP_REGISTER_WRITE) ||
++		    psmouse_sliced_command(psmouse, reg) ||
++		    psmouse_sliced_command(psmouse, val) ||
++		    ps2_command(&psmouse->ps2dev, NULL, PSMOUSE_CMD_SETSCALE11)) {
++			rc = -1;
++		}
++		goto skip_hw_version;
++	}
++
+ 	switch (etd->hw_version) {
+ 	case 1:
+ 		if (psmouse_sliced_command(psmouse, ETP_REGISTER_WRITE) ||
+@@ -209,6 +265,7 @@ static int elantech_write_reg(struct psmouse *psmouse, unsigned char reg,
+ 		break;
+ 	}
+ 
++skip_hw_version:
+ 	if (rc)
+ 		psmouse_err(psmouse,
+ 			    "failed to write register 0x%02x with value 0x%02x.\n",
+@@ -222,7 +279,7 @@ static int elantech_write_reg(struct psmouse *psmouse, unsigned char reg,
+  */
+ static void elantech_packet_dump(struct psmouse *psmouse)
+ {
+-	psmouse_printk(KERN_DEBUG, psmouse, "PS/2 packet [%*ph]\n",
++	psmouse_printk(KERN_ALERT, psmouse, "PS/2 packet [%*ph]\n",
+ 		       psmouse->pktsize, psmouse->packet);
+ }
+ 
+@@ -803,6 +860,14 @@ static int elantech_packet_check_v4(struct psmouse *psmouse)
+ 		sanity_check = ((packet[0] & 0x0c) == 0x04 &&
+ 				(packet[3] & 0x1c) == 0x10);
+ 
++	if (!support_fast_command(etd)) {
++		/* base on observation, packet[3] & 0x08 == 0x08
++		 * but not sure about it, set sanity_check to true
++		 * for all 0x5e1f00 firmware
++		 * */
++		sanity_check = 1;
++	}
++
+ 	if (!sanity_check)
+ 		return PACKET_UNKNOWN;
+ 
+@@ -815,6 +880,12 @@ static int elantech_packet_check_v4(struct psmouse *psmouse)
+ 
+ 	case 2:
+ 		return PACKET_V4_MOTION;
++
++	default:
++		/* don't know what this is
++		 * guess debounce packet?
++		 * */
++		return PACKET_DEBOUNCE;
+ 	}
+ 
+ 	return PACKET_UNKNOWN;
+@@ -880,6 +951,10 @@ static psmouse_ret_t elantech_process_byte(struct psmouse *psmouse)
+ 		case PACKET_UNKNOWN:
+ 			return PSMOUSE_BAD_DATA;
+ 
++		case PACKET_DEBOUNCE:
++			/* ignore debounce */
++			break;
++
+ 		case PACKET_TRACKPOINT:
+ 			elantech_report_trackpoint(psmouse, packet_type);
+ 			break;
+@@ -1090,8 +1165,9 @@ static int elantech_get_resolution_v4(struct psmouse *psmouse,
+ 				      unsigned int *y_res)
+ {
+ 	unsigned char param[3];
++	struct elantech_data *etd = psmouse->private;
+ 
+-	if (elantech_send_cmd(psmouse, ETP_RESOLUTION_QUERY, param))
++	if (etd->send_cmd(psmouse, ETP_RESOLUTION_QUERY, param))
+ 		return -1;
+ 
+ 	*x_res = elantech_convert_res(param[1] & 0x0f);
+@@ -1597,6 +1673,11 @@ static int elantech_set_properties(struct elantech_data *etd)
+ 	etd->send_cmd = etd->hw_version >= 3 ? elantech_send_cmd :
+ 					       synaptics_send_cmd;
+ 
++	/* firmware 0x5e1f00 doesn't support fast command. */
++	if (!support_fast_command(etd)) {
++		etd->send_cmd = synaptics_send_cmd;
++	}
++
+ 	/* Turn on packet checking by default */
+ 	etd->paritycheck = 1;
+ 
+@@ -1626,6 +1707,10 @@ static int elantech_set_properties(struct elantech_data *etd)
+ 	/* Enable real hardware resolution on hw_version 3 ? */
+ 	etd->set_hw_resolution = !dmi_check_system(no_hw_res_dmi_table);
+ 
++	if (!support_fast_command(etd)) {
++		etd->debug = 10;
++	}
++
+ 	return 0;
+ }
+ 

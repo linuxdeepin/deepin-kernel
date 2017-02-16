@@ -44,6 +44,7 @@ class Gencontrol(Base):
             'installer': config.SchemaItemBoolean(),
             'libc-dev': config.SchemaItemBoolean(),
             'tools': config.SchemaItemBoolean(),
+            'virtual': config.SchemaItemBoolean(),
         }
     }
 
@@ -120,6 +121,29 @@ class Gencontrol(Base):
         self._substitute_file('lintian-overrides.perf', self.vars,
                               'debian/linux-perf-%s.lintian-overrides' %
                               self.vars['version'])
+
+    def do_virtual(self, packages, makefile):
+        if not self.config.merge('packages').get('virtual', True):
+            return
+        templates_virtual = self.templates.get("control.virtual", None)
+        if templates_virtual is None:
+            return
+
+        packages_virtual = self.process_packages(templates_virtual, self.vars)
+        packages.extend(packages_virtual)
+        virtual_arches = {}
+        for package in packages_virtual:
+            arches = package['Architecture']
+            for arch in arches:
+                i = virtual_arches.get(arch, [])
+                i.append(package)
+                virtual_arches[arch] = i
+        for arch in sorted(virtual_arches.keys()):
+            cmds = []
+            for i in virtual_arches[arch]:
+                cmds.append("$(MAKE) -f debian/rules.real install-dummy ARCH='%s' DH_OPTIONS='-p%s'" % (arch, i['Package']))
+            makefile.add('binary-arch_%s' % arch, ['binary-arch_%s_virtual' % arch])
+            makefile.add("binary-arch_%s_virtual" % arch, cmds = cmds)
 
     def do_indep_featureset_setup(self, vars, makeflags, featureset, extra):
         makeflags['LOCALVERSION'] = vars['localversion']
