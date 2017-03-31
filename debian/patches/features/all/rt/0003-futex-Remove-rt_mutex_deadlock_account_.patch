@@ -1,0 +1,185 @@
+From: Peter Zijlstra <peterz@infradead.org>
+Date: Wed, 22 Mar 2017 11:35:50 +0100
+Subject: [PATCH] futex: Remove rt_mutex_deadlock_account_*()
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.9/older/patches-4.9.18-rt14.tar.xz
+
+Upstream commit fffa954fb528963c2fb7b0c0084eb77e2be7ab52
+
+These are unused and clutter up the code.
+
+Signed-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>
+Cc: juri.lelli@arm.com
+Cc: bigeasy@linutronix.de
+Cc: xlpang@redhat.com
+Cc: rostedt@goodmis.org
+Cc: mathieu.desnoyers@efficios.com
+Cc: jdesfossez@efficios.com
+Cc: dvhart@infradead.org
+Cc: bristot@redhat.com
+Link: http://lkml.kernel.org/r/20170322104151.652692478@infradead.org
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+---
+ kernel/locking/rtmutex-debug.c |    9 -------
+ kernel/locking/rtmutex-debug.h |    3 --
+ kernel/locking/rtmutex.c       |   47 +++++++++++++++--------------------------
+ kernel/locking/rtmutex.h       |    2 -
+ 4 files changed, 18 insertions(+), 43 deletions(-)
+
+--- a/kernel/locking/rtmutex-debug.c
++++ b/kernel/locking/rtmutex-debug.c
+@@ -173,12 +173,3 @@ void debug_rt_mutex_init(struct rt_mutex
+ 	lock->name = name;
+ }
+ 
+-void
+-rt_mutex_deadlock_account_lock(struct rt_mutex *lock, struct task_struct *task)
+-{
+-}
+-
+-void rt_mutex_deadlock_account_unlock(struct task_struct *task)
+-{
+-}
+-
+--- a/kernel/locking/rtmutex-debug.h
++++ b/kernel/locking/rtmutex-debug.h
+@@ -9,9 +9,6 @@
+  * This file contains macros used solely by rtmutex.c. Debug version.
+  */
+ 
+-extern void
+-rt_mutex_deadlock_account_lock(struct rt_mutex *lock, struct task_struct *task);
+-extern void rt_mutex_deadlock_account_unlock(struct task_struct *task);
+ extern void debug_rt_mutex_init_waiter(struct rt_mutex_waiter *waiter);
+ extern void debug_rt_mutex_free_waiter(struct rt_mutex_waiter *waiter);
+ extern void debug_rt_mutex_init(struct rt_mutex *lock, const char *name);
+--- a/kernel/locking/rtmutex.c
++++ b/kernel/locking/rtmutex.c
+@@ -936,8 +936,6 @@ static int try_to_take_rt_mutex(struct r
+ 	 */
+ 	rt_mutex_set_owner(lock, task);
+ 
+-	rt_mutex_deadlock_account_lock(lock, task);
+-
+ 	return 1;
+ }
+ 
+@@ -1340,8 +1338,6 @@ static bool __sched rt_mutex_slowunlock(
+ 
+ 	debug_rt_mutex_unlock(lock);
+ 
+-	rt_mutex_deadlock_account_unlock(current);
+-
+ 	/*
+ 	 * We must be careful here if the fast path is enabled. If we
+ 	 * have no waiters queued we cannot set owner to NULL here
+@@ -1407,11 +1403,10 @@ rt_mutex_fastlock(struct rt_mutex *lock,
+ 				struct hrtimer_sleeper *timeout,
+ 				enum rtmutex_chainwalk chwalk))
+ {
+-	if (likely(rt_mutex_cmpxchg_acquire(lock, NULL, current))) {
+-		rt_mutex_deadlock_account_lock(lock, current);
++	if (likely(rt_mutex_cmpxchg_acquire(lock, NULL, current)))
+ 		return 0;
+-	} else
+-		return slowfn(lock, state, NULL, RT_MUTEX_MIN_CHAINWALK);
++
++	return slowfn(lock, state, NULL, RT_MUTEX_MIN_CHAINWALK);
+ }
+ 
+ static inline int
+@@ -1423,21 +1418,19 @@ rt_mutex_timed_fastlock(struct rt_mutex
+ 				      enum rtmutex_chainwalk chwalk))
+ {
+ 	if (chwalk == RT_MUTEX_MIN_CHAINWALK &&
+-	    likely(rt_mutex_cmpxchg_acquire(lock, NULL, current))) {
+-		rt_mutex_deadlock_account_lock(lock, current);
++	    likely(rt_mutex_cmpxchg_acquire(lock, NULL, current)))
+ 		return 0;
+-	} else
+-		return slowfn(lock, state, timeout, chwalk);
++
++	return slowfn(lock, state, timeout, chwalk);
+ }
+ 
+ static inline int
+ rt_mutex_fasttrylock(struct rt_mutex *lock,
+ 		     int (*slowfn)(struct rt_mutex *lock))
+ {
+-	if (likely(rt_mutex_cmpxchg_acquire(lock, NULL, current))) {
+-		rt_mutex_deadlock_account_lock(lock, current);
++	if (likely(rt_mutex_cmpxchg_acquire(lock, NULL, current)))
+ 		return 1;
+-	}
++
+ 	return slowfn(lock);
+ }
+ 
+@@ -1447,19 +1440,18 @@ rt_mutex_fastunlock(struct rt_mutex *loc
+ 				   struct wake_q_head *wqh))
+ {
+ 	WAKE_Q(wake_q);
++	bool deboost;
+ 
+-	if (likely(rt_mutex_cmpxchg_release(lock, current, NULL))) {
+-		rt_mutex_deadlock_account_unlock(current);
++	if (likely(rt_mutex_cmpxchg_release(lock, current, NULL)))
++		return;
+ 
+-	} else {
+-		bool deboost = slowfn(lock, &wake_q);
++	deboost = slowfn(lock, &wake_q);
+ 
+-		wake_up_q(&wake_q);
++	wake_up_q(&wake_q);
+ 
+-		/* Undo pi boosting if necessary: */
+-		if (deboost)
+-			rt_mutex_adjust_prio(current);
+-	}
++	/* Undo pi boosting if necessary: */
++	if (deboost)
++		rt_mutex_adjust_prio(current);
+ }
+ 
+ /**
+@@ -1570,10 +1562,9 @@ EXPORT_SYMBOL_GPL(rt_mutex_unlock);
+ bool __sched rt_mutex_futex_unlock(struct rt_mutex *lock,
+ 				   struct wake_q_head *wqh)
+ {
+-	if (likely(rt_mutex_cmpxchg_release(lock, current, NULL))) {
+-		rt_mutex_deadlock_account_unlock(current);
++	if (likely(rt_mutex_cmpxchg_release(lock, current, NULL)))
+ 		return false;
+-	}
++
+ 	return rt_mutex_slowunlock(lock, wqh);
+ }
+ 
+@@ -1631,7 +1622,6 @@ void rt_mutex_init_proxy_locked(struct r
+ 	__rt_mutex_init(lock, NULL);
+ 	debug_rt_mutex_proxy_lock(lock, proxy_owner);
+ 	rt_mutex_set_owner(lock, proxy_owner);
+-	rt_mutex_deadlock_account_lock(lock, proxy_owner);
+ }
+ 
+ /**
+@@ -1647,7 +1637,6 @@ void rt_mutex_proxy_unlock(struct rt_mut
+ {
+ 	debug_rt_mutex_proxy_unlock(lock);
+ 	rt_mutex_set_owner(lock, NULL);
+-	rt_mutex_deadlock_account_unlock(proxy_owner);
+ }
+ 
+ /**
+--- a/kernel/locking/rtmutex.h
++++ b/kernel/locking/rtmutex.h
+@@ -11,8 +11,6 @@
+  */
+ 
+ #define rt_mutex_deadlock_check(l)			(0)
+-#define rt_mutex_deadlock_account_lock(m, t)		do { } while (0)
+-#define rt_mutex_deadlock_account_unlock(l)		do { } while (0)
+ #define debug_rt_mutex_init_waiter(w)			do { } while (0)
+ #define debug_rt_mutex_free_waiter(w)			do { } while (0)
+ #define debug_rt_mutex_lock(l)				do { } while (0)
