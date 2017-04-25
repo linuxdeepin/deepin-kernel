@@ -1,0 +1,144 @@
+commit 17ce039b4e5405c49d8c0d64e6d781cc6f4dc1ac
+Author: Mauro Carvalho Chehab <mchehab@s-opensource.com>
+Date:   Fri Oct 7 06:30:27 2016 -0300
+
+    [media] cxusb: don't do DMA on stack
+    
+    The USB control messages require DMA to work. We cannot pass
+    a stack-allocated buffer, as it is not warranted that the
+    stack would be into a DMA enabled area.
+    
+    Reviewed-by: Patrick Boettcher <patrick.boettcher@posteo.de>
+    Signed-off-by: Mauro Carvalho Chehab <mchehab@s-opensource.com>
+
+diff --git a/drivers/media/usb/dvb-usb/cxusb.c b/drivers/media/usb/dvb-usb/cxusb.c
+index 907ac01..3977281 100644
+--- a/drivers/media/usb/dvb-usb/cxusb.c
++++ b/drivers/media/usb/dvb-usb/cxusb.c
+@@ -45,9 +45,6 @@
+ #include "si2168.h"
+ #include "si2157.h"
+ 
+-/* Max transfer size done by I2C transfer functions */
+-#define MAX_XFER_SIZE  80
+-
+ /* debug */
+ static int dvb_usb_cxusb_debug;
+ module_param_named(debug, dvb_usb_cxusb_debug, int, 0644);
+@@ -61,23 +58,27 @@
+ static int cxusb_ctrl_msg(struct dvb_usb_device *d,
+ 			  u8 cmd, u8 *wbuf, int wlen, u8 *rbuf, int rlen)
+ {
+-	int wo = (rbuf == NULL || rlen == 0); /* write-only */
+-	u8 sndbuf[MAX_XFER_SIZE];
++	struct cxusb_state *st = d->priv;
++	int ret, wo;
+ 
+-	if (1 + wlen > sizeof(sndbuf)) {
+-		warn("i2c wr: len=%d is too big!\n",
+-		     wlen);
++	if (1 + wlen > MAX_XFER_SIZE) {
++		warn("i2c wr: len=%d is too big!\n", wlen);
+ 		return -EOPNOTSUPP;
+ 	}
+ 
+-	memset(sndbuf, 0, 1+wlen);
++	wo = (rbuf == NULL || rlen == 0); /* write-only */
+ 
+-	sndbuf[0] = cmd;
+-	memcpy(&sndbuf[1], wbuf, wlen);
++	mutex_lock(&st->data_mutex);
++	st->data[0] = cmd;
++	memcpy(&st->data[1], wbuf, wlen);
+ 	if (wo)
+-		return dvb_usb_generic_write(d, sndbuf, 1+wlen);
++		ret = dvb_usb_generic_write(d, st->data, 1 + wlen);
+ 	else
+-		return dvb_usb_generic_rw(d, sndbuf, 1+wlen, rbuf, rlen, 0);
++		ret = dvb_usb_generic_rw(d, st->data, 1 + wlen,
++					 rbuf, rlen, 0);
++
++	mutex_unlock(&st->data_mutex);
++	return ret;
+ }
+ 
+ /* GPIO */
+@@ -1460,36 +1461,43 @@ static int bluebird_patch_dvico_firmware_download(struct usb_device *udev,
+ static int cxusb_probe(struct usb_interface *intf,
+ 		       const struct usb_device_id *id)
+ {
++	struct dvb_usb_device *d;
++	struct cxusb_state *st;
++
+ 	if (0 == dvb_usb_device_init(intf, &cxusb_medion_properties,
+-				     THIS_MODULE, NULL, adapter_nr) ||
++				     THIS_MODULE, &d, adapter_nr) ||
+ 	    0 == dvb_usb_device_init(intf, &cxusb_bluebird_lgh064f_properties,
+-				     THIS_MODULE, NULL, adapter_nr) ||
++				     THIS_MODULE, &d, adapter_nr) ||
+ 	    0 == dvb_usb_device_init(intf, &cxusb_bluebird_dee1601_properties,
+-				     THIS_MODULE, NULL, adapter_nr) ||
++				     THIS_MODULE, &d, adapter_nr) ||
+ 	    0 == dvb_usb_device_init(intf, &cxusb_bluebird_lgz201_properties,
+-				     THIS_MODULE, NULL, adapter_nr) ||
++				     THIS_MODULE, &d, adapter_nr) ||
+ 	    0 == dvb_usb_device_init(intf, &cxusb_bluebird_dtt7579_properties,
+-				     THIS_MODULE, NULL, adapter_nr) ||
++				     THIS_MODULE, &d, adapter_nr) ||
+ 	    0 == dvb_usb_device_init(intf, &cxusb_bluebird_dualdig4_properties,
+-				     THIS_MODULE, NULL, adapter_nr) ||
++				     THIS_MODULE, &d, adapter_nr) ||
+ 	    0 == dvb_usb_device_init(intf, &cxusb_bluebird_nano2_properties,
+-				     THIS_MODULE, NULL, adapter_nr) ||
++				     THIS_MODULE, &d, adapter_nr) ||
+ 	    0 == dvb_usb_device_init(intf,
+ 				&cxusb_bluebird_nano2_needsfirmware_properties,
+-				     THIS_MODULE, NULL, adapter_nr) ||
++				     THIS_MODULE, &d, adapter_nr) ||
+ 	    0 == dvb_usb_device_init(intf, &cxusb_aver_a868r_properties,
+-				     THIS_MODULE, NULL, adapter_nr) ||
++				     THIS_MODULE, &d, adapter_nr) ||
+ 	    0 == dvb_usb_device_init(intf,
+ 				     &cxusb_bluebird_dualdig4_rev2_properties,
+-				     THIS_MODULE, NULL, adapter_nr) ||
++				     THIS_MODULE, &d, adapter_nr) ||
+ 	    0 == dvb_usb_device_init(intf, &cxusb_d680_dmb_properties,
+-				     THIS_MODULE, NULL, adapter_nr) ||
++				     THIS_MODULE, &d, adapter_nr) ||
+ 	    0 == dvb_usb_device_init(intf, &cxusb_mygica_d689_properties,
+-				     THIS_MODULE, NULL, adapter_nr) ||
++				     THIS_MODULE, &d, adapter_nr) ||
+ 	    0 == dvb_usb_device_init(intf, &cxusb_mygica_t230_properties,
+-				     THIS_MODULE, NULL, adapter_nr) ||
+-	    0)
++				     THIS_MODULE, &d, adapter_nr) ||
++	    0) {
++		st = d->priv;
++		mutex_init(&st->data_mutex);
++
+ 		return 0;
++	}
+ 
+ 	return -EINVAL;
+ }
+diff --git a/drivers/media/usb/dvb-usb/cxusb.h b/drivers/media/usb/dvb-usb/cxusb.h
+index 527ff79..9f3ee0e 100644
+--- a/drivers/media/usb/dvb-usb/cxusb.h
++++ b/drivers/media/usb/dvb-usb/cxusb.h
+@@ -28,10 +28,16 @@
+ #define CMD_ANALOG        0x50
+ #define CMD_DIGITAL       0x51
+ 
++/* Max transfer size done by I2C transfer functions */
++#define MAX_XFER_SIZE  80
++
+ struct cxusb_state {
+ 	u8 gpio_write_state[3];
+ 	struct i2c_client *i2c_client_demod;
+ 	struct i2c_client *i2c_client_tuner;
++
++	unsigned char data[MAX_XFER_SIZE];
++	struct mutex data_mutex;
+ };
+ 
+ #endif
