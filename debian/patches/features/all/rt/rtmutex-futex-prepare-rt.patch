@@ -1,7 +1,7 @@
 Subject: rtmutex: Handle the various new futex race conditions
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Fri, 10 Jun 2011 11:04:15 +0200
-Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.9/older/patches-4.9.20-rt16.tar.xz
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.9/older/patches-4.9.30-rt20.tar.xz
 
 RT opens a few new interesting race conditions in the rtmutex/futex
 combo due to futex hash bucket lock being a 'sleeping' spinlock and
@@ -10,13 +10,13 @@ therefor not disabling preemption.
 Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 ---
  kernel/futex.c                  |   77 ++++++++++++++++++++++++++++++++--------
- kernel/locking/rtmutex.c        |   36 +++++++++++++++---
+ kernel/locking/rtmutex.c        |   37 ++++++++++++++++---
  kernel/locking/rtmutex_common.h |    2 +
- 3 files changed, 94 insertions(+), 21 deletions(-)
+ 3 files changed, 95 insertions(+), 21 deletions(-)
 
 --- a/kernel/futex.c
 +++ b/kernel/futex.c
-@@ -2009,6 +2009,16 @@ static int futex_requeue(u32 __user *uad
+@@ -2011,6 +2011,16 @@ static int futex_requeue(u32 __user *uad
  				requeue_pi_wake_futex(this, &key2, hb2);
  				drop_count++;
  				continue;
@@ -33,7 +33,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  			} else if (ret) {
  				/*
  				 * rt_mutex_start_proxy_lock() detected a
-@@ -2992,7 +3002,7 @@ static int futex_wait_requeue_pi(u32 __u
+@@ -2996,7 +3006,7 @@ static int futex_wait_requeue_pi(u32 __u
  	struct hrtimer_sleeper timeout, *to = NULL;
  	struct futex_pi_state *pi_state = NULL;
  	struct rt_mutex_waiter rt_waiter;
@@ -42,7 +42,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	union futex_key key2 = FUTEX_KEY_INIT;
  	struct futex_q q = futex_q_init;
  	int res, ret;
-@@ -3048,20 +3058,55 @@ static int futex_wait_requeue_pi(u32 __u
+@@ -3052,20 +3062,55 @@ static int futex_wait_requeue_pi(u32 __u
  	/* Queue the futex_q, drop the hb lock, wait for wakeup. */
  	futex_wait_queue_me(hb, &q, to);
  
@@ -109,7 +109,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	/* Check if the requeue code acquired the second futex for us. */
  	if (!q.rt_waiter) {
-@@ -3070,7 +3115,8 @@ static int futex_wait_requeue_pi(u32 __u
+@@ -3074,7 +3119,8 @@ static int futex_wait_requeue_pi(u32 __u
  		 * did a lock-steal - fix up the PI-state in that case.
  		 */
  		if (q.pi_state && (q.pi_state->owner != current)) {
@@ -119,7 +119,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  			ret = fixup_pi_state_owner(uaddr2, &q, current);
  			if (ret && rt_mutex_owner(&q.pi_state->pi_mutex) == current) {
  				pi_state = q.pi_state;
-@@ -3081,7 +3127,7 @@ static int futex_wait_requeue_pi(u32 __u
+@@ -3085,7 +3131,7 @@ static int futex_wait_requeue_pi(u32 __u
  			 * the requeue_pi() code acquired for us.
  			 */
  			put_pi_state(q.pi_state);
@@ -128,7 +128,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  		}
  	} else {
  		struct rt_mutex *pi_mutex;
-@@ -3095,7 +3141,8 @@ static int futex_wait_requeue_pi(u32 __u
+@@ -3099,7 +3145,8 @@ static int futex_wait_requeue_pi(u32 __u
  		pi_mutex = &q.pi_state->pi_mutex;
  		ret = rt_mutex_wait_proxy_lock(pi_mutex, to, &rt_waiter);
  
@@ -152,7 +152,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  /*
   * We can speed up the acquire/release, if there's no debugging state to be
   * set up.
-@@ -421,7 +426,8 @@ int max_lock_depth = 1024;
+@@ -389,7 +394,8 @@ int max_lock_depth = 1024;
  
  static inline struct rt_mutex *task_blocked_on_lock(struct task_struct *p)
  {
@@ -162,7 +162,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  }
  
  /*
-@@ -557,7 +563,7 @@ static int rt_mutex_adjust_prio_chain(st
+@@ -525,7 +531,7 @@ static int rt_mutex_adjust_prio_chain(st
  	 * reached or the state of the chain has changed while we
  	 * dropped the locks.
  	 */
@@ -171,7 +171,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  		goto out_unlock_pi;
  
  	/*
-@@ -969,6 +975,23 @@ static int task_blocks_on_rt_mutex(struc
+@@ -961,6 +967,23 @@ static int task_blocks_on_rt_mutex(struc
  		return -EDEADLK;
  
  	raw_spin_lock(&task->pi_lock);
@@ -192,29 +192,29 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +
 +	BUG_ON(rt_mutex_real_waiter(task->pi_blocked_on));
 +
- 	__rt_mutex_adjust_prio(task);
+ 	rt_mutex_adjust_prio(task);
  	waiter->task = task;
  	waiter->lock = lock;
-@@ -992,7 +1015,7 @@ static int task_blocks_on_rt_mutex(struc
+@@ -985,7 +1008,7 @@ static int task_blocks_on_rt_mutex(struc
  		rt_mutex_enqueue_pi(owner, waiter);
  
- 		__rt_mutex_adjust_prio(owner);
+ 		rt_mutex_adjust_prio(owner);
 -		if (owner->pi_blocked_on)
 +		if (rt_mutex_real_waiter(owner->pi_blocked_on))
  			chain_walk = 1;
  	} else if (rt_mutex_cond_detect_deadlock(waiter, chwalk)) {
  		chain_walk = 1;
-@@ -1076,7 +1099,7 @@ static void remove_waiter(struct rt_mute
+@@ -1081,7 +1104,7 @@ static void remove_waiter(struct rt_mute
  {
  	bool is_top_waiter = (waiter == rt_mutex_top_waiter(lock));
  	struct task_struct *owner = rt_mutex_owner(lock);
 -	struct rt_mutex *next_lock;
 +	struct rt_mutex *next_lock = NULL;
  
- 	raw_spin_lock(&current->pi_lock);
- 	rt_mutex_dequeue(lock, waiter);
-@@ -1100,7 +1123,8 @@ static void remove_waiter(struct rt_mute
- 	__rt_mutex_adjust_prio(owner);
+ 	lockdep_assert_held(&lock->wait_lock);
+ 
+@@ -1107,7 +1130,8 @@ static void remove_waiter(struct rt_mute
+ 	rt_mutex_adjust_prio(owner);
  
  	/* Store the lock on which owner is blocked or NULL */
 -	next_lock = task_blocked_on_lock(owner);
@@ -223,18 +223,19 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	raw_spin_unlock(&owner->pi_lock);
  
-@@ -1136,7 +1160,7 @@ void rt_mutex_adjust_pi(struct task_stru
+@@ -1143,7 +1167,8 @@ void rt_mutex_adjust_pi(struct task_stru
  	raw_spin_lock_irqsave(&task->pi_lock, flags);
  
  	waiter = task->pi_blocked_on;
--	if (!waiter || (waiter->prio == task->prio &&
-+	if (!rt_mutex_real_waiter(waiter) || (waiter->prio == task->prio &&
- 			!dl_prio(task->prio))) {
+-	if (!waiter || rt_mutex_waiter_equal(waiter, task_to_waiter(task))) {
++	if (!rt_mutex_real_waiter(waiter) ||
++	    rt_mutex_waiter_equal(waiter, task_to_waiter(task))) {
  		raw_spin_unlock_irqrestore(&task->pi_lock, flags);
  		return;
+ 	}
 --- a/kernel/locking/rtmutex_common.h
 +++ b/kernel/locking/rtmutex_common.h
-@@ -98,6 +98,8 @@ enum rtmutex_chainwalk {
+@@ -99,6 +99,8 @@ enum rtmutex_chainwalk {
  /*
   * PI-futex support (proxy locking functions, etc.):
   */
