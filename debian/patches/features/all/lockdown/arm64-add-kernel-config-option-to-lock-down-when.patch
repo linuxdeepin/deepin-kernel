@@ -1,0 +1,111 @@
+From: Linn Crosetto <linn@hpe.com>
+Date: Tue, 30 Aug 2016 11:54:38 -0600
+Subject: arm64: add kernel config option to lock down when in Secure Boot mode
+Bug-Debian: https://bugs.debian.org/831827
+Forwarded: no
+
+Add a kernel configuration option to lock down the kernel, to restrict
+userspace's ability to modify the running kernel when UEFI Secure Boot is
+enabled. Based on the x86 patch by Matthew Garrett.
+
+Determine the state of Secure Boot in the EFI stub and pass this to the
+kernel using the FDT.
+
+Signed-off-by: Linn Crosetto <linn@hpe.com>
+[bwh: Forward-ported to 4.10: adjust context]
+[Lukas Wunner: Forward-ported to 4.11: drop parts applied upstream]
+[bwh: Forward-ported to 4.11 and lockdown patch set:
+ - Convert result of efi_get_secureboot() to a boolean
+ - Use lockdown API and naming]
+---
+ arch/arm64/Kconfig                      | 13 +++++++++++++
+ drivers/firmware/efi/arm-init.c         |  7 +++++++
+ drivers/firmware/efi/efi.c              |  3 ++-
+ drivers/firmware/efi/libstub/arm-stub.c |  2 +-
+ drivers/firmware/efi/libstub/efistub.h  |  1 +
+ drivers/firmware/efi/libstub/fdt.c      |  7 +++++++
+ include/linux/efi.h                     |  1 +
+ 7 files changed, 32 insertions(+), 2 deletions(-)
+
+--- a/arch/arm64/Kconfig
++++ b/arch/arm64/Kconfig
+@@ -1033,6 +1033,18 @@ config EFI
+ 	  allow the kernel to be booted as an EFI application. This
+ 	  is only useful on systems that have UEFI firmware.
+ 
++config EFI_SECURE_BOOT_LOCK_DOWN
++	def_bool n
++	depends on EFI
++	prompt "Lock down the kernel when UEFI Secure Boot is enabled"
++	---help---
++	  UEFI Secure Boot provides a mechanism for ensuring that the firmware
++	  will only load signed bootloaders and kernels.  Certain use cases may
++	  also require that all kernel modules also be signed and that
++	  userspace is prevented from directly changing the running kernel
++	  image.  Say Y here to automatically lock down the kernel when a
++	  system boots with UEFI Secure Boot enabled.
++
+ config DMI
+ 	bool "Enable support for SMBIOS (DMI) tables"
+ 	depends on EFI
+--- a/drivers/firmware/efi/arm-init.c
++++ b/drivers/firmware/efi/arm-init.c
+@@ -21,6 +21,7 @@
+ #include <linux/of_fdt.h>
+ #include <linux/platform_device.h>
+ #include <linux/screen_info.h>
++#include <linux/security.h>
+ 
+ #include <asm/efi.h>
+ 
+@@ -244,6 +245,11 @@ void __init efi_init(void)
+ 	     "Unexpected EFI_MEMORY_DESCRIPTOR version %ld",
+ 	      efi.memmap.desc_version);
+ 
++#ifdef CONFIG_EFI_SECURE_BOOT_LOCK_DOWN
++	if (params.secure_boot > 0)
++		lock_kernel_down();
++#endif
++
+ 	if (uefi_init() < 0) {
+ 		efi_memmap_unmap();
+ 		return;
+--- a/drivers/firmware/efi/efi.c
++++ b/drivers/firmware/efi/efi.c
+@@ -613,7 +613,8 @@ static __initdata struct params fdt_para
+ 	UEFI_PARAM("MemMap Address", "linux,uefi-mmap-start", mmap),
+ 	UEFI_PARAM("MemMap Size", "linux,uefi-mmap-size", mmap_size),
+ 	UEFI_PARAM("MemMap Desc. Size", "linux,uefi-mmap-desc-size", desc_size),
+-	UEFI_PARAM("MemMap Desc. Version", "linux,uefi-mmap-desc-ver", desc_ver)
++	UEFI_PARAM("MemMap Desc. Version", "linux,uefi-mmap-desc-ver", desc_ver),
++	UEFI_PARAM("Secure Boot Enabled", "linux,uefi-secure-boot", secure_boot)
+ };
+ 
+ static __initdata struct params xen_fdt_params[] = {
+--- a/drivers/firmware/efi/libstub/fdt.c
++++ b/drivers/firmware/efi/libstub/fdt.c
+@@ -134,6 +134,14 @@ static efi_status_t update_fdt(efi_syste
+ 			return efi_status;
+ 		}
+ 	}
++
++	fdt_val32 = cpu_to_fdt32(efi_get_secureboot(sys_table) !=
++				 efi_secureboot_mode_disabled);
++	status = fdt_setprop(fdt, node, "linux,uefi-secure-boot",
++			     &fdt_val32, sizeof(fdt_val32));
++	if (status)
++		goto fdt_set_fail;
++
+ 	return EFI_SUCCESS;
+ 
+ fdt_set_fail:
+--- a/include/linux/efi.h
++++ b/include/linux/efi.h
+@@ -736,6 +736,7 @@ struct efi_fdt_params {
+ 	u32 mmap_size;
+ 	u32 desc_size;
+ 	u32 desc_ver;
++	u32 secure_boot;
+ };
+ 
+ typedef struct {

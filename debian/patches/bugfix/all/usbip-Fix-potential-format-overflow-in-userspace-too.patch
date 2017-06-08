@@ -1,0 +1,106 @@
+From: Jonathan Dieter <jdieter@lesbg.com>
+Date: Mon, 27 Feb 2017 10:31:03 +0200
+Subject: usbip: Fix potential format overflow in userspace tools
+Origin: https://git.kernel.org/pub/scm/linux/kernel/git/gregkh/usb.git/commit?id=e5dfa3f902b9a642ae8c6997d57d7c41e384a90b
+
+The usbip userspace tools call sprintf()/snprintf() and don't check for
+the return value which can lead the paths to overflow, truncating the
+final file in the path.
+
+More urgently, GCC 7 now warns that these aren't checked with
+-Wformat-overflow, and with -Werror enabled in configure.ac, that makes
+these tools unbuildable.
+
+This patch fixes these problems by replacing sprintf() with snprintf() in
+one place and adding checks for the return value of snprintf().
+
+Reviewed-by: Peter Senna Tschudin <peter.senna@gmail.com>
+Signed-off-by: Jonathan Dieter <jdieter@lesbg.com>
+Acked-by: Shuah Khan <shuahkh@osg.samsung.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ tools/usb/usbip/libsrc/usbip_common.c      |  9 ++++++++-
+ tools/usb/usbip/libsrc/usbip_host_common.c | 28 +++++++++++++++++++++++-----
+ 2 files changed, 31 insertions(+), 6 deletions(-)
+
+diff --git a/tools/usb/usbip/libsrc/usbip_common.c b/tools/usb/usbip/libsrc/usbip_common.c
+index ac73710473de..1517a232ab18 100644
+--- a/tools/usb/usbip/libsrc/usbip_common.c
++++ b/tools/usb/usbip/libsrc/usbip_common.c
+@@ -215,9 +215,16 @@ int read_usb_interface(struct usbip_usb_device *udev, int i,
+ 		       struct usbip_usb_interface *uinf)
+ {
+ 	char busid[SYSFS_BUS_ID_SIZE];
++	int size;
+ 	struct udev_device *sif;
+ 
+-	sprintf(busid, "%s:%d.%d", udev->busid, udev->bConfigurationValue, i);
++	size = snprintf(busid, sizeof(busid), "%s:%d.%d",
++			udev->busid, udev->bConfigurationValue, i);
++	if (size < 0 || (unsigned int)size >= sizeof(busid)) {
++		err("busid length %i >= %lu or < 0", size,
++		    (long unsigned)sizeof(busid));
++		return -1;
++	}
+ 
+ 	sif = udev_device_new_from_subsystem_sysname(udev_context, "usb", busid);
+ 	if (!sif) {
+diff --git a/tools/usb/usbip/libsrc/usbip_host_common.c b/tools/usb/usbip/libsrc/usbip_host_common.c
+index 9d415228883d..6ff7b601f854 100644
+--- a/tools/usb/usbip/libsrc/usbip_host_common.c
++++ b/tools/usb/usbip/libsrc/usbip_host_common.c
+@@ -40,13 +40,20 @@ struct udev *udev_context;
+ static int32_t read_attr_usbip_status(struct usbip_usb_device *udev)
+ {
+ 	char status_attr_path[SYSFS_PATH_MAX];
++	int size;
+ 	int fd;
+ 	int length;
+ 	char status;
+ 	int value = 0;
+ 
+-	snprintf(status_attr_path, SYSFS_PATH_MAX, "%s/usbip_status",
+-		 udev->path);
++	size = snprintf(status_attr_path, sizeof(status_attr_path),
++			"%s/usbip_status", udev->path);
++	if (size < 0 || (unsigned int)size >= sizeof(status_attr_path)) {
++		err("usbip_status path length %i >= %lu or < 0", size,
++		    (long unsigned)sizeof(status_attr_path));
++		return -1;
++	}
++
+ 
+ 	fd = open(status_attr_path, O_RDONLY);
+ 	if (fd < 0) {
+@@ -218,6 +225,7 @@ int usbip_export_device(struct usbip_exported_device *edev, int sockfd)
+ {
+ 	char attr_name[] = "usbip_sockfd";
+ 	char sockfd_attr_path[SYSFS_PATH_MAX];
++	int size;
+ 	char sockfd_buff[30];
+ 	int ret;
+ 
+@@ -237,10 +245,20 @@ int usbip_export_device(struct usbip_exported_device *edev, int sockfd)
+ 	}
+ 
+ 	/* only the first interface is true */
+-	snprintf(sockfd_attr_path, sizeof(sockfd_attr_path), "%s/%s",
+-		 edev->udev.path, attr_name);
++	size = snprintf(sockfd_attr_path, sizeof(sockfd_attr_path), "%s/%s",
++			edev->udev.path, attr_name);
++	if (size < 0 || (unsigned int)size >= sizeof(sockfd_attr_path)) {
++		err("exported device path length %i >= %lu or < 0", size,
++		    (long unsigned)sizeof(sockfd_attr_path));
++		return -1;
++	}
+ 
+-	snprintf(sockfd_buff, sizeof(sockfd_buff), "%d\n", sockfd);
++	size = snprintf(sockfd_buff, sizeof(sockfd_buff), "%d\n", sockfd);
++	if (size < 0 || (unsigned int)size >= sizeof(sockfd_buff)) {
++		err("socket length %i >= %lu or < 0", size,
++		    (long unsigned)sizeof(sockfd_buff));
++		return -1;
++	}
+ 
+ 	ret = write_sysfs_attribute(sockfd_attr_path, sockfd_buff,
+ 				    strlen(sockfd_buff));
