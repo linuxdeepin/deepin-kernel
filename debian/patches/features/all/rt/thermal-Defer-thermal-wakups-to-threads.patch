@@ -1,7 +1,7 @@
 From: Daniel Wagner <wagi@monom.org>
 Date: Tue, 17 Feb 2015 09:37:44 +0100
 Subject: thermal: Defer thermal wakups to threads
-Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.9/older/patches-4.9.30-rt20.tar.xz
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.11/older/patches-4.11.5-rt1.tar.xz
 
 On RT the spin lock in pkg_temp_thermal_platfrom_thermal_notify will
 call schedule while we run in irq context.
@@ -24,8 +24,8 @@ Signed-off-by: Daniel Wagner <daniel.wagner@bmw-carit.de>
 [bigeasy: reoder init/denit position. TODO: flush swork on exit]
 Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
 ---
- drivers/thermal/x86_pkg_temp_thermal.c |   50 +++++++++++++++++++++++++++++++--
- 1 file changed, 47 insertions(+), 3 deletions(-)
+ drivers/thermal/x86_pkg_temp_thermal.c |   52 +++++++++++++++++++++++++++++++--
+ 1 file changed, 49 insertions(+), 3 deletions(-)
 
 --- a/drivers/thermal/x86_pkg_temp_thermal.c
 +++ b/drivers/thermal/x86_pkg_temp_thermal.c
@@ -37,34 +37,25 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  #include <asm/cpu_device_id.h>
  #include <asm/mce.h>
  
-@@ -353,7 +354,7 @@ static void pkg_temp_thermal_threshold_w
- 	}
+@@ -329,7 +330,7 @@ static void pkg_thermal_schedule_work(in
+ 	schedule_delayed_work_on(cpu, work, ms);
  }
  
--static int pkg_temp_thermal_platform_thermal_notify(__u64 msr_val)
-+static void platform_thermal_notify_work(struct swork_event *event)
+-static int pkg_thermal_notify(u64 msr_val)
++static void pkg_thermal_notify_work(struct swork_event *event)
  {
- 	unsigned long flags;
  	int cpu = smp_processor_id();
-@@ -370,7 +371,7 @@ static int pkg_temp_thermal_platform_the
- 			pkg_work_scheduled[phy_id]) {
- 		disable_pkg_thres_interrupt();
- 		spin_unlock_irqrestore(&pkg_work_lock, flags);
--		return -EINVAL;
-+		return;
+ 	struct pkg_device *pkgdev;
+@@ -348,9 +349,47 @@ static int pkg_thermal_notify(u64 msr_va
  	}
- 	pkg_work_scheduled[phy_id] = 1;
- 	spin_unlock_irqrestore(&pkg_work_lock, flags);
-@@ -379,9 +380,48 @@ static int pkg_temp_thermal_platform_the
- 	schedule_delayed_work_on(cpu,
- 				&per_cpu(pkg_temp_thermal_threshold_work, cpu),
- 				msecs_to_jiffies(notify_delay_ms));
+ 
+ 	spin_unlock_irqrestore(&pkg_temp_lock, flags);
 +}
 +
 +#ifdef CONFIG_PREEMPT_RT_FULL
 +static struct swork_event notify_work;
 +
-+static int thermal_notify_work_init(void)
++static int pkg_thermal_notify_work_init(void)
 +{
 +	int err;
 +
@@ -72,16 +63,16 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
 +	if (err)
 +		return err;
 +
-+	INIT_SWORK(&notify_work, platform_thermal_notify_work);
++	INIT_SWORK(&notify_work, pkg_thermal_notify_work);
  	return 0;
  }
  
-+static void thermal_notify_work_cleanup(void)
++static void pkg_thermal_notify_work_cleanup(void)
 +{
 +	swork_put();
 +}
 +
-+static int pkg_temp_thermal_platform_thermal_notify(__u64 msr_val)
++static int pkg_thermal_notify(u64 msr_val)
 +{
 +	swork_queue(&notify_work);
 +	return 0;
@@ -89,45 +80,51 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
 +
 +#else  /* !CONFIG_PREEMPT_RT_FULL */
 +
-+static int thermal_notify_work_init(void) { return 0; }
++static int pkg_thermal_notify_work_init(void) { return 0; }
 +
-+static void thermal_notify_work_cleanup(void) {  }
++static void pkg_thermal_notify_work_cleanup(void) {  }
 +
-+static int pkg_temp_thermal_platform_thermal_notify(__u64 msr_val)
++static int pkg_thermal_notify(u64 msr_val)
 +{
-+	platform_thermal_notify_work(NULL);
-+
++	pkg_thermal_notify_work(NULL);
 +	return 0;
 +}
 +#endif /* CONFIG_PREEMPT_RT_FULL */
 +
- static int find_siblings_cpu(int cpu)
+ static int pkg_temp_thermal_device_add(unsigned int cpu)
  {
- 	int i;
-@@ -585,6 +625,9 @@ static int __init pkg_temp_thermal_init(
+ 	int pkgid = topology_logical_package_id(cpu);
+@@ -515,10 +554,15 @@ static int __init pkg_temp_thermal_init(
  	if (!x86_match_cpu(pkg_temp_thermal_ids))
  		return -ENODEV;
  
-+	if (!thermal_notify_work_init())
++	if (!pkg_thermal_notify_work_init())
 +		return -ENODEV;
 +
- 	spin_lock_init(&pkg_work_lock);
- 	platform_thermal_package_notify =
- 			pkg_temp_thermal_platform_thermal_notify;
-@@ -609,7 +652,7 @@ static int __init pkg_temp_thermal_init(
- 	kfree(pkg_work_scheduled);
- 	platform_thermal_package_notify = NULL;
- 	platform_thermal_package_rate_control = NULL;
--
-+	thermal_notify_work_cleanup();
- 	return -ENODEV;
- }
+ 	max_packages = topology_max_packages();
+ 	packages = kzalloc(max_packages * sizeof(struct pkg_device *), GFP_KERNEL);
+-	if (!packages)
+-		return -ENOMEM;
++	if (!packages) {
++		ret = -ENOMEM;
++		goto err;
++	}
  
-@@ -634,6 +677,7 @@ static void __exit pkg_temp_thermal_exit
- 	mutex_unlock(&phy_dev_list_mutex);
- 	platform_thermal_package_notify = NULL;
- 	platform_thermal_package_rate_control = NULL;
-+	thermal_notify_work_cleanup();
- 	for_each_online_cpu(i)
- 		cancel_delayed_work_sync(
- 			&per_cpu(pkg_temp_thermal_threshold_work, i));
+ 	ret = cpuhp_setup_state(CPUHP_AP_ONLINE_DYN, "thermal/x86_pkg:online",
+ 				pkg_thermal_cpu_online,	pkg_thermal_cpu_offline);
+@@ -536,6 +580,7 @@ static int __init pkg_temp_thermal_init(
+ 	return 0;
+ 
+ err:
++	pkg_thermal_notify_work_cleanup();
+ 	kfree(packages);
+ 	return ret;
+ }
+@@ -549,6 +594,7 @@ static void __exit pkg_temp_thermal_exit
+ 	cpuhp_remove_state(pkg_thermal_hp_state);
+ 	debugfs_remove_recursive(debugfs);
+ 	kfree(packages);
++	pkg_thermal_notify_work_cleanup();
+ }
+ module_exit(pkg_temp_thermal_exit)
+ 

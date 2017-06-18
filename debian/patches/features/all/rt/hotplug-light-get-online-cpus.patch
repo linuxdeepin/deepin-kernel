@@ -1,7 +1,7 @@
 Subject: hotplug: Lightweight get online cpus
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Wed, 15 Jun 2011 12:36:06 +0200
-Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.9/older/patches-4.9.30-rt20.tar.xz
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.11/older/patches-4.11.5-rt1.tar.xz
 
 get_online_cpus() is a heavy weight function which involves a global
 mutex. migrate_disable() wants a simpler construct which prevents only
@@ -13,43 +13,35 @@ tasks on the cpu which should be brought down.
 
 Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 ---
- include/linux/cpu.h |    7 +--
+ include/linux/cpu.h |    5 ++
  kernel/cpu.c        |  118 ++++++++++++++++++++++++++++++++++++++++++++++++++++
- 2 files changed, 122 insertions(+), 3 deletions(-)
+ kernel/sched/core.c |    4 +
+ 3 files changed, 127 insertions(+)
 
 --- a/include/linux/cpu.h
 +++ b/include/linux/cpu.h
-@@ -173,9 +173,6 @@ static inline void cpu_notifier_register
- #endif /* CONFIG_SMP */
- extern struct bus_type cpu_subsys;
- 
--static inline void pin_current_cpu(void) { }
--static inline void unpin_current_cpu(void) { }
--
- #ifdef CONFIG_HOTPLUG_CPU
- /* Stop CPUs going up and down. */
- 
-@@ -185,6 +182,8 @@ extern void get_online_cpus(void);
- extern void put_online_cpus(void);
- extern void cpu_hotplug_disable(void);
+@@ -109,6 +109,8 @@ extern void cpu_hotplug_disable(void);
  extern void cpu_hotplug_enable(void);
+ void clear_tasks_mm_cpumask(int cpu);
+ int cpu_down(unsigned int cpu);
 +extern void pin_current_cpu(void);
 +extern void unpin_current_cpu(void);
- #define hotcpu_notifier(fn, pri)	cpu_notifier(fn, pri)
- #define __hotcpu_notifier(fn, pri)	__cpu_notifier(fn, pri)
- #define register_hotcpu_notifier(nb)	register_cpu_notifier(nb)
-@@ -202,6 +201,8 @@ static inline void cpu_hotplug_done(void
+ 
+ #else		/* CONFIG_HOTPLUG_CPU */
+ 
+@@ -118,6 +120,9 @@ static inline void cpu_hotplug_done(void
  #define put_online_cpus()	do { } while (0)
  #define cpu_hotplug_disable()	do { } while (0)
  #define cpu_hotplug_enable()	do { } while (0)
-+static inline void pin_current_cpu(void) { }
-+static inline void unpin_current_cpu(void) { }
- #define hotcpu_notifier(fn, pri)	do { (void)(fn); } while (0)
- #define __hotcpu_notifier(fn, pri)	do { (void)(fn); } while (0)
- /* These aren't inline functions due to a GCC bug. */
++static inline void pin_current_cpu(void)	{ }
++static inline void unpin_current_cpu(void)	{ }
++
+ #endif		/* CONFIG_HOTPLUG_CPU */
+ 
+ #ifdef CONFIG_PM_SLEEP_SMP
 --- a/kernel/cpu.c
 +++ b/kernel/cpu.c
-@@ -239,6 +239,100 @@ static struct {
+@@ -234,6 +234,100 @@ static struct {
  #define cpuhp_lock_acquire()      lock_map_acquire(&cpu_hotplug.dep_map)
  #define cpuhp_lock_release()      lock_map_release(&cpu_hotplug.dep_map)
  
@@ -150,16 +142,16 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  void get_online_cpus(void)
  {
-@@ -877,6 +971,8 @@ static int __ref _cpu_down(unsigned int
+@@ -766,6 +860,8 @@ static int __ref _cpu_down(unsigned int
+ {
  	struct cpuhp_cpu_state *st = per_cpu_ptr(&cpuhp_state, cpu);
  	int prev_state, ret = 0;
- 	bool hasdied = false;
 +	int mycpu;
 +	cpumask_var_t cpumask;
  
  	if (num_online_cpus() == 1)
  		return -EBUSY;
-@@ -884,7 +980,27 @@ static int __ref _cpu_down(unsigned int
+@@ -773,7 +869,27 @@ static int __ref _cpu_down(unsigned int
  	if (!cpu_present(cpu))
  		return -EINVAL;
  
@@ -187,12 +179,39 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	cpuhp_tasks_frozen = tasks_frozen;
  
-@@ -923,6 +1039,8 @@ static int __ref _cpu_down(unsigned int
+@@ -811,6 +927,8 @@ static int __ref _cpu_down(unsigned int
+ 	}
  
- 	hasdied = prev_state != st->state && st->state == CPUHP_OFFLINE;
  out:
 +	cpu_unplug_done(cpu);
 +out_cancel:
  	cpu_hotplug_done();
- 	/* This post dead nonsense must die */
- 	if (!ret && hasdied)
+ 	return ret;
+ }
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -7471,6 +7471,7 @@ void migrate_disable(void)
+ 	/* get_online_cpus(); */
+ 
+ 	preempt_disable();
++	pin_current_cpu();
+ 	p->migrate_disable = 1;
+ 
+ 	p->cpus_ptr = cpumask_of(smp_processor_id());
+@@ -7535,13 +7536,16 @@ void migrate_enable(void)
+ 			arg.task = p;
+ 			arg.dest_cpu = dest_cpu;
+ 
++			unpin_current_cpu();
+ 			preempt_enable();
+ 			stop_one_cpu(task_cpu(p), migration_cpu_stop, &arg);
+ 			tlb_migrate_finish(p->mm);
+ 			/* put_online_cpus(); */
++
+ 			return;
+ 		}
+ 	}
++	unpin_current_cpu();
+ 	/* put_online_cpus(); */
+ 	preempt_enable();
+ }

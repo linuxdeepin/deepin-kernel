@@ -1,7 +1,7 @@
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Sat, 1 Apr 2017 12:51:01 +0200
 Subject: [PATCH] rtmutex: Provide locked slowpath
-Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.9/older/patches-4.9.30-rt20.tar.xz
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.11/older/patches-4.11.5-rt1.tar.xz
 
 The new rt rwsem implementation needs rtmutex::wait_lock to protect struct
 rw_semaphore. Dropping the lock and reaquiring it for locking the rtmutex
@@ -14,12 +14,12 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
 ---
  kernel/locking/rtmutex.c        |   72 +++++++++++++++++++++++-----------------
- kernel/locking/rtmutex_common.h |    9 +++++
- 2 files changed, 51 insertions(+), 30 deletions(-)
+ kernel/locking/rtmutex_common.h |    8 ++++
+ 2 files changed, 50 insertions(+), 30 deletions(-)
 
 --- a/kernel/locking/rtmutex.c
 +++ b/kernel/locking/rtmutex.c
-@@ -1750,36 +1750,18 @@ static void ww_mutex_account_lock(struct
+@@ -1752,30 +1752,13 @@ static void ww_mutex_account_lock(struct
  }
  #endif
  
@@ -54,7 +54,9 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
 -	raw_spin_lock_irqsave(&lock->wait_lock, flags);
 +	int ret;
  
- 	/* Try to acquire the lock again: */
+ #ifdef CONFIG_PREEMPT_RT_FULL
+ 	if (ww_ctx) {
+@@ -1791,7 +1774,6 @@ rt_mutex_slowlock(struct rt_mutex *lock,
  	if (try_to_take_rt_mutex(lock, current, NULL)) {
  		if (ww_ctx)
  			ww_mutex_account_lock(lock, ww_ctx);
@@ -62,7 +64,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  		return 0;
  	}
  
-@@ -1789,13 +1771,13 @@ rt_mutex_slowlock(struct rt_mutex *lock,
+@@ -1801,13 +1783,13 @@ rt_mutex_slowlock(struct rt_mutex *lock,
  	if (unlikely(timeout))
  		hrtimer_start_expires(&timeout->timer, HRTIMER_MODE_ABS);
  
@@ -80,7 +82,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  		/* ww_mutex received EDEADLK, let it become EALREADY */
  		ret = __mutex_lock_check_stamp(lock, ww_ctx);
  		BUG_ON(!ret);
-@@ -1804,10 +1786,10 @@ rt_mutex_slowlock(struct rt_mutex *lock,
+@@ -1816,10 +1798,10 @@ rt_mutex_slowlock(struct rt_mutex *lock,
  	if (unlikely(ret)) {
  		__set_current_state(TASK_RUNNING);
  		if (rt_mutex_has_waiters(lock))
@@ -93,7 +95,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  	} else if (ww_ctx) {
  		ww_mutex_account_lock(lock, ww_ctx);
  	}
-@@ -1817,6 +1799,36 @@ rt_mutex_slowlock(struct rt_mutex *lock,
+@@ -1829,6 +1811,36 @@ rt_mutex_slowlock(struct rt_mutex *lock,
  	 * unconditionally. We might have to fix that up.
  	 */
  	fixup_rt_mutex_waiters(lock);
@@ -132,10 +134,10 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  
 --- a/kernel/locking/rtmutex_common.h
 +++ b/kernel/locking/rtmutex_common.h
-@@ -131,6 +131,15 @@ extern bool __rt_mutex_futex_unlock(stru
- extern void rt_mutex_postunlock(struct wake_q_head *wake_q,
- 				struct wake_q_head *wq_sleeper);
+@@ -131,6 +131,14 @@ extern bool __rt_mutex_futex_unlock(stru
  
+ extern void rt_mutex_postunlock(struct wake_q_head *wake_q,
+ 				struct wake_q_head *wake_sleeper_q);
 +/* RW semaphore special interface */
 +struct ww_acquire_ctx;
 +
@@ -144,7 +146,6 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
 +				     enum rtmutex_chainwalk chwalk,
 +				     struct ww_acquire_ctx *ww_ctx,
 +				     struct rt_mutex_waiter *waiter);
-+
+ 
  #ifdef CONFIG_DEBUG_RT_MUTEXES
  # include "rtmutex-debug.h"
- #else

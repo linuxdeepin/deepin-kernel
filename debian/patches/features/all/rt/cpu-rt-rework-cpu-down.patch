@@ -1,7 +1,7 @@
 From: Steven Rostedt <srostedt@redhat.com>
 Date: Mon, 16 Jul 2012 08:07:43 +0000
 Subject: cpu/rt: Rework cpu down for PREEMPT_RT
-Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.9/older/patches-4.9.30-rt20.tar.xz
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.11/older/patches-4.11.5-rt1.tar.xz
 
 Bringing a CPU down is a pain with the PREEMPT_RT kernel because
 tasks can be preempted in many more places than in non-RT. In
@@ -57,18 +57,18 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 
 --- a/include/linux/sched.h
 +++ b/include/linux/sched.h
-@@ -2480,6 +2480,10 @@ extern void do_set_cpus_allowed(struct t
- 
- extern int set_cpus_allowed_ptr(struct task_struct *p,
- 				const struct cpumask *new_mask);
+@@ -1346,6 +1346,10 @@ extern int task_can_attach(struct task_s
+ #ifdef CONFIG_SMP
+ extern void do_set_cpus_allowed(struct task_struct *p, const struct cpumask *new_mask);
+ extern int set_cpus_allowed_ptr(struct task_struct *p, const struct cpumask *new_mask);
 +int migrate_me(void);
 +void tell_sched_cpu_down_begin(int cpu);
 +void tell_sched_cpu_down_done(int cpu);
 +
  #else
- static inline void do_set_cpus_allowed(struct task_struct *p,
- 				      const struct cpumask *new_mask)
-@@ -2492,6 +2496,9 @@ static inline int set_cpus_allowed_ptr(s
+ static inline void do_set_cpus_allowed(struct task_struct *p, const struct cpumask *new_mask)
+ {
+@@ -1356,6 +1360,9 @@ static inline int set_cpus_allowed_ptr(s
  		return -EINVAL;
  	return 0;
  }
@@ -77,10 +77,10 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +static inline void tell_sched_cpu_down_done(int cpu) { }
  #endif
  
- #ifdef CONFIG_NO_HZ_COMMON
+ #ifndef cpu_relax_yield
 --- a/kernel/cpu.c
 +++ b/kernel/cpu.c
-@@ -210,16 +210,10 @@ static int cpu_hotplug_disabled;
+@@ -205,16 +205,10 @@ static int cpu_hotplug_disabled;
  
  static struct {
  	struct task_struct *active_writer;
@@ -97,7 +97,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	/*
  	 * Also blocks the new readers during
  	 * an ongoing cpu hotplug operation.
-@@ -232,24 +226,12 @@ static struct {
+@@ -227,24 +221,12 @@ static struct {
  } cpu_hotplug = {
  	.active_writer = NULL,
  	.wq = __WAIT_QUEUE_HEAD_INITIALIZER(cpu_hotplug.wq),
@@ -122,7 +122,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  /* Lockdep annotations for get/put_online_cpus() and cpu_hotplug_begin/end() */
  #define cpuhp_lock_acquire_read() lock_map_acquire_read(&cpu_hotplug.dep_map)
  #define cpuhp_lock_acquire_tryread() \
-@@ -257,12 +239,42 @@ static struct {
+@@ -252,12 +234,42 @@ static struct {
  #define cpuhp_lock_acquire()      lock_map_acquire(&cpu_hotplug.dep_map)
  #define cpuhp_lock_release()      lock_map_release(&cpu_hotplug.dep_map)
  
@@ -165,7 +165,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  static DEFINE_PER_CPU(struct hotplug_pcp, hotplug_pcp);
  
  /**
-@@ -276,18 +288,39 @@ static DEFINE_PER_CPU(struct hotplug_pcp
+@@ -271,18 +283,39 @@ static DEFINE_PER_CPU(struct hotplug_pcp
  void pin_current_cpu(void)
  {
  	struct hotplug_pcp *hp;
@@ -209,7 +209,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	preempt_disable();
  	goto retry;
  }
-@@ -308,26 +341,84 @@ void unpin_current_cpu(void)
+@@ -303,26 +336,84 @@ void unpin_current_cpu(void)
  		wake_up_process(hp->unplug);
  }
  
@@ -301,7 +301,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  /*
   * Start the sync_unplug_thread on the target cpu and wait for it to
   * complete.
-@@ -335,23 +426,83 @@ static int sync_unplug_thread(void *data
+@@ -330,23 +421,83 @@ static int sync_unplug_thread(void *data
  static int cpu_unplug_begin(unsigned int cpu)
  {
  	struct hotplug_pcp *hp = &per_cpu(hotplug_pcp, cpu);
@@ -392,7 +392,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  }
  
  void get_online_cpus(void)
-@@ -360,9 +511,9 @@ void get_online_cpus(void)
+@@ -355,9 +506,9 @@ void get_online_cpus(void)
  	if (cpu_hotplug.active_writer == current)
  		return;
  	cpuhp_lock_acquire_read();
@@ -404,7 +404,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  }
  EXPORT_SYMBOL_GPL(get_online_cpus);
  
-@@ -415,11 +566,11 @@ void cpu_hotplug_begin(void)
+@@ -410,11 +561,11 @@ void cpu_hotplug_begin(void)
  	cpuhp_lock_acquire();
  
  	for (;;) {
@@ -418,7 +418,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  		schedule();
  	}
  	finish_wait(&cpu_hotplug.wq, &wait);
-@@ -428,7 +579,7 @@ void cpu_hotplug_begin(void)
+@@ -423,7 +574,7 @@ void cpu_hotplug_begin(void)
  void cpu_hotplug_done(void)
  {
  	cpu_hotplug.active_writer = NULL;
@@ -427,7 +427,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	cpuhp_lock_release();
  }
  
-@@ -907,6 +1058,9 @@ static int takedown_cpu(unsigned int cpu
+@@ -806,6 +957,9 @@ static int takedown_cpu(unsigned int cpu
  	kthread_park(per_cpu_ptr(&cpuhp_state, cpu)->thread);
  	smpboot_park_threads(cpu);
  
@@ -439,8 +439,8 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	 * interrupt affinities.
 --- a/kernel/sched/core.c
 +++ b/kernel/sched/core.c
-@@ -1140,6 +1140,84 @@ void do_set_cpus_allowed(struct task_str
- 		set_curr_task(rq, p);
+@@ -1111,6 +1111,84 @@ void do_set_cpus_allowed(struct task_str
+ 	__do_set_cpus_allowed_tail(p, new_mask);
  }
  
 +static DEFINE_PER_CPU(struct cpumask, sched_cpumasks);
@@ -480,7 +480,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +	struct task_struct *p = current;
 +	struct migration_arg arg;
 +	struct cpumask *cpumask;
-+	struct cpumask *mask;
++	const struct cpumask *mask;
 +	unsigned int dest_cpu;
 +	struct rq_flags rf;
 +	struct rq *rq;
@@ -496,7 +496,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +	rq = task_rq_lock(p, &rf);
 +
 +	cpumask = this_cpu_ptr(&sched_cpumasks);
-+	mask = &p->cpus_allowed;
++	mask = p->cpus_ptr;
 +
 +	cpumask_andnot(cpumask, mask, &sched_down_cpumask);
 +

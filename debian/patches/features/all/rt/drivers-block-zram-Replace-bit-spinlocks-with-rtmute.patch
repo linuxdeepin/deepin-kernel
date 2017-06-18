@@ -2,7 +2,7 @@ From: Mike Galbraith <umgwanakikbuti@gmail.com>
 Date: Thu, 31 Mar 2016 04:08:28 +0200
 Subject: [PATCH] drivers/block/zram: Replace bit spinlocks with rtmutex
  for -rt
-Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.9/older/patches-4.9.30-rt20.tar.xz
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.11/older/patches-4.11.5-rt1.tar.xz
 
 They're nondeterministic, and lead to ___might_sleep() splats in -rt.
 OTOH, they're a lot less wasteful than an rtmutex per page.
@@ -16,7 +16,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
 
 --- a/drivers/block/zram/zram_drv.c
 +++ b/drivers/block/zram/zram_drv.c
-@@ -528,6 +528,8 @@ static struct zram_meta *zram_meta_alloc
+@@ -461,6 +461,8 @@ static struct zram_meta *zram_meta_alloc
  		goto out_error;
  	}
  
@@ -25,7 +25,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  	return meta;
  
  out_error:
-@@ -576,12 +578,12 @@ static int zram_decompress_page(struct z
+@@ -511,12 +513,12 @@ static int zram_decompress_page(struct z
  	unsigned long handle;
  	unsigned int size;
  
@@ -34,13 +34,13 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  	handle = meta->table[index].handle;
  	size = zram_get_obj_size(meta, index);
  
- 	if (!handle || zram_test_flag(meta, index, ZRAM_ZERO)) {
+ 	if (!handle || zram_test_flag(meta, index, ZRAM_SAME)) {
 -		bit_spin_unlock(ZRAM_ACCESS, &meta->table[index].value);
 +		zram_unlock_table(&meta->table[index]);
- 		memset(mem, 0, PAGE_SIZE);
+ 		zram_fill_page(mem, PAGE_SIZE, meta->table[index].element);
  		return 0;
  	}
-@@ -596,7 +598,7 @@ static int zram_decompress_page(struct z
+@@ -531,7 +533,7 @@ static int zram_decompress_page(struct z
  		zcomp_stream_put(zram->comp);
  	}
  	zs_unmap_object(meta->mem_pool, handle);
@@ -49,17 +49,17 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  
  	/* Should NEVER happen. Return bio error if it does. */
  	if (unlikely(ret)) {
-@@ -616,14 +618,14 @@ static int zram_bvec_read(struct zram *z
+@@ -551,14 +553,14 @@ static int zram_bvec_read(struct zram *z
  	struct zram_meta *meta = zram->meta;
  	page = bvec->bv_page;
  
 -	bit_spin_lock(ZRAM_ACCESS, &meta->table[index].value);
 +	zram_lock_table(&meta->table[index]);
  	if (unlikely(!meta->table[index].handle) ||
- 			zram_test_flag(meta, index, ZRAM_ZERO)) {
+ 			zram_test_flag(meta, index, ZRAM_SAME)) {
 -		bit_spin_unlock(ZRAM_ACCESS, &meta->table[index].value);
 +		zram_unlock_table(&meta->table[index]);
- 		handle_zero_page(bvec);
+ 		handle_same_page(bvec, meta->table[index].element);
  		return 0;
  	}
 -	bit_spin_unlock(ZRAM_ACCESS, &meta->table[index].value);
@@ -67,20 +67,21 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  
  	if (is_partial_io(bvec))
  		/* Use  a temporary buffer to decompress the page */
-@@ -700,10 +702,10 @@ static int zram_bvec_write(struct zram *
+@@ -636,11 +638,11 @@ static int zram_bvec_write(struct zram *
  		if (user_mem)
  			kunmap_atomic(user_mem);
  		/* Free memory associated with this sector now. */
 -		bit_spin_lock(ZRAM_ACCESS, &meta->table[index].value);
 +		zram_lock_table(&meta->table[index]);
  		zram_free_page(zram, index);
- 		zram_set_flag(meta, index, ZRAM_ZERO);
+ 		zram_set_flag(meta, index, ZRAM_SAME);
+ 		zram_set_element(meta, index, element);
 -		bit_spin_unlock(ZRAM_ACCESS, &meta->table[index].value);
 +		zram_unlock_table(&meta->table[index]);
  
- 		atomic64_inc(&zram->stats.zero_pages);
+ 		atomic64_inc(&zram->stats.same_pages);
  		ret = 0;
-@@ -794,12 +796,12 @@ static int zram_bvec_write(struct zram *
+@@ -731,12 +733,12 @@ static int zram_bvec_write(struct zram *
  	 * Free memory associated with this sector
  	 * before overwriting unused sectors.
  	 */
@@ -95,7 +96,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  
  	/* Update stats */
  	atomic64_add(clen, &zram->stats.compr_data_size);
-@@ -842,9 +844,9 @@ static void zram_bio_discard(struct zram
+@@ -779,9 +781,9 @@ static void zram_bio_discard(struct zram
  	}
  
  	while (n >= PAGE_SIZE) {
@@ -107,7 +108,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  		atomic64_inc(&zram->stats.notify_free);
  		index++;
  		n -= PAGE_SIZE;
-@@ -973,9 +975,9 @@ static void zram_slot_free_notify(struct
+@@ -905,9 +907,9 @@ static void zram_slot_free_notify(struct
  	zram = bdev->bd_disk->private_data;
  	meta = zram->meta;
  
@@ -121,9 +122,9 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  
 --- a/drivers/block/zram/zram_drv.h
 +++ b/drivers/block/zram/zram_drv.h
-@@ -73,6 +73,9 @@ enum zram_pageflags {
- struct zram_table_entry {
- 	unsigned long handle;
+@@ -76,6 +76,9 @@ struct zram_table_entry {
+ 		unsigned long element;
+ 	};
  	unsigned long value;
 +#ifdef CONFIG_PREEMPT_RT_BASE
 +	spinlock_t lock;
