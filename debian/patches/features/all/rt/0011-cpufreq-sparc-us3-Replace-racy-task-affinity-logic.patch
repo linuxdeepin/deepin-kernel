@@ -1,0 +1,125 @@
+From 9fe24c4e92d3963d92d7d383e28ed098bd5689d8 Mon Sep 17 00:00:00 2001
+From: Thomas Gleixner <tglx@linutronix.de>
+Date: Wed, 12 Apr 2017 22:07:37 +0200
+Subject: [PATCH 11/13] cpufreq/sparc-us3: Replace racy task affinity logic
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.11/older/patches-4.11.5-rt1.tar.xz
+
+The access to the safari config register in the CPU frequency functions
+must be executed on the target CPU. This is achieved by temporarily setting
+the affinity of the calling user space thread to the requested CPU and
+reset it to the original affinity afterwards.
+
+That's racy vs. CPU hotplug and concurrent affinity settings for that
+thread resulting in code executing on the wrong CPU and overwriting the
+new affinity setting.
+
+Replace it by a straight forward smp function call.
+
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Acked-by: Viresh Kumar <viresh.kumar@linaro.org>
+Cc: Fenghua Yu <fenghua.yu@intel.com>
+Cc: Tony Luck <tony.luck@intel.com>
+Cc: Herbert Xu <herbert@gondor.apana.org.au>
+Cc: "Rafael J. Wysocki" <rjw@rjwysocki.net>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+Cc: Sebastian Siewior <bigeasy@linutronix.de>
+Cc: linux-pm@vger.kernel.org
+Cc: Lai Jiangshan <jiangshanlai@gmail.com>
+Cc: Michael Ellerman <mpe@ellerman.id.au>
+Cc: Tejun Heo <tj@kernel.org>
+Cc: "David S. Miller" <davem@davemloft.net>
+Cc: Len Brown <lenb@kernel.org>
+Link: http://lkml.kernel.org/r/20170412201043.047558840@linutronix.de
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+---
+ drivers/cpufreq/sparc-us3-cpufreq.c |   46 ++++++++++++------------------------
+ 1 file changed, 16 insertions(+), 30 deletions(-)
+
+--- a/drivers/cpufreq/sparc-us3-cpufreq.c
++++ b/drivers/cpufreq/sparc-us3-cpufreq.c
+@@ -35,22 +35,28 @@ static struct us3_freq_percpu_info *us3_
+ #define SAFARI_CFG_DIV_32	0x0000000080000000UL
+ #define SAFARI_CFG_DIV_MASK	0x00000000C0000000UL
+ 
+-static unsigned long read_safari_cfg(void)
++static void read_safari_cfg(void *arg)
+ {
+-	unsigned long ret;
++	unsigned long ret, *val = arg;
+ 
+ 	__asm__ __volatile__("ldxa	[%%g0] %1, %0"
+ 			     : "=&r" (ret)
+ 			     : "i" (ASI_SAFARI_CONFIG));
+-	return ret;
++	*val = ret;
+ }
+ 
+-static void write_safari_cfg(unsigned long val)
++static void update_safari_cfg(void *arg)
+ {
++	unsigned long reg, *new_bits = arg;
++
++	read_safari_cfg(&reg);
++	reg &= ~SAFARI_CFG_DIV_MASK;
++	reg |= *new_bits;
++
+ 	__asm__ __volatile__("stxa	%0, [%%g0] %1\n\t"
+ 			     "membar	#Sync"
+ 			     : /* no outputs */
+-			     : "r" (val), "i" (ASI_SAFARI_CONFIG)
++			     : "r" (reg), "i" (ASI_SAFARI_CONFIG)
+ 			     : "memory");
+ }
+ 
+@@ -78,29 +84,17 @@ static unsigned long get_current_freq(un
+ 
+ static unsigned int us3_freq_get(unsigned int cpu)
+ {
+-	cpumask_t cpus_allowed;
+ 	unsigned long reg;
+-	unsigned int ret;
+-
+-	cpumask_copy(&cpus_allowed, &current->cpus_allowed);
+-	set_cpus_allowed_ptr(current, cpumask_of(cpu));
+-
+-	reg = read_safari_cfg();
+-	ret = get_current_freq(cpu, reg);
+ 
+-	set_cpus_allowed_ptr(current, &cpus_allowed);
+-
+-	return ret;
++	if (smp_call_function_single(cpu, read_safari_cfg, &reg, 1))
++		return 0;
++	return get_current_freq(cpu, reg);
+ }
+ 
+ static int us3_freq_target(struct cpufreq_policy *policy, unsigned int index)
+ {
+ 	unsigned int cpu = policy->cpu;
+-	unsigned long new_bits, new_freq, reg;
+-	cpumask_t cpus_allowed;
+-
+-	cpumask_copy(&cpus_allowed, &current->cpus_allowed);
+-	set_cpus_allowed_ptr(current, cpumask_of(cpu));
++	unsigned long new_bits, new_freq;
+ 
+ 	new_freq = sparc64_get_clock_tick(cpu) / 1000;
+ 	switch (index) {
+@@ -121,15 +115,7 @@ static int us3_freq_target(struct cpufre
+ 		BUG();
+ 	}
+ 
+-	reg = read_safari_cfg();
+-
+-	reg &= ~SAFARI_CFG_DIV_MASK;
+-	reg |= new_bits;
+-	write_safari_cfg(reg);
+-
+-	set_cpus_allowed_ptr(current, &cpus_allowed);
+-
+-	return 0;
++	return smp_call_function_single(cpu, update_safari_cfg, &new_bits, 1);
+ }
+ 
+ static int __init us3_freq_cpu_init(struct cpufreq_policy *policy)

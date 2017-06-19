@@ -1,7 +1,7 @@
 From: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
 Date: Thu, 29 Jan 2015 15:10:08 +0100
 Subject: block/mq: don't complete requests via IPI
-Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.9/older/patches-4.9.30-rt20.tar.xz
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.11/older/patches-4.11.5-rt1.tar.xz
 
 The IPI runs in hardirq context and there are sleeping locks. This patch
 moves the completion into a workqueue.
@@ -9,14 +9,14 @@ moves the completion into a workqueue.
 Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
 ---
  block/blk-core.c       |    3 +++
- block/blk-mq.c         |   20 ++++++++++++++++++++
+ block/blk-mq.c         |   24 ++++++++++++++++++++++++
  include/linux/blk-mq.h |    2 +-
- include/linux/blkdev.h |    1 +
- 4 files changed, 25 insertions(+), 1 deletion(-)
+ include/linux/blkdev.h |    3 +++
+ 4 files changed, 31 insertions(+), 1 deletion(-)
 
 --- a/block/blk-core.c
 +++ b/block/blk-core.c
-@@ -125,6 +125,9 @@ void blk_rq_init(struct request_queue *q
+@@ -116,6 +116,9 @@ void blk_rq_init(struct request_queue *q
  
  	INIT_LIST_HEAD(&rq->queuelist);
  	INIT_LIST_HEAD(&rq->timeout_list);
@@ -28,9 +28,9 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  	rq->__sector = (sector_t) -1;
 --- a/block/blk-mq.c
 +++ b/block/blk-mq.c
-@@ -177,6 +177,9 @@ static void blk_mq_rq_ctx_init(struct re
- 	rq->resid_len = 0;
- 	rq->sense = NULL;
+@@ -213,6 +213,9 @@ void blk_mq_rq_ctx_init(struct request_q
+ 	rq->errors = 0;
+ 	rq->extra_len = 0;
  
 +#ifdef CONFIG_PREEMPT_RT_FULL
 +	INIT_WORK(&rq->work, __blk_mq_complete_request_remote_work);
@@ -38,7 +38,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  	INIT_LIST_HEAD(&rq->timeout_list);
  	rq->timeout = 0;
  
-@@ -345,6 +348,17 @@ void blk_mq_end_request(struct request *
+@@ -395,6 +398,17 @@ void blk_mq_end_request(struct request *
  }
  EXPORT_SYMBOL(blk_mq_end_request);
  
@@ -56,7 +56,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  static void __blk_mq_complete_request_remote(void *data)
  {
  	struct request *rq = data;
-@@ -352,6 +366,8 @@ static void __blk_mq_complete_request_re
+@@ -402,6 +416,8 @@ static void __blk_mq_complete_request_re
  	rq->q->softirq_done_fn(rq);
  }
  
@@ -65,11 +65,15 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  static void blk_mq_ipi_complete_request(struct request *rq)
  {
  	struct blk_mq_ctx *ctx = rq->mq_ctx;
-@@ -368,10 +384,14 @@ static void blk_mq_ipi_complete_request(
+@@ -418,10 +434,18 @@ static void blk_mq_ipi_complete_request(
  		shared = cpus_share_cache(cpu, ctx->cpu);
  
  	if (cpu != ctx->cpu && !shared && cpu_online(ctx->cpu)) {
 +#ifdef CONFIG_PREEMPT_RT_FULL
++		/*
++		 * We could force QUEUE_FLAG_SAME_FORCE then we would not get in
++		 * here. But we could try to invoke it one the CPU like this.
++		 */
 +		schedule_work_on(ctx->cpu, &rq->work);
 +#else
  		rq->csd.func = __blk_mq_complete_request_remote;
@@ -82,7 +86,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  	}
 --- a/include/linux/blk-mq.h
 +++ b/include/linux/blk-mq.h
-@@ -209,7 +209,7 @@ static inline u16 blk_mq_unique_tag_to_t
+@@ -218,7 +218,7 @@ static inline u16 blk_mq_unique_tag_to_t
  	return unique_tag & BLK_MQ_UNIQUE_TAG_MASK;
  }
  
@@ -93,11 +97,13 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  void blk_mq_end_request(struct request *rq, int error);
 --- a/include/linux/blkdev.h
 +++ b/include/linux/blkdev.h
-@@ -89,6 +89,7 @@ struct request {
+@@ -128,6 +128,9 @@ typedef __u32 __bitwise req_flags_t;
+  */
+ struct request {
  	struct list_head queuelist;
++#ifdef CONFIG_PREEMPT_RT_FULL
++	struct work_struct work;
++#endif
  	union {
  		struct call_single_data csd;
-+		struct work_struct work;
  		u64 fifo_time;
- 	};
- 

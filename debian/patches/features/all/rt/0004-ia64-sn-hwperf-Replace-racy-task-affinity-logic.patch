@@ -1,0 +1,77 @@
+From 9feb42ac88b516e378b9782e82b651ca5bed95c4 Mon Sep 17 00:00:00 2001
+From: Thomas Gleixner <tglx@linutronix.de>
+Date: Thu, 6 Apr 2017 14:56:18 +0200
+Subject: [PATCH 04/13] ia64/sn/hwperf: Replace racy task affinity logic
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.11/older/patches-4.11.5-rt1.tar.xz
+
+sn_hwperf_op_cpu() which is invoked from an ioctl requires to run code on
+the requested cpu. This is achieved by temporarily setting the affinity of
+the calling user space thread to the requested CPU and reset it to the
+original affinity afterwards.
+
+That's racy vs. CPU hotplug and concurrent affinity settings for that
+thread resulting in code executing on the wrong CPU and overwriting the
+new affinity setting.
+
+Replace it by using work_on_cpu_safe() which guarantees to run the code on
+the requested CPU or to fail in case the CPU is offline.
+
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Cc: Fenghua Yu <fenghua.yu@intel.com>
+Cc: Tony Luck <tony.luck@intel.com>
+Cc: linux-ia64@vger.kernel.org
+Cc: Herbert Xu <herbert@gondor.apana.org.au>
+Cc: "Rafael J. Wysocki" <rjw@rjwysocki.net>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+Cc: Sebastian Siewior <bigeasy@linutronix.de>
+Cc: Lai Jiangshan <jiangshanlai@gmail.com>
+Cc: Viresh Kumar <viresh.kumar@linaro.org>
+Cc: Michael Ellerman <mpe@ellerman.id.au>
+Cc: Tejun Heo <tj@kernel.org>
+Cc: "David S. Miller" <davem@davemloft.net>
+Cc: Len Brown <lenb@kernel.org>
+Link: http://lkml.kernel.org/r/alpine.DEB.2.20.1704122251450.2548@nanos
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+---
+ arch/ia64/sn/kernel/sn2/sn_hwperf.c |   17 +++++++++--------
+ 1 file changed, 9 insertions(+), 8 deletions(-)
+
+--- a/arch/ia64/sn/kernel/sn2/sn_hwperf.c
++++ b/arch/ia64/sn/kernel/sn2/sn_hwperf.c
+@@ -598,12 +598,17 @@ static void sn_hwperf_call_sal(void *inf
+ 	op_info->ret = r;
+ }
+ 
++static long sn_hwperf_call_sal_work(void *info)
++{
++	sn_hwperf_call_sal(info);
++	return 0;
++}
++
+ static int sn_hwperf_op_cpu(struct sn_hwperf_op_info *op_info)
+ {
+ 	u32 cpu;
+ 	u32 use_ipi;
+ 	int r = 0;
+-	cpumask_t save_allowed;
+ 	
+ 	cpu = (op_info->a->arg & SN_HWPERF_ARG_CPU_MASK) >> 32;
+ 	use_ipi = op_info->a->arg & SN_HWPERF_ARG_USE_IPI_MASK;
+@@ -629,13 +634,9 @@ static int sn_hwperf_op_cpu(struct sn_hw
+ 			/* use an interprocessor interrupt to call SAL */
+ 			smp_call_function_single(cpu, sn_hwperf_call_sal,
+ 				op_info, 1);
+-		}
+-		else {
+-			/* migrate the task before calling SAL */ 
+-			save_allowed = current->cpus_allowed;
+-			set_cpus_allowed_ptr(current, cpumask_of(cpu));
+-			sn_hwperf_call_sal(op_info);
+-			set_cpus_allowed_ptr(current, &save_allowed);
++		} else {
++			/* Call on the target CPU */
++			work_on_cpu_safe(cpu, sn_hwperf_call_sal_work, op_info);
+ 		}
+ 	}
+ 	r = op_info->ret;

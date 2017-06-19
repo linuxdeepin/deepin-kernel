@@ -1,0 +1,90 @@
+From 6d11b87d55eb75007a3721c2de5938f5bbf607fb Mon Sep 17 00:00:00 2001
+From: Thomas Gleixner <tglx@linutronix.de>
+Date: Wed, 12 Apr 2017 22:07:31 +0200
+Subject: [PATCH 05/13] powerpc/smp: Replace open coded task affinity logic
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.11/older/patches-4.11.5-rt1.tar.xz
+
+Init task invokes smp_ops->setup_cpu() from smp_cpus_done(). Init task can
+run on any online CPU at this point, but the setup_cpu() callback requires
+to be invoked on the boot CPU. This is achieved by temporarily setting the
+affinity of the calling user space thread to the requested CPU and reset it
+to the original affinity afterwards.
+
+That's racy vs. CPU hotplug and concurrent affinity settings for that
+thread resulting in code executing on the wrong CPU and overwriting the
+new affinity setting.
+
+That's actually not a problem in this context as neither CPU hotplug nor
+affinity settings can happen, but the access to task_struct::cpus_allowed
+is about to restricted.
+
+Replace it with a call to work_on_cpu_safe() which achieves the same result.
+
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Acked-by: Michael Ellerman <mpe@ellerman.id.au>
+Cc: Fenghua Yu <fenghua.yu@intel.com>
+Cc: Tony Luck <tony.luck@intel.com>
+Cc: Herbert Xu <herbert@gondor.apana.org.au>
+Cc: "Rafael J. Wysocki" <rjw@rjwysocki.net>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+Cc: Sebastian Siewior <bigeasy@linutronix.de>
+Cc: Lai Jiangshan <jiangshanlai@gmail.com>
+Cc: Viresh Kumar <viresh.kumar@linaro.org>
+Cc: Tejun Heo <tj@kernel.org>
+Cc: Paul Mackerras <paulus@samba.org>
+Cc: linuxppc-dev@lists.ozlabs.org
+Cc: "David S. Miller" <davem@davemloft.net>
+Cc: Len Brown <lenb@kernel.org>
+Link: http://lkml.kernel.org/r/20170412201042.518053336@linutronix.de
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+---
+ arch/powerpc/kernel/smp.c |   26 +++++++++++---------------
+ 1 file changed, 11 insertions(+), 15 deletions(-)
+
+--- a/arch/powerpc/kernel/smp.c
++++ b/arch/powerpc/kernel/smp.c
+@@ -787,24 +787,21 @@ static struct sched_domain_topology_leve
+ 	{ NULL, },
+ };
+ 
+-void __init smp_cpus_done(unsigned int max_cpus)
++static __init long smp_setup_cpu_workfn(void *data __always_unused)
+ {
+-	cpumask_var_t old_mask;
++	smp_ops->setup_cpu(boot_cpuid);
++	return 0;
++}
+ 
+-	/* We want the setup_cpu() here to be called from CPU 0, but our
+-	 * init thread may have been "borrowed" by another CPU in the meantime
+-	 * se we pin us down to CPU 0 for a short while
++void __init smp_cpus_done(unsigned int max_cpus)
++{
++	/*
++	 * We want the setup_cpu() here to be called on the boot CPU, but
++	 * init might run on any CPU, so make sure it's invoked on the boot
++	 * CPU.
+ 	 */
+-	alloc_cpumask_var(&old_mask, GFP_NOWAIT);
+-	cpumask_copy(old_mask, &current->cpus_allowed);
+-	set_cpus_allowed_ptr(current, cpumask_of(boot_cpuid));
+-	
+ 	if (smp_ops && smp_ops->setup_cpu)
+-		smp_ops->setup_cpu(boot_cpuid);
+-
+-	set_cpus_allowed_ptr(current, old_mask);
+-
+-	free_cpumask_var(old_mask);
++		work_on_cpu_safe(boot_cpuid, smp_setup_cpu_workfn, NULL);
+ 
+ 	if (smp_ops && smp_ops->bringup_done)
+ 		smp_ops->bringup_done();
+@@ -812,7 +809,6 @@ void __init smp_cpus_done(unsigned int m
+ 	dump_numa_cpu_topology();
+ 
+ 	set_sched_topology(powerpc_topology);
+-
+ }
+ 
+ #ifdef CONFIG_HOTPLUG_CPU

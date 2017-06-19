@@ -1,0 +1,75 @@
+From 8fb12156b8db61af3d49f3e5e104568494581d1f Mon Sep 17 00:00:00 2001
+From: Thomas Gleixner <tglx@linutronix.de>
+Date: Tue, 16 May 2017 20:42:32 +0200
+Subject: [PATCH 01/17] init: Pin init task to the boot CPU, initially
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.11/older/patches-4.11.5-rt1.tar.xz
+
+Some of the boot code in init_kernel_freeable() which runs before SMP
+bringup assumes (rightfully) that it runs on the boot CPU and therefore can
+use smp_processor_id() in preemptible context.
+
+That works so far because the smp_processor_id() check starts to be
+effective after smp bringup. That's just wrong. Starting with SMP bringup
+and the ability to move threads around, smp_processor_id() in preemptible
+context is broken.
+
+Aside of that it does not make sense to allow init to run on all CPUs
+before sched_smp_init() has been run.
+
+Pin the init to the boot CPU so the existing code can continue to use
+smp_processor_id() without triggering the checks when the enabling of those
+checks starts earlier.
+
+Tested-by: Mark Rutland <mark.rutland@arm.com>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Signed-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>
+Cc: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+Cc: Linus Torvalds <torvalds@linux-foundation.org>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Steven Rostedt <rostedt@goodmis.org>
+Link: http://lkml.kernel.org/r/20170516184734.943149935@linutronix.de
+Signed-off-by: Ingo Molnar <mingo@kernel.org>
+---
+ init/main.c |   17 ++++++++++++-----
+ 1 file changed, 12 insertions(+), 5 deletions(-)
+
+--- a/init/main.c
++++ b/init/main.c
+@@ -389,6 +389,7 @@ static __initdata DECLARE_COMPLETION(kth
+ 
+ static noinline void __ref rest_init(void)
+ {
++	struct task_struct *tsk;
+ 	int pid;
+ 
+ 	rcu_scheduler_starting();
+@@ -397,7 +398,17 @@ static noinline void __ref rest_init(voi
+ 	 * the init task will end up wanting to create kthreads, which, if
+ 	 * we schedule it before we create kthreadd, will OOPS.
+ 	 */
+-	kernel_thread(kernel_init, NULL, CLONE_FS);
++	pid = kernel_thread(kernel_init, NULL, CLONE_FS);
++	/*
++	 * Pin init on the boot CPU. Task migration is not properly working
++	 * until sched_init_smp() has been run. It will set the allowed
++	 * CPUs for init to the non isolated CPUs.
++	 */
++	rcu_read_lock();
++	tsk = find_task_by_pid_ns(pid, &init_pid_ns);
++	set_cpus_allowed_ptr(tsk, cpumask_of(smp_processor_id()));
++	rcu_read_unlock();
++
+ 	numa_default_policy();
+ 	pid = kernel_thread(kthreadd, NULL, CLONE_FS | CLONE_FILES);
+ 	rcu_read_lock();
+@@ -1011,10 +1022,6 @@ static noinline void __init kernel_init_
+ 	 * init can allocate pages on any node
+ 	 */
+ 	set_mems_allowed(node_states[N_MEMORY]);
+-	/*
+-	 * init can run on any cpu.
+-	 */
+-	set_cpus_allowed_ptr(current, cpu_all_mask);
+ 
+ 	cad_pid = task_pid(current);
+ 

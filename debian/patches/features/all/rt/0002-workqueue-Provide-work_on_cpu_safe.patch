@@ -1,0 +1,85 @@
+From 0e8d6a9336b487a1dd6f1991ff376e669d4c87c6 Mon Sep 17 00:00:00 2001
+From: Thomas Gleixner <tglx@linutronix.de>
+Date: Wed, 12 Apr 2017 22:07:28 +0200
+Subject: [PATCH 02/13] workqueue: Provide work_on_cpu_safe()
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.11/older/patches-4.11.5-rt1.tar.xz
+
+work_on_cpu() is not protected against CPU hotplug. For code which requires
+to be either executed on an online CPU or to fail if the CPU is not
+available the callsite would have to protect against CPU hotplug.
+
+Provide a function which does get/put_online_cpus() around the call to
+work_on_cpu() and fails the call with -ENODEV if the target CPU is not
+online.
+
+Preparatory patch to convert several racy task affinity manipulations.
+
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Acked-by: Tejun Heo <tj@kernel.org>
+Cc: Fenghua Yu <fenghua.yu@intel.com>
+Cc: Tony Luck <tony.luck@intel.com>
+Cc: Herbert Xu <herbert@gondor.apana.org.au>
+Cc: "Rafael J. Wysocki" <rjw@rjwysocki.net>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+Cc: Sebastian Siewior <bigeasy@linutronix.de>
+Cc: Lai Jiangshan <jiangshanlai@gmail.com>
+Cc: Viresh Kumar <viresh.kumar@linaro.org>
+Cc: Michael Ellerman <mpe@ellerman.id.au>
+Cc: "David S. Miller" <davem@davemloft.net>
+Cc: Len Brown <lenb@kernel.org>
+Link: http://lkml.kernel.org/r/20170412201042.262610721@linutronix.de
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+---
+ include/linux/workqueue.h |    5 +++++
+ kernel/workqueue.c        |   23 +++++++++++++++++++++++
+ 2 files changed, 28 insertions(+)
+
+--- a/include/linux/workqueue.h
++++ b/include/linux/workqueue.h
+@@ -608,8 +608,13 @@ static inline long work_on_cpu(int cpu,
+ {
+ 	return fn(arg);
+ }
++static inline long work_on_cpu_safe(int cpu, long (*fn)(void *), void *arg)
++{
++	return fn(arg);
++}
+ #else
+ long work_on_cpu(int cpu, long (*fn)(void *), void *arg);
++long work_on_cpu_safe(int cpu, long (*fn)(void *), void *arg);
+ #endif /* CONFIG_SMP */
+ 
+ #ifdef CONFIG_FREEZER
+--- a/kernel/workqueue.c
++++ b/kernel/workqueue.c
+@@ -4735,6 +4735,29 @@ long work_on_cpu(int cpu, long (*fn)(voi
+ 	return wfc.ret;
+ }
+ EXPORT_SYMBOL_GPL(work_on_cpu);
++
++/**
++ * work_on_cpu_safe - run a function in thread context on a particular cpu
++ * @cpu: the cpu to run on
++ * @fn:  the function to run
++ * @arg: the function argument
++ *
++ * Disables CPU hotplug and calls work_on_cpu(). The caller must not hold
++ * any locks which would prevent @fn from completing.
++ *
++ * Return: The value @fn returns.
++ */
++long work_on_cpu_safe(int cpu, long (*fn)(void *), void *arg)
++{
++	long ret = -ENODEV;
++
++	get_online_cpus();
++	if (cpu_online(cpu))
++		ret = work_on_cpu(cpu, fn, arg);
++	put_online_cpus();
++	return ret;
++}
++EXPORT_SYMBOL_GPL(work_on_cpu_safe);
+ #endif /* CONFIG_SMP */
+ 
+ #ifdef CONFIG_FREEZER
