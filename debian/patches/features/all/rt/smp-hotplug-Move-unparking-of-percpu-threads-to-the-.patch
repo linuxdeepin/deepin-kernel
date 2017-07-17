@@ -1,0 +1,158 @@
+From: Thomas Gleixner <tglx@linutronix.de>
+Date: Thu, 6 Jul 2017 01:57:55 -0700
+Subject: [PATCH] smp/hotplug: Move unparking of percpu threads to the control
+ CPU
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.11/older/patches-4.11.9-rt7.tar.xz
+
+Upstream commit 9cd4f1a4e7a858849e889a081a99adff83e08e4c
+
+Vikram reported the following backtrace:
+
+   BUG: scheduling while atomic: swapper/7/0/0x00000002
+   CPU: 7 PID: 0 Comm: swapper/7 Not tainted 4.9.32-perf+ #680
+   schedule
+   schedule_hrtimeout_range_clock
+   schedule_hrtimeout
+   wait_task_inactive
+   __kthread_bind_mask
+   __kthread_bind
+   __kthread_unpark
+   kthread_unpark
+   cpuhp_online_idle
+   cpu_startup_entry
+   secondary_start_kernel
+
+He analyzed correctly that a parked cpu hotplug thread of an offlined CPU
+was still on the runqueue when the CPU came back online and tried to unpark
+it. This causes the thread which invoked kthread_unpark() to call
+wait_task_inactive() and subsequently schedule() with preemption disabled.
+His proposed workaround was to "make sure" that a parked thread has
+scheduled out when the CPU goes offline, so the situation cannot happen.
+
+But that's still wrong because the root cause is not the fact that the
+percpu thread is still on the runqueue and neither that preemption is
+disabled, which could be simply solved by enabling preemption before
+calling kthread_unpark().
+
+The real issue is that the calling thread is the idle task of the upcoming
+CPU, which is not supposed to call anything which might sleep.  The moron,
+who wrote that code, missed completely that kthread_unpark() might end up
+in schedule().
+
+The solution is simpler than expected. The thread which controls the
+hotplug operation is waiting for the CPU to call complete() on the hotplug
+state completion. So the idle task of the upcoming CPU can set its state to
+CPUHP_AP_ONLINE_IDLE and invoke complete(). This in turn wakes the control
+task on a different CPU, which then can safely do the unpark and kick the
+now unparked hotplug thread of the upcoming CPU to complete the bringup to
+the final target state.
+
+Control CPU                     AP
+
+bringup_cpu();
+  __cpu_up()  ------------>
+				bringup_ap();
+  bringup_wait_for_ap()
+    wait_for_completion();
+                                cpuhp_online_idle();
+                <------------    complete();
+    unpark(AP->stopper);
+    unpark(AP->hotplugthread);
+                                while(1)
+                                  do_idle();
+    kick(AP->hotplugthread);
+    wait_for_completion();	hotplug_thread()
+				  run_online_callbacks();
+				  complete();
+
+Fixes: 8df3e07e7f21 ("cpu/hotplug: Let upcoming cpu bring itself fully up")
+Reported-by: Vikram Mulukutla <markivx@codeaurora.org>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Acked-by: Peter Zijlstra <peterz@infradead.org>
+Cc: Sebastian Sewior <bigeasy@linutronix.de>
+Cc: Rusty Russell <rusty@rustcorp.com.au>
+Cc: Tejun Heo <tj@kernel.org>
+Cc: Andrew Morton <akpm@linux-foundation.org>
+Link: http://lkml.kernel.org/r/alpine.DEB.2.20.1707042218020.2131@nanos
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+---
+ kernel/cpu.c |   37 ++++++++++++++++++-------------------
+ 1 file changed, 18 insertions(+), 19 deletions(-)
+
+--- a/kernel/cpu.c
++++ b/kernel/cpu.c
+@@ -344,13 +344,25 @@ void cpu_hotplug_enable(void)
+ EXPORT_SYMBOL_GPL(cpu_hotplug_enable);
+ #endif	/* CONFIG_HOTPLUG_CPU */
+ 
+-/* Notifier wrappers for transitioning to state machine */
++static void __cpuhp_kick_ap_work(struct cpuhp_cpu_state *st);
+ 
+ static int bringup_wait_for_ap(unsigned int cpu)
+ {
+ 	struct cpuhp_cpu_state *st = per_cpu_ptr(&cpuhp_state, cpu);
+ 
++	/* Wait for the CPU to reach CPUHP_AP_ONLINE_IDLE */
+ 	wait_for_completion(&st->done);
++	BUG_ON(!cpu_online(cpu));
++
++	/* Unpark the stopper thread and the hotplug thread of the target cpu */
++	stop_machine_unpark(cpu);
++	kthread_unpark(st->thread);
++
++	/* Should we go further up ? */
++	if (st->target > CPUHP_AP_ONLINE_IDLE) {
++		__cpuhp_kick_ap_work(st);
++		wait_for_completion(&st->done);
++	}
+ 	return st->result;
+ }
+ 
+@@ -371,9 +383,7 @@ static int bringup_cpu(unsigned int cpu)
+ 	irq_unlock_sparse();
+ 	if (ret)
+ 		return ret;
+-	ret = bringup_wait_for_ap(cpu);
+-	BUG_ON(!cpu_online(cpu));
+-	return ret;
++	return bringup_wait_for_ap(cpu);
+ }
+ 
+ /*
+@@ -859,31 +869,20 @@ void notify_cpu_starting(unsigned int cp
+ }
+ 
+ /*
+- * Called from the idle task. We need to set active here, so we can kick off
+- * the stopper thread and unpark the smpboot threads. If the target state is
+- * beyond CPUHP_AP_ONLINE_IDLE we kick cpuhp thread and let it bring up the
+- * cpu further.
++ * Called from the idle task. Wake up the controlling task which brings the
++ * stopper and the hotplug thread of the upcoming CPU up and then delegates
++ * the rest of the online bringup to the hotplug thread.
+  */
+ void cpuhp_online_idle(enum cpuhp_state state)
+ {
+ 	struct cpuhp_cpu_state *st = this_cpu_ptr(&cpuhp_state);
+-	unsigned int cpu = smp_processor_id();
+ 
+ 	/* Happens for the boot cpu */
+ 	if (state != CPUHP_AP_ONLINE_IDLE)
+ 		return;
+ 
+ 	st->state = CPUHP_AP_ONLINE_IDLE;
+-
+-	/* Unpark the stopper thread and the hotplug thread of this cpu */
+-	stop_machine_unpark(cpu);
+-	kthread_unpark(st->thread);
+-
+-	/* Should we go further up ? */
+-	if (st->target > CPUHP_AP_ONLINE_IDLE)
+-		__cpuhp_kick_ap_work(st);
+-	else
+-		complete(&st->done);
++	complete(&st->done);
+ }
+ 
+ /* Requires cpu_add_remove_lock to be held */
