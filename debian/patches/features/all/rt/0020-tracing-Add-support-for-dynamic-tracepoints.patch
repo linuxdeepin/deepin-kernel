@@ -1,0 +1,196 @@
+From: Tom Zanussi <tom.zanussi@linux.intel.com>
+Date: Mon, 26 Jun 2017 17:49:21 -0500
+Subject: [PATCH 20/32] tracing: Add support for dynamic tracepoints
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.11/older/patches-4.11.9-rt7.tar.xz
+
+The tracepoint infrastructure assumes statically-defined tracepoints
+and uses static_keys for tracepoint enablement.  In order to define
+tracepoints on the fly, we need to have a dynamic counterpart.
+
+Add a dynamic_tracepoint_probe_register() and a dynamic param onto
+tracepoint_probe_unregister() for this purpose.
+
+Signed-off-by: Tom Zanussi <tom.zanussi@linux.intel.com>
+Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+---
+ include/linux/tracepoint.h  |   11 +++++++----
+ kernel/trace/trace_events.c |    4 ++--
+ kernel/tracepoint.c         |   42 ++++++++++++++++++++++++++++++------------
+ 3 files changed, 39 insertions(+), 18 deletions(-)
+
+--- a/include/linux/tracepoint.h
++++ b/include/linux/tracepoint.h
+@@ -37,9 +37,12 @@ extern int
+ tracepoint_probe_register(struct tracepoint *tp, void *probe, void *data);
+ extern int
+ tracepoint_probe_register_prio(struct tracepoint *tp, void *probe, void *data,
+-			       int prio);
++			       int prio, bool dynamic);
++extern int dynamic_tracepoint_probe_register(struct tracepoint *tp,
++					     void *probe, void *data);
+ extern int
+-tracepoint_probe_unregister(struct tracepoint *tp, void *probe, void *data);
++tracepoint_probe_unregister(struct tracepoint *tp, void *probe, void *data,
++			    bool dynamic);
+ extern void
+ for_each_kernel_tracepoint(void (*fct)(struct tracepoint *tp, void *priv),
+ 		void *priv);
+@@ -206,13 +209,13 @@ extern void syscall_unregfunc(void);
+ 				   int prio)				\
+ 	{								\
+ 		return tracepoint_probe_register_prio(&__tracepoint_##name, \
+-					      (void *)probe, data, prio); \
++				      (void *)probe, data, prio, false); \
+ 	}								\
+ 	static inline int						\
+ 	unregister_trace_##name(void (*probe)(data_proto), void *data)	\
+ 	{								\
+ 		return tracepoint_probe_unregister(&__tracepoint_##name,\
+-						(void *)probe, data);	\
++					   (void *)probe, data, false); \
+ 	}								\
+ 	static inline void						\
+ 	check_trace_callback_type_##name(void (*cb)(data_proto))	\
+--- a/kernel/trace/trace_events.c
++++ b/kernel/trace/trace_events.c
+@@ -297,7 +297,7 @@ int trace_event_reg(struct trace_event_c
+ 	case TRACE_REG_UNREGISTER:
+ 		tracepoint_probe_unregister(call->tp,
+ 					    call->class->probe,
+-					    file);
++					    file, false);
+ 		return 0;
+ 
+ #ifdef CONFIG_PERF_EVENTS
+@@ -308,7 +308,7 @@ int trace_event_reg(struct trace_event_c
+ 	case TRACE_REG_PERF_UNREGISTER:
+ 		tracepoint_probe_unregister(call->tp,
+ 					    call->class->perf_probe,
+-					    call);
++					    call, false);
+ 		return 0;
+ 	case TRACE_REG_PERF_OPEN:
+ 	case TRACE_REG_PERF_CLOSE:
+--- a/kernel/tracepoint.c
++++ b/kernel/tracepoint.c
+@@ -192,12 +192,15 @@ static void *func_remove(struct tracepoi
+  * Add the probe function to a tracepoint.
+  */
+ static int tracepoint_add_func(struct tracepoint *tp,
+-			       struct tracepoint_func *func, int prio)
++			       struct tracepoint_func *func, int prio,
++			       bool dynamic)
+ {
+ 	struct tracepoint_func *old, *tp_funcs;
+ 	int ret;
+ 
+-	if (tp->regfunc && !static_key_enabled(&tp->key)) {
++	if (tp->regfunc &&
++	    ((dynamic && !(atomic_read(&tp->key.enabled) > 0)) ||
++	     !static_key_enabled(&tp->key))) {
+ 		ret = tp->regfunc();
+ 		if (ret < 0)
+ 			return ret;
+@@ -219,7 +222,9 @@ static int tracepoint_add_func(struct tr
+ 	 * is used.
+ 	 */
+ 	rcu_assign_pointer(tp->funcs, tp_funcs);
+-	if (!static_key_enabled(&tp->key))
++	if (dynamic && !(atomic_read(&tp->key.enabled) > 0))
++		atomic_inc(&tp->key.enabled);
++	else if (!dynamic && !static_key_enabled(&tp->key))
+ 		static_key_slow_inc(&tp->key);
+ 	release_probes(old);
+ 	return 0;
+@@ -232,7 +237,7 @@ static int tracepoint_add_func(struct tr
+  * by preempt_disable around the call site.
+  */
+ static int tracepoint_remove_func(struct tracepoint *tp,
+-		struct tracepoint_func *func)
++				  struct tracepoint_func *func, bool dynamic)
+ {
+ 	struct tracepoint_func *old, *tp_funcs;
+ 
+@@ -246,10 +251,14 @@ static int tracepoint_remove_func(struct
+ 
+ 	if (!tp_funcs) {
+ 		/* Removed last function */
+-		if (tp->unregfunc && static_key_enabled(&tp->key))
++		if (tp->unregfunc &&
++		    ((dynamic && (atomic_read(&tp->key.enabled) > 0)) ||
++		     static_key_enabled(&tp->key)))
+ 			tp->unregfunc();
+ 
+-		if (static_key_enabled(&tp->key))
++		if (dynamic && (atomic_read(&tp->key.enabled) > 0))
++			atomic_dec(&tp->key.enabled);
++		else if (!dynamic && static_key_enabled(&tp->key))
+ 			static_key_slow_dec(&tp->key);
+ 	}
+ 	rcu_assign_pointer(tp->funcs, tp_funcs);
+@@ -258,7 +267,7 @@ static int tracepoint_remove_func(struct
+ }
+ 
+ /**
+- * tracepoint_probe_register -  Connect a probe to a tracepoint
++ * tracepoint_probe_register_prio -  Connect a probe to a tracepoint
+  * @tp: tracepoint
+  * @probe: probe handler
+  * @data: tracepoint data
+@@ -271,7 +280,7 @@ static int tracepoint_remove_func(struct
+  * within module exit functions.
+  */
+ int tracepoint_probe_register_prio(struct tracepoint *tp, void *probe,
+-				   void *data, int prio)
++				   void *data, int prio, bool dynamic)
+ {
+ 	struct tracepoint_func tp_func;
+ 	int ret;
+@@ -280,7 +289,7 @@ int tracepoint_probe_register_prio(struc
+ 	tp_func.func = probe;
+ 	tp_func.data = data;
+ 	tp_func.prio = prio;
+-	ret = tracepoint_add_func(tp, &tp_func, prio);
++	ret = tracepoint_add_func(tp, &tp_func, prio, dynamic);
+ 	mutex_unlock(&tracepoints_mutex);
+ 	return ret;
+ }
+@@ -301,10 +310,18 @@ EXPORT_SYMBOL_GPL(tracepoint_probe_regis
+  */
+ int tracepoint_probe_register(struct tracepoint *tp, void *probe, void *data)
+ {
+-	return tracepoint_probe_register_prio(tp, probe, data, TRACEPOINT_DEFAULT_PRIO);
++	return tracepoint_probe_register_prio(tp, probe, data, TRACEPOINT_DEFAULT_PRIO, false);
+ }
+ EXPORT_SYMBOL_GPL(tracepoint_probe_register);
+ 
++int dynamic_tracepoint_probe_register(struct tracepoint *tp, void *probe,
++				      void *data)
++{
++	return tracepoint_probe_register_prio(tp, probe, data,
++					      TRACEPOINT_DEFAULT_PRIO, true);
++}
++EXPORT_SYMBOL_GPL(dynamic_tracepoint_probe_register);
++
+ /**
+  * tracepoint_probe_unregister -  Disconnect a probe from a tracepoint
+  * @tp: tracepoint
+@@ -313,7 +330,8 @@ EXPORT_SYMBOL_GPL(tracepoint_probe_regis
+  *
+  * Returns 0 if ok, error value on error.
+  */
+-int tracepoint_probe_unregister(struct tracepoint *tp, void *probe, void *data)
++int tracepoint_probe_unregister(struct tracepoint *tp, void *probe, void *data,
++				bool dynamic)
+ {
+ 	struct tracepoint_func tp_func;
+ 	int ret;
+@@ -321,7 +339,7 @@ int tracepoint_probe_unregister(struct t
+ 	mutex_lock(&tracepoints_mutex);
+ 	tp_func.func = probe;
+ 	tp_func.data = data;
+-	ret = tracepoint_remove_func(tp, &tp_func);
++	ret = tracepoint_remove_func(tp, &tp_func, dynamic);
+ 	mutex_unlock(&tracepoints_mutex);
+ 	return ret;
+ }

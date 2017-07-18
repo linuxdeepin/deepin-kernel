@@ -1,0 +1,46 @@
+From: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+Date: Fri, 23 Jun 2017 11:43:30 +0200
+Subject: [PATCH] mm, swap: don't disable preemption while taking the per-CPU
+ cache
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.11/older/patches-4.11.9-rt7.tar.xz
+
+get_cpu_var() disables preemption and returns the per-CPU version of the
+variable. Disabling preemption is useful to ensure atomic access to the
+variable within the critical section.
+In this case however, after the per-CPU version of the variable is
+obtained the ->free_lock is acquired. For that reason it seems the raw
+accessor could be used. It only seems that ->slots_ret should be
+retested (because with disabled preemption this variable can not be set
+to NULL otherwise).
+This popped up during PREEMPT-RT testing because it tries to take
+spinlocks in a preempt disabled section.
+
+Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+---
+ mm/swap_slots.c |    5 ++---
+ 1 file changed, 2 insertions(+), 3 deletions(-)
+
+--- a/mm/swap_slots.c
++++ b/mm/swap_slots.c
+@@ -267,11 +267,11 @@ int free_swap_slot(swp_entry_t entry)
+ {
+ 	struct swap_slots_cache *cache;
+ 
+-	cache = &get_cpu_var(swp_slots);
++	cache = raw_cpu_ptr(&swp_slots);
+ 	if (use_swap_slot_cache && cache->slots_ret) {
+ 		spin_lock_irq(&cache->free_lock);
+ 		/* Swap slots cache may be deactivated before acquiring lock */
+-		if (!use_swap_slot_cache) {
++		if (!use_swap_slot_cache || !cache->slots_ret) {
+ 			spin_unlock_irq(&cache->free_lock);
+ 			goto direct_free;
+ 		}
+@@ -291,7 +291,6 @@ int free_swap_slot(swp_entry_t entry)
+ direct_free:
+ 		swapcache_free_entries(&entry, 1);
+ 	}
+-	put_cpu_var(swp_slots);
+ 
+ 	return 0;
+ }

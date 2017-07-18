@@ -1,0 +1,106 @@
+From: Tom Zanussi <tom.zanussi@linux.intel.com>
+Date: Mon, 26 Jun 2017 17:49:11 -0500
+Subject: [PATCH 10/32] tracing: Add NO_DISCARD event file flag
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.11/older/patches-4.11.9-rt7.tar.xz
+
+Whenever an event_command has a post-trigger that needs access to the
+event record, the event record can't be discarded, or the post-trigger
+will eventually see bogus data.
+
+In order to allow the discard check to treat this case separately, add
+an EVENT_FILE_FL_NO_DISCARD flag to the event file flags, along with
+code in the discard check that checks the flag and avoids the discard
+when the flag is set.
+
+Signed-off-by: Tom Zanussi <tom.zanussi@linux.intel.com>
+Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+---
+ include/linux/trace_events.h        |    3 +++
+ kernel/trace/trace.h                |   13 ++++++++++---
+ kernel/trace/trace_events_trigger.c |   16 +++++++++++++---
+ 3 files changed, 26 insertions(+), 6 deletions(-)
+
+--- a/include/linux/trace_events.h
++++ b/include/linux/trace_events.h
+@@ -306,6 +306,7 @@ enum {
+ 	EVENT_FILE_FL_TRIGGER_MODE_BIT,
+ 	EVENT_FILE_FL_TRIGGER_COND_BIT,
+ 	EVENT_FILE_FL_PID_FILTER_BIT,
++	EVENT_FILE_FL_NO_DISCARD_BIT,
+ };
+ 
+ /*
+@@ -320,6 +321,7 @@ enum {
+  *  TRIGGER_MODE  - When set, invoke the triggers associated with the event
+  *  TRIGGER_COND  - When set, one or more triggers has an associated filter
+  *  PID_FILTER    - When set, the event is filtered based on pid
++ *  NO_DISCARD    - When set, do not discard events, something needs them later
+  */
+ enum {
+ 	EVENT_FILE_FL_ENABLED		= (1 << EVENT_FILE_FL_ENABLED_BIT),
+@@ -331,6 +333,7 @@ enum {
+ 	EVENT_FILE_FL_TRIGGER_MODE	= (1 << EVENT_FILE_FL_TRIGGER_MODE_BIT),
+ 	EVENT_FILE_FL_TRIGGER_COND	= (1 << EVENT_FILE_FL_TRIGGER_COND_BIT),
+ 	EVENT_FILE_FL_PID_FILTER	= (1 << EVENT_FILE_FL_PID_FILTER_BIT),
++	EVENT_FILE_FL_NO_DISCARD	= (1 << EVENT_FILE_FL_NO_DISCARD_BIT),
+ };
+ 
+ struct trace_event_file {
+--- a/kernel/trace/trace.h
++++ b/kernel/trace/trace.h
+@@ -1191,9 +1191,16 @@ static inline bool
+ 	if (eflags & EVENT_FILE_FL_TRIGGER_COND)
+ 		*tt = event_triggers_call(file, entry, event);
+ 
+-	if (test_bit(EVENT_FILE_FL_SOFT_DISABLED_BIT, &file->flags) ||
+-	    (unlikely(file->flags & EVENT_FILE_FL_FILTERED) &&
+-	     !filter_match_preds(file->filter, entry))) {
++	if (unlikely(file->flags & EVENT_FILE_FL_FILTERED) &&
++	    !filter_match_preds(file->filter, entry)) {
++		__trace_event_discard_commit(buffer, event);
++		return true;
++	}
++
++	if (test_bit(EVENT_FILE_FL_NO_DISCARD_BIT, &file->flags))
++		return false;
++
++	if (test_bit(EVENT_FILE_FL_SOFT_DISABLED_BIT, &file->flags)) {
+ 		__trace_event_discard_commit(buffer, event);
+ 		return true;
+ 	}
+--- a/kernel/trace/trace_events_trigger.c
++++ b/kernel/trace/trace_events_trigger.c
+@@ -505,20 +505,30 @@ clear_event_triggers(struct trace_array
+ void update_cond_flag(struct trace_event_file *file)
+ {
+ 	struct event_trigger_data *data;
+-	bool set_cond = false;
++	bool set_cond = false, set_no_discard = false;
+ 
+ 	list_for_each_entry_rcu(data, &file->triggers, list) {
+ 		if (data->filter || event_command_post_trigger(data->cmd_ops) ||
+-		    event_command_needs_rec(data->cmd_ops)) {
++		    event_command_needs_rec(data->cmd_ops))
+ 			set_cond = true;
++
++		if (event_command_post_trigger(data->cmd_ops) &&
++		    event_command_needs_rec(data->cmd_ops))
++			set_no_discard = true;
++
++		if (set_cond && set_no_discard)
+ 			break;
+-		}
+ 	}
+ 
+ 	if (set_cond)
+ 		set_bit(EVENT_FILE_FL_TRIGGER_COND_BIT, &file->flags);
+ 	else
+ 		clear_bit(EVENT_FILE_FL_TRIGGER_COND_BIT, &file->flags);
++
++	if (set_no_discard)
++		set_bit(EVENT_FILE_FL_NO_DISCARD_BIT, &file->flags);
++	else
++		clear_bit(EVENT_FILE_FL_NO_DISCARD_BIT, &file->flags);
+ }
+ 
+ /**

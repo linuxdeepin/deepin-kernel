@@ -1,0 +1,1123 @@
+From: Tom Zanussi <tom.zanussi@linux.intel.com>
+Date: Mon, 26 Jun 2017 17:49:20 -0500
+Subject: [PATCH 19/32] tracing: Add variable reference handling to hist
+ triggers
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.11/older/patches-4.11.9-rt7.tar.xz
+
+Add the necessary infrastructure to allow the variables defined on one
+event to be referenced in another.  This allows variables set by a
+previous event to be referenced and used in expressions combining the
+variable values saved by that previous event and the event fields of
+the current event.  For example, here's how a latency can be
+calculated and saved into yet another variable named 'wakeup_lat':
+
+    # echo 'hist:keys=pid,prio:ts0=common_timestamp ...
+    # echo 'hist:keys=next_pid:wakeup_lat=common_timestamp-$ts0 ...
+
+In the first event, the event's timetamp is saved into the variable
+ts0.  In the next line, ts0 is subtracted from the second event's
+timestamp to produce the latency.
+
+Further users of variable references will be described in subsequent
+patches, such as for instance how the 'wakeup_lat' variable above can
+be displayed in a latency histogram.
+
+Signed-off-by: Tom Zanussi <tom.zanussi@linux.intel.com>
+Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+---
+ kernel/trace/trace.h                |    2 
+ kernel/trace/trace_events_hist.c    |  719 +++++++++++++++++++++++++++++-------
+ kernel/trace/trace_events_trigger.c |    6 
+ 3 files changed, 604 insertions(+), 123 deletions(-)
+
+--- a/kernel/trace/trace.h
++++ b/kernel/trace/trace.h
+@@ -1448,6 +1448,8 @@ extern void pause_named_trigger(struct e
+ extern void unpause_named_trigger(struct event_trigger_data *data);
+ extern void set_named_trigger_data(struct event_trigger_data *data,
+ 				   struct event_trigger_data *named_data);
++extern struct event_trigger_data *
++get_named_trigger_data(struct event_trigger_data *data);
+ extern int register_event_command(struct event_command *cmd);
+ extern int unregister_event_command(struct event_command *cmd);
+ extern int register_trigger_hist_enable_disable_cmds(void);
+--- a/kernel/trace/trace_events_hist.c
++++ b/kernel/trace/trace_events_hist.c
+@@ -26,8 +26,10 @@
+ 
+ struct hist_field;
+ 
+-typedef u64 (*hist_field_fn_t) (struct hist_field *field, void *event,
+-				struct ring_buffer_event *rbe);
++typedef u64 (*hist_field_fn_t) (struct hist_field *field,
++				struct tracing_map_elt *elt,
++				struct ring_buffer_event *rbe,
++				void *event);
+ 
+ #define HIST_FIELD_OPERANDS_MAX	2
+ #define HIST_FIELDS_MAX		(TRACING_MAP_FIELDS_MAX + TRACING_MAP_VARS_MAX)
+@@ -57,30 +59,41 @@ struct hist_field {
+ 	struct hist_var			var;
+ 	enum field_op_id		operator;
+ 	char				*name;
++	unsigned int			var_idx;
++	unsigned int			var_ref_idx;
++	bool                            read_once;
+ };
+ 
+-static u64 hist_field_none(struct hist_field *field, void *event,
+-			   struct ring_buffer_event *rbe)
++static u64 hist_field_none(struct hist_field *field,
++			   struct tracing_map_elt *elt,
++			   struct ring_buffer_event *rbe,
++			   void *event)
+ {
+ 	return 0;
+ }
+ 
+-static u64 hist_field_counter(struct hist_field *field, void *event,
+-			      struct ring_buffer_event *rbe)
++static u64 hist_field_counter(struct hist_field *field,
++			      struct tracing_map_elt *elt,
++			      struct ring_buffer_event *rbe,
++			      void *event)
+ {
+ 	return 1;
+ }
+ 
+-static u64 hist_field_string(struct hist_field *hist_field, void *event,
+-			     struct ring_buffer_event *rbe)
++static u64 hist_field_string(struct hist_field *hist_field,
++			     struct tracing_map_elt *elt,
++			     struct ring_buffer_event *rbe,
++			     void *event)
+ {
+ 	char *addr = (char *)(event + hist_field->field->offset);
+ 
+ 	return (u64)(unsigned long)addr;
+ }
+ 
+-static u64 hist_field_dynstring(struct hist_field *hist_field, void *event,
+-				struct ring_buffer_event *rbe)
++static u64 hist_field_dynstring(struct hist_field *hist_field,
++				struct tracing_map_elt *elt,
++				struct ring_buffer_event *rbe,
++				void *event)
+ {
+ 	u32 str_item = *(u32 *)(event + hist_field->field->offset);
+ 	int str_loc = str_item & 0xffff;
+@@ -89,54 +102,64 @@ static u64 hist_field_dynstring(struct h
+ 	return (u64)(unsigned long)addr;
+ }
+ 
+-static u64 hist_field_pstring(struct hist_field *hist_field, void *event,
+-			      struct ring_buffer_event *rbe)
++static u64 hist_field_pstring(struct hist_field *hist_field,
++			      struct tracing_map_elt *elt,
++			      struct ring_buffer_event *rbe,
++			      void *event)
+ {
+ 	char **addr = (char **)(event + hist_field->field->offset);
+ 
+ 	return (u64)(unsigned long)*addr;
+ }
+ 
+-static u64 hist_field_log2(struct hist_field *hist_field, void *event,
+-			   struct ring_buffer_event *rbe)
++static u64 hist_field_log2(struct hist_field *hist_field,
++			   struct tracing_map_elt *elt,
++			   struct ring_buffer_event *rbe,
++			   void *event)
+ {
+ 	struct hist_field *operand = hist_field->operands[0];
+ 
+-	u64 val = operand->fn(operand, event, rbe);
++	u64 val = operand->fn(operand, elt, rbe, event);
+ 
+ 	return (u64) ilog2(roundup_pow_of_two(val));
+ }
+ 
+-static u64 hist_field_plus(struct hist_field *hist_field, void *event,
+-			   struct ring_buffer_event *rbe)
++static u64 hist_field_plus(struct hist_field *hist_field,
++			   struct tracing_map_elt *elt,
++			   struct ring_buffer_event *rbe,
++			   void *event)
+ {
+ 	struct hist_field *operand1 = hist_field->operands[0];
+ 	struct hist_field *operand2 = hist_field->operands[1];
+ 
+-	u64 val1 = operand1->fn(operand1, event, rbe);
+-	u64 val2 = operand2->fn(operand2, event, rbe);
++	u64 val1 = operand1->fn(operand1, elt, rbe, event);
++	u64 val2 = operand2->fn(operand2, elt, rbe, event);
+ 
+ 	return val1 + val2;
+ }
+ 
+-static u64 hist_field_minus(struct hist_field *hist_field, void *event,
+-			    struct ring_buffer_event *rbe)
++static u64 hist_field_minus(struct hist_field *hist_field,
++			    struct tracing_map_elt *elt,
++			    struct ring_buffer_event *rbe,
++			    void *event)
+ {
+ 	struct hist_field *operand1 = hist_field->operands[0];
+ 	struct hist_field *operand2 = hist_field->operands[1];
+ 
+-	u64 val1 = operand1->fn(operand1, event, rbe);
+-	u64 val2 = operand2->fn(operand2, event, rbe);
++	u64 val1 = operand1->fn(operand1, elt, rbe, event);
++	u64 val2 = operand2->fn(operand2, elt, rbe, event);
+ 
+ 	return val1 - val2;
+ }
+ 
+-static u64 hist_field_unary_minus(struct hist_field *hist_field, void *event,
+-				  struct ring_buffer_event *rbe)
++static u64 hist_field_unary_minus(struct hist_field *hist_field,
++				  struct tracing_map_elt *elt,
++				  struct ring_buffer_event *rbe,
++				  void *event)
+ {
+ 	struct hist_field *operand = hist_field->operands[0];
+ 
+-	s64 sval = (s64)operand->fn(operand, event, rbe);
++	s64 sval = (s64)operand->fn(operand, elt, rbe, event);
+ 	u64 val = (u64)-sval;
+ 
+ 	return val;
+@@ -144,8 +167,9 @@ static u64 hist_field_unary_minus(struct
+ 
+ #define DEFINE_HIST_FIELD_FN(type)					\
+ 	static u64 hist_field_##type(struct hist_field *hist_field,	\
+-				     void *event,			\
+-				     struct ring_buffer_event *rbe)	\
++				     struct tracing_map_elt *elt,	\
++				     struct ring_buffer_event *rbe,	\
++				     void *event)			\
+ {									\
+ 	type *addr = (type *)(event + hist_field->field->offset);	\
+ 									\
+@@ -193,6 +217,7 @@ enum hist_field_flags {
+ 	HIST_FIELD_FL_VAR		= 4096,
+ 	HIST_FIELD_FL_VAR_ONLY		= 8192,
+ 	HIST_FIELD_FL_EXPR		= 16384,
++	HIST_FIELD_FL_VAR_REF		= 32768,
+ };
+ 
+ struct hist_trigger_attrs {
+@@ -225,10 +250,14 @@ struct hist_trigger_data {
+ 	struct tracing_map		*map;
+ 	bool				enable_timestamps;
+ 	bool				remove;
++	struct hist_field               *var_refs[TRACING_MAP_VARS_MAX];
++	unsigned int			n_var_refs;
+ };
+ 
+-static u64 hist_field_timestamp(struct hist_field *hist_field, void *event,
+-				struct ring_buffer_event *rbe)
++static u64 hist_field_timestamp(struct hist_field *hist_field,
++				struct tracing_map_elt *elt,
++				struct ring_buffer_event *rbe,
++				void *event)
+ {
+ 	struct hist_trigger_data *hist_data = hist_field->hist_data;
+ 	struct trace_array *tr = hist_data->event_file->tr;
+@@ -241,6 +270,324 @@ static u64 hist_field_timestamp(struct h
+ 	return ts;
+ }
+ 
++static LIST_HEAD(hist_var_list);
++
++struct hist_var_data {
++	struct list_head list;
++	struct hist_trigger_data *hist_data;
++};
++
++static struct hist_field *check_var_ref(struct hist_field *hist_field,
++					struct hist_trigger_data *var_data,
++					unsigned int var_idx)
++{
++	struct hist_field *found = NULL;
++
++	if (hist_field && hist_field->flags & HIST_FIELD_FL_VAR_REF) {
++		if (hist_field->var.idx == var_idx &&
++		    hist_field->var.hist_data == var_data) {
++			found = hist_field;
++		}
++	}
++
++	return found;
++}
++
++static struct hist_field *find_var_ref(struct hist_trigger_data *hist_data,
++				       struct hist_trigger_data *var_data,
++				       unsigned int var_idx)
++{
++	struct hist_field *hist_field, *found = NULL;
++	unsigned int i, j;
++
++	for_each_hist_field(i, hist_data) {
++		hist_field = hist_data->fields[i];
++		found = check_var_ref(hist_field, var_data, var_idx);
++		if (found)
++			return found;
++
++		for (j = 0; j < HIST_FIELD_OPERANDS_MAX; j++) {
++			struct hist_field *operand;
++
++			operand = hist_field->operands[j];
++			found = check_var_ref(operand, var_data, var_idx);
++			if (found)
++				return found;
++		}
++	}
++
++	return found;
++}
++
++static struct hist_field *find_any_var_ref(struct hist_trigger_data *hist_data,
++					   unsigned int var_idx)
++{
++	struct hist_field *found = NULL;
++	struct hist_var_data *var_data;
++
++	list_for_each_entry(var_data, &hist_var_list, list) {
++		found = find_var_ref(var_data->hist_data, hist_data, var_idx);
++		if (found)
++			break;
++	}
++
++	return found;
++}
++
++static bool check_var_refs(struct hist_trigger_data *hist_data)
++{
++	struct hist_field *field;
++	bool found = false;
++	int i;
++
++	for_each_hist_field(i, hist_data) {
++		field = hist_data->fields[i];
++		if (field && field->flags & HIST_FIELD_FL_VAR) {
++			if (find_any_var_ref(hist_data, field->var.idx)) {
++				found = true;
++				break;
++			}
++		}
++	}
++
++	return found;
++}
++
++static struct hist_var_data *find_hist_vars(struct hist_trigger_data *hist_data)
++{
++	struct hist_var_data *var_data, *found = NULL;
++
++	list_for_each_entry(var_data, &hist_var_list, list) {
++		if (var_data->hist_data == hist_data) {
++			found = var_data;
++			break;
++		}
++	}
++
++	return found;
++}
++
++static bool has_hist_vars(struct hist_trigger_data *hist_data)
++{
++	struct hist_field *hist_field;
++	bool found = false;
++	int i;
++
++	for_each_hist_field(i, hist_data) {
++		hist_field = hist_data->fields[i];
++		if (hist_field && hist_field->flags & HIST_FIELD_FL_VAR) {
++			found = true;
++			break;
++		}
++	}
++
++	return found;
++}
++
++static int save_hist_vars(struct hist_trigger_data *hist_data)
++{
++	struct hist_var_data *var_data;
++
++	var_data = find_hist_vars(hist_data);
++	if (var_data)
++		return 0;
++
++	var_data = kzalloc(sizeof(*var_data), GFP_KERNEL);
++	if (!var_data)
++		return -ENOMEM;
++
++	var_data->hist_data = hist_data;
++	list_add(&var_data->list, &hist_var_list);
++
++	return 0;
++}
++
++static void remove_hist_vars(struct hist_trigger_data *hist_data)
++{
++	struct hist_var_data *var_data;
++
++	var_data = find_hist_vars(hist_data);
++	if (!var_data)
++		return;
++
++	if (WARN_ON(check_var_refs(hist_data)))
++		return;
++
++	list_del(&var_data->list);
++
++	kfree(var_data);
++}
++
++static struct hist_field *find_var_field(struct hist_trigger_data *hist_data,
++					 const char *var_name)
++{
++	struct hist_field *hist_field, *found = NULL;
++	int i;
++
++	for_each_hist_field(i, hist_data) {
++		hist_field = hist_data->fields[i];
++		if (hist_field && hist_field->flags & HIST_FIELD_FL_VAR &&
++		    strcmp(hist_field->var.name, var_name) == 0) {
++			found = hist_field;
++			break;
++		}
++	}
++
++	return found;
++}
++
++static struct hist_field *find_var(struct trace_event_file *file,
++				   const char *var_name)
++{
++	struct hist_trigger_data *hist_data;
++	struct event_trigger_data *test;
++	struct hist_field *hist_field;
++
++	list_for_each_entry_rcu(test, &file->triggers, list) {
++		if (test->cmd_ops->trigger_type == ETT_EVENT_HIST) {
++			hist_data = test->private_data;
++			hist_field = find_var_field(hist_data, var_name);
++			if (hist_field)
++				return hist_field;
++		}
++	}
++
++	return NULL;
++}
++
++static struct trace_event_file *find_var_file(const char *system,
++					      const char *event_name,
++					      const char *var_name)
++{
++	struct hist_trigger_data *var_hist_data;
++	struct hist_var_data *var_data;
++	struct trace_event_call *call;
++	struct trace_event_file *file;
++	const char *name;
++
++	list_for_each_entry(var_data, &hist_var_list, list) {
++		var_hist_data = var_data->hist_data;
++		file = var_hist_data->event_file;
++		call = file->event_call;
++		name = trace_event_name(call);
++
++		if (!system || !event_name) {
++			if (find_var(file, var_name))
++				return file;
++			continue;
++		}
++
++		if (strcmp(event_name, name) != 0)
++			continue;
++		if (strcmp(system, call->class->system) != 0)
++			continue;
++
++		return file;
++	}
++
++	return NULL;
++}
++
++static struct hist_field *find_file_var(struct trace_event_file *file,
++					const char *var_name)
++{
++	struct hist_trigger_data *test_data;
++	struct event_trigger_data *test;
++	struct hist_field *hist_field;
++
++	list_for_each_entry_rcu(test, &file->triggers, list) {
++		if (test->cmd_ops->trigger_type == ETT_EVENT_HIST) {
++			test_data = test->private_data;
++			hist_field = find_var_field(test_data, var_name);
++			if (hist_field)
++				return hist_field;
++		}
++	}
++
++	return NULL;
++}
++
++static struct hist_field *find_event_var(const char *system,
++					 const char *event_name,
++					 const char *var_name)
++{
++	struct hist_field *hist_field = NULL;
++	struct trace_event_file *file;
++
++	file = find_var_file(system, event_name, var_name);
++	if (!file)
++		return NULL;
++
++	hist_field = find_file_var(file, var_name);
++
++	return hist_field;
++}
++
++struct hist_elt_data {
++	char *comm;
++	u64 *var_ref_vals;
++};
++
++static u64 hist_field_var_ref(struct hist_field *hist_field,
++			      struct tracing_map_elt *elt,
++			      struct ring_buffer_event *rbe,
++			      void *event)
++{
++	struct hist_elt_data *elt_data;
++	u64 var_val = 0;
++
++	elt_data = elt->private_data;
++	var_val = elt_data->var_ref_vals[hist_field->var_ref_idx];
++
++	return var_val;
++}
++
++static bool resolve_var_refs(struct hist_trigger_data *hist_data, void *key,
++			     u64 *var_ref_vals, bool self)
++{
++	struct hist_trigger_data *var_data;
++	struct tracing_map_elt *var_elt;
++	struct hist_field *hist_field;
++	unsigned int i, var_idx;
++	bool resolved = true;
++	u64 var_val = 0;
++
++	for (i = 0; i < hist_data->n_var_refs; i++) {
++		hist_field = hist_data->var_refs[i];
++		var_idx = hist_field->var.idx;
++		var_data = hist_field->var.hist_data;
++
++		if (var_data == NULL) {
++			resolved = false;
++			break;
++		}
++
++		if ((self && var_data != hist_data) ||
++		    (!self && var_data == hist_data))
++			continue;
++
++		var_elt = tracing_map_lookup(var_data->map, key);
++		if (!var_elt) {
++			resolved = false;
++			break;
++		}
++
++		if (!tracing_map_var_set(var_elt, var_idx)) {
++			resolved = false;
++			break;
++		}
++
++		if (self || !hist_field->read_once)
++			var_val = tracing_map_read_var(var_elt, var_idx);
++		else
++			var_val = tracing_map_read_var_once(var_elt, var_idx);
++
++		var_ref_vals[i] = var_val;
++	}
++
++	return resolved;
++}
++
+ static const char *hist_field_name(struct hist_field *field,
+ 				   unsigned int level)
+ {
+@@ -255,7 +602,8 @@ static const char *hist_field_name(struc
+ 		field_name = hist_field_name(field->operands[0], ++level);
+ 	else if (field->flags & HIST_FIELD_FL_TIMESTAMP)
+ 		field_name = "$common_timestamp";
+-	else if (field->flags & HIST_FIELD_FL_EXPR)
++	else if (field->flags & HIST_FIELD_FL_EXPR ||
++		 field->flags & HIST_FIELD_FL_VAR_REF)
+ 		field_name = field->name;
+ 
+ 	if (field_name == NULL)
+@@ -439,26 +787,36 @@ static inline void save_comm(char *comm,
+ 	memcpy(comm, task->comm, TASK_COMM_LEN);
+ }
+ 
+-static void hist_trigger_elt_comm_free(struct tracing_map_elt *elt)
++static void hist_trigger_elt_data_free(struct tracing_map_elt *elt)
+ {
+-	kfree((char *)elt->private_data);
++	struct hist_elt_data *private_data = elt->private_data;
++
++	kfree(private_data->comm);
++	kfree(private_data);
+ }
+ 
+-static int hist_trigger_elt_comm_alloc(struct tracing_map_elt *elt)
++static int hist_trigger_elt_data_alloc(struct tracing_map_elt *elt)
+ {
+ 	struct hist_trigger_data *hist_data = elt->map->private_data;
++	unsigned int size = TASK_COMM_LEN + 1;
++	struct hist_elt_data *elt_data;
+ 	struct hist_field *key_field;
+ 	unsigned int i;
+ 
++	elt->private_data = elt_data = kzalloc(sizeof(*elt_data), GFP_KERNEL);
++	if (!elt_data)
++		return -ENOMEM;
++
+ 	for_each_hist_key_field(i, hist_data) {
+ 		key_field = hist_data->fields[i];
+ 
+ 		if (key_field->flags & HIST_FIELD_FL_EXECNAME) {
+-			unsigned int size = TASK_COMM_LEN + 1;
+-
+-			elt->private_data = kzalloc(size, GFP_KERNEL);
+-			if (!elt->private_data)
++			elt_data->comm = kzalloc(size, GFP_KERNEL);
++			if (!elt_data->comm) {
++				kfree(elt_data);
++				elt->private_data = NULL;
+ 				return -ENOMEM;
++			}
+ 			break;
+ 		}
+ 	}
+@@ -466,29 +824,31 @@ static int hist_trigger_elt_comm_alloc(s
+ 	return 0;
+ }
+ 
+-static void hist_trigger_elt_comm_copy(struct tracing_map_elt *to,
++static void hist_trigger_elt_data_copy(struct tracing_map_elt *to,
+ 				       struct tracing_map_elt *from)
+ {
+-	char *comm_from = from->private_data;
+-	char *comm_to = to->private_data;
++	struct hist_elt_data *from_data = from->private_data;
++	struct hist_elt_data *to_data = to->private_data;
++
++	memcpy(to_data, from_data, sizeof(*to));
+ 
+-	if (comm_from)
+-		memcpy(comm_to, comm_from, TASK_COMM_LEN + 1);
++	if (from_data->comm)
++		memcpy(to_data->comm, from_data->comm, TASK_COMM_LEN + 1);
+ }
+ 
+-static void hist_trigger_elt_comm_init(struct tracing_map_elt *elt)
++static void hist_trigger_elt_data_init(struct tracing_map_elt *elt)
+ {
+-	char *comm = elt->private_data;
++	struct hist_elt_data *private_data = elt->private_data;
+ 
+-	if (comm)
+-		save_comm(comm, current);
++	if (private_data->comm)
++		save_comm(private_data->comm, current);
+ }
+ 
+-static const struct tracing_map_ops hist_trigger_elt_comm_ops = {
+-	.elt_alloc	= hist_trigger_elt_comm_alloc,
+-	.elt_copy	= hist_trigger_elt_comm_copy,
+-	.elt_free	= hist_trigger_elt_comm_free,
+-	.elt_init	= hist_trigger_elt_comm_init,
++static const struct tracing_map_ops hist_trigger_elt_data_ops = {
++	.elt_alloc	= hist_trigger_elt_data_alloc,
++	.elt_copy	= hist_trigger_elt_data_copy,
++	.elt_free	= hist_trigger_elt_data_free,
++	.elt_init	= hist_trigger_elt_data_init,
+ };
+ 
+ static char *expr_str(struct hist_field *field, unsigned int level)
+@@ -513,6 +873,8 @@ static char *expr_str(struct hist_field
+ 		return expr;
+ 	}
+ 
++	if (field->operands[0]->flags & HIST_FIELD_FL_VAR_REF)
++		strcat(expr, "$");
+ 	strcat(expr, hist_field_name(field->operands[0], 0));
+ 
+ 	switch (field->operator) {
+@@ -527,6 +889,8 @@ static char *expr_str(struct hist_field
+ 		return NULL;
+ 	}
+ 
++	if (field->operands[1]->flags & HIST_FIELD_FL_VAR_REF)
++		strcat(expr, "$");
+ 	strcat(expr, hist_field_name(field->operands[1], 0));
+ 
+ 	return expr;
+@@ -597,6 +961,11 @@ static struct hist_field *create_hist_fi
+ 	if (flags & HIST_FIELD_FL_EXPR)
+ 		goto out; /* caller will populate */
+ 
++	if (flags & HIST_FIELD_FL_VAR_REF) {
++		hist_field->fn = hist_field_var_ref;
++		goto out;
++	}
++
+ 	if (flags & HIST_FIELD_FL_HITCOUNT) {
+ 		hist_field->fn = hist_field_counter;
+ 		goto out;
+@@ -669,6 +1038,44 @@ static void destroy_hist_fields(struct h
+ 	}
+ }
+ 
++static struct hist_field *create_var_ref(struct hist_field *var_field)
++{
++	unsigned long flags = HIST_FIELD_FL_VAR_REF;
++	struct hist_field *ref_field;
++
++	ref_field = create_hist_field(var_field->hist_data, NULL, flags, NULL);
++	if (ref_field) {
++		ref_field->var.idx = var_field->var.idx;
++		ref_field->var.hist_data = var_field->hist_data;
++		ref_field->size = var_field->size;
++		ref_field->is_signed = var_field->is_signed;
++		ref_field->name = kstrdup(var_field->var.name, GFP_KERNEL);
++		if (!ref_field->name) {
++			destroy_hist_field(ref_field, 0);
++			return NULL;
++		}
++	}
++
++	return ref_field;
++}
++
++static struct hist_field *parse_var_ref(char *system, char *event_name,
++					char *var_name)
++{
++	struct hist_field *var_field = NULL, *ref_field = NULL;
++
++	if (!var_name || strlen(var_name) < 2 || var_name[0] != '$')
++		return NULL;
++
++	var_name++;
++
++	var_field = find_event_var(system, event_name, var_name);
++	if (var_field)
++		ref_field = create_var_ref(var_field);
++
++	return ref_field;
++}
++
+ static struct ftrace_event_field *
+ parse_field(struct hist_trigger_data *hist_data, struct trace_event_file *file,
+ 	    char *field_str, unsigned long *flags)
+@@ -715,10 +1122,28 @@ struct hist_field *parse_atom(struct his
+ 			      struct trace_event_file *file, char *str,
+ 			      unsigned long *flags, char *var_name)
+ {
++	char *s, *ref_system = NULL, *ref_event = NULL, *ref_var = str;
+ 	struct ftrace_event_field *field = NULL;
+ 	struct hist_field *hist_field = NULL;
+ 	int ret = 0;
+ 
++	s = strchr(str, '.');
++	if (s) {
++		s = strchr(++s, '.');
++		if (s) {
++			ref_system = strsep(&str, ".");
++			ref_event = strsep(&str, ".");
++			ref_var = str;
++		}
++	}
++
++	hist_field = parse_var_ref(ref_system, ref_event, ref_var);
++	if (hist_field) {
++		hist_data->var_refs[hist_data->n_var_refs] = hist_field;
++		hist_field->var_ref_idx = hist_data->n_var_refs++;
++		return hist_field;
++	}
++
+ 	field = parse_field(hist_data, file, str, flags);
+ 	if (IS_ERR(field)) {
+ 		ret = PTR_ERR(field);
+@@ -885,6 +1310,9 @@ static struct hist_field *parse_expr(str
+ 		goto free;
+ 	}
+ 
++	operand1->read_once = true;
++	operand2->read_once = true;
++
+ 	expr->operands[0] = operand1;
+ 	expr->operands[1] = operand2;
+ 	expr->operator = field_op;
+@@ -926,43 +1354,6 @@ static int create_hitcount_val(struct hi
+ 	return 0;
+ }
+ 
+-static struct hist_field *find_var_field(struct hist_trigger_data *hist_data,
+-					 const char *var_name)
+-{
+-	struct hist_field *hist_field, *found = NULL;
+-	int i;
+-
+-	for_each_hist_field(i, hist_data) {
+-		hist_field = hist_data->fields[i];
+-		if (hist_field && hist_field->flags & HIST_FIELD_FL_VAR &&
+-		    strcmp(hist_field->var.name, var_name) == 0) {
+-			found = hist_field;
+-			break;
+-		}
+-	}
+-
+-	return found;
+-}
+-
+-static struct hist_field *find_var(struct trace_event_file *file,
+-				   const char *var_name)
+-{
+-	struct hist_trigger_data *hist_data;
+-	struct event_trigger_data *test;
+-	struct hist_field *hist_field;
+-
+-	list_for_each_entry_rcu(test, &file->triggers, list) {
+-		if (test->cmd_ops->trigger_type == ETT_EVENT_HIST) {
+-			hist_data = test->private_data;
+-			hist_field = find_var_field(hist_data, var_name);
+-			if (hist_field)
+-				return hist_field;
+-		}
+-	}
+-
+-	return NULL;
+-}
+-
+ static int create_val_field(struct hist_trigger_data *hist_data,
+ 			    unsigned int val_idx,
+ 			    struct trace_event_file *file,
+@@ -1119,6 +1510,12 @@ static int create_key_field(struct hist_
+ 			}
+ 		}
+ 
++		if (hist_field->flags & HIST_FIELD_FL_VAR_REF) {
++			destroy_hist_field(hist_field, 0);
++			ret = -EINVAL;
++			goto out;
++		}
++
+ 		key_size = hist_field->size;
+ 	}
+ 
+@@ -1378,21 +1775,6 @@ static int create_tracing_map_fields(str
+ 	return 0;
+ }
+ 
+-static bool need_tracing_map_ops(struct hist_trigger_data *hist_data)
+-{
+-	struct hist_field *key_field;
+-	unsigned int i;
+-
+-	for_each_hist_key_field(i, hist_data) {
+-		key_field = hist_data->fields[i];
+-
+-		if (key_field->flags & HIST_FIELD_FL_EXECNAME)
+-			return true;
+-	}
+-
+-	return false;
+-}
+-
+ static struct hist_trigger_data *
+ create_hist_data(unsigned int map_bits,
+ 		 struct hist_trigger_attrs *attrs,
+@@ -1418,8 +1800,7 @@ create_hist_data(unsigned int map_bits,
+ 	if (ret)
+ 		goto free;
+ 
+-	if (need_tracing_map_ops(hist_data))
+-		map_ops = &hist_trigger_elt_comm_ops;
++	map_ops = &hist_trigger_elt_data_ops;
+ 
+ 	hist_data->map = tracing_map_create(map_bits, hist_data->key_size,
+ 					    map_ops, hist_data);
+@@ -1433,10 +1814,6 @@ create_hist_data(unsigned int map_bits,
+ 	if (ret)
+ 		goto free;
+ 
+-	ret = tracing_map_init(hist_data->map);
+-	if (ret)
+-		goto free;
+-
+ 	hist_data->event_file = file;
+  out:
+ 	return hist_data;
+@@ -1452,15 +1829,20 @@ create_hist_data(unsigned int map_bits,
+ 
+ static void hist_trigger_elt_update(struct hist_trigger_data *hist_data,
+ 				    struct tracing_map_elt *elt, void *rec,
+-				    struct ring_buffer_event *rbe)
++				    struct ring_buffer_event *rbe,
++				    u64 *var_ref_vals)
+ {
++	struct hist_elt_data *elt_data;
+ 	struct hist_field *hist_field;
+ 	unsigned int i, var_idx;
+ 	u64 hist_val;
+ 
++	elt_data = elt->private_data;
++	elt_data->var_ref_vals = var_ref_vals;
++
+ 	for_each_hist_val_field(i, hist_data) {
+ 		hist_field = hist_data->fields[i];
+-		hist_val = hist_field->fn(hist_field, rbe, rec);
++		hist_val = hist_field->fn(hist_field, elt, rbe, rec);
+ 		if (hist_field->flags & HIST_FIELD_FL_VAR) {
+ 			var_idx = hist_field->var.idx;
+ 			tracing_map_set_var(elt, var_idx, hist_val);
+@@ -1473,7 +1855,7 @@ static void hist_trigger_elt_update(stru
+ 	for_each_hist_key_field(i, hist_data) {
+ 		hist_field = hist_data->fields[i];
+ 		if (hist_field->flags & HIST_FIELD_FL_VAR) {
+-			hist_val = hist_field->fn(hist_field, rbe, rec);
++			hist_val = hist_field->fn(hist_field, elt, rbe, rec);
+ 			var_idx = hist_field->var.idx;
+ 			tracing_map_set_var(elt, var_idx, hist_val);
+ 		}
+@@ -1510,10 +1892,11 @@ static void event_hist_trigger(struct ev
+ 	struct hist_trigger_data *hist_data = data->private_data;
+ 	bool use_compound_key = (hist_data->n_keys > 1);
+ 	unsigned long entries[HIST_STACKTRACE_DEPTH];
++	u64 var_ref_vals[TRACING_MAP_VARS_MAX];
+ 	char compound_key[HIST_KEY_SIZE_MAX];
++	struct tracing_map_elt *elt = NULL;
+ 	struct stack_trace stacktrace;
+ 	struct hist_field *key_field;
+-	struct tracing_map_elt *elt;
+ 	u64 field_contents;
+ 	void *key = NULL;
+ 	unsigned int i;
+@@ -1534,7 +1917,7 @@ static void event_hist_trigger(struct ev
+ 
+ 			key = entries;
+ 		} else {
+-			field_contents = key_field->fn(key_field, rec, rbe);
++			field_contents = key_field->fn(key_field, elt, rbe, rec);
+ 			if (key_field->flags & HIST_FIELD_FL_STRING) {
+ 				key = (void *)(unsigned long)field_contents;
+ 				use_compound_key = true;
+@@ -1549,9 +1932,15 @@ static void event_hist_trigger(struct ev
+ 	if (use_compound_key)
+ 		key = compound_key;
+ 
++	if (hist_data->n_var_refs &&
++	    !resolve_var_refs(hist_data, key, var_ref_vals, false))
++		return;
++
+ 	elt = tracing_map_insert(hist_data->map, key);
+-	if (elt)
+-		hist_trigger_elt_update(hist_data, elt, rec, rbe);
++	if (!elt)
++		return;
++
++	hist_trigger_elt_update(hist_data, elt, rec, rbe, var_ref_vals);
+ }
+ 
+ static void hist_trigger_stacktrace_print(struct seq_file *m,
+@@ -1608,7 +1997,8 @@ hist_trigger_entry_print(struct seq_file
+ 			seq_printf(m, "%s: [%llx] %-55s", field_name,
+ 				   uval, str);
+ 		} else if (key_field->flags & HIST_FIELD_FL_EXECNAME) {
+-			char *comm = elt->private_data;
++			struct hist_elt_data *elt_data = elt->private_data;
++			char *comm = elt_data->comm;
+ 
+ 			uval = *(u64 *)(key + key_field->offset);
+ 			seq_printf(m, "%s: %-16s[%10llu]", field_name,
+@@ -1653,7 +2043,8 @@ hist_trigger_entry_print(struct seq_file
+ 		field_name = hist_field_name(hist_data->fields[i], 0);
+ 
+ 		if (hist_data->fields[i]->flags & HIST_FIELD_FL_VAR ||
+-		    hist_data->fields[i]->flags & HIST_FIELD_FL_EXPR)
++		    hist_data->fields[i]->flags & HIST_FIELD_FL_EXPR ||
++		    hist_data->fields[i]->flags & HIST_FIELD_FL_VAR_REF)
+ 			continue;
+ 
+ 		if (hist_data->fields[i]->flags & HIST_FIELD_FL_HEX) {
+@@ -1925,7 +2316,11 @@ static void event_hist_trigger_free(stru
+ 	if (!data->ref) {
+ 		if (data->name)
+ 			del_named_trigger(data);
++
+ 		trigger_data_free(data);
++
++		remove_hist_vars(hist_data);
++
+ 		destroy_hist_data(hist_data);
+ 	}
+ }
+@@ -2139,23 +2534,55 @@ static int hist_register_trigger(char *g
+ 			goto out;
+ 	}
+ 
+-	list_add_rcu(&data->list, &file->triggers);
+ 	ret++;
+ 
+-	update_cond_flag(file);
+-
+ 	if (hist_data->enable_timestamps)
+ 		tracing_set_time_stamp_abs(file->tr, true);
++ out:
++	return ret;
++}
++
++static int hist_trigger_enable(struct event_trigger_data *data,
++			       struct trace_event_file *file)
++{
++	int ret = 0;
++
++	list_add_rcu(&data->list, &file->triggers);
++
++	update_cond_flag(file);
+ 
+ 	if (trace_event_trigger_enable_disable(file, 1) < 0) {
+ 		list_del_rcu(&data->list);
+ 		update_cond_flag(file);
+ 		ret--;
+ 	}
+- out:
++
+ 	return ret;
+ }
+ 
++static bool hist_trigger_check_refs(struct event_trigger_data *data,
++				    struct trace_event_file *file)
++{
++	struct hist_trigger_data *hist_data = data->private_data;
++	struct event_trigger_data *test, *named_data = NULL;
++
++	if (hist_data->attrs->name)
++		named_data = find_named_trigger(hist_data->attrs->name);
++
++	list_for_each_entry_rcu(test, &file->triggers, list) {
++		if (test->cmd_ops->trigger_type == ETT_EVENT_HIST) {
++			if (!hist_trigger_match(data, test, named_data, false))
++				continue;
++			hist_data = test->private_data;
++			if (check_var_refs(hist_data))
++				return true;
++			break;
++		}
++	}
++
++	return false;
++}
++
+ static void hist_unregister_trigger(char *glob, struct event_trigger_ops *ops,
+ 				    struct event_trigger_data *data,
+ 				    struct trace_event_file *file)
+@@ -2186,10 +2613,32 @@ static void hist_unregister_trigger(char
+ 		tracing_set_time_stamp_abs(file->tr, false);
+ }
+ 
++static bool hist_file_check_refs(struct trace_event_file *file)
++{
++	struct hist_trigger_data *hist_data;
++	struct event_trigger_data *test;
++
++	printk("func: %s\n", __func__);
++
++	list_for_each_entry_rcu(test, &file->triggers, list) {
++		if (test->cmd_ops->trigger_type == ETT_EVENT_HIST) {
++			hist_data = test->private_data;
++			if (check_var_refs(hist_data))
++				return true;
++			break;
++		}
++	}
++
++	return false;
++}
++
+ static void hist_unreg_all(struct trace_event_file *file)
+ {
+ 	struct event_trigger_data *test, *n;
+ 
++	if (hist_file_check_refs(file))
++	    return;
++
+ 	list_for_each_entry_safe(test, n, &file->triggers, list) {
+ 		if (test->cmd_ops->trigger_type == ETT_EVENT_HIST) {
+ 			list_del_rcu(&test->list);
+@@ -2262,6 +2711,11 @@ static int event_hist_trigger_func(struc
+ 	}
+ 
+ 	if (remove) {
++		if (hist_trigger_check_refs(trigger_data, file)) {
++			ret = -EBUSY;
++			goto out_free;
++		}
++
+ 		cmd_ops->unreg(glob+1, trigger_ops, trigger_data, file);
+ 		ret = 0;
+ 		goto out_free;
+@@ -2279,14 +2733,33 @@ static int event_hist_trigger_func(struc
+ 		goto out_free;
+ 	} else if (ret < 0)
+ 		goto out_free;
++
++	if (get_named_trigger_data(trigger_data))
++		goto enable;
++
++	if (has_hist_vars(hist_data))
++		save_hist_vars(hist_data);
++
++	ret = tracing_map_init(hist_data->map);
++	if (ret)
++		goto out_unreg;
++enable:
++	ret = hist_trigger_enable(trigger_data, file);
++	if (ret)
++		goto out_unreg;
++
+ 	/* Just return zero, not the number of registered triggers */
+ 	ret = 0;
+  out:
+ 	return ret;
++ out_unreg:
++	cmd_ops->unreg(glob+1, trigger_ops, trigger_data, file);
+  out_free:
+ 	if (cmd_ops->set_filter)
+ 		cmd_ops->set_filter(NULL, trigger_data, NULL);
+ 
++	remove_hist_vars(hist_data);
++
+ 	kfree(trigger_data);
+ 
+ 	destroy_hist_data(hist_data);
+--- a/kernel/trace/trace_events_trigger.c
++++ b/kernel/trace/trace_events_trigger.c
+@@ -919,6 +919,12 @@ void set_named_trigger_data(struct event
+ 	data->named_data = named_data;
+ }
+ 
++struct event_trigger_data *
++get_named_trigger_data(struct event_trigger_data *data)
++{
++	return data->named_data;
++}
++
+ static void
+ traceon_trigger(struct event_trigger_data *data, void *rec,
+ 		struct ring_buffer_event *event)
