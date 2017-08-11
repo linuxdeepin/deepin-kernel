@@ -1,0 +1,51 @@
+From: Willem de Bruijn <willemb@google.com>
+Date: Thu, 10 Aug 2017 12:41:58 -0400
+Subject: packet: fix tp_reserve race in packet_set_ring
+Origin: https://git.kernel.org/linus/c27927e372f0785f3303e8fad94b85945e2c97b7
+Bug-Debian-Security: https://security-tracker.debian.org/tracker/CVE-2017-1000111
+
+Updates to tp_reserve can race with reads of the field in
+packet_set_ring. Avoid this by holding the socket lock during
+updates in setsockopt PACKET_RESERVE.
+
+This bug was discovered by syzkaller.
+
+Fixes: 8913336a7e8d ("packet: add PACKET_RESERVE sockopt")
+Reported-by: Andrey Konovalov <andreyknvl@google.com>
+Signed-off-by: Willem de Bruijn <willemb@google.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ net/packet/af_packet.c | 13 +++++++++----
+ 1 file changed, 9 insertions(+), 4 deletions(-)
+
+diff --git a/net/packet/af_packet.c b/net/packet/af_packet.c
+index 0615c2a950fa..008a45ca3112 100644
+--- a/net/packet/af_packet.c
++++ b/net/packet/af_packet.c
+@@ -3700,14 +3700,19 @@ packet_setsockopt(struct socket *sock, int level, int optname, char __user *optv
+ 
+ 		if (optlen != sizeof(val))
+ 			return -EINVAL;
+-		if (po->rx_ring.pg_vec || po->tx_ring.pg_vec)
+-			return -EBUSY;
+ 		if (copy_from_user(&val, optval, sizeof(val)))
+ 			return -EFAULT;
+ 		if (val > INT_MAX)
+ 			return -EINVAL;
+-		po->tp_reserve = val;
+-		return 0;
++		lock_sock(sk);
++		if (po->rx_ring.pg_vec || po->tx_ring.pg_vec) {
++			ret = -EBUSY;
++		} else {
++			po->tp_reserve = val;
++			ret = 0;
++		}
++		release_sock(sk);
++		return ret;
+ 	}
+ 	case PACKET_LOSS:
+ 	{
+-- 
+2.11.0
+
