@@ -1,0 +1,458 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Sat, 22 Jul 2017 01:14:38 +0100
+Subject: Revert "gpu: host1x: Add IOMMU support"
+Forwarded: no
+
+This reverts commit 404bfb78daf3bedafb0bfab24947059575cbea3d, which
+resulted in a build failure:
+
+drivers/gpu/host1x/cdma.c: In function 'host1x_pushbuffer_init':
+drivers/gpu/host1x/cdma.c:94:48: error: passing argument 3 of 'dma_alloc_wc' from incompatible pointer type [-Werror=incompatible-pointer-types]
+   pb->mapped = dma_alloc_wc(host1x->dev, size, &pb->phys,
+                                                ^
+In file included from drivers/gpu/host1x/cdma.c:22:0:
+include/linux/dma-mapping.h:773:21: note: expected 'dma_addr_t * {aka long long unsigned int *}' but argument is of type 'phys_addr_t * {aka unsigned int *}'
+ static inline void *dma_alloc_wc(struct device *dev, size_t size,
+                     ^~~~~~~~~~~~
+
+This code is mixing up dma_addr_t and phys_addr_t, and this looks had
+to avoid when combining the two address mapping APIs.  But with XEN
+enabled and ARM_LPAE not enabled, as in the armmp config, dma_addr_t
+is 64-bit while phys_addr_t is 32-bit.
+
+---
+--- a/drivers/gpu/host1x/cdma.c
++++ b/drivers/gpu/host1x/cdma.c
+@@ -51,15 +51,9 @@ static void host1x_pushbuffer_destroy(st
+ 	struct host1x_cdma *cdma = pb_to_cdma(pb);
+ 	struct host1x *host1x = cdma_to_host1x(cdma);
+ 
+-	if (!pb->phys)
+-		return;
+-
+-	if (host1x->domain) {
+-		iommu_unmap(host1x->domain, pb->dma, pb->alloc_size);
+-		free_iova(&host1x->iova, iova_pfn(&host1x->iova, pb->dma));
+-	}
+-
+-	dma_free_wc(host1x->dev, pb->alloc_size, pb->mapped, pb->phys);
++	if (pb->phys != 0)
++		dma_free_wc(host1x->dev, pb->size_bytes + 4, pb->mapped,
++			    pb->phys);
+ 
+ 	pb->mapped = NULL;
+ 	pb->phys = 0;
+@@ -72,64 +66,28 @@ static int host1x_pushbuffer_init(struct
+ {
+ 	struct host1x_cdma *cdma = pb_to_cdma(pb);
+ 	struct host1x *host1x = cdma_to_host1x(cdma);
+-	struct iova *alloc;
+-	u32 size;
+-	int err;
+ 
+ 	pb->mapped = NULL;
+ 	pb->phys = 0;
+-	pb->size = HOST1X_PUSHBUFFER_SLOTS * 8;
+-
+-	size = pb->size + 4;
++	pb->size_bytes = HOST1X_PUSHBUFFER_SLOTS * 8;
+ 
+ 	/* initialize buffer pointers */
+-	pb->fence = pb->size - 8;
++	pb->fence = pb->size_bytes - 8;
+ 	pb->pos = 0;
+ 
+-	if (host1x->domain) {
+-		unsigned long shift;
+-
+-		size = iova_align(&host1x->iova, size);
+-
+-		pb->mapped = dma_alloc_wc(host1x->dev, size, &pb->phys,
+-					  GFP_KERNEL);
+-		if (!pb->mapped)
+-			return -ENOMEM;
+-
+-		shift = iova_shift(&host1x->iova);
+-		alloc = alloc_iova(&host1x->iova, size >> shift,
+-				   host1x->iova_end >> shift, true);
+-		if (!alloc) {
+-			err = -ENOMEM;
+-			goto iommu_free_mem;
+-		}
+-
+-		pb->dma = iova_dma_addr(&host1x->iova, alloc);
+-		err = iommu_map(host1x->domain, pb->dma, pb->phys, size,
+-				IOMMU_READ);
+-		if (err)
+-			goto iommu_free_iova;
+-	} else {
+-		pb->mapped = dma_alloc_wc(host1x->dev, size, &pb->phys,
+-					  GFP_KERNEL);
+-		if (!pb->mapped)
+-			return -ENOMEM;
+-
+-		pb->dma = pb->phys;
+-	}
+-
+-	pb->alloc_size = size;
++	/* allocate and map pushbuffer memory */
++	pb->mapped = dma_alloc_wc(host1x->dev, pb->size_bytes + 4, &pb->phys,
++				  GFP_KERNEL);
++	if (!pb->mapped)
++		goto fail;
+ 
+ 	host1x_hw_pushbuffer_init(host1x, pb);
+ 
+ 	return 0;
+ 
+-iommu_free_iova:
+-	__free_iova(&host1x->iova, alloc);
+-iommu_free_mem:
+-	dma_free_wc(host1x->dev, pb->alloc_size, pb->mapped, pb->phys);
+-
+-	return err;
++fail:
++	host1x_pushbuffer_destroy(pb);
++	return -ENOMEM;
+ }
+ 
+ /*
+@@ -143,7 +101,7 @@ static void host1x_pushbuffer_push(struc
+ 	WARN_ON(pb->pos == pb->fence);
+ 	*(p++) = op1;
+ 	*(p++) = op2;
+-	pb->pos = (pb->pos + 8) & (pb->size - 1);
++	pb->pos = (pb->pos + 8) & (pb->size_bytes - 1);
+ }
+ 
+ /*
+@@ -153,7 +111,7 @@ static void host1x_pushbuffer_push(struc
+ static void host1x_pushbuffer_pop(struct push_buffer *pb, unsigned int slots)
+ {
+ 	/* Advance the next write position */
+-	pb->fence = (pb->fence + slots * 8) & (pb->size - 1);
++	pb->fence = (pb->fence + slots * 8) & (pb->size_bytes - 1);
+ }
+ 
+ /*
+@@ -161,7 +119,7 @@ static void host1x_pushbuffer_pop(struct
+  */
+ static u32 host1x_pushbuffer_space(struct push_buffer *pb)
+ {
+-	return ((pb->fence - pb->pos) & (pb->size - 1)) / 8;
++	return ((pb->fence - pb->pos) & (pb->size_bytes - 1)) / 8;
+ }
+ 
+ /*
+--- a/drivers/gpu/host1x/cdma.h
++++ b/drivers/gpu/host1x/cdma.h
+@@ -43,12 +43,10 @@ struct host1x_job;
+ 
+ struct push_buffer {
+ 	void *mapped;			/* mapped pushbuffer memory */
+-	dma_addr_t dma;			/* device address of pushbuffer */
+-	phys_addr_t phys;		/* physical address of pushbuffer */
++	dma_addr_t phys;		/* physical address of pushbuffer */
+ 	u32 fence;			/* index we've written */
+ 	u32 pos;			/* index to write to */
+-	u32 size;
+-	u32 alloc_size;
++	u32 size_bytes;
+ };
+ 
+ struct buffer_timeout {
+--- a/drivers/gpu/host1x/dev.c
++++ b/drivers/gpu/host1x/dev.c
+@@ -27,7 +27,6 @@
+ 
+ #define CREATE_TRACE_POINTS
+ #include <trace/events/host1x.h>
+-#undef CREATE_TRACE_POINTS
+ 
+ #include "bus.h"
+ #include "channel.h"
+@@ -177,37 +176,16 @@ static int host1x_probe(struct platform_
+ 		return err;
+ 	}
+ 
+-	if (iommu_present(&platform_bus_type)) {
+-		struct iommu_domain_geometry *geometry;
+-		unsigned long order;
+-
+-		host->domain = iommu_domain_alloc(&platform_bus_type);
+-		if (!host->domain)
+-			return -ENOMEM;
+-
+-		err = iommu_attach_device(host->domain, &pdev->dev);
+-		if (err)
+-			goto fail_free_domain;
+-
+-		geometry = &host->domain->geometry;
+-
+-		order = __ffs(host->domain->pgsize_bitmap);
+-		init_iova_domain(&host->iova, 1UL << order,
+-				 geometry->aperture_start >> order,
+-				 geometry->aperture_end >> order);
+-		host->iova_end = geometry->aperture_end;
+-	}
+-
+ 	err = host1x_channel_list_init(host);
+ 	if (err) {
+ 		dev_err(&pdev->dev, "failed to initialize channel list\n");
+-		goto fail_detach_device;
++		return err;
+ 	}
+ 
+ 	err = clk_prepare_enable(host->clk);
+ 	if (err < 0) {
+ 		dev_err(&pdev->dev, "failed to enable clock\n");
+-		goto fail_detach_device;
++		return err;
+ 	}
+ 
+ 	err = reset_control_deassert(host->rst);
+@@ -244,15 +222,6 @@ fail_reset_assert:
+ 	reset_control_assert(host->rst);
+ fail_unprepare_disable:
+ 	clk_disable_unprepare(host->clk);
+-fail_detach_device:
+-	if (host->domain) {
+-		put_iova_domain(&host->iova);
+-		iommu_detach_device(host->domain, &pdev->dev);
+-	}
+-fail_free_domain:
+-	if (host->domain)
+-		iommu_domain_free(host->domain);
+-
+ 	return err;
+ }
+ 
+@@ -266,12 +235,6 @@ static int host1x_remove(struct platform
+ 	reset_control_assert(host->rst);
+ 	clk_disable_unprepare(host->clk);
+ 
+-	if (host->domain) {
+-		put_iova_domain(&host->iova);
+-		iommu_detach_device(host->domain, &pdev->dev);
+-		iommu_domain_free(host->domain);
+-	}
+-
+ 	return 0;
+ }
+ 
+--- a/drivers/gpu/host1x/dev.h
++++ b/drivers/gpu/host1x/dev.h
+@@ -18,8 +18,6 @@
+ #define HOST1X_DEV_H
+ 
+ #include <linux/device.h>
+-#include <linux/iommu.h>
+-#include <linux/iova.h>
+ #include <linux/platform_device.h>
+ #include <linux/reset.h>
+ 
+@@ -112,10 +110,6 @@ struct host1x {
+ 	struct clk *clk;
+ 	struct reset_control *rst;
+ 
+-	struct iommu_domain *domain;
+-	struct iova_domain iova;
+-	dma_addr_t iova_end;
+-
+ 	struct mutex intr_mutex;
+ 	int intr_syncpt_irq;
+ 
+--- a/drivers/gpu/host1x/hw/cdma_hw.c
++++ b/drivers/gpu/host1x/hw/cdma_hw.c
+@@ -30,7 +30,7 @@
+  */
+ static void push_buffer_init(struct push_buffer *pb)
+ {
+-	*(u32 *)(pb->mapped + pb->size) = host1x_opcode_restart(0);
++	*(u32 *)(pb->mapped + pb->size_bytes) = host1x_opcode_restart(0);
+ }
+ 
+ /*
+@@ -55,8 +55,8 @@ static void cdma_timeout_cpu_incr(struct
+ 		*(p++) = HOST1X_OPCODE_NOP;
+ 		*(p++) = HOST1X_OPCODE_NOP;
+ 		dev_dbg(host1x->dev, "%s: NOP at %pad+%#x\n", __func__,
+-			&pb->dma, getptr);
+-		getptr = (getptr + 8) & (pb->size - 1);
++			&pb->phys, getptr);
++		getptr = (getptr + 8) & (pb->size_bytes - 1);
+ 	}
+ 
+ 	wmb();
+@@ -78,9 +78,10 @@ static void cdma_start(struct host1x_cdm
+ 			 HOST1X_CHANNEL_DMACTRL);
+ 
+ 	/* set base, put and end pointer */
+-	host1x_ch_writel(ch, cdma->push_buffer.dma, HOST1X_CHANNEL_DMASTART);
++	host1x_ch_writel(ch, cdma->push_buffer.phys, HOST1X_CHANNEL_DMASTART);
+ 	host1x_ch_writel(ch, cdma->push_buffer.pos, HOST1X_CHANNEL_DMAPUT);
+-	host1x_ch_writel(ch, cdma->push_buffer.dma + cdma->push_buffer.size + 4,
++	host1x_ch_writel(ch, cdma->push_buffer.phys +
++			 cdma->push_buffer.size_bytes + 4,
+ 			 HOST1X_CHANNEL_DMAEND);
+ 
+ 	/* reset GET */
+@@ -114,8 +115,9 @@ static void cdma_timeout_restart(struct
+ 			 HOST1X_CHANNEL_DMACTRL);
+ 
+ 	/* set base, end pointer (all of memory) */
+-	host1x_ch_writel(ch, cdma->push_buffer.dma, HOST1X_CHANNEL_DMASTART);
+-	host1x_ch_writel(ch, cdma->push_buffer.dma + cdma->push_buffer.size,
++	host1x_ch_writel(ch, cdma->push_buffer.phys, HOST1X_CHANNEL_DMASTART);
++	host1x_ch_writel(ch, cdma->push_buffer.phys +
++			 cdma->push_buffer.size_bytes,
+ 			 HOST1X_CHANNEL_DMAEND);
+ 
+ 	/* set GET, by loading the value in PUT (then reset GET) */
+--- a/drivers/gpu/host1x/job.c
++++ b/drivers/gpu/host1x/job.c
+@@ -174,10 +174,9 @@ static int do_waitchks(struct host1x_job
+ 	return 0;
+ }
+ 
+-static unsigned int pin_job(struct host1x *host, struct host1x_job *job)
++static unsigned int pin_job(struct host1x_job *job)
+ {
+ 	unsigned int i;
+-	int err;
+ 
+ 	job->num_unpins = 0;
+ 
+@@ -187,16 +186,12 @@ static unsigned int pin_job(struct host1
+ 		dma_addr_t phys_addr;
+ 
+ 		reloc->target.bo = host1x_bo_get(reloc->target.bo);
+-		if (!reloc->target.bo) {
+-			err = -EINVAL;
++		if (!reloc->target.bo)
+ 			goto unpin;
+-		}
+ 
+ 		phys_addr = host1x_bo_pin(reloc->target.bo, &sgt);
+-		if (!phys_addr) {
+-			err = -EINVAL;
++		if (!phys_addr)
+ 			goto unpin;
+-		}
+ 
+ 		job->addr_phys[job->num_unpins] = phys_addr;
+ 		job->unpins[job->num_unpins].bo = reloc->target.bo;
+@@ -206,67 +201,28 @@ static unsigned int pin_job(struct host1
+ 
+ 	for (i = 0; i < job->num_gathers; i++) {
+ 		struct host1x_job_gather *g = &job->gathers[i];
+-		size_t gather_size = 0;
+-		struct scatterlist *sg;
+ 		struct sg_table *sgt;
+ 		dma_addr_t phys_addr;
+-		unsigned long shift;
+-		struct iova *alloc;
+-		unsigned int j;
+ 
+ 		g->bo = host1x_bo_get(g->bo);
+-		if (!g->bo) {
+-			err = -EINVAL;
++		if (!g->bo)
+ 			goto unpin;
+-		}
+ 
+ 		phys_addr = host1x_bo_pin(g->bo, &sgt);
+-		if (!phys_addr) {
+-			err = -EINVAL;
++		if (!phys_addr)
+ 			goto unpin;
+-		}
+-
+-		if (!IS_ENABLED(CONFIG_TEGRA_HOST1X_FIREWALL) && host->domain) {
+-			for_each_sg(sgt->sgl, sg, sgt->nents, j)
+-				gather_size += sg->length;
+-			gather_size = iova_align(&host->iova, gather_size);
+-
+-			shift = iova_shift(&host->iova);
+-			alloc = alloc_iova(&host->iova, gather_size >> shift,
+-					   host->iova_end >> shift, true);
+-			if (!alloc) {
+-				err = -ENOMEM;
+-				goto unpin;
+-			}
+-
+-			err = iommu_map_sg(host->domain,
+-					iova_dma_addr(&host->iova, alloc),
+-					sgt->sgl, sgt->nents, IOMMU_READ);
+-			if (err == 0) {
+-				__free_iova(&host->iova, alloc);
+-				err = -EINVAL;
+-				goto unpin;
+-			}
+-
+-			job->addr_phys[job->num_unpins] =
+-				iova_dma_addr(&host->iova, alloc);
+-			job->unpins[job->num_unpins].size = gather_size;
+-		} else {
+-			job->addr_phys[job->num_unpins] = phys_addr;
+-		}
+-
+-		job->gather_addr_phys[i] = job->addr_phys[job->num_unpins];
+ 
++		job->addr_phys[job->num_unpins] = phys_addr;
+ 		job->unpins[job->num_unpins].bo = g->bo;
+ 		job->unpins[job->num_unpins].sgt = sgt;
+ 		job->num_unpins++;
+ 	}
+ 
+-	return 0;
++	return job->num_unpins;
+ 
+ unpin:
+ 	host1x_job_unpin(job);
+-	return err;
++	return 0;
+ }
+ 
+ static int do_relocs(struct host1x_job *job, struct host1x_bo *cmdbuf)
+@@ -569,8 +525,8 @@ int host1x_job_pin(struct host1x_job *jo
+ 		host1x_syncpt_load(host->syncpt + i);
+ 
+ 	/* pin memory */
+-	err = pin_job(host, job);
+-	if (err)
++	err = pin_job(job);
++	if (!err)
+ 		goto out;
+ 
+ 	/* patch gathers */
+@@ -616,19 +572,11 @@ EXPORT_SYMBOL(host1x_job_pin);
+ 
+ void host1x_job_unpin(struct host1x_job *job)
+ {
+-	struct host1x *host = dev_get_drvdata(job->channel->dev->parent);
+ 	unsigned int i;
+ 
+ 	for (i = 0; i < job->num_unpins; i++) {
+ 		struct host1x_job_unpin_data *unpin = &job->unpins[i];
+ 
+-		if (!IS_ENABLED(CONFIG_TEGRA_HOST1X_FIREWALL) && host->domain) {
+-			iommu_unmap(host->domain, job->addr_phys[i],
+-				    unpin->size);
+-			free_iova(&host->iova,
+-				iova_pfn(&host->iova, job->addr_phys[i]));
+-		}
+-
+ 		host1x_bo_unpin(unpin->bo, unpin->sgt);
+ 		host1x_bo_put(unpin->bo);
+ 	}
+--- a/drivers/gpu/host1x/job.h
++++ b/drivers/gpu/host1x/job.h
+@@ -44,7 +44,6 @@ struct host1x_waitchk {
+ struct host1x_job_unpin_data {
+ 	struct host1x_bo *bo;
+ 	struct sg_table *sgt;
+-	size_t size;
+ };
+ 
+ /*

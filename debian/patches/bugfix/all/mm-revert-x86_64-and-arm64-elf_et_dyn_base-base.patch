@@ -1,0 +1,71 @@
+From: Kees Cook <keescook@chromium.org>
+Date: Mon, 07 Aug 2017 20:15:42 +0000
+Subject: mm: Revert x86_64 and arm64 ELF_ET_DYN_BASE base
+Origin: https://marc.info/?l=linux-arm-kernel&m=150213698426008&w=2
+Bug-Debian: https://bugs.debian.org/869090
+
+Moving the x86_64 and arm64 PIE base from 0x555555554000 to 0x000100000000
+broke AddressSanitizer. This is a partial revert of:
+
+  commit eab09532d400 ("binfmt_elf: use ELF_ET_DYN_BASE only for PIE")
+  commit 02445990a96e ("arm64: move ELF_ET_DYN_BASE to 4GB / 4MB")
+
+The AddressSanitizer tool has hard-coded expectations about where
+executable mappings are loaded. The motivation for changing the PIE
+base in the above commits was to avoid the Stack-Clash CVEs that
+allowed executable mappings to get too close to heap and stack. This
+was mainly a problem on 32-bit, but the 64-bit bases were moved too,
+in an effort to proactively protect those systems (proofs of concept
+do exist that show 64-bit collisions, but other recent changes to fix
+stack accounting and setuid behaviors will minimize the impact).
+
+The new 32-bit PIE base is fine for ASan (since it matches the ET_EXEC
+base), so only the 64-bit PIE base needs to be reverted to let x86 and
+arm64 ASan binaries run again. Future changes to the 64-bit PIE base on
+these architectures can be made optional once a more dynamic method for
+dealing with AddressSanitizer is found. (e.g. always loading PIE into
+the mmap region for marked binaries.)
+
+Reported-by: Kostya Serebryany <kcc@google.com>
+Cc: stable@vger.kernel.org
+Signed-off-by: Kees Cook <keescook@chromium.org>
+---
+ arch/arm64/include/asm/elf.h | 4 ++--
+ arch/x86/include/asm/elf.h   | 4 ++--
+ 2 files changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/arch/arm64/include/asm/elf.h b/arch/arm64/include/asm/elf.h
+index acae781f7359..3288c2b36731 100644
+--- a/arch/arm64/include/asm/elf.h
++++ b/arch/arm64/include/asm/elf.h
+@@ -114,10 +114,10 @@
+ 
+ /*
+  * This is the base location for PIE (ET_DYN with INTERP) loads. On
+- * 64-bit, this is raised to 4GB to leave the entire 32-bit address
++ * 64-bit, this is above 4GB to leave the entire 32-bit address
+  * space open for things that want to use the area for 32-bit pointers.
+  */
+-#define ELF_ET_DYN_BASE		0x100000000UL
++#define ELF_ET_DYN_BASE		(2 * TASK_SIZE_64 / 3)
+ 
+ #ifndef __ASSEMBLY__
+ 
+diff --git a/arch/x86/include/asm/elf.h b/arch/x86/include/asm/elf.h
+index 1c18d83d3f09..9aeb91935ce0 100644
+--- a/arch/x86/include/asm/elf.h
++++ b/arch/x86/include/asm/elf.h
+@@ -247,11 +247,11 @@ extern int force_personality32;
+ 
+ /*
+  * This is the base location for PIE (ET_DYN with INTERP) loads. On
+- * 64-bit, this is raised to 4GB to leave the entire 32-bit address
++ * 64-bit, this is above 4GB to leave the entire 32-bit address
+  * space open for things that want to use the area for 32-bit pointers.
+  */
+ #define ELF_ET_DYN_BASE		(mmap_is_ia32() ? 0x000400000UL : \
+-						  0x100000000UL)
++						  (TASK_SIZE / 3 * 2))
+ 
+ /* This yields a mask that user programs can use to figure out what
+    instruction set this CPU supports.  This could be done in user space,
