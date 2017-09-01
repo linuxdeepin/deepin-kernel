@@ -189,20 +189,23 @@ class CheckImage(object):
 
     def __call__(self, out):
         image = self.config_entry_build.get('image-file')
+        uncompressed_image = self.config_entry_build.get('uncompressed-image-file')
 
         if not image:
             # TODO: Bail out
             return 0
 
         image = os.path.join(self.dir, image)
+        if uncompressed_image:
+            uncompressed_image = os.path.join(self.dir, uncompressed_image)
 
         fail = 0
 
-        fail |= self.check_size(out, image)
+        fail |= self.check_size(out, image, uncompressed_image)
 
         return fail
 
-    def check_size(self, out, image):
+    def check_size(self, out, image, uncompressed_image):
         value = self.config_entry_image.get('check-size')
 
         if not value:
@@ -218,10 +221,6 @@ class CheckImage(object):
 
         size = os.stat(image).st_size + dtb_size
 
-        if size > value:
-            out.write('Image too large (%d > %d)!  Refusing to continue.\n' % (size, value))
-            return 1
-
         # 1% overhead is desirable in order to cope with growth
         # through the lifetime of a stable release. Warn if this is
         # not the case.
@@ -235,6 +234,21 @@ class CheckImage(object):
         else:
             out.write('Image fits.  ')
         out.write('Continuing.\n')
+
+        # Also check the uncompressed image
+        if uncompressed_image and self.config_entry_image.get('check-uncompressed-size'):
+            value = self.config_entry_image.get('check-uncompressed-size')
+            size = os.stat(uncompressed_image).st_size
+            usage = (float(size)/value) * 100.0
+            out.write('Uncompressed Image size %d/%d, using %.2f%%.  ' % (size, value, usage))
+            if size > value:
+                out.write('Too large.  Refusing to continue.\n')
+                return 1
+            elif usage >= 99.0:
+                out.write('Uncompressed Image Under 1%% space in %s.  ' % self.changelog.distribution)
+            else:
+                out.write('Uncompressed Image fits.  ')
+            out.write('Continuing.\n')
 
         return 0
 

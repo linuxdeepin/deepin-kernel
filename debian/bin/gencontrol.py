@@ -35,6 +35,7 @@ class Gencontrol(Base):
             'initramfs-generators': config.SchemaItemList(),
             'check-size': config.SchemaItemInteger(),
             'check-size-with-dtb': config.SchemaItemBoolean(),
+            'check-uncompressed-size': config.SchemaItemInteger(),
         },
         'relations': {
         },
