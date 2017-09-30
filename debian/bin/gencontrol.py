@@ -338,7 +338,7 @@ class Gencontrol(Base):
         for group in relations_compiler_build_dep:
             for item in group:
                 item.arches = [arch]
-        packages['source']['Build-Depends'].extend(relations_compiler_build_dep)
+        packages['source']['Build-Depends-Arch'].extend(relations_compiler_build_dep)
 
         image_fields = {'Description': PackageDescription()}
         for field in 'Depends', 'Provides', 'Suggests', 'Recommends', 'Conflicts', 'Breaks':
