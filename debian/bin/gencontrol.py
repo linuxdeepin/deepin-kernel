@@ -118,7 +118,7 @@ class Gencontrol(Base):
         if self.config.merge('packages').get('tools', True):
             packages.extend(self.process_packages(self.templates["control.tools"], self.vars))
 
-        self._substitute_file('lintian-overrides.perf', self.vars,
+        self._substitute_file('perf.lintian-overrides', self.vars,
                               'debian/linux-perf-%s.lintian-overrides' %
                               self.vars['version'])
 
@@ -499,7 +499,7 @@ class Gencontrol(Base):
             self._substitute_file('image.%s' % name, vars,
                                   'debian/%s.%s' % (image_main['Package'], name))
         if build_debug:
-            self._substitute_file('image-dbg.lintian-override', vars,
+            self._substitute_file('image-dbg.lintian-overrides', vars,
                                   'debian/linux-image-%s%s-dbg.lintian-overrides' %
                                   (vars['abiname'], vars['localversion']))
 
