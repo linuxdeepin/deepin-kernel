@@ -499,9 +499,11 @@ class Gencontrol(Base):
             self._substitute_file('image.%s' % name, vars,
                                   'debian/%s.%s' % (image_main['Package'], name))
         if build_debug:
-            self._substitute_file('image-dbg.lintian-overrides', vars,
-                                  'debian/linux-image-%s%s-dbg.lintian-overrides' %
+            debug_lintian_over = ('debian/linux-image-%s%s-dbg.lintian-overrides' %
                                   (vars['abiname'], vars['localversion']))
+            self._substitute_file('image-dbg.lintian-overrides', vars,
+                                  debug_lintian_over)
+            os.chmod(debug_lintian_over, 0o755)
 
     def process_changelog(self):
         act_upstream = self.changelog[0].version.upstream
