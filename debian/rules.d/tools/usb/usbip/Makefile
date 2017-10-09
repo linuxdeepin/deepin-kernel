@@ -17,6 +17,7 @@ all:
 		--with-tcp-wrappers \
 		--with-usbids-dir=/usr/share/misc \
 		--disable-shared \
+		--disable-static \
 		--host=$(shell dpkg-architecture -qDEB_HOST_GNU_TYPE)
 	$(MAKE)
 
