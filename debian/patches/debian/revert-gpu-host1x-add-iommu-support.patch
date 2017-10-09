@@ -20,6 +20,10 @@ to avoid when combining the two address mapping APIs.  But with XEN
 enabled and ARM_LPAE not enabled, as in the armmp config, dma_addr_t
 is 64-bit while phys_addr_t is 32-bit.
 
+It also reverts the commit fea20995976f4b2e8968f852a18e280487d42f0d
+"gpu: host1x: Free the IOMMU domain when there is no device to attach"
+which depends on it.
+
 ---
 --- a/drivers/gpu/host1x/cdma.c
 +++ b/drivers/gpu/host1x/cdma.c
@@ -171,7 +175,7 @@ is 64-bit while phys_addr_t is 32-bit.
  
  #include "bus.h"
  #include "channel.h"
-@@ -177,37 +176,16 @@ static int host1x_probe(struct platform_
+@@ -177,38 +176,11 @@ static int host1x_probe(struct platform_
  		return err;
  	}
  
@@ -184,8 +188,13 @@ is 64-bit while phys_addr_t is 32-bit.
 -			return -ENOMEM;
 -
 -		err = iommu_attach_device(host->domain, &pdev->dev);
--		if (err)
+-		if (err == -ENODEV) {
+-			iommu_domain_free(host->domain);
+-			host->domain = NULL;
+-			goto skip_iommu;
+-		} else if (err) {
 -			goto fail_free_domain;
+-		}
 -
 -		geometry = &host->domain->geometry;
 -
@@ -196,7 +205,9 @@ is 64-bit while phys_addr_t is 32-bit.
 -		host->iova_end = geometry->aperture_end;
 -	}
 -
- 	err = host1x_channel_list_init(host);
+-skip_iommu:
+ 	err = host1x_channel_list_init(&host->channel_list,
+ 				       host->info->nb_channels);
  	if (err) {
  		dev_err(&pdev->dev, "failed to initialize channel list\n");
 -		goto fail_detach_device;
@@ -204,17 +215,10 @@ is 64-bit while phys_addr_t is 32-bit.
  	}
  
  	err = clk_prepare_enable(host->clk);
- 	if (err < 0) {
- 		dev_err(&pdev->dev, "failed to enable clock\n");
--		goto fail_detach_device;
-+		return err;
- 	}
- 
- 	err = reset_control_deassert(host->rst);
-@@ -244,15 +222,6 @@ fail_reset_assert:
- 	reset_control_assert(host->rst);
- fail_unprepare_disable:
+@@ -253,15 +225,6 @@ fail_unprepare_disable:
  	clk_disable_unprepare(host->clk);
+ fail_free_channels:
+ 	host1x_channel_list_free(&host->channel_list);
 -fail_detach_device:
 -	if (host->domain) {
 -		put_iova_domain(&host->iova);
@@ -227,7 +231,7 @@ is 64-bit while phys_addr_t is 32-bit.
  	return err;
  }
  
-@@ -266,12 +235,6 @@ static int host1x_remove(struct platform
+@@ -275,12 +238,6 @@ static int host1x_remove(struct platform
  	reset_control_assert(host->rst);
  	clk_disable_unprepare(host->clk);
  
@@ -311,7 +315,7 @@ is 64-bit while phys_addr_t is 32-bit.
  	/* set GET, by loading the value in PUT (then reset GET) */
 --- a/drivers/gpu/host1x/job.c
 +++ b/drivers/gpu/host1x/job.c
-@@ -174,10 +174,9 @@ static int do_waitchks(struct host1x_job
+@@ -178,10 +178,9 @@ static int do_waitchks(struct host1x_job
  	return 0;
  }
  
@@ -323,7 +327,7 @@ is 64-bit while phys_addr_t is 32-bit.
  
  	job->num_unpins = 0;
  
-@@ -187,16 +186,12 @@ static unsigned int pin_job(struct host1
+@@ -191,16 +190,12 @@ static unsigned int pin_job(struct host1
  		dma_addr_t phys_addr;
  
  		reloc->target.bo = host1x_bo_get(reloc->target.bo);
@@ -342,7 +346,7 @@ is 64-bit while phys_addr_t is 32-bit.
  
  		job->addr_phys[job->num_unpins] = phys_addr;
  		job->unpins[job->num_unpins].bo = reloc->target.bo;
-@@ -206,67 +201,28 @@ static unsigned int pin_job(struct host1
+@@ -210,67 +205,28 @@ static unsigned int pin_job(struct host1
  
  	for (i = 0; i < job->num_gathers; i++) {
  		struct host1x_job_gather *g = &job->gathers[i];
@@ -414,8 +418,8 @@ is 64-bit while phys_addr_t is 32-bit.
 +	return 0;
  }
  
- static int do_relocs(struct host1x_job *job, struct host1x_bo *cmdbuf)
-@@ -569,8 +525,8 @@ int host1x_job_pin(struct host1x_job *jo
+ static int do_relocs(struct host1x_job *job, struct host1x_job_gather *g)
+@@ -639,8 +595,8 @@ int host1x_job_pin(struct host1x_job *jo
  		host1x_syncpt_load(host->syncpt + i);
  
  	/* pin memory */
@@ -425,8 +429,8 @@ is 64-bit while phys_addr_t is 32-bit.
 +	if (!err)
  		goto out;
  
- 	/* patch gathers */
-@@ -616,19 +572,11 @@ EXPORT_SYMBOL(host1x_job_pin);
+ 	if (IS_ENABLED(CONFIG_TEGRA_HOST1X_FIREWALL)) {
+@@ -688,19 +644,11 @@ EXPORT_SYMBOL(host1x_job_pin);
  
  void host1x_job_unpin(struct host1x_job *job)
  {
@@ -448,7 +452,7 @@ is 64-bit while phys_addr_t is 32-bit.
  	}
 --- a/drivers/gpu/host1x/job.h
 +++ b/drivers/gpu/host1x/job.h
-@@ -44,7 +44,6 @@ struct host1x_waitchk {
+@@ -30,7 +30,6 @@ struct host1x_job_gather {
  struct host1x_job_unpin_data {
  	struct host1x_bo *bo;
  	struct sg_table *sgt;

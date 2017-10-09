@@ -35,6 +35,7 @@ class Gencontrol(Base):
             'initramfs-generators': config.SchemaItemList(),
             'check-size': config.SchemaItemInteger(),
             'check-size-with-dtb': config.SchemaItemBoolean(),
+            'check-uncompressed-size': config.SchemaItemInteger(),
         },
         'relations': {
         },
@@ -118,7 +119,7 @@ class Gencontrol(Base):
         if self.config.merge('packages').get('tools', True):
             packages.extend(self.process_packages(self.templates["control.tools"], self.vars))
 
-        self._substitute_file('lintian-overrides.perf', self.vars,
+        self._substitute_file('perf.lintian-overrides', self.vars,
                               'debian/linux-perf-%s.lintian-overrides' %
                               self.vars['version'])
 
@@ -361,7 +362,7 @@ class Gencontrol(Base):
         for group in relations_compiler_build_dep:
             for item in group:
                 item.arches = [arch]
-        packages['source']['Build-Depends'].extend(relations_compiler_build_dep)
+        packages['source']['Build-Depends-Arch'].extend(relations_compiler_build_dep)
 
         image_fields = {'Description': PackageDescription()}
         for field in 'Depends', 'Provides', 'Suggests', 'Recommends', 'Conflicts', 'Breaks':
@@ -522,9 +523,11 @@ class Gencontrol(Base):
             self._substitute_file('image.%s' % name, vars,
                                   'debian/%s.%s' % (image_main['Package'], name))
         if build_debug:
-            self._substitute_file('image-dbg.lintian-override', vars,
-                                  'debian/linux-image-%s%s-dbg.lintian-overrides' %
+            debug_lintian_over = ('debian/linux-image-%s%s-dbg.lintian-overrides' %
                                   (vars['abiname'], vars['localversion']))
+            self._substitute_file('image-dbg.lintian-overrides', vars,
+                                  debug_lintian_over)
+            os.chmod(debug_lintian_over, 0o755)
 
     def process_changelog(self):
         act_upstream = self.changelog[0].version.upstream
