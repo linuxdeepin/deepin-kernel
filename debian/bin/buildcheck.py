@@ -139,9 +139,9 @@ class CheckAbi(object):
         ret = []
         for i in re.split(r'(\*\*?)', pattern):
             if i == '*':
-                ret.append(r'[^!]+')
+                ret.append(r'[^/]*')
             elif i == '**':
-                ret.append(r'.+')
+                ret.append(r'.*')
             elif i:
                 ret.append(re.escape(i))
         return re.compile('^' + ''.join(ret) + '$')
