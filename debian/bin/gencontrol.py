@@ -3,13 +3,15 @@
 import sys
 sys.path.append("debian/lib/python")
 
-import codecs
+import locale
 import errno
 import glob
 import io
 import os
 import os.path
 import subprocess
+
+locale.setlocale(locale.LC_CTYPE, "C.UTF-8")
 
 from debian_linux import config
 from debian_linux.debian import *
@@ -62,7 +64,7 @@ class Gencontrol(Base):
                 makeflags[dst] = data[src]
 
     def _substitute_file(self, template, vars, target, append=False):
-        with codecs.open(target, 'a' if append else 'w', 'utf-8') as f:
+        with open(target, 'a' if append else 'w') as f:
             f.write(self.substitute(self.templates[template], vars))
 
     def do_main_setup(self, vars, makeflags, extra):
@@ -237,9 +239,9 @@ class Gencontrol(Base):
                     stdout=subprocess.PIPE,
                     env=kw_env)
                 if not isinstance(kw_proc.stdout, io.IOBase):
-                    udeb_packages = read_control(io.open(kw_proc.stdout.fileno(), encoding='utf-8', closefd=False))
+                    udeb_packages = read_control(io.open(kw_proc.stdout.fileno(), closefd=False))
                 else:
-                    udeb_packages = read_control(io.TextIOWrapper(kw_proc.stdout, 'utf-8'))
+                    udeb_packages = read_control(io.TextIOWrapper(kw_proc.stdout))
                 kw_proc.wait()
                 if kw_proc.returncode != 0:
                     raise RuntimeError('kernel-wedge exited with code %d' %
@@ -573,7 +575,7 @@ class Gencontrol(Base):
         f.close()
 
     def write_tests_control(self):
-        self.write_rfc822(codecs.open("debian/tests/control", 'w', 'utf-8'),
+        self.write_rfc822(open("debian/tests/control", 'w'),
                           [self.tests_control])
 
 if __name__ == '__main__':
