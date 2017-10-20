@@ -22,6 +22,7 @@ SCRIPTS =  \
 	gen_initramfs_list.sh \
 	headers_install.sh \
 	kernel-doc \
+	ld-version.sh \
 	Lindent \
 	makelst \
 	mksysmap \
