@@ -1,0 +1,119 @@
+commit ccc91454e3d12f29c8318808a61cb130e0e7da43
+Author: Colin Ian King <colin.king@canonical.com>
+Date:   Mon Feb 6 15:21:31 2017 +0000
+
+    UBUNTU: SAUCE: md/raid6 algorithms: scale test duration for speedier boots
+    
+    The original code runs for a set run time based on 2^RAID6_TIME_JIFFIES_LG2.
+    The default kernel value for RAID6_TIME_JIFFIES_LG2 is 4, however, emperical
+    testing shows that a value of 3.5 is the sweet spot for getting consistent
+    benchmarking results and speeding up the run time of the benchmarking.
+    
+    To achieve 2^3.5 we use the following:
+       2^3.5 = 2^4 / 2^0.5
+             = 2^4 / sqrt(2)
+             = 2^4 * 0.707106781
+    
+    Too keep this as integer math that is as accurate as required and avoiding
+    overflow, this becomes:
+             = 2^4 * 181 / 256
+             = (2^4 * 181) >> 8
+    
+    We also need to scale down perf by the same factor, however, to
+    get a good approximate integer result without an overflow we scale
+    by 2^4.0 * sqrt(2) =
+             = 2 ^ 4 * 1.41421356237
+             = 2 ^ 4 * 1448 / 1024
+             = (2 ^ 4 * 1448) >> 10
+    
+    This has been tested on 2 AWS instances, a small t2 and a medium m3
+    with 30 boot tests each and compared to the same instances booted 30
+    times on an umodified kernel. In all results, we get the same
+    algorithms being selected and a 100% consistent result over the 30
+    boots, showing that this optimised jiffy timing scaling does not break
+    the original functionality.
+    
+    On the t2.small we see a saving of ~0.126 seconds and t3.medium a saving of
+    ~0.177 seconds.
+    
+    Tested on a 4 CPU VM on an 8 thread Xeon server; seeing a saving of ~0.33
+    seconds (average over 10 boots).
+    
+    Tested on a 8 thread Xeon server, seeing a saving of ~1.24 seconds (average
+    of 10 boots).
+    
+    The testing included double checking the algorithm chosen by the optimized
+    selection and seeing the same as pre-optimised version.
+    
+    Signed-off-by: Colin Ian King <colin.king@canonical.com>
+    Acked-by: Tim Gardner <tim.gardner@canonical.com>
+    Signed-off-by: Kamal Mostafa <kamal@canonical.com>
+    Signed-off-by: Tim Gardner <tim.gardner@canonical.com>
+
+diff --git a/lib/raid6/algos.c b/lib/raid6/algos.c
+index 476994723258..d3b16f43c39f 100644
+--- a/lib/raid6/algos.c
++++ b/lib/raid6/algos.c
+@@ -159,6 +159,10 @@ static inline const struct raid6_calls *raid6_choose_gen(
+ 
+ 	for (bestgenperf = 0, bestxorperf = 0, best = NULL, algo = raid6_algos; *algo; algo++) {
+ 		if (!best || (*algo)->prefer >= best->prefer) {
++			/* 2 ^ (RAID6_TIME_JIFFIES_LG2 - 0.5) */
++			const unsigned long raid6_time_jiffies =
++				((1 << RAID6_TIME_JIFFIES_LG2) * 181) >> 8;
++
+ 			if ((*algo)->valid && !(*algo)->valid())
+ 				continue;
+ 
+@@ -169,7 +173,7 @@ static inline const struct raid6_calls *raid6_choose_gen(
+ 			while ((j1 = jiffies) == j0)
+ 				cpu_relax();
+ 			while (time_before(jiffies,
+-					    j1 + (1<<RAID6_TIME_JIFFIES_LG2))) {
++					    j1 + raid6_time_jiffies)) {
+ 				(*algo)->gen_syndrome(disks, PAGE_SIZE, *dptrs);
+ 				perf++;
+ 			}
+@@ -180,7 +184,8 @@ static inline const struct raid6_calls *raid6_choose_gen(
+ 				best = *algo;
+ 			}
+ 			pr_info("raid6: %-8s gen() %5ld MB/s\n", (*algo)->name,
+-			       (perf*HZ) >> (20-16+RAID6_TIME_JIFFIES_LG2));
++			       (((perf*HZ) >>
++				(20-16+RAID6_TIME_JIFFIES_LG2)) * 1448) >> 10);
+ 
+ 			if (!(*algo)->xor_syndrome)
+ 				continue;
+@@ -192,7 +197,7 @@ static inline const struct raid6_calls *raid6_choose_gen(
+ 			while ((j1 = jiffies) == j0)
+ 				cpu_relax();
+ 			while (time_before(jiffies,
+-					    j1 + (1<<RAID6_TIME_JIFFIES_LG2))) {
++					    j1 + raid6_time_jiffies)) {
+ 				(*algo)->xor_syndrome(disks, start, stop,
+ 						      PAGE_SIZE, *dptrs);
+ 				perf++;
+@@ -203,17 +208,20 @@ static inline const struct raid6_calls *raid6_choose_gen(
+ 				bestxorperf = perf;
+ 
+ 			pr_info("raid6: %-8s xor() %5ld MB/s\n", (*algo)->name,
+-				(perf*HZ) >> (20-16+RAID6_TIME_JIFFIES_LG2+1));
++				(((perf*HZ) >>
++				 (20-16+RAID6_TIME_JIFFIES_LG2+1)) * 1448) >> 10);
+ 		}
+ 	}
+ 
+ 	if (best) {
+ 		pr_info("raid6: using algorithm %s gen() %ld MB/s\n",
+ 		       best->name,
+-		       (bestgenperf*HZ) >> (20-16+RAID6_TIME_JIFFIES_LG2));
++		       (((bestgenperf*HZ) >>
++			(20-16+RAID6_TIME_JIFFIES_LG2)) * 1448) >> 10);
+ 		if (best->xor_syndrome)
+ 			pr_info("raid6: .... xor() %ld MB/s, rmw enabled\n",
+-			       (bestxorperf*HZ) >> (20-16+RAID6_TIME_JIFFIES_LG2+1));
++			       (((bestxorperf*HZ) >>
++				(20-16+RAID6_TIME_JIFFIES_LG2+1)) * 1448) >> 10);
+ 		raid6_call = *best;
+ 	} else
+ 		pr_err("raid6: Yikes!  No algorithm found!\n");
