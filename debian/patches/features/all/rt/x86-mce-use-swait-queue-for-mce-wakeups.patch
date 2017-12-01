@@ -1,7 +1,7 @@
 Subject: x86/mce: use swait queue for mce wakeups
 From: Steven Rostedt <rostedt@goodmis.org>
 Date:	Fri, 27 Feb 2015 15:20:37 +0100
-Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.11/older/patches-4.11.9-rt7.tar.xz
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.14/older/patches-4.14.1-rt3.tar.xz
 
 We had a customer report a lockup on a 3.0-rt kernel that had the
 following backtrace:
@@ -56,43 +56,31 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
 [wagi: use work-simple framework to defer work to a kthread]
 Signed-off-by: Daniel Wagner <daniel.wagner@bmw-carit.de>
 ---
- arch/x86/kernel/cpu/mcheck/mce.c |   68 ++++++++++++++++++++++++++++++++-------
- 1 file changed, 56 insertions(+), 12 deletions(-)
+ arch/x86/kernel/cpu/mcheck/dev-mcelog.c |   37 +++++++++++++++++++++++++++++---
+ 1 file changed, 34 insertions(+), 3 deletions(-)
 
---- a/arch/x86/kernel/cpu/mcheck/mce.c
-+++ b/arch/x86/kernel/cpu/mcheck/mce.c
-@@ -42,6 +42,7 @@
- #include <linux/irq_work.h>
- #include <linux/export.h>
- #include <linux/jiffies.h>
+--- a/arch/x86/kernel/cpu/mcheck/dev-mcelog.c
++++ b/arch/x86/kernel/cpu/mcheck/dev-mcelog.c
+@@ -14,6 +14,7 @@
+ #include <linux/slab.h>
+ #include <linux/kmod.h>
+ #include <linux/poll.h>
 +#include <linux/swork.h>
- #include <linux/jump_label.h>
  
- #include <asm/intel-family.h>
-@@ -1397,6 +1398,56 @@ static void mce_do_trigger(struct work_s
+ #include "mce-internal.h"
+ 
+@@ -86,13 +87,43 @@ static void mce_do_trigger(struct work_s
  
  static DECLARE_WORK(mce_trigger_work, mce_do_trigger);
  
-+static void __mce_notify_work(struct swork_event *event)
-+{
-+	/* Not more than two messages every minute */
-+	static DEFINE_RATELIMIT_STATE(ratelimit, 60*HZ, 2);
-+
-+	/* wake processes polling /dev/mcelog */
-+	wake_up_interruptible(&mce_chrdev_wait);
-+
-+	/*
-+	 * There is no risk of missing notifications because
-+	 * work_pending is always cleared before the function is
-+	 * executed.
-+	 */
-+	if (mce_helper[0] && !work_pending(&mce_trigger_work))
-+		schedule_work(&mce_trigger_work);
-+
-+	if (__ratelimit(&ratelimit))
-+		pr_info(HW_ERR "Machine check events logged\n");
-+}
-+
+-
+-void mce_work_trigger(void)
++static void __mce_work_trigger(struct swork_event *event)
+ {
+ 	if (mce_helper[0])
+ 		schedule_work(&mce_trigger_work);
+ }
+ 
 +#ifdef CONFIG_PREEMPT_RT_FULL
 +static bool notify_work_ready __read_mostly;
 +static struct swork_event notify_work;
@@ -105,56 +93,34 @@ Signed-off-by: Daniel Wagner <daniel.wagner@bmw-carit.de>
 +	if (err)
 +		return err;
 +
-+	INIT_SWORK(&notify_work, __mce_notify_work);
++	INIT_SWORK(&notify_work, __mce_work_trigger);
 +	notify_work_ready = true;
 +	return 0;
 +}
 +
-+static void mce_notify_work(void)
++void mce_work_trigger(void)
 +{
 +	if (notify_work_ready)
 +		swork_queue(&notify_work);
 +}
++
 +#else
-+static void mce_notify_work(void)
++void mce_work_trigger(void)
 +{
-+	__mce_notify_work(NULL);
++	__mce_work_trigger(NULL);
 +}
 +static inline int mce_notify_work_init(void) { return 0; }
 +#endif
 +
- /*
-  * Notify the user(s) about new machine check events.
-  * Can be called from interrupt context, but not from machine check/NMI
-@@ -1404,19 +1455,8 @@ static DECLARE_WORK(mce_trigger_work, mc
-  */
- int mce_notify_irq(void)
+ static ssize_t
+ show_trigger(struct device *s, struct device_attribute *attr, char *buf)
  {
--	/* Not more than two messages every minute */
--	static DEFINE_RATELIMIT_STATE(ratelimit, 60*HZ, 2);
--
- 	if (test_and_clear_bit(0, &mce_need_notify)) {
--		/* wake processes polling /dev/mcelog */
--		wake_up_interruptible(&mce_chrdev_wait);
--
--		if (mce_helper[0])
--			schedule_work(&mce_trigger_work);
--
--		if (__ratelimit(&ratelimit))
--			pr_info(HW_ERR "Machine check events logged\n");
--
-+		mce_notify_work();
- 		return 1;
- 	}
- 	return 0;
-@@ -2561,6 +2601,10 @@ static __init int mcheck_init_device(voi
- 		goto err_out;
- 	}
+@@ -356,7 +387,7 @@ static __init int dev_mcelog_init_device
  
-+	err = mce_notify_work_init();
-+	if (err)
-+		goto err_out;
-+
- 	if (!zalloc_cpumask_var(&mce_device_initialized, GFP_KERNEL)) {
- 		err = -ENOMEM;
- 		goto err_out;
+ 		return err;
+ 	}
+-
++	mce_notify_work_init();
+ 	mce_register_decode_chain(&dev_mcelog_nb);
+ 	return 0;
+ }

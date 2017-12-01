@@ -1,7 +1,7 @@
 Subject: irqwork: push most work into softirq context
 From: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
 Date: Tue, 23 Jun 2015 15:32:51 +0200
-Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.11/older/patches-4.11.9-rt7.tar.xz
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.14/older/patches-4.14.1-rt3.tar.xz
 
 Initially we defered all irqwork into softirq because we didn't want the
 latency spikes if perf or another user was busy and delayed the RT task.
@@ -22,14 +22,14 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
 ---
  include/linux/irq_work.h |    1 +
  kernel/irq_work.c        |   47 ++++++++++++++++++++++++++++++++++-------------
- kernel/sched/rt.c        |    1 +
+ kernel/sched/topology.c  |    1 +
  kernel/time/tick-sched.c |    1 +
- kernel/time/timer.c      |    6 +++++-
- 5 files changed, 42 insertions(+), 14 deletions(-)
+ kernel/time/timer.c      |    5 ++++-
+ 5 files changed, 41 insertions(+), 14 deletions(-)
 
 --- a/include/linux/irq_work.h
 +++ b/include/linux/irq_work.h
-@@ -16,6 +16,7 @@
+@@ -17,6 +17,7 @@
  #define IRQ_WORK_BUSY		2UL
  #define IRQ_WORK_FLAGS		3UL
  #define IRQ_WORK_LAZY		4UL /* Doesn't want IPI, wait for tick */
@@ -142,19 +142,19 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  }
  EXPORT_SYMBOL_GPL(irq_work_run);
  
---- a/kernel/sched/rt.c
-+++ b/kernel/sched/rt.c
-@@ -103,6 +103,7 @@ void init_rt_rq(struct rt_rq *rt_rq)
- 	rt_rq->push_cpu = nr_cpu_ids;
- 	raw_spin_lock_init(&rt_rq->push_lock);
- 	init_irq_work(&rt_rq->push_work, push_irq_work_func);
-+	rt_rq->push_work.flags |= IRQ_WORK_HARD_IRQ;
+--- a/kernel/sched/topology.c
++++ b/kernel/sched/topology.c
+@@ -273,6 +273,7 @@ static int init_rootdomain(struct root_d
+ 	rd->rto_cpu = -1;
+ 	raw_spin_lock_init(&rd->rto_lock);
+ 	init_irq_work(&rd->rto_push_work, rto_push_irq_work_func);
++	rd->rto_push_work.flags |= IRQ_WORK_HARD_IRQ;
  #endif
- #endif /* CONFIG_SMP */
- 	/* We start is dequeued state, because no RT tasks are queued */
+ 
+ 	init_dl_bw(&rd->dl_bw);
 --- a/kernel/time/tick-sched.c
 +++ b/kernel/time/tick-sched.c
-@@ -224,6 +224,7 @@ static void nohz_full_kick_func(struct i
+@@ -230,6 +230,7 @@ static void nohz_full_kick_func(struct i
  
  static DEFINE_PER_CPU(struct irq_work, nohz_full_kick_work) = {
  	.func = nohz_full_kick_func,
@@ -164,7 +164,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  /*
 --- a/kernel/time/timer.c
 +++ b/kernel/time/timer.c
-@@ -1604,7 +1604,7 @@ void update_process_times(int user_tick)
+@@ -1640,7 +1640,7 @@ void update_process_times(int user_tick)
  	scheduler_tick();
  	run_local_timers();
  	rcu_check_callbacks(user_tick);
@@ -173,14 +173,13 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  	if (in_irq())
  		irq_work_tick();
  #endif
-@@ -1645,6 +1645,10 @@ static __latent_entropy void run_timer_s
+@@ -1681,6 +1681,9 @@ static __latent_entropy void run_timer_s
  {
  	struct timer_base *base = this_cpu_ptr(&timer_bases[BASE_STD]);
  
 +#if defined(CONFIG_IRQ_WORK) && defined(CONFIG_PREEMPT_RT_FULL)
 +	irq_work_tick();
 +#endif
-+
- 	__run_timers(base);
- 	if (IS_ENABLED(CONFIG_NO_HZ_COMMON) && base->nohz_active)
- 		__run_timers(this_cpu_ptr(&timer_bases[BASE_DEF]));
+ 	/*
+ 	 * must_forward_clk must be cleared before running timers so that any
+ 	 * timer functions that call mod_timer will not try to forward the

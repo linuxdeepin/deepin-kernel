@@ -2,7 +2,7 @@ From: Mike Galbraith <umgwanakikbuti@gmail.com>
 Date: Thu, 20 Oct 2016 11:15:22 +0200
 Subject: [PATCH] drivers/zram: Don't disable preemption in
  zcomp_stream_get/put()
-Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.11/older/patches-4.11.9-rt7.tar.xz
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.14/older/patches-4.14.1-rt3.tar.xz
 
 In v4.7, the driver switched to percpu compression streams, disabling
 preemption via get/put_cpu_ptr(). Use a per-zcomp_strm lock here. We
@@ -16,12 +16,12 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
 ---
  drivers/block/zram/zcomp.c    |   12 ++++++++++--
  drivers/block/zram/zcomp.h    |    1 +
- drivers/block/zram/zram_drv.c |    6 +++---
- 3 files changed, 14 insertions(+), 5 deletions(-)
+ drivers/block/zram/zram_drv.c |    5 +++--
+ 3 files changed, 14 insertions(+), 4 deletions(-)
 
 --- a/drivers/block/zram/zcomp.c
 +++ b/drivers/block/zram/zcomp.c
-@@ -118,12 +118,19 @@ ssize_t zcomp_available_show(const char
+@@ -116,12 +116,19 @@ ssize_t zcomp_available_show(const char
  
  struct zcomp_strm *zcomp_stream_get(struct zcomp *comp)
  {
@@ -43,7 +43,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  }
  
  int zcomp_compress(struct zcomp_strm *zstrm,
-@@ -173,6 +180,7 @@ int zcomp_cpu_up_prepare(unsigned int cp
+@@ -171,6 +178,7 @@ int zcomp_cpu_up_prepare(unsigned int cp
  		pr_err("Can't allocate a compression stream\n");
  		return -ENOMEM;
  	}
@@ -63,30 +63,35 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  /* dynamic per-device compression frontend */
 --- a/drivers/block/zram/zram_drv.c
 +++ b/drivers/block/zram/zram_drv.c
-@@ -512,6 +512,7 @@ static int zram_decompress_page(struct z
- 	struct zram_meta *meta = zram->meta;
+@@ -871,6 +871,7 @@ static int __zram_bvec_read(struct zram
  	unsigned long handle;
  	unsigned int size;
+ 	void *src, *dst;
 +	struct zcomp_strm *zstrm;
  
- 	zram_lock_table(&meta->table[index]);
- 	handle = meta->table[index].handle;
-@@ -523,16 +524,15 @@ static int zram_decompress_page(struct z
- 		return 0;
- 	}
+ 	if (zram_wb_enabled(zram)) {
+ 		zram_slot_lock(zram, index);
+@@ -905,6 +906,7 @@ static int __zram_bvec_read(struct zram
+ 
+ 	size = zram_get_obj_size(zram, index);
  
 +	zstrm = zcomp_stream_get(zram->comp);
- 	cmem = zs_map_object(meta->mem_pool, handle, ZS_MM_RO);
+ 	src = zs_map_object(zram->mem_pool, handle, ZS_MM_RO);
  	if (size == PAGE_SIZE) {
- 		memcpy(mem, cmem, PAGE_SIZE);
+ 		dst = kmap_atomic(page);
+@@ -912,14 +914,13 @@ static int __zram_bvec_read(struct zram
+ 		kunmap_atomic(dst);
+ 		ret = 0;
  	} else {
 -		struct zcomp_strm *zstrm = zcomp_stream_get(zram->comp);
--
- 		ret = zcomp_decompress(zstrm, cmem, size, mem);
+ 
+ 		dst = kmap_atomic(page);
+ 		ret = zcomp_decompress(zstrm, src, size, dst);
+ 		kunmap_atomic(dst);
 -		zcomp_stream_put(zram->comp);
  	}
- 	zs_unmap_object(meta->mem_pool, handle);
+ 	zs_unmap_object(zram->mem_pool, handle);
 +	zcomp_stream_put(zram->comp);
- 	zram_unlock_table(&meta->table[index]);
+ 	zram_slot_unlock(zram, index);
  
  	/* Should NEVER happen. Return bio error if it does. */
