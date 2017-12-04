@@ -1,0 +1,200 @@
+From: Dongli Zhang <dongli.zhang@oracle.com>
+Date: Wed, 1 Nov 2017 09:46:33 +0800
+Subject: xen/time: do not decrease steal time after live migration on xen
+Origin: https://git.kernel.org/linus/5e25f5db6abb96ca8ee2aaedcb863daa6dfcc07a
+Bug-Debian: https://bugs.debian.org/871608
+
+After guest live migration on xen, steal time in /proc/stat
+(cpustat[CPUTIME_STEAL]) might decrease because steal returned by
+xen_steal_lock() might be less than this_rq()->prev_steal_time which is
+derived from previous return value of xen_steal_clock().
+
+For instance, steal time of each vcpu is 335 before live migration.
+
+cpu  198 0 368 200064 1962 0 0 1340 0 0
+cpu0 38 0 81 50063 492 0 0 335 0 0
+cpu1 65 0 97 49763 634 0 0 335 0 0
+cpu2 38 0 81 50098 462 0 0 335 0 0
+cpu3 56 0 107 50138 374 0 0 335 0 0
+
+After live migration, steal time is reduced to 312.
+
+cpu  200 0 370 200330 1971 0 0 1248 0 0
+cpu0 38 0 82 50123 500 0 0 312 0 0
+cpu1 65 0 97 49832 634 0 0 312 0 0
+cpu2 39 0 82 50167 462 0 0 312 0 0
+cpu3 56 0 107 50207 374 0 0 312 0 0
+
+Since runstate times are cumulative and cleared during xen live migration
+by xen hypervisor, the idea of this patch is to accumulate runstate times
+to global percpu variables before live migration suspend. Once guest VM is
+resumed, xen_get_runstate_snapshot_cpu() would always return the sum of new
+runstate times and previously accumulated times stored in global percpu
+variables.
+
+Comment above HYPERVISOR_suspend() has been removed as it is inaccurate:
+the call can return an error code (e.g., possibly -EPERM in the future).
+
+Similar and more severe issue would impact prior linux 4.8-4.10 as
+discussed by Michael Las at
+https://0xstubs.org/debugging-a-flaky-cpu-steal-time-counter-on-a-paravirtualized-xen-guest,
+which would overflow steal time and lead to 100% st usage in top command
+for linux 4.8-4.10. A backport of this patch would fix that issue.
+
+[boris: added linux/slab.h to driver/xen/time.c, slightly reformatted
+        commit message]
+
+References: https://0xstubs.org/debugging-a-flaky-cpu-steal-time-counter-on-a-paravirtualized-xen-guest
+Signed-off-by: Dongli Zhang <dongli.zhang@oracle.com>
+Reviewed-by: Boris Ostrovsky <boris.ostrovsky@oracle.com>
+Signed-off-by: Boris Ostrovsky <boris.ostrovsky@oracle.com>
+---
+ drivers/xen/manage.c  |  7 ++---
+ drivers/xen/time.c    | 72 +++++++++++++++++++++++++++++++++++++++++++++++++--
+ include/xen/xen-ops.h |  1 +
+ 3 files changed, 73 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/xen/manage.c b/drivers/xen/manage.c
+index c425d03d37d2..8835065029d3 100644
+--- a/drivers/xen/manage.c
++++ b/drivers/xen/manage.c
+@@ -72,18 +72,15 @@ static int xen_suspend(void *data)
+ 	}
+ 
+ 	gnttab_suspend();
++	xen_manage_runstate_time(-1);
+ 	xen_arch_pre_suspend();
+ 
+-	/*
+-	 * This hypercall returns 1 if suspend was cancelled
+-	 * or the domain was merely checkpointed, and 0 if it
+-	 * is resuming in a new domain.
+-	 */
+ 	si->cancelled = HYPERVISOR_suspend(xen_pv_domain()
+                                            ? virt_to_gfn(xen_start_info)
+                                            : 0);
+ 
+ 	xen_arch_post_suspend(si->cancelled);
++	xen_manage_runstate_time(si->cancelled ? 1 : 0);
+ 	gnttab_resume();
+ 
+ 	if (!si->cancelled) {
+diff --git a/drivers/xen/time.c b/drivers/xen/time.c
+index ac5f23fcafc2..8c46f555d82a 100644
+--- a/drivers/xen/time.c
++++ b/drivers/xen/time.c
+@@ -5,6 +5,7 @@
+ #include <linux/kernel_stat.h>
+ #include <linux/math64.h>
+ #include <linux/gfp.h>
++#include <linux/slab.h>
+ 
+ #include <asm/paravirt.h>
+ #include <asm/xen/hypervisor.h>
+@@ -19,6 +20,8 @@
+ /* runstate info updated by Xen */
+ static DEFINE_PER_CPU(struct vcpu_runstate_info, xen_runstate);
+ 
++static DEFINE_PER_CPU(u64[4], old_runstate_time);
++
+ /* return an consistent snapshot of 64-bit time/counter value */
+ static u64 get64(const u64 *p)
+ {
+@@ -47,8 +50,8 @@ static u64 get64(const u64 *p)
+ 	return ret;
+ }
+ 
+-static void xen_get_runstate_snapshot_cpu(struct vcpu_runstate_info *res,
+-					  unsigned int cpu)
++static void xen_get_runstate_snapshot_cpu_delta(
++			      struct vcpu_runstate_info *res, unsigned int cpu)
+ {
+ 	u64 state_time;
+ 	struct vcpu_runstate_info *state;
+@@ -66,6 +69,71 @@ static void xen_get_runstate_snapshot_cpu(struct vcpu_runstate_info *res,
+ 		 (state_time & XEN_RUNSTATE_UPDATE));
+ }
+ 
++static void xen_get_runstate_snapshot_cpu(struct vcpu_runstate_info *res,
++					  unsigned int cpu)
++{
++	int i;
++
++	xen_get_runstate_snapshot_cpu_delta(res, cpu);
++
++	for (i = 0; i < 4; i++)
++		res->time[i] += per_cpu(old_runstate_time, cpu)[i];
++}
++
++void xen_manage_runstate_time(int action)
++{
++	static struct vcpu_runstate_info *runstate_delta;
++	struct vcpu_runstate_info state;
++	int cpu, i;
++
++	switch (action) {
++	case -1: /* backup runstate time before suspend */
++		if (unlikely(runstate_delta))
++			pr_warn_once("%s: memory leak as runstate_delta is not NULL\n",
++					__func__);
++
++		runstate_delta = kmalloc_array(num_possible_cpus(),
++					sizeof(*runstate_delta),
++					GFP_ATOMIC);
++		if (unlikely(!runstate_delta)) {
++			pr_warn("%s: failed to allocate runstate_delta\n",
++					__func__);
++			return;
++		}
++
++		for_each_possible_cpu(cpu) {
++			xen_get_runstate_snapshot_cpu_delta(&state, cpu);
++			memcpy(runstate_delta[cpu].time, state.time,
++					sizeof(runstate_delta[cpu].time));
++		}
++
++		break;
++
++	case 0: /* backup runstate time after resume */
++		if (unlikely(!runstate_delta)) {
++			pr_warn("%s: cannot accumulate runstate time as runstate_delta is NULL\n",
++					__func__);
++			return;
++		}
++
++		for_each_possible_cpu(cpu) {
++			for (i = 0; i < 4; i++)
++				per_cpu(old_runstate_time, cpu)[i] +=
++					runstate_delta[cpu].time[i];
++		}
++
++		break;
++
++	default: /* do not accumulate runstate time for checkpointing */
++		break;
++	}
++
++	if (action != -1 && runstate_delta) {
++		kfree(runstate_delta);
++		runstate_delta = NULL;
++	}
++}
++
+ /*
+  * Runstate accounting
+  */
+diff --git a/include/xen/xen-ops.h b/include/xen/xen-ops.h
+index 218e6aae5433..09072271f122 100644
+--- a/include/xen/xen-ops.h
++++ b/include/xen/xen-ops.h
+@@ -32,6 +32,7 @@ void xen_resume_notifier_unregister(struct notifier_block *nb);
+ bool xen_vcpu_stolen(int vcpu);
+ void xen_setup_runstate_info(int cpu);
+ void xen_time_setup_guest(void);
++void xen_manage_runstate_time(int action);
+ void xen_get_runstate_snapshot(struct vcpu_runstate_info *res);
+ u64 xen_steal_clock(int cpu);
+ 
+-- 
+2.15.1
+
