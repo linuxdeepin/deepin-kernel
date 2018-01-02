@@ -1,7 +1,7 @@
 From: Tom Zanussi <tom.zanussi@linux.intel.com>
-Date: Fri, 17 Nov 2017 14:33:04 -0600
+Date: Wed, 6 Dec 2017 16:38:06 -0600
 Subject: [PATCH 25/37] tracing: Add support for 'field variables'
-Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.14/older/patches-4.14.1-rt3.tar.xz
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/4.14/older/patches-4.14.6-rt7.tar.xz
 
 Users should be able to directly specify event fields in hist trigger
 'actions' rather than being forced to explicitly create a variable for
@@ -31,18 +31,18 @@ once a hist trigger is defined, variables can't be added to it later.
   echo 'wakeup_latency u64 lat; pid_t pid; int prio' >>
        /sys/kernel/debug/tracing/synthetic_events
 
-  echo 'hist:keys=pid:ts0=$common_timestamp.usecs >>
+  echo 'hist:keys=pid:ts0=common_timestamp.usecs >>
        /sys/kernel/debug/tracing/events/sched/sched_waking/trigger
 
-echo 'hist:keys=next_pid:wakeup_lat=$common_timestamp.usecs-$ts0:
+echo 'hist:keys=next_pid:wakeup_lat=common_timestamp.usecs-$ts0:
       onmatch(sched.sched_waking).wakeup_latency($wakeup_lat,next_pid,prio)
             >> /sys/kernel/debug/tracing/events/sched/sched_switch/trigger
 
 Signed-off-by: Tom Zanussi <tom.zanussi@linux.intel.com>
 Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
 ---
- kernel/trace/trace_events_hist.c |  536 ++++++++++++++++++++++++++++++++++++++-
- 1 file changed, 535 insertions(+), 1 deletion(-)
+ kernel/trace/trace_events_hist.c |  531 ++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 530 insertions(+), 1 deletion(-)
 
 --- a/kernel/trace/trace_events_hist.c
 +++ b/kernel/trace/trace_events_hist.c
@@ -63,13 +63,11 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  struct hist_trigger_data {
  	struct hist_field               *fields[HIST_FIELDS_MAX];
  	unsigned int			n_vals;
-@@ -274,6 +284,14 @@ struct hist_trigger_data {
+@@ -274,6 +284,12 @@ struct hist_trigger_data {
  
  	struct action_data		*actions[HIST_ACTIONS_MAX];
  	unsigned int			n_actions;
 +
-+	struct hist_field		*synth_var_refs[SYNTH_FIELDS_MAX];
-+	unsigned int			n_synth_var_refs;
 +	struct field_var		*field_vars[SYNTH_FIELDS_MAX];
 +	unsigned int			n_field_vars;
 +	unsigned int			n_field_var_str;
@@ -78,16 +76,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  };
  
  struct synth_field {
-@@ -1387,6 +1405,8 @@ static struct trace_event_file *find_var
- 	list_for_each_entry(var_data, &tr->hist_vars, list) {
- 		var_hist_data = var_data->hist_data;
- 		file = var_hist_data->event_file;
-+		if (file == found)
-+			continue;
- 		call = file->event_call;
- 		name = trace_event_name(call);
- 
-@@ -1453,6 +1473,7 @@ static struct hist_field *find_event_var
+@@ -1444,6 +1460,7 @@ static struct hist_field *find_event_var
  struct hist_elt_data {
  	char *comm;
  	u64 *var_ref_vals;
@@ -95,7 +84,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  };
  
  static u64 hist_field_var_ref(struct hist_field *hist_field,
-@@ -1757,6 +1778,11 @@ static inline void save_comm(char *comm,
+@@ -1748,6 +1765,11 @@ static inline void save_comm(char *comm,
  
  static void hist_elt_data_free(struct hist_elt_data *elt_data)
  {
@@ -107,7 +96,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  	kfree(elt_data->comm);
  	kfree(elt_data);
  }
-@@ -1774,7 +1800,7 @@ static int hist_trigger_elt_data_alloc(s
+@@ -1765,7 +1787,7 @@ static int hist_trigger_elt_data_alloc(s
  	unsigned int size = TASK_COMM_LEN + 1;
  	struct hist_elt_data *elt_data;
  	struct hist_field *key_field;
@@ -116,7 +105,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  
  	elt_data = kzalloc(sizeof(*elt_data), GFP_KERNEL);
  	if (!elt_data)
-@@ -1793,6 +1819,18 @@ static int hist_trigger_elt_data_alloc(s
+@@ -1784,6 +1806,18 @@ static int hist_trigger_elt_data_alloc(s
  		}
  	}
  
@@ -135,7 +124,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  	elt->private_data = elt_data;
  
  	return 0;
-@@ -2477,6 +2515,471 @@ static struct hist_field *parse_expr(str
+@@ -2486,6 +2520,470 @@ static struct hist_field *parse_expr(str
  	return ERR_PTR(ret);
  }
  
@@ -305,7 +294,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
 +	/* See if a synthetic field variable has already been created */
 +	event_var = find_synthetic_field_var(target_hist_data, subsys_name,
 +					     event_name, field_name);
-+	if (event_var && !IS_ERR(event_var))
++	if (!IS_ERR_OR_NULL(event_var))
 +		return event_var;
 +
 +	var_hist = kzalloc(sizeof(*var_hist), GFP_KERNEL);
@@ -367,8 +356,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
 +	/* If we can't find the variable, something went wrong */
 +	event_var = find_synthetic_field_var(target_hist_data, subsys_name,
 +					     event_name, field_name);
-+	if (!event_var || IS_ERR(event_var)) {
-+		kfree(cmd);
++	if (IS_ERR_OR_NULL(event_var)) {
 +		kfree(var_hist->cmd);
 +		kfree(var_hist);
 +		return ERR_PTR(-EINVAL);
@@ -607,7 +595,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  static int create_hitcount_val(struct hist_trigger_data *hist_data)
  {
  	hist_data->fields[HITCOUNT_IDX] =
-@@ -2932,6 +3435,16 @@ static int create_actions(struct hist_tr
+@@ -2941,6 +3439,16 @@ static int create_actions(struct hist_tr
  	return ret;
  }
  
@@ -624,7 +612,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  static void destroy_hist_data(struct hist_trigger_data *hist_data)
  {
  	if (!hist_data)
-@@ -2942,6 +3455,8 @@ static void destroy_hist_data(struct his
+@@ -2951,6 +3459,8 @@ static void destroy_hist_data(struct his
  	tracing_map_destroy(hist_data->map);
  
  	destroy_actions(hist_data);
@@ -633,7 +621,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  
  	kfree(hist_data);
  }
-@@ -3078,6 +3593,8 @@ static void hist_trigger_elt_update(stru
+@@ -3087,6 +3597,8 @@ static void hist_trigger_elt_update(stru
  			tracing_map_set_var(elt, var_idx, hist_val);
  		}
  	}
@@ -642,8 +630,8 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  }
  
  static inline void add_to_key(char *compound_key, void *key,
-@@ -3824,6 +4341,21 @@ static bool hist_trigger_check_refs(stru
- 	return false;
+@@ -3533,6 +4045,21 @@ static int event_hist_trigger_init(struc
+ 	return 0;
  }
  
 +static void unregister_field_var_hists(struct hist_trigger_data *hist_data)
@@ -661,22 +649,15 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
 +	}
 +}
 +
- static void hist_unregister_trigger(char *glob, struct event_trigger_ops *ops,
- 				    struct event_trigger_data *data,
- 				    struct trace_event_file *file)
-@@ -3839,6 +4371,7 @@ static void hist_unregister_trigger(char
- 		if (test->cmd_ops->trigger_type == ETT_EVENT_HIST) {
- 			if (!hist_trigger_match(data, test, named_data, false))
- 				continue;
-+			unregister_field_var_hists(test->private_data);
- 			unregistered = true;
- 			list_del_rcu(&test->list);
- 			trace_event_trigger_enable_disable(file, 0);
-@@ -3885,6 +4418,7 @@ static void hist_unreg_all(struct trace_
- 	list_for_each_entry_safe(test, n, &file->triggers, list) {
- 		if (test->cmd_ops->trigger_type == ETT_EVENT_HIST) {
- 			hist_data = test->private_data;
-+			unregister_field_var_hists(hist_data);
- 			list_del_rcu(&test->list);
- 			trace_event_trigger_enable_disable(file, 0);
+ static void event_hist_trigger_free(struct event_trigger_ops *ops,
+ 				    struct event_trigger_data *data)
+ {
+@@ -3550,6 +4077,8 @@ static void event_hist_trigger_free(stru
  
+ 		remove_hist_vars(hist_data);
+ 
++		unregister_field_var_hists(hist_data);
++
+ 		destroy_hist_data(hist_data);
+ 	}
+ }
