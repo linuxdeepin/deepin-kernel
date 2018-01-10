@@ -1,0 +1,57 @@
+From: Hannes Reinecke <hare@suse.de>
+Date: Wed, 10 Jan 2018 08:34:02 +0100
+Subject: Disable asynchronous aborts for SATA devices
+Origin: https://marc.info/?l=linux-scsi&m=151557324907914
+
+Handling CD-ROM devices from libsas is decidedly odd, as libata
+relies on SCSI EH to be started to figure out that no medium is
+present.
+So we cannot do asynchronous aborts for SATA devices.
+
+Fixes: 909657615d9 ("scsi: libsas: allow async aborts")
+Cc: <stable@vger.kernel.org> # 4.12+
+Signed-off-by: Hannes Reinecke <hare@suse.com>
+Reviewed-by: Christoph Hellwig <hch@lst.de>
+Tested-by: Yves-Alexis Perez <corsac@debian.org>
+---
+ drivers/scsi/libsas/sas_scsi_host.c | 17 +++++++++++++++--
+ 1 file changed, 15 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/scsi/libsas/sas_scsi_host.c b/drivers/scsi/libsas/sas_scsi_host.c
+index 58476b728c57..c9406852c3e9 100644
+--- a/drivers/scsi/libsas/sas_scsi_host.c
++++ b/drivers/scsi/libsas/sas_scsi_host.c
+@@ -486,15 +486,28 @@ static int sas_queue_reset(struct domain_device *dev, int reset_type,
+ 
+ int sas_eh_abort_handler(struct scsi_cmnd *cmd)
+ {
+-	int res;
++	int res = TMF_RESP_FUNC_FAILED;
+ 	struct sas_task *task = TO_SAS_TASK(cmd);
+ 	struct Scsi_Host *host = cmd->device->host;
++	struct domain_device *dev = cmd_to_domain_dev(cmd);
+ 	struct sas_internal *i = to_sas_internal(host->transportt);
++	unsigned long flags;
+ 
+ 	if (!i->dft->lldd_abort_task)
+ 		return FAILED;
+ 
+-	res = i->dft->lldd_abort_task(task);
++	spin_lock_irqsave(host->host_lock, flags);
++	/* We cannot do async aborts for SATA devices */
++	if (dev_is_sata(dev) && !host->host_eh_scheduled) {
++		spin_unlock_irqrestore(host->host_lock, flags);
++		return FAILED;
++	}
++	spin_unlock_irqrestore(host->host_lock, flags);
++
++	if (task)
++		res = i->dft->lldd_abort_task(task);
++	else
++		SAS_DPRINTK("no task to abort\n");
+ 	if (res == TMF_RESP_FUNC_SUCC || res == TMF_RESP_FUNC_COMPLETE)
+ 		return SUCCESS;
+ 
+-- 
+2.11.0
+
