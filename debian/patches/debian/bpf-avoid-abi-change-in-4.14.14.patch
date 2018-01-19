@@ -1,0 +1,138 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Thu, 18 Jan 2018 05:17:34 +0000
+Subject: bpf: Avoid ABI change in 4.14.14
+Forwarded: not-needed
+
+Commit b2157399cc98 "bpf: prevent out-of-bounds speculation" added one
+member each to struct bpf_map and struct bpf_array (which is
+effectively a sub-type of bpf_map).  Changing the size of struct
+bpf_array is an ABI change, since the array contents immediately
+follows the structure.  However, bpf_map::work is not used (or even
+initialised) until after the map's refcount drops to zero.  We can
+therefore move the new members into a union with it.
+
+---
+--- a/include/linux/bpf.h
++++ b/include/linux/bpf.h
+@@ -51,10 +51,20 @@ struct bpf_map {
+ 	u32 pages;
+ 	u32 id;
+ 	int numa_node;
+-	bool unpriv_array;
++
+ 	struct user_struct *user;
+ 	const struct bpf_map_ops *ops;
++#ifdef __GENKSYMS__
+ 	struct work_struct work;
++#else
++	union {
++		struct work_struct work;
++		struct {
++			bool unpriv_array;
++			u32 index_mask;
++		};
++	};
++#endif
+ 	atomic_t usercnt;
+ 	struct bpf_map *inner_map_meta;
+ };
+@@ -196,7 +206,6 @@ struct bpf_prog_aux {
+ struct bpf_array {
+ 	struct bpf_map map;
+ 	u32 elem_size;
+-	u32 index_mask;
+ 	/* 'ownership' of prog_array is claimed by the first program that
+ 	 * is going to use this map or by the first program which FD is stored
+ 	 * in the map to make sure that all callers and callees have the same
+--- a/kernel/bpf/arraymap.c
++++ b/kernel/bpf/arraymap.c
+@@ -104,7 +104,7 @@ static struct bpf_map *array_map_alloc(u
+ 	array = bpf_map_area_alloc(array_size, numa_node);
+ 	if (!array)
+ 		return ERR_PTR(-ENOMEM);
+-	array->index_mask = index_mask;
++	array->map.index_mask = index_mask;
+ 	array->map.unpriv_array = unpriv;
+ 
+ 	/* copy mandatory map attributes */
+@@ -141,7 +141,7 @@ static void *array_map_lookup_elem(struc
+ 	if (unlikely(index >= array->map.max_entries))
+ 		return NULL;
+ 
+-	return array->value + array->elem_size * (index & array->index_mask);
++	return array->value + array->elem_size * (index & array->map.index_mask);
+ }
+ 
+ /* emit BPF instructions equivalent to C code of array_map_lookup_elem() */
+@@ -158,7 +158,7 @@ static u32 array_map_gen_lookup(struct b
+ 	*insn++ = BPF_LDX_MEM(BPF_W, ret, index, 0);
+ 	if (map->unpriv_array) {
+ 		*insn++ = BPF_JMP_IMM(BPF_JGE, ret, map->max_entries, 4);
+-		*insn++ = BPF_ALU32_IMM(BPF_AND, ret, array->index_mask);
++		*insn++ = BPF_ALU32_IMM(BPF_AND, ret, array->map.index_mask);
+ 	} else {
+ 		*insn++ = BPF_JMP_IMM(BPF_JGE, ret, map->max_entries, 3);
+ 	}
+@@ -183,7 +183,7 @@ static void *percpu_array_map_lookup_ele
+ 	if (unlikely(index >= array->map.max_entries))
+ 		return NULL;
+ 
+-	return this_cpu_ptr(array->pptrs[index & array->index_mask]);
++	return this_cpu_ptr(array->pptrs[index & array->map.index_mask]);
+ }
+ 
+ int bpf_percpu_array_copy(struct bpf_map *map, void *key, void *value)
+@@ -203,7 +203,7 @@ int bpf_percpu_array_copy(struct bpf_map
+ 	 */
+ 	size = round_up(map->value_size, 8);
+ 	rcu_read_lock();
+-	pptr = array->pptrs[index & array->index_mask];
++	pptr = array->pptrs[index & array->map.index_mask];
+ 	for_each_possible_cpu(cpu) {
+ 		bpf_long_memcpy(value + off, per_cpu_ptr(pptr, cpu), size);
+ 		off += size;
+@@ -251,11 +251,11 @@ static int array_map_update_elem(struct
+ 		return -EEXIST;
+ 
+ 	if (array->map.map_type == BPF_MAP_TYPE_PERCPU_ARRAY)
+-		memcpy(this_cpu_ptr(array->pptrs[index & array->index_mask]),
++		memcpy(this_cpu_ptr(array->pptrs[index & array->map.index_mask]),
+ 		       value, map->value_size);
+ 	else
+ 		memcpy(array->value +
+-		       array->elem_size * (index & array->index_mask),
++		       array->elem_size * (index & array->map.index_mask),
+ 		       value, map->value_size);
+ 	return 0;
+ }
+@@ -289,7 +289,7 @@ int bpf_percpu_array_update(struct bpf_m
+ 	 */
+ 	size = round_up(map->value_size, 8);
+ 	rcu_read_lock();
+-	pptr = array->pptrs[index & array->index_mask];
++	pptr = array->pptrs[index & array->map.index_mask];
+ 	for_each_possible_cpu(cpu) {
+ 		bpf_long_memcpy(per_cpu_ptr(pptr, cpu), value + off, size);
+ 		off += size;
+@@ -651,7 +651,7 @@ static u32 array_of_map_gen_lookup(struc
+ 	*insn++ = BPF_LDX_MEM(BPF_W, ret, index, 0);
+ 	if (map->unpriv_array) {
+ 		*insn++ = BPF_JMP_IMM(BPF_JGE, ret, map->max_entries, 6);
+-		*insn++ = BPF_ALU32_IMM(BPF_AND, ret, array->index_mask);
++		*insn++ = BPF_ALU32_IMM(BPF_AND, ret, array->map.index_mask);
+ 	} else {
+ 		*insn++ = BPF_JMP_IMM(BPF_JGE, ret, map->max_entries, 5);
+ 	}
+--- a/kernel/bpf/verifier.c
++++ b/kernel/bpf/verifier.c
+@@ -4344,9 +4344,7 @@ static int fixup_bpf_calls(struct bpf_ve
+ 			insn_buf[0] = BPF_JMP_IMM(BPF_JGE, BPF_REG_3,
+ 						  map_ptr->max_entries, 2);
+ 			insn_buf[1] = BPF_ALU32_IMM(BPF_AND, BPF_REG_3,
+-						    container_of(map_ptr,
+-								 struct bpf_array,
+-								 map)->index_mask);
++						    map_ptr->index_mask);
+ 			insn_buf[2] = *insn;
+ 			cnt = 3;
+ 			new_prog = bpf_patch_insn_data(env, i + delta, insn_buf, cnt);
