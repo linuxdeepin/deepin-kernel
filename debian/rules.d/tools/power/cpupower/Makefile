@@ -8,6 +8,8 @@ MAKE_CPUPOWER += CROSS='$(CROSS_COMPILE)'
 
 MAKE_CPUPOWER += PACKAGE_BUGREPORT='Debian\ \(reportbug\ linux-cpupower\)'
 
+MAKE_CPUPOWER += libdir=/usr/lib/$(DEB_HOST_MULTIARCH)
+
 all:
 	$(MAKE_CPUPOWER) -C $(top_srcdir)/tools/power/cpupower
 
