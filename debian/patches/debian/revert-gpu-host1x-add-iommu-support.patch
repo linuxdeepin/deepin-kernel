@@ -20,10 +20,11 @@ to avoid when combining the two address mapping APIs.  But with XEN
 enabled and ARM_LPAE not enabled, as in the armmp config, dma_addr_t
 is 64-bit while phys_addr_t is 32-bit.
 
-It also reverts commit fea20995976f4b2e8968f852a18e280487d42f0d
-"gpu: host1x: Free the IOMMU domain when there is no device to attach"
-and commit 8b3f5ac6b55f5f3f60723a58f14ec235a5b8cfe
-"gpu: host1x: Don't fail on NULL bo physical address" which depend on it.
+It also reverts commits fea20995976f "gpu: host1x: Free the IOMMU
+domain when there is no device to attach", 8b3f5ac6b55f "gpu: host1x:
+Don't fail on NULL bo physical address", 1f876c3fcead "gpu: host1x:
+Rewrite conditional for better readability" and 41c3068cc2fd "gpu:
+host1x: Use IOMMU groups" which depend on it.
 
 ---
 --- a/drivers/gpu/host1x/cdma.c
@@ -176,24 +177,31 @@ and commit 8b3f5ac6b55f5f3f60723a58f14ec235a5b8cfe
  
  #include "bus.h"
  #include "channel.h"
-@@ -218,37 +217,11 @@ static int host1x_probe(struct platform_
+@@ -218,44 +217,11 @@ static int host1x_probe(struct platform_
  		return err;
  	}
  
--	if (iommu_present(&platform_bus_type)) {
+-	host->group = iommu_group_get(&pdev->dev);
+-	if (host->group) {
 -		struct iommu_domain_geometry *geometry;
 -		unsigned long order;
 -
 -		host->domain = iommu_domain_alloc(&platform_bus_type);
--		if (!host->domain)
--			return -ENOMEM;
+-		if (!host->domain) {
+-			err = -ENOMEM;
+-			goto put_group;
+-		}
 -
--		err = iommu_attach_device(host->domain, &pdev->dev);
--		if (err == -ENODEV) {
--			iommu_domain_free(host->domain);
--			host->domain = NULL;
--			goto skip_iommu;
--		} else if (err) {
+-		err = iommu_attach_group(host->domain, host->group);
+-		if (err) {
+-			if (err == -ENODEV) {
+-				iommu_domain_free(host->domain);
+-				host->domain = NULL;
+-				iommu_group_put(host->group);
+-				host->group = NULL;
+-				goto skip_iommu;
+-			}
+-
 -			goto fail_free_domain;
 -		}
 -
@@ -215,30 +223,33 @@ and commit 8b3f5ac6b55f5f3f60723a58f14ec235a5b8cfe
  	}
  
  	err = clk_prepare_enable(host->clk);
-@@ -293,15 +266,6 @@ fail_unprepare_disable:
+@@ -300,17 +266,6 @@ fail_unprepare_disable:
  	clk_disable_unprepare(host->clk);
  fail_free_channels:
  	host1x_channel_list_free(&host->channel_list);
 -fail_detach_device:
--	if (host->domain) {
+-	if (host->group && host->domain) {
 -		put_iova_domain(&host->iova);
--		iommu_detach_device(host->domain, &pdev->dev);
+-		iommu_detach_group(host->domain, host->group);
 -	}
 -fail_free_domain:
 -	if (host->domain)
 -		iommu_domain_free(host->domain);
+-put_group:
+-	iommu_group_put(host->group);
 -
  	return err;
  }
  
-@@ -315,12 +279,6 @@ static int host1x_remove(struct platform
+@@ -324,13 +279,6 @@ static int host1x_remove(struct platform
  	reset_control_assert(host->rst);
  	clk_disable_unprepare(host->clk);
  
 -	if (host->domain) {
 -		put_iova_domain(&host->iova);
--		iommu_detach_device(host->domain, &pdev->dev);
+-		iommu_detach_group(host->domain, host->group);
 -		iommu_domain_free(host->domain);
+-		iommu_group_put(host->group);
 -	}
 -
  	return 0;
@@ -255,10 +266,11 @@ and commit 8b3f5ac6b55f5f3f60723a58f14ec235a5b8cfe
  #include <linux/platform_device.h>
  #include <linux/reset.h>
  
-@@ -117,10 +115,6 @@ struct host1x {
+@@ -117,11 +115,6 @@ struct host1x {
  	struct clk *clk;
  	struct reset_control *rst;
  
+-	struct iommu_group *group;
 -	struct iommu_domain *domain;
 -	struct iova_domain iova;
 -	dma_addr_t iova_end;
