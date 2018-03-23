@@ -6,8 +6,8 @@ conf: conf.o zconf.tab.o
 
 zconf.tab.c: kconf_id.c zconf.lex.c
 
-%.c: %.c_shipped
-	ln -sf $< $@
+%.lex.c: %.l
+	flex -o$@ -L $<
 
-%.h: %.h_shipped
-	ln -sf $< $@
+%.tab.c: %.y
+	bison -o$@ -t -l $<
