@@ -24,7 +24,6 @@ static struct pci_driver rtw_8822ce_driver = {
 	.id_table = rtw_8822ce_id_table,
 	.probe = rtw_pci_probe,
 	.remove = rtw_pci_remove,
-	.driver.pm = &rtw_pm_ops,
 	.shutdown = rtw_pci_shutdown,
 };
 module_pci_driver(rtw_8822ce_driver);
