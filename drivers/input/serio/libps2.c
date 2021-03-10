@@ -155,6 +155,7 @@ bool ps2_is_keyboard_id(u8 id_byte)
 		0x5d,	/* Trust keyboard		*/
 		0x60,	/* NMB SGI keyboard, translated */
 		0x47,	/* NMB SGI keyboard		*/
+		0x83,	/* Lenovo Xiaoxin keyboard		*/
 	};
 
 	return memchr(keyboard_ids, id_byte, sizeof(keyboard_ids)) != NULL;
